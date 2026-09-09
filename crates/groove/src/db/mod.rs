@@ -1580,6 +1580,31 @@ impl Drop for AppliedBatch {
     }
 }
 
+/// Fail closed if a host-owned durable/runtime application is abandoned.
+/// This guard does not retain a database borrow; the host must retain exclusive
+/// ownership until it completes the operation or drops the guard.
+#[doc(hidden)]
+#[must_use = "complete the application only after durable and runtime state agree"]
+pub struct HostApplicationGuard {
+    abandoned_application: Rc<Cell<bool>>,
+    completed: bool,
+}
+
+impl HostApplicationGuard {
+    /// The host has applied both durable and runtime state successfully.
+    pub fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for HostApplicationGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.abandoned_application.set(true);
+        }
+    }
+}
+
 struct PersistenceOrder {
     next: u64,
     waiters: BTreeMap<u64, Waker>,

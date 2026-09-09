@@ -383,16 +383,16 @@ pub(super) fn duplex_with_admitted_session_context(
             node: client_node,
             epoch: client_epoch,
         },
-        remote: crate::wire::WireAuthorityEndpoint {
+        remote: Some(crate::wire::WireAuthorityEndpoint {
             node: server_node,
             epoch: server_epoch,
-        },
+        }),
         link_identity: identity,
         negotiated_features: features,
     };
     let server = ConnectionSessionContext {
-        local: client.remote,
-        remote: client.local,
+        local: client.remote.unwrap(),
+        remote: Some(client.local),
         link_identity: identity,
         negotiated_features: features,
     };
@@ -433,16 +433,16 @@ pub(super) fn duplex_with_admitted_session_context_and_client_outbound_tap(
             node: client_node,
             epoch: client_epoch,
         },
-        remote: crate::wire::WireAuthorityEndpoint {
+        remote: Some(crate::wire::WireAuthorityEndpoint {
             node: server_node,
             epoch: server_epoch,
-        },
+        }),
         link_identity: identity,
         negotiated_features: features,
     };
     let server = ConnectionSessionContext {
-        local: client.remote,
-        remote: client.local,
+        local: client.remote.unwrap(),
+        remote: Some(client.local),
         link_identity: identity,
         negotiated_features: features,
     };

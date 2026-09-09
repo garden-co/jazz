@@ -12,12 +12,12 @@ fn required_include_rls_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("targets")
                     .column("title", PublicColumnType::Text)
                     .column("owner", PublicColumnType::Uuid)
-                    .policies(
-                        PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
                             "owner",
                             vec!["claims".to_owned(), "user_id".to_owned()],
-                        )),
-                    ),
+                        ),
+                    )),
             ),
     )
 }
@@ -63,10 +63,11 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
         .unwrap();
     let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
-        rows.into_iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
         vec![membership]
     );
-
 }
 
 /// A serving authority's internal point-read authorization must select the
@@ -76,21 +77,23 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
 fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     let alice = user(0xa1);
     let bob = user(0xa2);
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("documents")
-            .column("id", PublicColumnType::Uuid)
-            .column("owner", PublicColumnType::Uuid)
-            .policies(
-                PublicTablePolicies::new()
-                    .with_select(PublicPolicyExpr::eq_session(
-                        "owner",
-                        vec!["claims".to_owned(), "sub".to_owned()],
-                    ))
-                    .with_insert(PublicPolicyExpr::True)
-                    .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
-                    .with_delete(PublicPolicyExpr::True),
-            ),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("id", PublicColumnType::Uuid)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["claims".to_owned(), "sub".to_owned()],
+                        ))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(0xa9), schema);
     core.set_test_provider_claims(
         alice,
@@ -104,12 +107,12 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     let other_physical_row = row(0xc2);
     let declared_id = row(0xd1);
     let tx = core
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("documents", physical_row, 10).cells(BTreeMap::from([
+        .commit_mergeable_unit_settled(MergeableCommit::new("documents", physical_row, 10).cells(
+            BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(declared_id.0)),
                 ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     core.accept_global_for_test(tx.0).unwrap();
     let other_tx = core
@@ -191,10 +194,9 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     );
 
     let ownership_change = core
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("documents", physical_row, 20)
-                .cells(BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))])),
-        )
+        .commit_mergeable_unit_settled(MergeableCommit::new("documents", physical_row, 20).cells(
+            BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
+        ))
         .unwrap();
     core.accept_global_for_test(ownership_change.0).unwrap();
     assert!(
@@ -241,8 +243,7 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     );
     let restoration = core
         .commit_mergeable_unit_settled(
-            MergeableCommit::new("documents", physical_row, 40)
-                .deletion(DeletionEvent::Restored),
+            MergeableCommit::new("documents", physical_row, 40).deletion(DeletionEvent::Restored),
         )
         .unwrap();
     core.accept_global_for_test(restoration.0).unwrap();
@@ -276,7 +277,10 @@ fn required_include_rows(
         .unwrap()
 }
 
-fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_owner: AuthorSubject) {
+fn seed_required_include_fixture(
+    core: &mut NodeState<RocksDbStorage>,
+    readable_owner: AuthorSubject,
+) {
     core.set_test_provider_claims(
         readable_owner,
         BTreeMap::from([(
@@ -361,12 +365,12 @@ fn multi_segment_required_include_rls_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("orgs")
                     .column("title", PublicColumnType::Text)
                     .column("owner", PublicColumnType::Uuid)
-                    .policies(
-                        PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
                             "owner",
                             vec!["claims".to_owned(), "user_id".to_owned()],
-                        )),
-                    ),
+                        ),
+                    )),
             ),
     )
 }
@@ -418,12 +422,9 @@ fn seed_multi_segment_include_fixture(
     core.accept_global_for_test(tx).unwrap();
 }
 
-fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
+fn canonical_view_update_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
@@ -433,49 +434,25 @@ fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec
     // result set. These policy fixtures use root-row queries, so content-layer
     // covered inputs are the exact closure counterpart to their old result
     // member assertions.
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     let mut adds = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
-                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
-            {
-                Some((input.version_table.clone(), input.source_row, input.version.tx))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let mut removes = program_fact_removes
-        .iter()
-        .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
-                if input.version.layer == crate::protocol::ResultRowLayer::Content =>
-            {
-                Some((input.version_table.clone(), input.source_row, input.version.tx))
+            input if input.version.layer == crate::protocol::ResultRowLayer::Content => {
+                Some((input.version_table.clone(), input.row, input.version.tx))
             }
             _ => None,
         })
         .collect::<Vec<_>>();
     adds.sort();
-    removes.sort();
-    (adds, removes)
+    adds
 }
 
 fn canonical_view_update_rows_for_table(
     update: &SyncMessage,
     table: &str,
-) -> (Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
-    let (adds, removes) = canonical_view_update_rows(update);
-    (
-        adds.into_iter()
-            .filter(|(entry_table, _, _)| entry_table.as_str() == table)
-            .collect(),
-        removes
-            .into_iter()
-            .filter(|(entry_table, _, _)| entry_table.as_str() == table)
-            .collect(),
-    )
+) -> Vec<ResultRowEntry> {
+    canonical_view_update_rows(update).into_iter()
+        .filter(|(entry_table, _, _)| entry_table.as_str() == table).collect()
 }
 
 #[test]
@@ -592,8 +569,7 @@ fn maintained_subscription_view_multi_segment_inner_include_payload_references_v
         1
     );
 
-    let (result_adds, result_removes) = canonical_view_update_rows(&maintained);
-    assert!(result_removes.is_empty());
+    let result_adds = canonical_view_update_rows(&maintained);
     assert_eq!(
         result_adds
             .iter()
@@ -617,7 +593,9 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     let shape = required_include_shape(&core, Include::new("project.org"));
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::client_link(reader);
-    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let mut expected = canonical_view_update_rows(&initial).into_iter().collect::<BTreeSet<_>>();
+    expected.retain(|(table, id, _)| table.as_str() != "roots" || *id != row(0xd2));
 
     let update_tx = core
         .commit_mergeable_settled(
@@ -632,11 +610,9 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     core.accept_global_for_test(update_tx).unwrap();
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let (adds, _) = canonical_view_update_rows(&update);
-    assert_eq!(
-        adds.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([("roots".to_owned().into(), row(0xd2), update_tx)])
-    );
+    let adds = canonical_view_update_rows(&update);
+    expected.insert(("roots".to_owned().into(), row(0xd2), update_tx));
+    assert_eq!(adds.into_iter().collect::<BTreeSet<_>>(), expected);
 }
 
 #[test]
@@ -654,8 +630,7 @@ fn maintained_inner_multi_segment_include_payload_references_visible_path_only()
         .rehydrate_query(&mut maintained_core, &shape, &binding)
         .unwrap();
 
-    let (adds, removes) = canonical_view_update_rows(&maintained);
-    assert!(removes.is_empty());
+    let adds = canonical_view_update_rows(&maintained);
     assert_eq!(
         adds.into_iter()
             .filter(|entry| entry.0.as_str() == "roots")
@@ -696,8 +671,8 @@ fn holes_multi_segment_include_keeps_parent_and_withholds_unreadable_second_hop(
             SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
-            read_view: Default::default(),
-},
+                read_view: Default::default(),
+            },
             [],
             [],
             [],
@@ -735,8 +710,7 @@ fn maintained_subscription_view_multi_segment_holes_include_payload_references_v
     let maintained = maintained_peer
         .rehydrate_query(&mut maintained_core, &shape, &binding)
         .unwrap();
-    let (adds, removes) = canonical_view_update_rows(&maintained);
-    assert!(removes.is_empty());
+    let adds = canonical_view_update_rows(&maintained);
     assert_eq!(
         adds.into_iter()
             .filter(|entry| entry.0.as_str() == "roots")
@@ -853,8 +827,8 @@ fn holes_include_unreadable_target_keeps_parent_and_withholds_target() {
             SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
-            read_view: Default::default(),
-},
+                read_view: Default::default(),
+            },
             [],
             [],
             [],

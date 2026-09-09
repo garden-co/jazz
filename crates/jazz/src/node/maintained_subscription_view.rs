@@ -115,6 +115,9 @@ struct VersionDecodePlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
+    /// Keep reader exclusion inputs alive until the final serving view closes.
+    pub(crate) edge_availability_owner:
+        Option<std::sync::Arc<super::query_eval::EdgeAvailabilityOwner>>,
     /// The immutable resolved read-view identity of this maintained program.
     /// Terminal row members must retain it so distinct branch views never
     /// collapse when their source row and transaction coincide.
@@ -167,6 +170,7 @@ pub(crate) struct MaintainedSubscriptionView {
     /// +/− pair observed in one drain is never serialized as an ambiguous
     /// ordered operation.
     source_fact_weights: BTreeMap<ProgramFactEntry, BTreeMap<SourceFactOrigin, i64>>,
+    selected_deletion_witnesses: BTreeMap<ProgramFactEntry, VersionRow>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -174,6 +178,7 @@ pub(crate) struct MaintainedSubscriptionView {
 impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
+            edge_availability_owner: None,
             read_view: Default::default(),
             witness_table_names: BTreeMap::new(),
             result_weights: BTreeMap::new(),
@@ -189,6 +194,7 @@ impl Default for MaintainedSubscriptionView {
             storage_backed_result_materialization: false,
             inline_content_branch_keys: BTreeSet::new(),
             source_fact_weights: BTreeMap::new(),
+            selected_deletion_witnesses: BTreeMap::new(),
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
         }
@@ -810,7 +816,15 @@ impl MaintainedSubscriptionView {
     }
 
     pub(crate) fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
-        self.versions.versions_by_tx(tx_id)
+        let mut versions = self.versions.versions_by_tx(tx_id);
+        for (fact, version) in &self.selected_deletion_witnesses {
+            if matches!(fact, ProgramFactEntry::CoveredInput(input) if input.version.tx == tx_id)
+                && !versions.contains(version)
+            {
+                versions.push(version.clone());
+            }
+        }
+        versions
     }
 
     /// The final peer-safe source closure after every drained terminal batch.
@@ -823,7 +837,28 @@ impl MaintainedSubscriptionView {
                 weights.values().any(|weight| *weight > 0) && fact.is_peer_source_closure_fact()
             })
             .map(|(fact, _)| fact.clone())
+            .chain(self.selected_deletion_witnesses.keys().cloned())
             .collect()
+    }
+
+    /// Exact selected-scope tombstones carry provenance but no app input tuple.
+    pub(crate) fn replace_selected_deletion_witnesses(
+        &mut self,
+        witnesses: BTreeMap<ProgramFactEntry, VersionRow>,
+    ) -> (Vec<ProgramFactEntry>, Vec<ProgramFactEntry>) {
+        let adds = witnesses
+            .keys()
+            .filter(|fact| !self.selected_deletion_witnesses.contains_key(*fact))
+            .cloned()
+            .collect();
+        let removes = self
+            .selected_deletion_witnesses
+            .keys()
+            .filter(|fact| !witnesses.contains_key(*fact))
+            .cloned()
+            .collect();
+        self.selected_deletion_witnesses = witnesses;
+        (adds, removes)
     }
 
     /// Apply one terminal's reference delta to a peer source fact. The wire
@@ -894,7 +929,13 @@ impl MaintainedSubscriptionView {
                     result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
                 })
                 .sum::<usize>();
-        let versions_bytes = self.versions.footprint_bytes();
+        let versions_bytes = self.versions.footprint_bytes()
+            + btree_map_bytes(self.selected_deletion_witnesses.len())
+            + self
+                .selected_deletion_witnesses
+                .values()
+                .map(version_row_bytes)
+                .sum::<usize>();
         let replacements_bytes = self.replacements.footprint_bytes();
         let witness_table_names_bytes = btree_map_bytes(self.witness_table_names.len())
             + self
@@ -939,7 +980,8 @@ impl MaintainedSubscriptionView {
                 .map(|records| records.values().filter(|weight| **weight > 0).count())
                 .sum::<usize>()
                 + self.structured_terminal_records.len(),
-            version_identities: self.versions.by_identity.len(),
+            version_identities: self.versions.by_identity.len()
+                + self.selected_deletion_witnesses.len(),
             version_tx_entries: self
                 .versions
                 .by_tx
@@ -4087,6 +4129,33 @@ mod tests {
         append_net_peer_source_fact_changes(&mut transitions, changes);
         assert!(transitions.program_fact_adds.is_empty());
         assert!(transitions.program_fact_removes.is_empty());
+    }
+
+    // Internal: source replacement must release exact wire witnesses even
+    // though deletion has no application tuple or visible graph row.
+    #[test]
+    fn selected_deletion_witness_replacement_releases_facts_and_versions() {
+        let version = deletion(RowUuid(uuid::Uuid::from_u128(7)), 42);
+        let aliases = BTreeMap::from([(NodeUuid(uuid::Uuid::from_u128(10)), NodeAlias(10))]);
+        let input = covered_input_for_version(test_source(), &version, &aliases).unwrap();
+        let tx = input.version.tx;
+        let fact = ProgramFactEntry::CoveredInput(input);
+        let mut maintained = MaintainedSubscriptionView::default();
+        let (adds, removes) = maintained
+            .replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.clone())]));
+        assert_eq!(adds, vec![fact.clone()]);
+        assert!(removes.is_empty());
+        assert_eq!(maintained.versions_by_tx(tx), vec![version]);
+        assert!(
+            maintained
+                .active_peer_source_closure_facts()
+                .contains(&fact)
+        );
+        let (adds, removes) = maintained.replace_selected_deletion_witnesses(BTreeMap::new());
+        assert!(adds.is_empty());
+        assert_eq!(removes, vec![fact]);
+        assert!(maintained.versions_by_tx(tx).is_empty());
+        assert!(maintained.active_peer_source_closure_facts().is_empty());
     }
 
     #[test]

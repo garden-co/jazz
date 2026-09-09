@@ -60,28 +60,49 @@ function TodoList() {
 
 function TodoForm() {
   const db = useDb();
-  const handleSubmit = (e: React.SubmitEvent<HTMLFormElement>) => {
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string>();
+  const handleSubmit = async (e: React.SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     const form = e.target as HTMLFormElement;
     const title = form.titleField.value.trim();
-    if (!title) return;
-    db.insert(app.todos, { title, done: false });
-    form.reset();
+    if (!title || saving) return;
+    setSaving(true);
+    setSaved(false);
+    setSaveError(undefined);
+    try {
+      // The row appears optimistically; acknowledge saving only after the
+      // browser worker has persisted it so it can survive a reload.
+      await db.insert(app.todos, { title, done: false }).wait({ tier: "local" });
+      form.reset();
+      setSaved(true);
+    } catch (error: unknown) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
   };
   return (
-    <form onSubmit={handleSubmit} className="flex gap-2">
-      <input
-        name="titleField"
-        type="text"
-        placeholder="New todo…"
-        className="flex-1 text-sm bg-transparent border border-foreground/15 rounded px-3 py-1.5 outline-none focus:border-foreground/40 placeholder:text-foreground/25"
-      />
-      <button
-        type="submit"
-        className="text-sm px-3 py-1.5 border border-foreground/15 rounded hover:bg-foreground/5 transition-colors cursor-pointer"
-      >
-        Add
-      </button>
-    </form>
+    <>
+      <form onSubmit={handleSubmit} className="flex gap-2">
+        <input
+          disabled={saving}
+          name="titleField"
+          type="text"
+          placeholder="New todo…"
+          className="flex-1 text-sm bg-transparent border border-foreground/15 rounded px-3 py-1.5 outline-none focus:border-foreground/40 placeholder:text-foreground/25"
+        />
+        <button
+          disabled={saving}
+          type="submit"
+          className="text-sm px-3 py-1.5 border border-foreground/15 rounded hover:bg-foreground/5 transition-colors cursor-pointer"
+        >
+          Add
+        </button>
+      </form>
+      <p role="status">{saving ? "Saving…" : saved ? "Saved locally" : ""}</p>
+      {saveError && <p role="alert">{saveError}</p>}
+    </>
   );
 }

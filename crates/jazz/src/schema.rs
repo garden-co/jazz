@@ -42,6 +42,8 @@ pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
 /// authority identity. Result-store keys remain bounded without reducing the
 /// runtime policy boundary to a hash-only identity.
 pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_bindings";
+/// Versioned local current-row availability and ordering receipts.
+pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
 /// Append-only proof that a scope-isolated relay actually received a row
 /// version from its upstream authority. This is distinct from live result
 /// membership, whose later removals only govern future disclosure.
@@ -640,6 +642,15 @@ impl RuntimeSchema {
                     ("fact_digest", ValueType::Bytes),
                 ]),
                 RecordDescriptor::new([("fact", ValueType::Bytes)]),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                LOCAL_ROW_AVAILABILITY_STORE,
+                RecordDescriptor::new([
+                    ("policy_binding_digest", ValueType::Bytes),
+                    ("global_table", ValueType::Uuid),
+                    ("row", ValueType::Uuid),
+                ]),
+                crate::node::local_availability_record_descriptor(),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SCOPE_RELAY_REPAIR_LEDGER_STORE,

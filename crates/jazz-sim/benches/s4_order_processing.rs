@@ -1210,7 +1210,7 @@ fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarne
             jazz::db::block_on(client.edge_peer.rehydrate_query(core, &shape, &binding)).unwrap()
         };
         client.hydration_bytes += view_update_bytes(&update);
-        client.hydration_rows += result_row_count(&update);
+        client.hydration_rows += result_row_count(&update, table);
         apply_sync_message_settled(&mut client.edge, update).unwrap();
     }
     client.hydrated = true;
@@ -2050,7 +2050,10 @@ fn open_node(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = jazz::db::block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
+    let node = jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .unwrap();
     (dir, node)
 }
 
@@ -2062,6 +2065,18 @@ fn open_db(
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    // These direct-message simulations bypass the transport catalogue handshake.
+    // Seed the same physical catalogue before reopening through the public Db API.
+    drop(
+        block_on(NodeState::new_with_shared_test_catalogue(
+            node_uuid,
+            schema.clone(),
+            storage,
+        ))
+        .unwrap(),
+    );
     let storage =
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
     let db = block_on(Db::open(DbConfig {
@@ -2216,8 +2231,6 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
             ..
         }) => {
             version_bundle_refs(version_carriers)
@@ -2225,29 +2238,19 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
                 .map(|version| version.record().raw().len() as u64 + 64)
                 .sum::<u64>()
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
-                + ((result_member_adds.len() + result_member_removes.len()) as u64 * 64)
         }
         _ => 0,
     }
 }
 
-fn result_row_count(update: &SyncMessage) -> usize {
+fn result_row_count(update: &SyncMessage, table: &str) -> usize {
     match update {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            program_fact_adds,
-            program_fact_removes,
-            ..
-        }) => program_fact_adds
+            supporting_rows, ..
+        }) => supporting_rows
             .iter()
-            .chain(program_fact_removes)
-            .filter_map(|fact| match fact {
-                jazz::protocol::ProgramFactEntry::CoveredInput(input)
-                    if input.source.path == [jazz::protocol::ProgramSourceRole::Root] =>
-                {
-                    Some((&input.version_table, input.source_row, input.version.tx))
-                }
-                _ => None,
-            })
+            .filter(|input| input.version_table.as_str() == table)
+            .map(|input| (&input.version_table, input.row, input.version.tx))
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         _ => 0,

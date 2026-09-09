@@ -63,6 +63,71 @@ describe("Db disconnect/reconnect", () => {
     await ctx.cleanup();
   });
 
+  it.each(["reconnect", "reopen"] as const)(
+    "repairs a default local query after an offline predicate exit on worker %s",
+    async (mode) => {
+      const label = uniqueDbName("local-query-offline-exit");
+      const server = await publishSyncServerSchemaAndPermissions(label);
+      const secret = generateAuthSecret();
+      const dbName = uniqueDbName(label);
+      const open = async () =>
+        ctx.track(
+          await createDb({
+            appId: server.appId,
+            driver: { type: "persistent", dbName },
+            serverUrl: server.serverUrl,
+            secret,
+          }),
+        );
+      let db = await open();
+      const peer = await createDirectDb(ctx, `${label}-peer`, secret, server);
+      const pending = todos.where({ done: { eq: false } });
+      let visible: Todo[] = [];
+      let stop = ctx.trackSubscription(
+        db.subscribe(pending, (rows) => {
+          visible = rows;
+        }),
+      );
+      const row = await db.insert(todos, { title: label, done: false }).wait({ tier: "global" });
+      await waitForCondition(
+        async () => visible.some((item) => item.id === row.id),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "local subscription did not show its own write",
+      );
+      await db.all(pending, { tier: "global" });
+      await db.disconnect();
+      if (mode === "reopen") {
+        stop();
+        await db.shutdown();
+        ctx.untrack(db);
+      }
+      await peer.all(todoByTitle(label), { tier: "global" });
+      await peer.update(todos, row.id, { done: true }).wait({ tier: "global" });
+      if (mode === "reopen") {
+        db = await open();
+        visible = [];
+        stop = ctx.trackSubscription(
+          db.subscribe(pending, (rows) => {
+            visible = rows;
+          }),
+        );
+      }
+      await db.reconnect();
+      expect(await db.all(pending, { tier: "global" })).toEqual([]);
+      // No broader remote query may fetch the missing newer version for us.
+      await waitForCondition(
+        async () => {
+          const cached = await db.all(todoByTitle(label), inspectorLocalQueryOptions());
+          return cached.some((item) => item.done) && !visible.some((item) => item.id === row.id);
+        },
+        SYNC_OPERATION_TIMEOUT_MS,
+        "current-row repair did not reach the foreground local cache",
+      );
+      stop();
+    },
+    60_000,
+  );
+
   describe("server-backed subscriptions", () => {
     it.each(["edge", "global"] as const)(
       "keeps a disconnected %s subscription pending, then hydrates its local write",
@@ -494,23 +559,7 @@ describe("Db disconnect/reconnect", () => {
           tier: "local",
         }),
         "worker mode: local-tier read for disconnected write did not resolve",
-      ).catch((error: unknown) => {
-        const runtime = (
-          db as unknown as {
-            getClient(schema: typeof todos._schema): {
-              getRuntime(): { describeQueryCoverageWaits(): unknown };
-            };
-          }
-        )
-          .getClient(todos._schema)
-          .getRuntime();
-        if (error instanceof Error) {
-          const receipt = JSON.stringify(runtime.describeQueryCoverageWaits());
-          error.message += `; queryCoverage=${receipt}`;
-          error.stack += `\nQuery coverage state: ${receipt}`;
-        }
-        throw error;
-      });
+      );
       expect(localRows.some((row) => row.title === offlineTitle)).toBe(true);
 
       const peerRowsBeforeReconnect = await withWorkerOperationTimeout(

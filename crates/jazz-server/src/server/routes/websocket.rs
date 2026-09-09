@@ -38,7 +38,6 @@ const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
 static WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
-static WS_NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 static WS_ADMISSIONS: OnceLock<std::sync::Mutex<WebSocketAdmissionRegistry>> = OnceLock::new();
 
 /// Jazz WebSocket endpoint.
@@ -219,6 +218,13 @@ fn ws_link_admission(
     admission_epoch: u64,
 ) -> Result<ServerLinkAdmission, WireError> {
     match admission.requested_link {
+        RequestedWebSocketLink::OrdinarySession
+            if admission.credential == WebSocketCredential::Admin
+                && admission.identity == AuthorSubject::SYSTEM
+                && admission.trust == CommitUnitTrust::TrustedAuthority =>
+        {
+            Ok(ServerLinkAdmission::AuthorityQueryDelegate)
+        }
         RequestedWebSocketLink::OrdinarySession => Ok(ServerLinkAdmission::OrdinarySession),
         RequestedWebSocketLink::ScopeIsolatedClientRelay
             if admission.trust == CommitUnitTrust::Session
@@ -240,7 +246,7 @@ async fn ws_admission(
     prelude: WebSocketPrelude,
     request_headers: &HeaderMap,
     state: &Arc<ServerState>,
-) -> Result<WebSocketAdmission, String> {
+) -> Result<WebSocketAdmission, super::accounts::AdmissionError> {
     let peer_identity = ws_peer_identity(&prelude.peer_identity)?;
     let requested_link = prelude.requested_link;
     let auth = prelude.auth;
@@ -335,7 +341,7 @@ async fn ws_admission(
     })?;
 
     let Some(mut session) = session else {
-        return Err("Session required. Provide JWT, backend secret, or admin secret.".to_owned());
+        return Err("Session required. Provide JWT, backend secret, or admin secret.".into());
     };
 
     // A backend-authenticated impersonation remains policy-scoped, but its
@@ -371,20 +377,27 @@ async fn ws_admission(
     })
 }
 
-async fn account_still_admitted(state: &ServerState, identity: Option<AuthorSubject>) -> bool {
+async fn account_still_admitted(
+    state: &ServerState,
+    identity: Option<AuthorSubject>,
+) -> Result<(), super::accounts::AdmissionError> {
     let Some(identity) = identity else {
-        return true;
+        return Ok(());
     };
     let Some(account) = identity.account_id() else {
-        return false;
+        return Err("account identity revoked".into());
     };
     let (issuer, subject) = identity.principal_parts();
-    super::accounts::resolve_assignment(
+    let assignment = super::accounts::resolve_assignment(
         state,
         jazz::account_registry::Principal { issuer, subject },
     )
-    .await
-    .is_ok_and(|assignment| assignment == account)
+    .await?;
+    if assignment == account {
+        Ok(())
+    } else {
+        Err("account identity revoked".into())
+    }
 }
 
 fn session_claims(
@@ -608,11 +621,7 @@ async fn handle_ws_connection(
     let admission = match ws_admission(prelude, &request_headers, &state).await {
         Ok(admission) => admission,
         Err(error) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
-            )
-            .await;
+            send_ws_error(&mut socket, error.into_wire()).await;
             let _ = socket.close().await;
             return;
         }
@@ -706,10 +715,7 @@ async fn handle_ws_connection(
             let _ = socket.close().await;
             return;
         };
-        let server_endpoint = WireAuthorityEndpoint {
-            node: NodeUuid::from_bytes([0x5e; 16]),
-            epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-        };
+        let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
         let hello = match encode_frame(&WireFrame::Hello(
             WireHello::current(WirePeerRole::Core, negotiated.features)
                 .with_authority(server_endpoint.node, server_endpoint.epoch),
@@ -776,23 +782,21 @@ async fn handle_ws_connection(
     // Every admitted server link receives a fresh server endpoint. A browser
     // client need not (and must not) self-assert one merely to learn which
     // authority issued its downstream fates.
-    let server_endpoint = WireAuthorityEndpoint {
-        node: NodeUuid::from_bytes([0x5e; 16]),
-        epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
-    };
+    let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
     let session_context = if negotiated.features
         & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
             | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
         != 0
     {
-        remote_hello
-            .authority
-            .map(|remote| ConnectionSessionContext {
-                local: server_endpoint,
-                remote,
-                link_identity: admission.identity,
-                negotiated_features: negotiated.features,
-            })
+        // An authenticated client can request current rows without itself
+        // being an authority. Retain our receipt epoch and its admitted identity
+        // independently of whether it advertises a remote authority endpoint.
+        Some(ConnectionSessionContext {
+            local: server_endpoint,
+            remote: remote_hello.authority,
+            link_identity: admission.identity,
+            negotiated_features: negotiated.features,
+        })
     } else {
         None
     };
@@ -867,8 +871,9 @@ async fn handle_ws_connection(
     let mut activity_rx = core_server_shell.subscribe_activity();
     // Subscribe before checking: a revocation concurrent with this check must
     // remain visible even if no application traffic arrives afterward.
-    if !account_still_admitted(&state, account_identity).await {
-        close_ws_for_policy(&mut socket, "account identity revoked").await;
+    if let Err(error) = account_still_admitted(&state, account_identity).await {
+        send_ws_error(&mut socket, error.into_wire()).await;
+        let _ = socket.close().await;
         core_server_shell.close(session);
         return;
     }
@@ -894,8 +899,9 @@ async fn handle_ws_connection(
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 } else { std::future::pending::<()>().await; }
             } => {
-                if !account_still_admitted(&state, account_identity).await {
-                    close_ws_for_policy(&mut socket, "account identity revoked").await;
+                if let Err(error) = account_still_admitted(&state, account_identity).await {
+                    send_ws_error(&mut socket, error.into_wire()).await;
+                    let _ = socket.close().await;
                     break;
                 }
             }
@@ -922,8 +928,9 @@ async fn handle_ws_connection(
             }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
-                    if !account_still_admitted(&state, account_identity).await {
-                        close_ws_for_policy(&mut socket, "account identity revoked").await;
+                    if let Err(error) = account_still_admitted(&state, account_identity).await {
+                        send_ws_error(&mut socket, error.into_wire()).await;
+                        let _ = socket.close().await;
                         break;
                     }
                     let frames = match decode_ws_encoded_frame_batch(&bytes) {
@@ -970,8 +977,9 @@ async fn handle_ws_connection(
                                 break 'connection;
                             }
                         };
-                        if !account_still_admitted(&state, account_identity).await {
-                            close_ws_for_policy(&mut socket, "account identity revoked").await;
+                        if let Err(error) = account_still_admitted(&state, account_identity).await {
+                            send_ws_error(&mut socket, error.into_wire()).await;
+                        let _ = socket.close().await;
                             break 'connection;
                         }
                         if !outbound.is_empty()
@@ -999,8 +1007,9 @@ async fn handle_ws_connection(
                 _ => {}
             },
             changed = activity_rx.changed() => {
-                if !account_still_admitted(&state, account_identity).await {
-                    close_ws_for_policy(&mut socket, "account identity revoked").await;
+                if let Err(error) = account_still_admitted(&state, account_identity).await {
+                    send_ws_error(&mut socket, error.into_wire()).await;
+                    let _ = socket.close().await;
                     break;
                 }
                 if changed.is_err() {
@@ -1455,7 +1464,10 @@ mod tests {
         let error = ws_admission(prelude, &headers, &state)
             .await
             .expect_err("orphan backend session must not suppress cookie origin enforcement");
-        assert!(error.contains("Origin does not match Host"), "{error}");
+        assert!(
+            error.to_string().contains("Origin does not match Host"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1665,6 +1677,10 @@ mod tests {
         .expect("admit authenticated edge relay");
         assert_eq!(relay.credential, WebSocketCredential::Admin);
         assert_eq!(relay.trust, CommitUnitTrust::TrustedAuthority);
+        assert_eq!(
+            ws_link_admission(&relay, 0, 1).unwrap(),
+            ServerLinkAdmission::AuthorityQueryDelegate
+        );
 
         let admin_scope_request = ws_admission(
             WebSocketPrelude {
@@ -1703,6 +1719,10 @@ mod tests {
         .await
         .expect("admit authenticated catalogue bootstrap");
         assert_eq!(bootstrap.trust, CommitUnitTrust::TrustedAdmin);
+        assert_eq!(
+            ws_link_admission(&bootstrap, 0, 1).unwrap(),
+            ServerLinkAdmission::OrdinarySession
+        );
 
         let non_system = ws_admission(
             WebSocketPrelude {
@@ -1722,6 +1742,10 @@ mod tests {
         .await
         .expect("admit authentication before protocol bootstrap rejection");
         assert_eq!(non_system.trust, CommitUnitTrust::TrustedAuthority);
+        assert_eq!(
+            ws_link_admission(&non_system, 0, 1).unwrap(),
+            ServerLinkAdmission::OrdinarySession
+        );
 
         let backend = ws_admission(
             WebSocketPrelude {
@@ -1769,7 +1793,9 @@ mod tests {
             .expect_err("mismatched authenticated session and peer_identity must be rejected");
 
         assert!(
-            error.contains("peer_identity must match authenticated session author"),
+            error
+                .to_string()
+                .contains("peer_identity must match authenticated session author"),
             "unexpected websocket admission error: {error}"
         );
     }
@@ -1881,9 +1907,12 @@ mod tests {
             AuthorSubject::for_test_bytes([0x41; 16])
         );
         assert_eq!(context.local.node, NodeUuid::from_bytes([0x41; 16]));
-        assert_eq!(context.remote.node, NodeUuid::from_bytes([0x5e; 16]));
+        assert_eq!(
+            context.remote.unwrap().node,
+            NodeUuid::from_bytes([0x5e; 16])
+        );
         assert_ne!(context.local.epoch, 0);
-        assert_ne!(context.remote.epoch, 0);
+        assert_ne!(context.remote.unwrap().epoch, 0);
 
         let schema = ws_public_schema_convert();
         let column_families = schema.column_families();
@@ -2076,6 +2105,84 @@ mod tests {
             "edge runtime is awaiting a complete authoritative catalogue; retry shortly",
         )
         .await;
+    }
+
+    /// Exercise the actual HTTP registry and WebSocket boundary, including permanent denial.
+    #[tokio::test]
+    async fn ws_registry_outages_are_retryable_but_denials_remain_terminal() {
+        for status in [503_u16, 429, 403] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let upstream = listener.local_addr().unwrap();
+            let router = axum::Router::new()
+                .fallback(move || async move { axum::http::StatusCode::from_u16(status).unwrap() });
+            let task = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let app_id = AppId::random();
+            let server = ServerBuilder::new(app_id)
+                .with_auth_config(AuthConfig {
+                    admin_secret: Some("admin-secret".into()),
+                    allow_local_first_auth: true,
+                    ..Default::default()
+                })
+                .with_storage(StorageBackend::InMemory)
+                .with_upstream_url(format!("http://{upstream}"))
+                .build()
+                .await
+                .unwrap();
+            let addr = start_ws_test_server(server.state.clone()).await;
+            let seed = [0x31; 32];
+            let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
+            let account = jazz::account_registry::local_first_account_id(*app_id.uuid(), &subject);
+            let identity = AuthorSubject::from_canonical(
+                &serde_json::to_string(&(
+                    account.0,
+                    jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                    &subject,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            let token = jazz::tools::identity::mint_jazz_self_signed_token(
+                &seed,
+                jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                &app_id.to_string(),
+                3600,
+            )
+            .unwrap();
+            let prelude = serde_json::json!({"peer_identity":identity.canonical(), "auth":{"jwt_token":token}}).to_string();
+            let (mut client, _) = connect_async(ws_url(addr, app_id)).await.unwrap();
+            client
+                .send(WsMessage::Binary(prelude.into_bytes().into()))
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frames = decode_ws_message(&message);
+            let [WireFrame::Error(error)] = frames.as_slice() else {
+                panic!("expected structured admission error: {frames:?}")
+            };
+            assert_eq!(
+                error.code,
+                if status == 403 {
+                    WireErrorCode::AuthFailed
+                } else {
+                    WireErrorCode::NotReady
+                }
+            );
+            assert_eq!(
+                error.retry,
+                if status == 403 {
+                    WireRetry::Never
+                } else {
+                    WireRetry::Later
+                }
+            );
+            task.abort();
+        }
     }
 
     async fn assert_blank_runtime_diagnostic(edge: bool, expected: &str) {
@@ -3401,14 +3508,23 @@ mod tests {
             received, 0,
             "the first pump deliberately skips its response"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !client.edge_attachment_is_covered(&attachment),
             "the queued response must not be applied before the idle pump reads it"
         );
 
-        let (sent, received) = pump_core_websocket_transport_once(&client, &mut ws).await;
-        assert_eq!(sent, 0, "the second pump must have no new client work");
+        // Server scheduling is independent of this client. Retry the idle
+        // receive window until coverage arrives, but never permit new client
+        // work to make the response observable accidentally.
+        let start = tokio::time::Instant::now();
+        let mut received = 0;
+        while !client.edge_attachment_is_covered(&attachment) && start.elapsed() < WS_PUMP_DEADLINE
+        {
+            let (sent, newly_received) = pump_core_websocket_transport_once(&client, &mut ws).await;
+            assert_eq!(sent, 0, "idle pumps must have no new client work");
+            received += newly_received;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(
             received > 0,
             "the idle pump must consume the queued response"

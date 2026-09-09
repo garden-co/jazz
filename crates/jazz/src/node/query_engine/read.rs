@@ -144,6 +144,9 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
     /// Its rows are never reconstructed from a result set. Client lowering
     /// requires descriptor-bound CoveredInput sources for every occurrence.
     SettledBindingView {
+        /// Caller-selected source semantics, retained before registration.
+        /// Opaque binding keys include routing options and cannot recover it.
+        current_default: bool,
         /// Schema/storage/lens projection used by this source.
         projection: SchemaProjection<R>,
         /// Canonical registered binding/view result-set identity.

@@ -570,7 +570,9 @@ where
         let status = self.node.enqueue_mutation(
             tx_id,
             Box::pin(async move {
-                let write = db.upsert(&table, row, cells, options).await?;
+                let write = db
+                    .upsert_with_insert_validation(&table, row, cells, options, true)
+                    .await?;
                 debug_assert_eq!(write.mergeable_tx_id(), tx_id);
                 Ok(())
             }),
@@ -2321,6 +2323,18 @@ where
         cells: RowCells,
         options: UpsertOptions,
     ) -> Result<WriteHandle<S>, Error> {
+        self.upsert_with_insert_validation(table, row, cells, options, false)
+            .await
+    }
+
+    async fn upsert_with_insert_validation(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        options: UpsertOptions,
+        require_complete_insert: bool,
+    ) -> Result<WriteHandle<S>, Error> {
         self.ensure_mutation_operation_admitted()?;
         let UpsertOptions {
             identity,
@@ -2449,6 +2463,33 @@ where
                 }
             }
         };
+
+        // Bindings submit an upsert patch without synchronously inspecting the
+        // current row. Once the core has chosen an insertion, enforce required
+        // fields here rather than relying on a JavaScript preflight query.
+        // Raw Rust RowCells deliberately permit sparse rows. The typed
+        // binding queue opts into complete insertion checks instead.
+        if require_complete_insert && parents.is_empty() {
+            let schema = self.table_schema(table)?;
+            for column in &schema.columns {
+                if !schema.branch_by.contains(&column.name)
+                    && !cells.contains_key(&column.name)
+                    && column.default.is_none()
+                    && !matches!(
+                        column.column_type,
+                        GrooveColumnType::Nullable(_) | GrooveColumnType::Array(_)
+                    )
+                {
+                    return Err(Error::new(
+                        ErrorCode::WriteRejected,
+                        format!(
+                            "missing required field `{}` on table `{table}`",
+                            column.name
+                        ),
+                    ));
+                }
+            }
+        }
 
         self.write_mergeable_at_ms_with_authorship_in_branch(
             made_by,
@@ -2585,6 +2626,23 @@ where
     pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
         let changed = {
             let mut node = self.node.node.borrow_mut();
+            let previous_revision = node.session_claim_revision(identity);
+            node.set_session_claims(identity, claims);
+            node.session_claim_revision(identity) != previous_revision
+        };
+        if changed {
+            self.node.schedule_tick(TickUrgency::Deferred);
+        }
+    }
+
+    /// Attach claims without synchronously reentering a suspended storage operation.
+    pub async fn set_identity_claims_async(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) {
+        let changed = {
+            let mut node = self.node.node.lock().await;
             let previous_revision = node.session_claim_revision(identity);
             node.set_session_claims(identity, claims);
             node.session_claim_revision(identity) != previous_revision

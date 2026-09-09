@@ -101,19 +101,22 @@ impl DifferentialOracle {
                     )
                 });
             let mut receiver = maintained_receiver(schema, 0xb0 + receiver_offset as u8);
-            register_maintained_receiver(&mut receiver, &shape.shape, &shape.binding, shape.identity);
-            receiver.apply_sync_message_settled(update).unwrap_or_else(|err| {
-                panic!(
-                    "seed {seed}: receiver rejected initial source closure for {}: {err:?}",
-                    shape.name
-                )
-            });
-            let shape_rows = m3_receiver_row_bodies(
+            register_maintained_receiver(
                 &mut receiver,
                 &shape.shape,
                 &shape.binding,
                 shape.identity,
             );
+            receiver
+                .apply_sync_message_settled(update)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "seed {seed}: receiver rejected initial source closure for {}: {err:?}",
+                        shape.name
+                    )
+                });
+            let shape_rows =
+                m3_receiver_row_bodies(&mut receiver, &shape.shape, &shape.binding, shape.identity);
             rows.push(shape_rows);
             peers.push(peer);
             receivers.push(receiver);
@@ -145,9 +148,12 @@ impl DifferentialOracle {
             receiver
                 .apply_sync_message_settled(initial)
                 .unwrap_or_else(|err| {
-                    panic!("seed {seed}: receiver rejected initial source closure for {name}: {err:?}")
+                    panic!(
+                        "seed {seed}: receiver rejected initial source closure for {name}: {err:?}"
+                    )
                 });
-            let values = receiver_aggregate_values(&mut receiver, &shape, &binding, identity, output);
+            let values =
+                receiver_aggregate_values(&mut receiver, &shape, &binding, identity, output);
             aggregates.push(AggregateDifferential {
                 name,
                 shape,
@@ -184,12 +190,7 @@ impl DifferentialOracle {
         self.assert_checkpoint(core, seed, checkpoint);
     }
 
-    fn tick<S: OrderedKvStorage>(
-        &mut self,
-        core: &mut NodeState<S>,
-        seed: u64,
-        checkpoint: &str,
-    ) {
+    fn tick<S: OrderedKvStorage>(&mut self, core: &mut NodeState<S>, seed: u64, checkpoint: &str) {
         for (((peer, receiver), shape), rows) in self
             .peers
             .iter_mut()
@@ -216,8 +217,7 @@ impl DifferentialOracle {
                     shape.name
                 )
             });
-            *rows =
-                m3_receiver_row_bodies(receiver, &shape.shape, &shape.binding, shape.identity);
+            *rows = m3_receiver_row_bodies(receiver, &shape.shape, &shape.binding, shape.identity);
         }
         for aggregate in &mut self.aggregates {
             let aggregate_update = aggregate
@@ -440,7 +440,17 @@ fn maintained_grouped_aggregate_window_tracks_live_membership() {
         "docs",
         row(0x11),
         101,
-        differential_doc_cells("moved-group", "match", identity, 7, 2, 1.5, Some(1.5), -11, 11),
+        differential_doc_cells(
+            "moved-group",
+            "match",
+            identity,
+            7,
+            2,
+            1.5,
+            Some(1.5),
+            -11,
+            11,
+        ),
     );
     let update = peer
         .query_update_for_subscription(&mut core, subscription, &shape, &binding)
@@ -471,7 +481,10 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
     accept_global(
         &mut core,
         MergeableCommit::new("group_access_edges", excluded_seed, 4).cells(BTreeMap::from([
-            ("user_id".to_owned(), Value::String(user(0xb2).principal_parts().1)),
+            (
+                "user_id".to_owned(),
+                Value::String(user(0xb2).principal_parts().1),
+            ),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ])),
     );
@@ -484,7 +497,7 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
         .rehydrate_query(&mut core, &shape.shape, &shape.binding)
         .expect("authority evaluates exact recursive seed closure");
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = &update
     else {
@@ -493,26 +506,12 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
     let seed_inputs = program_fact_adds
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
-                if input.source.table.as_str() == "group_access_edges" =>
-            {
-                Some(input)
-            }
+            input if input.version_table.as_str() == "group_access_edges" => Some(input),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(seed_inputs.len(), 1, "one allowed recursive seed source");
-    assert_eq!(seed_inputs[0].source_row, row(0x42));
-    assert_eq!(
-        seed_inputs[0].source.path,
-        vec![
-            crate::protocol::ProgramSourceRole::Root,
-            crate::protocol::ProgramSourceRole::RecursiveSeed(
-                "reachable:0:group_access_edges".to_owned()
-            ),
-        ],
-        "allowed seed retains its exact normalized source occurrence"
-    );
+    assert_eq!(seed_inputs[0].row, row(0x42));
     let shipped_seed_rows = version_bundles_for_update(&update)
         .into_iter()
         .flat_map(|bundle| bundle.versions)
@@ -539,7 +538,10 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
         .find(|current| current.row_uuid() == row(0x42))
         .map(|current| selected_body_cells(&current))
         .expect("allowed seed exists on authority");
-    assert_eq!(received_seed_rows, BTreeMap::from([(row(0x42), expected_seed_body)]));
+    assert_eq!(
+        received_seed_rows,
+        BTreeMap::from([(row(0x42), expected_seed_body)])
+    );
 }
 
 #[test]
@@ -553,10 +555,7 @@ fn recursive_covered_inputs_remain_partitioned_between_live_sessions() {
     accept_global(
         &mut core,
         MergeableCommit::new("group_access_edges", bob_seed, 4).cells(BTreeMap::from([
-            (
-                "user_id".to_owned(),
-                Value::String(bob.principal_parts().1),
-            ),
+            ("user_id".to_owned(), Value::String(bob.principal_parts().1)),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ])),
     );
@@ -591,14 +590,10 @@ fn recursive_covered_inputs_remain_partitioned_between_live_sessions() {
         panic!("expected source reset")
     };
     let covered_seeds = payload
-        .program_fact_adds
+        .supporting_rows
         .iter()
         .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input)
-                if input.source.table.as_str() == "group_access_edges" =>
-            {
-                Some(input.source_row)
-            }
+            input if input.version_table.as_str() == "group_access_edges" => Some(input.row),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -608,8 +603,11 @@ fn recursive_covered_inputs_remain_partitioned_between_live_sessions() {
 fn run_m3_aggregate_churn_curve() {
     let schema = m3_differential_schema();
     let column_families = schema.column_families();
-    let column_family_refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut core = NodeState::new(
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut core = NodeState::new_with_shared_test_catalogue(
         node(0x76),
         schema.clone(),
         MemoryStorage::new(&column_family_refs).expect("valid memory storage families"),
@@ -756,10 +754,7 @@ fn accept_churn_with_parent<S: OrderedKvStorage + ReopenableStorage>(
     }
     let tx_id = core.commit_mergeable_settled(commit).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
-    parents
-        .entry(row_uuid)
-        .or_default()
-        .0 = Some(tx_id);
+    parents.entry(row_uuid).or_default().0 = Some(tx_id);
 }
 
 fn delete_churn_with_parent<S: OrderedKvStorage + ReopenableStorage>(
@@ -768,27 +763,25 @@ fn delete_churn_with_parent<S: OrderedKvStorage + ReopenableStorage>(
     row_uuid: RowUuid,
     made_at: u64,
 ) {
-    let mut commit = MergeableCommit::new("docs", row_uuid, made_at)
-        .deletion(DeletionEvent::Deleted);
+    let mut commit =
+        MergeableCommit::new("docs", row_uuid, made_at).deletion(DeletionEvent::Deleted);
     if let Some(parent) = parents.get(&row_uuid).and_then(|(_, deletion)| *deletion) {
         commit = commit.parents(vec![parent]);
     }
-    let tx_id = core
-        .commit_mergeable_settled(commit)
-        .unwrap();
+    let tx_id = core.commit_mergeable_settled(commit).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
-    parents
-        .entry(row_uuid)
-        .or_default()
-        .1 = Some(tx_id);
+    parents.entry(row_uuid).or_default().1 = Some(tx_id);
 }
 
 #[test]
 fn m3_maintained_one_shot_differential_oracle_f64_approximate_control() {
     let schema = m3_differential_schema();
     let column_families = schema.column_families();
-    let column_family_refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut core = NodeState::new(
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut core = NodeState::new_with_shared_test_catalogue(
         node(0x78),
         schema.clone(),
         MemoryStorage::new(&column_family_refs).expect("valid memory storage families"),
@@ -884,17 +877,7 @@ fn m3_maintained_one_shot_differential_oracle_null_semantics() {
         "docs",
         row(0x15),
         500,
-        differential_doc_cells(
-            "all-null",
-            "match",
-            user(0xa1),
-            7,
-            3,
-            4.0,
-            None,
-            4,
-            4,
-        ),
+        differential_doc_cells("all-null", "match", user(0xa1), 7, 3, 4.0, None, 4, 4),
     );
 
     let shape = Query::from("docs")
@@ -1025,14 +1008,11 @@ fn report_f64_churn_divergence<S: OrderedKvStorage>(
             panic!("{} must produce F64 output", aggregate.name);
         };
         let error = (maintained - one_shot).abs();
-        let tolerance = F64_AGGREGATE_ERROR_FACTOR
-            * f64::EPSILON
-            * (depth as f64 + 4.0)
-            * absolute_sums[&1];
+        let tolerance =
+            F64_AGGREGATE_ERROR_FACTOR * f64::EPSILON * (depth as f64 + 4.0) * absolute_sums[&1];
         eprintln!(
             "M3 F64 CHURN depth={depth} aggregate={} error={error:e} tolerance={tolerance:e} sum_abs={:e} maintained={maintained:e} one_shot={one_shot:e}",
-            aggregate.name,
-            absolute_sums[&1],
+            aggregate.name, absolute_sums[&1],
         );
     }
 }
@@ -1158,39 +1138,86 @@ fn maintained_nested_and_aggregate_results_rebuild_from_persisted_receiver_witho
     let schema = m3_differential_schema();
     let (_authority_dir, mut authority) = open_node_with_schema(node(0xd1), schema.clone());
     seed_m3_differential_base(&mut authority, 0);
-    let nested = m3_differential_shapes(&schema).into_iter()
-        .find(|shape| shape.name == "docs_projected_with_doc_access").unwrap();
-    let aggregate = Query::from("docs").aggregate([crate::query::Aggregate::count()])
-        .group_by("bucket").validate(&schema).unwrap();
+    let nested = m3_differential_shapes(&schema)
+        .into_iter()
+        .find(|shape| shape.name == "docs_projected_with_doc_access")
+        .unwrap();
+    let aggregate = Query::from("docs")
+        .aggregate([crate::query::Aggregate::count()])
+        .group_by("bucket")
+        .validate(&schema)
+        .unwrap();
     let aggregate_binding = aggregate.bind(BTreeMap::new()).unwrap();
     let identity = user(0xa1);
     let (receiver_dir, mut receiver) = open_node_with_schema(node(0xd2), schema.clone());
-    for (shape, binding) in [(&nested.shape, &nested.binding), (&aggregate, &aggregate_binding)] {
+    for (shape, binding) in [
+        (&nested.shape, &nested.binding),
+        (&aggregate, &aggregate_binding),
+    ] {
         register_maintained_receiver(&mut receiver, shape, binding, identity);
         let mut peer = PeerState::client_link(identity);
-        let update = peer.rehydrate_query(&mut authority, shape, binding).unwrap();
+        let update = peer
+            .rehydrate_query(&mut authority, shape, binding)
+            .unwrap();
         let bytes = crate::wire::encode_sync_message(&update).unwrap();
-        receiver.apply_sync_message_settled(crate::wire::decode_sync_message(&bytes).unwrap()).unwrap();
+        receiver
+            .apply_sync_message_settled(crate::wire::decode_sync_message(&bytes).unwrap())
+            .unwrap();
     }
-    let nested_before = m3_receiver_row_bodies(&mut receiver, &nested.shape, &nested.binding, identity);
+    let nested_before =
+        m3_receiver_row_bodies(&mut receiver, &nested.shape, &nested.binding, identity);
     assert!(!nested_before.is_empty());
-    assert!(nested_before.values().any(|cells| matches!(cells.get("access"), Some(Value::Array(values)) if !values.is_empty())),
-        "the fixture must contain actual nested rows");
-    let aggregates_before = receiver_aggregate_values(&mut receiver, &aggregate, &aggregate_binding, identity, "count");
+    assert!(
+        nested_before.values().any(
+            |cells| matches!(cells.get("access"), Some(Value::Array(values)) if !values.is_empty())
+        ),
+        "the fixture must contain actual nested rows"
+    );
+    let aggregates_before = receiver_aggregate_values(
+        &mut receiver,
+        &aggregate,
+        &aggregate_binding,
+        identity,
+        "count",
+    );
     assert!(!aggregates_before.is_empty());
-    assert_eq!(aggregates_before, one_shot_aggregate_values(&mut authority, &aggregate, &aggregate_binding, identity, "count"));
+    assert_eq!(
+        aggregates_before,
+        one_shot_aggregate_values(
+            &mut authority,
+            &aggregate,
+            &aggregate_binding,
+            identity,
+            "count"
+        )
+    );
     drop(authority);
     drop(receiver);
     let mut reopened = reopen_node_at(&receiver_dir, node(0xd2), schema);
     // No peer or serving authority survives. Registration can only compile a
     // new receiver graph against recovered records and the durable frontier.
-    for (shape, binding) in [(&nested.shape, &nested.binding), (&aggregate, &aggregate_binding)] {
+    for (shape, binding) in [
+        (&nested.shape, &nested.binding),
+        (&aggregate, &aggregate_binding),
+    ] {
         register_maintained_receiver(&mut reopened, shape, binding, identity);
     }
-    assert_eq!(m3_receiver_row_bodies(&mut reopened, &nested.shape, &nested.binding, identity), nested_before,
-        "reopen preserves root and child identities plus every nested value");
-    assert_eq!(receiver_aggregate_values(&mut reopened, &aggregate, &aggregate_binding, identity, "count"), aggregates_before,
-        "reopen preserves aggregate group identities and values without refresh");
+    assert_eq!(
+        m3_receiver_row_bodies(&mut reopened, &nested.shape, &nested.binding, identity),
+        nested_before,
+        "reopen preserves root and child identities plus every nested value"
+    );
+    assert_eq!(
+        receiver_aggregate_values(
+            &mut reopened,
+            &aggregate,
+            &aggregate_binding,
+            identity,
+            "count"
+        ),
+        aggregates_before,
+        "reopen preserves aggregate group identities and values without refresh"
+    );
 }
 
 #[test]
@@ -1308,16 +1335,12 @@ fn m3_differential_schema() -> JazzSchema {
             .table(
                 PublicTableSchemaBuilder::new("resources")
                     .column("label", PublicColumnType::Text)
-                    .policies(
-                        public_all_policies().with_select(same_table_policy),
-                    ),
+                    .policies(public_all_policies().with_select(same_table_policy)),
             )
             .table(
                 PublicTableSchemaBuilder::new("string_resources")
                     .column("label", PublicColumnType::Text)
-                    .policies(
-                        public_all_policies().with_select(string_same_table_policy),
-                    ),
+                    .policies(public_all_policies().with_select(string_same_table_policy)),
             )
             .table(
                 PublicTableSchemaBuilder::new("resource_access")
@@ -1383,7 +1406,12 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
                 "parent",
                 [],
             )
-            .seeded_by("group_access_edges", "user_id", "user.identity.subject", "group_id")
+            .seeded_by(
+                "group_access_edges",
+                "user_id",
+                "user.identity.subject",
+                "group_id",
+            )
             .validate(schema)
             .unwrap(),
     );
@@ -1414,9 +1442,7 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
         Query::from("docs")
             .select(["title"])
             .array_subquery(
-                ArraySubquery::new("access", "doc_access", "doc", "id")
-                    .select(["team"])
-                    ,
+                ArraySubquery::new("access", "doc_access", "doc", "id").select(["team"]),
             )
             .validate(schema)
             .unwrap(),
@@ -1596,7 +1622,10 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
     accept_global(
         core,
         MergeableCommit::new("group_access_edges", row(0x42), 3).cells(BTreeMap::from([
-            ("user_id".to_owned(), Value::String(alice.principal_parts().1)),
+            (
+                "user_id".to_owned(),
+                Value::String(alice.principal_parts().1),
+            ),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ])),
     );
@@ -1664,17 +1693,19 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
     ] {
         accept_global(
             core,
-            MergeableCommit::new("docs", doc, 10 + seed % 3).made_by(author).cells(differential_doc_cells(
-                title,
-                kind,
-                author,
-                created_at,
-                bucket,
-                f64_value,
-                nullable_f64_value,
-                i64_value,
-                u64_value,
-            )),
+            MergeableCommit::new("docs", doc, 10 + seed % 3)
+                .made_by(author)
+                .cells(differential_doc_cells(
+                    title,
+                    kind,
+                    author,
+                    created_at,
+                    bucket,
+                    f64_value,
+                    nullable_f64_value,
+                    i64_value,
+                    u64_value,
+                )),
         );
     }
     for (edge, doc, team) in [
@@ -1762,9 +1793,7 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
 
 type TableLayerParents = BTreeMap<(&'static str, RowUuid), (Option<TxId>, Option<TxId>)>;
 
-fn m3_differential_parent_map(
-    core: &mut NodeState<RocksDbStorage>,
-) -> TableLayerParents {
+fn m3_differential_parent_map(core: &mut NodeState<RocksDbStorage>) -> TableLayerParents {
     let mut parents = BTreeMap::new();
     for table in [
         "docs",
@@ -1854,8 +1883,8 @@ fn delete_with_parent(
     row_uuid: RowUuid,
     made_at: u64,
 ) -> TxId {
-    let mut commit = MergeableCommit::new(table, row_uuid, made_at)
-        .deletion(DeletionEvent::Deleted);
+    let mut commit =
+        MergeableCommit::new(table, row_uuid, made_at).deletion(DeletionEvent::Deleted);
     if let Some(parent) = parents
         .get(&(table, row_uuid))
         .and_then(|(_, deletion)| *deletion)
@@ -2053,8 +2082,11 @@ fn one_shot_aggregate_values<S: OrderedKvStorage>(
 /// never be read back from authority result facts on the update.
 fn maintained_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState<MemoryStorage> {
     let column_families = schema.column_families();
-    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut receiver = NodeState::new(
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut receiver = NodeState::new_with_shared_test_catalogue(
         node(receiver_id),
         schema.clone(),
         MemoryStorage::new(&refs).expect("valid aggregate receiver storage"),
@@ -2080,7 +2112,13 @@ fn register_maintained_receiver<S: OrderedKvStorage + ReopenableStorage>(
     let values = shape
         .params()
         .keys()
-        .map(|name| binding.values().get(name).cloned().expect("bound parameter"))
+        .map(|name| {
+            binding
+                .values()
+                .get(name)
+                .cloned()
+                .expect("bound parameter")
+        })
         .collect();
     receiver
         .apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
@@ -2228,9 +2266,7 @@ fn assert_aggregate_agreement<S: OrderedKvStorage>(
     }
 }
 
-fn f64_absolute_sums_by_bucket<S: OrderedKvStorage>(
-    core: &mut NodeState<S>,
-) -> BTreeMap<u64, f64> {
+fn f64_absolute_sums_by_bucket<S: OrderedKvStorage>(core: &mut NodeState<S>) -> BTreeMap<u64, f64> {
     let mut sums = BTreeMap::new();
     for row in core.current_rows("docs", DurabilityTier::Global).unwrap() {
         let cells = row.test_cells_by_descriptor();

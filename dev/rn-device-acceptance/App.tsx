@@ -5,6 +5,7 @@ import { scenarioPlan, scenariosForAcceptancePhase } from "./src/scenarios";
 import type { DeviceDiagnosticCode } from "./src/device-diagnostics";
 import {
   proveForegroundByteAbi,
+  proveForegroundJsReentry,
   proveForegroundRevoked,
   proveForegroundScopeIsolation,
   proveForegroundWriteAbi,
@@ -113,6 +114,8 @@ async function observeTrustedAdmissionLifecycleInner(
     encode: encodeNativeForegroundCommand,
     decode: decodeNativeForegroundResponse,
   };
+  markFailure("foreground-probe-failed");
+  proveForegroundJsReentry(foregroundFactory, capability, foregroundCodec);
   proveForegroundByteAbi(foregroundFactory, capability, foregroundCodec, markFailure);
   markFailure("foreground-open-failed");
   const revocableForeground = foregroundFactory.openAttached(capability);

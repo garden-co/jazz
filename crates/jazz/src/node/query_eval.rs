@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Instant;
+pub(crate) use unavailable_inputs::EdgeAvailabilityOwner;
 
 use groove::ivm::SubscriptionEvent as GrooveSubscriptionEvent;
 use groove::ivm::{
@@ -69,10 +70,18 @@ use crate::query::{
 use crate::schema::{ColumnSchema, RuntimeSchema};
 use crate::tools::{ObjectId, OutputOccurrenceId};
 
+mod local_availability_receipts;
 mod materialization;
 mod prepared_bindings;
 mod query_read_sets;
 mod query_result_rows;
+mod unavailable_inputs;
+pub(crate) use local_availability_receipts::{
+    LocalAvailabilityRecord, LocalAvailabilityWatermark, LocalRowAvailability,
+    local_availability_record_descriptor,
+};
+
+pub(crate) use unavailable_inputs::LocalUnavailableInput;
 
 pub(crate) use prepared_bindings::coerce_prepared_binding_value;
 use prepared_bindings::*;
@@ -629,6 +638,7 @@ where
         identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
         read_view: &ReadViewSpec,
+        physical_row: Option<RowUuid>,
     ) -> Result<QueryProgram, Error> {
         let query_schema = self
             .catalogue
@@ -676,7 +686,14 @@ where
         // This one-shot include-deleted source has no deletion anti-join after
         // it. The proof remains deliberately narrower than ordinary visible
         // reads, which discard the physical cap before their anti-join.
-        let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
+        let access_paths = if let Some(row) = physical_row {
+            BTreeMap::from([(
+                root_source_id(&shape.query().table),
+                CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row.0)]),
+            )])
+        } else {
+            self.one_shot_access_paths(shape, binding, tier)?
+        };
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }
@@ -881,8 +898,7 @@ where
         // local execution must lower concrete bindings into its locally
         // available (already upstream-scoped at Edge/Global) data, rather
         // than trying to evaluate a server-maintained binding graph.
-        let use_prepared_binding_source = authorization_mode
-            == QueryAuthorizationMode::TrustedServing
+        let use_prepared_binding_source = authorization_mode != QueryAuthorizationMode::ClientLocal
             && !force_inline_binding_source
             && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
@@ -1359,7 +1375,7 @@ where
             // A serving node evaluates its complete authority program. A
             // `SettledBindingView` is a receiver-local CoveredInput source,
             // not a server-side cache or an alternate trusted read path.
-            QueryAuthorizationMode::TrustedServing => None,
+            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => None,
         };
         // Ordinary Edge/Global reads are allowed to consume only a source
         // binding view registered by upstream coverage. A client-local plan
@@ -2107,6 +2123,7 @@ where
                 identity,
                 authorization_mode,
                 read_view,
+                None,
             )
             .await?;
         let deltas = self
@@ -2469,7 +2486,7 @@ where
                 self.prepare_client_subscription_binding(shape, binding, tier, identity)
                     .await
             }
-            QueryAuthorizationMode::TrustedServing => {
+            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
                 self.prepare_trusted_subscription_binding(shape, binding, tier, identity)
                     .await
             }
@@ -2707,6 +2724,59 @@ where
         Ok(rows)
     }
 
+    pub(crate) async fn query_readable_current_row_including_deleted(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let table = self
+            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .clone();
+        let program = self
+            .compile_include_deleted_query_program_in_authorization_mode(
+                shape,
+                binding,
+                tier,
+                identity,
+                QueryAuthorizationMode::TrustedServing,
+                &ReadViewSpec::default(),
+                Some(row_uuid),
+            )
+            .await?;
+        // A policy can introduce claim parameters even though this physical
+        // row lookup has no public query parameters. Those programs must go
+        // through Groove's prepare/bind boundary just like ordinary serving
+        // reads; executing the lowered graph directly leaves its binding
+        // source unprepared and fails instead of representing a denied read.
+        let plan = self
+            .prepared_query_plan_from_program(&program, shape, binding)
+            .await?;
+        let policy = self.query_program_policy_context(identity);
+        let deltas = match plan {
+            PreparedQueryPlan::Prepared { shape, params, .. } => {
+                let values = binding_values_for_plan(
+                    binding,
+                    &params,
+                    &policy,
+                    PreparedClaimBindingMode::Strict,
+                )?;
+                self.bind_disposable_shape_snapshot(shape, &values).await?
+            }
+            PreparedQueryPlan::Graph { graph, .. } => self
+                .database
+                .query_graph(graph)
+                .await
+                .map_err(Error::Groove)?,
+            PreparedQueryPlan::PeerMaintainedMarker => {
+                unreachable!("point reads never use peer-maintained plans")
+            }
+        };
+        self.materialize_include_deleted_query_rows(table, deltas)
+    }
+
     #[cfg(test)]
     pub(crate) async fn query_rows_for_link_forced_full_scan_for_test(
         &mut self,
@@ -2825,7 +2895,7 @@ where
                     self.query_rows_for_client(shape, binding, tier, identity)
                         .await?
                 }
-                QueryAuthorizationMode::TrustedServing => {
+                QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
                     self.query_rows_with_prepared_plan_for_identity(
                         shape, binding, tier, None, identity,
                     )
@@ -2843,7 +2913,7 @@ where
                 self.query_relation_snapshot_for_client(shape, binding, tier, identity, read_view)
                     .await
             }
-            QueryAuthorizationMode::TrustedServing => {
+            QueryAuthorizationMode::TrustedServing | QueryAuthorizationMode::EdgeServing => {
                 self.query_relation_snapshot_for_serving_in_read_view(
                     shape, binding, tier, identity, read_view,
                 )
@@ -3122,7 +3192,7 @@ where
                 permission_subject: bound_identity,
                 ..
             } => {
-                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+                if authorization_mode != QueryAuthorizationMode::ClientLocal
                     && identity != bound_identity
                 {
                     return Err(Error::OpenTransactionIdentityMismatch);
@@ -3135,7 +3205,7 @@ where
                 permission_subject: Some(bound_identity),
                 ..
             } => {
-                if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+                if authorization_mode != QueryAuthorizationMode::ClientLocal
                     && identity != bound_identity
                 {
                     return Err(Error::OpenTransactionIdentityMismatch);
@@ -3333,9 +3403,15 @@ where
         )
     }
 
+    pub(crate) fn enable_edge_query_serving(&mut self) {
+        self.edge_query_serving = true;
+    }
+
     pub(crate) fn peer_query_authorization_mode(&self) -> QueryAuthorizationMode {
         if self.client_relay_scope().is_some() {
             QueryAuthorizationMode::ClientLocal
+        } else if self.edge_query_serving {
+            QueryAuthorizationMode::EdgeServing
         } else {
             QueryAuthorizationMode::TrustedServing
         }
@@ -3487,6 +3563,16 @@ where
                 None => local.initial_received = false,
             }
         }
+        if local.initial_received {
+            let witnesses = self
+                .selected_deletion_witnesses(&authority_result_key, shape.schema_version())
+                .await?;
+            let (adds, removes) = local
+                .maintained
+                .replace_selected_deletion_witnesses(witnesses);
+            transitions.program_fact_adds.extend(adds);
+            transitions.program_fact_removes.extend(removes);
+        }
         Ok((
             local.subscription,
             local.maintained,
@@ -3636,6 +3722,18 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
+        // Acquire before compiling the input graph, including across cold
+        // storage awaits. On failure the temporary owner drops; on success
+        // the maintained view retains it for its complete serving lifetime.
+        let edge_availability_owner = if authorization_mode == QueryAuthorizationMode::EdgeServing
+            || (self.edge_query_serving
+                && authorization_mode == QueryAuthorizationMode::ClientLocal)
+        {
+            unavailable_inputs::local_unavailable_policy_binding(&request)
+                .map(|scope| self.pin_edge_availability_scope(scope))
+        } else {
+            None
+        };
         if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
             for source in request.reads.primary.sources.values_mut() {
                 if let SourceExpr::SettledBindingView {
@@ -3785,6 +3883,7 @@ where
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
         let mut maintained = MaintainedSubscriptionView::default();
+        maintained.edge_availability_owner = edge_availability_owner;
         maintained.set_read_view(read_view_key);
         // Resolve names from permanent physical catalogue identities, never
         // from equal row UUIDs or a search for the first matching table label.

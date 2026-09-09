@@ -1476,6 +1476,55 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(clientReads).toBe(1);
   });
 
+  it.each(["query", "subscription"] as const)(
+    "installs client correlation claims before opening a %s without preparing a native plan",
+    async (kind) => {
+      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      let releaseClaims!: () => void;
+      const installed = new Promise<void>((resolve) => {
+        releaseClaims = resolve;
+      });
+      const setSessionClaims = vi.fn(() => installed);
+      const all = vi.fn(() => encodeRows([]));
+      const subscribe = vi.fn(() => ({ readAll: () => [], close: () => undefined }));
+      const runtime = new NativeRuntimeAdapter(
+        { openMemory: () => fakeDb({ setSessionClaims, all, subscribe }) } as never,
+        app.todos._schema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const session = JSON.stringify({
+        user_id: "00000000-0000-0000-0000-0000000000a1",
+        issuer: "https://issuer.example",
+        authMode: "external",
+        claims: { role: "reader" },
+      });
+      const open = () =>
+        kind === "query"
+          ? runtime.query(app.todos._build(), session, "local")
+          : runtime.createSubscription(app.todos._build(), session, "local");
+      try {
+        const pending = open();
+        expect(setSessionClaims).toHaveBeenCalledOnce();
+        expect(setSessionClaims).toHaveBeenCalledWith(expect.objectContaining({ role: "reader" }));
+        expect(all).not.toHaveBeenCalled();
+        expect(subscribe).not.toHaveBeenCalled();
+        releaseClaims();
+        await pending;
+        const read = kind === "query" ? all : subscribe;
+        await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+        await open();
+        expect(read).toHaveBeenCalledTimes(2);
+        expect(setSessionClaims).toHaveBeenCalledOnce();
+      } finally {
+        releaseClaims();
+        await runtime.close();
+      }
+    },
+  );
+
   it("returns unknown locally without consulting hidden policy evidence", () => {
     let authoritativeChecks = 0;
     const runtime = new NativeRuntimeAdapter(
@@ -1623,7 +1672,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     const delegatedIdentity = expect.any(Uint8Array);
     for (const call of authoritative.mock.calls) {
       expect(call.at(-2)).toEqual(delegatedIdentity);
-      expect(call.at(-1)).toEqual(expect.objectContaining({ authMode: "external" }));
+      // Rust derives reserved authMode from the admitted identity. Do not
+      // synthesize a provider claim that differs from the authenticated JWT.
+      expect(call.at(-1)).toEqual({ iss: session.issuer, sub: session.user_id });
     }
     const forgedSystem = { ...session, issuer: SYSTEM_SESSION_ISSUER, user_id: SYSTEM_AUTHOR_ID };
     await expect(runtime.requestReadPermissionAdvice("todos", id, forgedSystem)).resolves.toBe(
@@ -1816,7 +1867,6 @@ describe("NativeRuntimeAdapter server transport", () => {
           subject: "application-owned-subject",
           iss: externalIssuer,
           sub: externalUserId,
-          authMode: "external",
         },
       },
     ]);

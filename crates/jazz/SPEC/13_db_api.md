@@ -289,6 +289,18 @@ reads lower with `Propagation::Full`. The Inspector MAY use an internal
 updates, and `Propagation::LocalOnly`; that tier MUST NOT appear in the public
 binding `ReadTier` type.
 
+For an attached browser Inspector, both these reads and its edit batches execute
+inside the authenticated storage owner's runtime through a private MessagePort.
+They are not peer queries with propagation disabled. In particular, reading a
+cached row in the worker and then authoring a partial update in a fresh, empty
+foreground would lose the update's local preimage: an edit to `done` would have
+no `title` to preserve. The worker instead stages the Inspector's whole edit
+batch as one ordinary mergeable transaction under its configured account
+identity, preserving the cached cells and the normal durability/upload path.
+Only a worker-minted attachment for the exact account/storage scope admits these
+commands; callers cannot supply an alternate author, claims, or backend
+attribution. A write wait must name a transaction created by that attachment.
+
 `RemoteIfPossible` does **not** infer offline state from a timeout, connection
 error, slow response, or an ordinary transport reconnect. A one-shot read
 chooses once. A subscription follows definite connectivity transitions in both
@@ -389,6 +401,25 @@ Rust `UpsertOptions::target` now uses `WriteTarget` rather than
 `ExactWriteTarget`. Root/default callers keep their runtime behaviour, but code
 that constructs the field with `ExactWriteTarget` must migrate, and exhaustive
 matches over the options field must handle `WriteTarget::BranchView`.
+
+A binding's asynchronous one-shot read MUST run after local mutation commands
+already admitted when the read began. WASM and NAPI place a marker in the owner
+FIFO before reading; a read following a queued deletion must not include the
+old row in a nested relation simply because that deletion has not executed yet.
+The marker does not wait for upstream acknowledgement or later writes, and does
+not claim a durability tier. Transaction reads retain their transaction-aware
+FIFO ordering. With no pending local commands the marker is immediately ready.
+
+JavaScript standalone upserts submit only the supplied cells to the Rust write
+queue. The facade MUST NOT synchronously query row existence first: another
+suspended operation may own the node, and blocking the host would prevent that
+operation from completing. Rust chooses insert versus patch under the write's
+identity and applies insertion defaults there. Consequently, errors that depend
+on that choice (such as a missing required column on a new row) are reported by
+the write handle; invalid supplied values can still be rejected before enqueue. This
+complete-insert validation belongs to the typed binding command path; raw Rust
+`RowCells` retain their sparse-row contract. Branch selector columns are supplied
+by the runtime and are not required in the caller's insertion cells.
 
 The write handle is the caller's durability and fate observation point. It
 carries the affected `RowUuid`, the backing `TxId` (`mergeable_tx_id()`), and the local
@@ -841,7 +872,16 @@ local materialized state (`INV-API-32`):
   for a query matching only that row — until reconnect delivery reaches the
   local store.
 
-`LocalOnly` prevents upstream routing. It is **not** what chooses the local
+`LocalOnly` prevents upstream routing, including from a memory-only browser
+foreground to its durable worker. Such a read sees only the foreground's own
+materialized/pending data; worker-only cache requires `Full` propagation.
+Local-only query attachments retain a unique usage identity but create no
+remote registration and are immediately covered. The wire compatibility field
+`RegisterShapeOptions.propagate_upstream` MUST be true: every receiving node
+rejects false as an unsupported capability, regardless of trust, topology,
+SYSTEM identity, delegated scope, or local-receiver role. No sender emits false.
+
+`LocalOnly` is **not** what chooses the local
 snapshot, nor is it a request to wait until that snapshot becomes complete
 relative to an unavailable upstream. Convergence is asserted separately, after
 `reconnect`.

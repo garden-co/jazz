@@ -287,6 +287,55 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  it("reconnects after a negotiated Edge reports its account registry temporarily unavailable", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transports: FakeTransport[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = new FakeTransport([]);
+              transports.push(transport);
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    const error = new PostcardWriter();
+    error.u64(2); // WireFrame::Error
+    error.u64(6); // NotReady
+    error.u64(3); // Later
+    error.string("account registry unavailable");
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([error.finish()]));
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    await runtime.waitForUpstreamServerConnection();
+    expect(sockets).toHaveLength(2);
+    expect(transports).toHaveLength(2);
+    expect(transports[0]!.closed).toBe(true);
+    expect(terminal).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
   it.each(["disconnect", "close"] as const)(
     "cancels an established-network retry on %s",
     async (action) => {

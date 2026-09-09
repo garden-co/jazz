@@ -1006,9 +1006,32 @@ struct InFlightChunk {
     /// Each consumer has at most one replaceable registered waker. Futures may
     /// legally be re-polled with a different waker, so retaining a bare list
     /// would keep every old task allocation alive until completion.
-    waiters: Vec<ChunkWaiter>,
+    wake: std::sync::Arc<ChunkWake>,
     consumers: usize,
     next_consumer_id: u64,
+}
+
+#[derive(Default)]
+struct ChunkWake {
+    waiters: std::sync::Mutex<Vec<ChunkWaiter>>,
+}
+
+impl futures::task::ArcWake for ChunkWake {
+    fn wake_by_ref(this: &std::sync::Arc<Self>) {
+        // The storage future belongs to all consumers. Waking only its last
+        // poller can strand an independently scheduled reader behind a parked
+        // evaluator. Never call host wakers while holding the registry lock.
+        let waiters = this
+            .waiters
+            .lock()
+            .expect("chunk waiters poisoned")
+            .iter()
+            .map(|waiter| waiter.waker.clone())
+            .collect::<Vec<_>>();
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
 }
 
 struct ChunkWaiter {
@@ -1070,13 +1093,15 @@ impl CoalescedChunkGet {
             };
             entry.consumers = entry.consumers.saturating_sub(1);
             entry
+                .wake
                 .waiters
+                .lock()
+                .expect("chunk waiters poisoned")
                 .retain(|waiter| waiter.consumer_id != self.consumer_id);
-            // The consumer which last polled the backing future may be the
-            // one being cancelled. Wake remaining consumers so one of them
-            // installs its waker on the single shared future.
+            // Prompt surviving consumers to re-check the shared operation
+            // after cancellation, without retaining the cancelled task owner.
             let wake = if entry.consumers != 0 && entry.result.is_none() {
-                std::mem::take(&mut entry.waiters)
+                std::mem::take(&mut *entry.wake.waiters.lock().expect("chunk waiters poisoned"))
             } else {
                 Vec::new()
             };
@@ -1097,7 +1122,10 @@ impl Future for CoalescedChunkGet {
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         enum Next {
             Complete(Result<Bytes, OwnedChunkError>),
-            Poll(ChunkFuture<'static, Result<Bytes, OwnedChunkError>>),
+            Poll(
+                ChunkFuture<'static, Result<Bytes, OwnedChunkError>>,
+                std::sync::Arc<ChunkWake>,
+            ),
             Reentrant,
         }
 
@@ -1110,7 +1138,24 @@ impl Future for CoalescedChunkGet {
             if let Some(result) = &entry.result {
                 Next::Complete(result.clone())
             } else {
-                entry.future.take().map_or(Next::Reentrant, Next::Poll)
+                let mut waiters = entry.wake.waiters.lock().expect("chunk waiters poisoned");
+                if let Some(waiter) = waiters
+                    .iter_mut()
+                    .find(|waiter| waiter.consumer_id == self.consumer_id)
+                {
+                    if !waiter.waker.will_wake(cx.waker()) {
+                        waiter.waker = cx.waker().clone();
+                    }
+                } else {
+                    waiters.push(ChunkWaiter {
+                        consumer_id: self.consumer_id,
+                        waker: cx.waker().clone(),
+                    });
+                }
+                drop(waiters);
+                entry.future.take().map_or(Next::Reentrant, |future| {
+                    Next::Poll(future, entry.wake.clone())
+                })
             }
         };
 
@@ -1118,51 +1163,36 @@ impl Future for CoalescedChunkGet {
         let result = match next {
             Next::Complete(result) => Some(result),
             Next::Reentrant => Some(Err(ChunkError::Reentrant.into())),
-            Next::Poll(mut future) => match future.as_mut().poll(cx) {
-                Poll::Pending => {
-                    let mut in_flight = self.in_flight.borrow_mut();
-                    let entry = in_flight.entries.get_mut(&self.request).expect(
-                        "coalesced chunk request remains registered while a consumer exists",
-                    );
-                    debug_assert!(entry.future.is_none());
-                    entry.future = Some(future);
-                    None
-                }
-                Poll::Ready(result) => {
-                    let mut in_flight = self.in_flight.borrow_mut();
-                    let entry = in_flight.entries.get_mut(&self.request).expect(
-                        "coalesced chunk request remains registered while a consumer exists",
-                    );
-                    entry.result = Some(result.clone());
-                    wake = std::mem::take(&mut entry.waiters)
+            Next::Poll(mut future, wake_bridge) => {
+                let waker = futures::task::waker(wake_bridge);
+                let mut shared_cx = std::task::Context::from_waker(&waker);
+                match future.as_mut().poll(&mut shared_cx) {
+                    Poll::Pending => {
+                        let mut in_flight = self.in_flight.borrow_mut();
+                        let entry = in_flight.entries.get_mut(&self.request).expect(
+                            "coalesced chunk request remains registered while a consumer exists",
+                        );
+                        debug_assert!(entry.future.is_none());
+                        entry.future = Some(future);
+                        None
+                    }
+                    Poll::Ready(result) => {
+                        let mut in_flight = self.in_flight.borrow_mut();
+                        let entry = in_flight.entries.get_mut(&self.request).expect(
+                            "coalesced chunk request remains registered while a consumer exists",
+                        );
+                        entry.result = Some(result.clone());
+                        wake = std::mem::take(
+                            &mut *entry.wake.waiters.lock().expect("chunk waiters poisoned"),
+                        )
                         .into_iter()
                         .filter(|waiter| waiter.consumer_id != self.consumer_id)
                         .collect();
-                    Some(result)
+                        Some(result)
+                    }
                 }
-            },
-        };
-        if result.is_none() {
-            let mut in_flight = self.in_flight.borrow_mut();
-            let entry = in_flight
-                .entries
-                .get_mut(&self.request)
-                .expect("coalesced chunk request remains registered while a consumer exists");
-            if let Some(waiter) = entry
-                .waiters
-                .iter_mut()
-                .find(|waiter| waiter.consumer_id == self.consumer_id)
-            {
-                if !waiter.waker.will_wake(cx.waker()) {
-                    waiter.waker = cx.waker().clone();
-                }
-            } else {
-                entry.waiters.push(ChunkWaiter {
-                    consumer_id: self.consumer_id,
-                    waker: cx.waker().clone(),
-                });
             }
-        }
+        };
         for waiter in wake {
             waiter.waker.wake();
         }
@@ -1374,7 +1404,7 @@ impl OwnedChunkProvider {
                                 install_failures,
                             )),
                             result: None,
-                            waiters: Vec::new(),
+                            wake: std::sync::Arc::new(ChunkWake::default()),
                             consumers: 1,
                             next_consumer_id: 1,
                         },
@@ -1789,6 +1819,53 @@ mod tests {
         assert_eq!(control.observed(), vec![request.clone(), request]);
     }
 
+    // Internal executor regression: each consumer of one coalesced I/O must
+    // be notified independently, including when another consumer is parked.
+    #[test]
+    fn completed_shared_chunk_wakes_every_consumer_without_another_poll() {
+        struct WakeCounter(AtomicUsize);
+        impl ArcWake for WakeCounter {
+            fn wake_by_ref(value: &Arc<Self>) {
+                value.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct Provider(RefCell<Option<futures::channel::oneshot::Receiver<Bytes>>>);
+        impl ChunkProvider for Provider {
+            fn get(&self, _: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+                let receive = self.0.borrow_mut().take().expect("one backing request");
+                Box::pin(async move { Ok(receive.await.expect("release I/O")) })
+            }
+        }
+        let bytes = Bytes::from_static(b"independently scheduled consumers");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"wake-every-consumer"),
+        };
+        let (send, receive) = futures::channel::oneshot::channel();
+        let chunks = OwnedChunkProvider::new(Rc::new(Provider(RefCell::new(Some(receive)))));
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request);
+        let first_wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let second_wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let first_waker = waker(first_wakes.clone());
+        let second_waker = waker(second_wakes.clone());
+        let mut first_cx = std::task::Context::from_waker(&first_waker);
+        let mut second_cx = std::task::Context::from_waker(&second_waker);
+        assert!(first.as_mut().poll(&mut first_cx).is_pending());
+        assert!(second.as_mut().poll(&mut second_cx).is_pending());
+        send.send(bytes).unwrap();
+        assert!(
+            first_wakes.0.load(Ordering::SeqCst) > 0,
+            "first consumer must wake without polling second"
+        );
+        assert!(
+            second_wakes.0.load(Ordering::SeqCst) > 0,
+            "second consumer must wake without polling first"
+        );
+        assert!(first.as_mut().poll(&mut first_cx).is_ready());
+        assert!(second.as_mut().poll(&mut second_cx).is_ready());
+    }
+
     #[test]
     fn cancelling_the_backing_poller_wakes_a_remaining_consumer() {
         struct WakeCounter(AtomicUsize);
@@ -1826,8 +1903,8 @@ mod tests {
         ));
         assert_eq!(second_wakes.0.load(Ordering::SeqCst), 0);
 
-        // `first` owns the backing future's last waker. Its cancellation must
-        // explicitly wake `second` so the shared future keeps making progress.
+        // Cancellation also prompts the surviving reader to re-check its
+        // operation and releases the cancelled reader's task allocation.
         drop(first);
         assert_eq!(second_wakes.0.load(Ordering::SeqCst), 1);
         assert!(
@@ -1837,7 +1914,10 @@ mod tests {
                 .entries
                 .get(&request)
                 .expect("remaining consumer keeps the shared request")
+                .wake
                 .waiters
+                .lock()
+                .expect("chunk waiters poisoned")
                 .is_empty()
         );
         assert!(matches!(
@@ -1851,7 +1931,10 @@ mod tests {
                 .entries
                 .get(&request)
                 .expect("remaining consumer re-registers its waker")
+                .wake
                 .waiters
+                .lock()
+                .expect("chunk waiters poisoned")
                 .len(),
             1
         );
@@ -1919,7 +2002,10 @@ mod tests {
                 .entries
                 .get(&request)
                 .expect("both pending consumers retain the request")
+                .wake
                 .waiters
+                .lock()
+                .expect("chunk waiters poisoned")
                 .len(),
             2
         );
@@ -1930,8 +2016,8 @@ mod tests {
         );
         assert!(weak_wakers[7].upgrade().is_some());
 
-        // Dropping the backing poller releases its current waiter and wakes
-        // the remaining consumer to register itself as the new poller.
+        // Dropping one consumer releases its current waiter and prompts the
+        // remaining consumer to re-register its current task waker.
         drop(first);
         assert_eq!(
             chunks
@@ -1940,7 +2026,10 @@ mod tests {
                 .entries
                 .get(&request)
                 .expect("remaining consumer retains the request")
+                .wake
                 .waiters
+                .lock()
+                .expect("chunk waiters poisoned")
                 .len(),
             0,
             "handoff wakes and clears the remaining consumer for re-registration"

@@ -71,8 +71,10 @@ where
                 .map(PublicationOutcome::settled);
         }
         let clock_before_ingest = self.clock.clone();
-        let mut updates = match self
-            .ingest_commit_unit_once(tx, versions, now_ms, ingest_context)
+        // One admission attempt includes policy evaluation and storage repair.
+        // Its future must not be embedded in this outer retry/clock owner.
+        let mut updates = match Box::pin(self
+            .ingest_commit_unit_once(tx, versions, now_ms, ingest_context))
             .await
         {
             Ok(updates) => updates,
@@ -799,13 +801,14 @@ where
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Global;
         let merge_rows = self.merge_rows_for_versions(&versions)?;
-        self.ingest_known_transaction(
+        // Keep persistence and merge construction out of the policy admission frame.
+        Box::pin(self.ingest_known_transaction(
             tx.clone(),
             versions,
             fate.clone(),
             Some(global_time),
             durability,
-        )
+        ))
         .await?;
         debug_assert_eq!(self.clock.committed_global_time, global_time);
         let mut outcome = PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
@@ -814,7 +817,7 @@ where
             global_time: Some(global_time),
             durability: Some(durability),
         }]);
-        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Core).await?);
+        outcome.append_outcome(Box::pin(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Core)).await?);
         Ok(outcome)
     }
 
@@ -952,8 +955,7 @@ where
                 durability: None,
             }]));
         }
-        if !self
-            .commit_unit_satisfies_write_policies(&tx, &versions, ingest_context)
+        if !Box::pin(self.commit_unit_satisfies_write_policies(&tx, &versions, ingest_context))
             .await?
         {
             let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
@@ -971,14 +973,15 @@ where
         let fate = Fate::Accepted;
         let durability = DurabilityTier::Edge;
         let merge_rows = self.merge_rows_for_versions(&versions)?;
-        self.ingest_known_transaction(tx.clone(), versions, fate.clone(), None, durability).await?;
+        // Separate persistence and merge construction from policy admission.
+        Box::pin(self.ingest_known_transaction(tx.clone(), versions, fate.clone(), None, durability)).await?;
         let mut outcome = PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
             global_time: None,
             durability: Some(durability),
         }]);
-        outcome.append_outcome(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Edge).await?);
+        outcome.append_outcome(Box::pin(self.create_merge_versions_for_rows(merge_rows, MergeAuthority::Edge)).await?);
         Ok(outcome)
     }
 

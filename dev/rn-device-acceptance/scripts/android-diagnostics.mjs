@@ -18,7 +18,7 @@ const THREADTIME_CORE_OBSERVATION =
 
 // Separate from the JS stage: its final retry must not hide native causality.
 const THREADTIME_FIXTURE_METADATA =
-  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzFixtureMetadata\s*:\s*(receipt-started|package-hash-started|receipt-resolved|receipt-failed-(?:activity|nonce|package-hash|device-identity|resolve)|phase-started|phase-activity-unavailable|phase-seed-resolved|phase-verify-resolved|phase-failed)\s*$/;
+  /^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+E\s+JazzFixtureMetadata\s*:\s*(receipt-started|receipt-waiting-activity|receipt-activity-ready|package-hash-started|receipt-resolved|receipt-failed-(?:activity|nonce|package-hash|device-identity|resolve)|phase-started|phase-activity-unavailable|phase-seed-resolved|phase-verify-resolved|phase-failed)\s*$/;
 
 export function androidFixtureMetadataDiagnostic(output) {
   const codes = new Set();

@@ -159,6 +159,7 @@ enum ServerShellCommand {
         protocol_version: u16,
         features: crate::wire::WireFeatures,
         session_context: Option<ConnectionSessionContext>,
+        permits_delegated_sessions: bool,
         reply: oneshot::Sender<Result<ServerUpstreamConnection, String>>,
     },
     Shutdown(std_mpsc::Sender<()>),
@@ -321,10 +322,15 @@ fn run_server_shell_owner(
                     protocol_version,
                     features,
                     session_context,
+                    permits_delegated_sessions,
                     reply,
                 } => {
-                    let io =
-                        shell.connect_upstream_wire_io(protocol_version, features, session_context);
+                    let io = shell.connect_upstream_wire_io_with_delegated_sessions(
+                        protocol_version,
+                        features,
+                        session_context,
+                        permits_delegated_sessions,
+                    );
                     let connection_id = io.connection_id;
                     let (wake_tx, wake_rx) = mpsc::unbounded();
                     if let Ok(mut wakers) = io_wakers.lock() {
@@ -1013,6 +1019,28 @@ impl ServerRuntimeHandle {
         features: crate::wire::WireFeatures,
         session_context: Option<ConnectionSessionContext>,
     ) -> Result<ServerUpstreamConnection, String> {
+        self.connect_upstream_wire_with_delegated_sessions(
+            transport,
+            transport_terminal,
+            protocol_version,
+            features,
+            session_context,
+            false,
+        )
+        .await
+    }
+
+    /// Attach an upstream with the delegation capability established by the
+    /// host's authenticated connector, never by a semantic peer-wire message.
+    pub async fn connect_upstream_wire_with_delegated_sessions(
+        &self,
+        transport: Box<dyn WireTransport + Send>,
+        transport_terminal: NativeTransportTerminalFuture,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+        permits_delegated_sessions: bool,
+    ) -> Result<ServerUpstreamConnection, String> {
         let (reply, response) = oneshot::channel();
         self.send(ServerShellCommand::AttachUpstreamWire {
             transport,
@@ -1020,6 +1048,7 @@ impl ServerRuntimeHandle {
             protocol_version,
             features,
             session_context,
+            permits_delegated_sessions,
             reply,
         })?;
         let result = response
@@ -1241,6 +1270,9 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
         SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
         SyncMessage::CatalogueSnapshot(_) => "CatalogueSnapshot",
+        SyncMessage::CurrentRowsRequest(_) => "CurrentRowsRequest",
+        SyncMessage::CurrentRowsReceipt(_) => "CurrentRowsReceipt",
+        SyncMessage::CurrentRowsCancel { .. } => "CurrentRowsCancel",
         SyncMessage::PermissionAdviceRequest { .. } => "PermissionAdviceRequest",
         SyncMessage::PermissionAdviceResponse { .. } => "PermissionAdviceResponse",
         SyncMessage::AuthorizationScopeSubscribe { .. } => "AuthorizationScopeSubscribe",

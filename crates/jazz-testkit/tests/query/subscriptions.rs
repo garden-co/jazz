@@ -426,7 +426,8 @@ async fn reset_replacement_preserves_update_category_and_prior_order() {
         query.clone(),
         "final ordered rows before stream drain",
         |rows| {
-            (rows.len() == 2 && rows[0].0 == anchor_id && rows[1].0 == moving_id).then_some(rows)
+            (rows.len() == 2 && rows[0].0 == anchor_id && rows[1].0 == moving_id
+                && rows[1].1.first() == Some(&Value::Text(final_title.clone()))).then_some(rows)
         },
     )
     .await;

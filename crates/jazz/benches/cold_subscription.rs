@@ -135,7 +135,6 @@ fn current_state_history_depth_contract() {
             .len();
         // Authorities send exact inputs, not a second terminal result. The
         // receiver's ordinary IVM query must materialize the one current row.
-        assert!(payload.result_member_adds.is_empty());
         let (_receiver_dir, mut receiver) = open_node(node(3), schema.clone());
         support::register_table_receiver(&mut receiver, &schema, TABLE, peer.identity());
         support::apply_and_settle(&mut receiver, update.clone());
@@ -260,8 +259,12 @@ impl ColdSubscriptionBench {
         )
         .expect("reopen core rocksdb");
         self.core = Some(
-            block_on(NodeState::new(node(2), self.schema.clone(), storage))
-                .expect("reopen core node"),
+            block_on(NodeState::new_with_shared_test_catalogue(
+                node(2),
+                self.schema.clone(),
+                storage,
+            ))
+            .expect("reopen core node"),
         );
     }
 
@@ -404,7 +407,10 @@ fn open_node(
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
             .expect("open rocksdb");
-    let node = block_on(NodeState::new(node_uuid, schema, storage)).expect("single node");
+    let node = block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .expect("single node");
     (temp_dir, node)
 }
 

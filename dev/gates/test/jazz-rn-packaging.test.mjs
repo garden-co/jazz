@@ -2217,10 +2217,8 @@ test("the private foreground JSI host retains teardown ownership and rejects mal
   );
   assert.throws(
     () => {
-      const broken = runtime.replace("lease_lock.unlock();", "");
-      const brokenOpen = broken.match(
-        /jazz_native_relay_host_lease_open_attached_foreground\([\s\S]*?Object::createFromHostObject/,
-      )?.[0];
+      // Target this operation: other safe bridge entry points also unlock now.
+      const brokenOpen = openAttached.replace("lease_lock.unlock();", "");
       assert.match(brokenOpen, /lease_lock\.unlock\(\);/);
     },
     /unlock/,

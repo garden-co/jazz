@@ -1857,7 +1857,7 @@ fn lowered_aggregate_terminals(
     // Retaining an authority ResultPayload here would reintroduce a second
     // truth path for aggregates.
     let authority_publishes_covered_inputs = request.authorization_mode
-        == QueryAuthorizationMode::TrustedServing
+        != QueryAuthorizationMode::ClientLocal
         && request
             .output
             .facts

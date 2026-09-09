@@ -67,6 +67,32 @@ where
     where
         S: ReopenableStorage,
     {
+        // Dispatch the commit before constructing the general message future.
+        // A commit's policy evaluation must not keep the inactive catalogue,
+        // chunk-upload and other message arms on the executor's stack.
+        if let SyncMessage::CommitUnit { tx, versions } = message {
+            return Box::pin(async move {
+                self.require_catalogue_ready()?;
+                if self.catalogue_activation_failed {
+                    return Err(Error::CatalogueActivationFailed);
+                }
+                    if ingest_context.is_some() {
+                        let descriptors = version_indirect_descriptors(&versions);
+                        self.current_staged_ids_for_descriptors(&descriptors, true)
+                            .await?;
+                    }
+                    let now_ms = if ingest_context.is_some() {
+                        authority_wall_clock_ms()?
+                    } else {
+                        tx.tx_id.time.physical_ms()
+                    };
+                    // Commit admission owns a large policy/storage state machine.
+                    // Keep it out of the catalogue dispatcher's inline state.
+                    Box::pin(self.ingest_commit_unit_with_context(
+                        tx, versions, now_ms, ingest_context,
+                    )).await
+            });
+        }
         Box::pin(async move {
             // A dynamic edge has exactly one admissible pre-ready transition: the
             // authenticated upstream invokes `apply_trusted_catalogue_snapshot`
@@ -251,20 +277,7 @@ where
                     }
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
-                SyncMessage::CommitUnit { tx, versions } => {
-                    if ingest_context.is_some() {
-                        let descriptors = version_indirect_descriptors(&versions);
-                        self.current_staged_ids_for_descriptors(&descriptors, true)
-                            .await?;
-                    }
-                    let now_ms = if ingest_context.is_some() {
-                        authority_wall_clock_ms()?
-                    } else {
-                        tx.tx_id.time.physical_ms()
-                    };
-                    self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context)
-                        .await
-                }
+                SyncMessage::CommitUnit { .. } => unreachable!("commit units dispatch before the general message future"),
                 SyncMessage::FateUpdate {
                     tx_id,
                     fate,
@@ -279,27 +292,24 @@ where
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through,
-                    reset_result_set,
                     version_carriers,
                     peer_payload_inventory,
-                    result_member_adds,
-                    result_member_removes,
-                    program_fact_adds,
-                    program_fact_removes,
+                    supporting_rows: program_fact_adds,
                 }) => {
                     self.apply_view_update(ViewUpdateParts {
+            wire_rows: Some(program_fact_adds),
                         subscription,
                         settled_through,
                         defer_settlement: false,
-                        reset_result_set,
+                        reset_input_set: true,
                         version_carriers,
                         peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                         authorization_progress: peer_payload_inventory.authorization_progress,
                         opening_pending: peer_payload_inventory.opening_pending,
-                        result_member_adds,
-                        result_member_removes,
-                        program_fact_adds,
-                        program_fact_removes,
+                        result_member_adds: Vec::new(),
+                        result_member_removes: Vec::new(),
+                        program_fact_adds: Vec::new(),
+                        program_fact_removes: Vec::new(),
                     })
                     .await?;
                     Ok(PublicationOutcome::settled(Vec::new()))
@@ -367,7 +377,10 @@ where
                 SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_) => Err(
                     Error::UnsupportedSyncMessage("chunk traffic requires peer link context"),
                 ),
-                SyncMessage::PermissionAdviceRequest { .. }
+                SyncMessage::CurrentRowsRequest(_)
+                | SyncMessage::CurrentRowsReceipt(_)
+                | SyncMessage::CurrentRowsCancel { .. }
+                | SyncMessage::PermissionAdviceRequest { .. }
                 | SyncMessage::PermissionAdviceResponse { .. }
                 | SyncMessage::AuthorizationScopeSubscribe { .. }
                 | SyncMessage::AuthorizationScopeReceipt { .. }

@@ -10,3 +10,6 @@ dev/benchmarks/**/*.html
 specs/TODO.md
 packages/jazz-tools/tests/ts-dsl/fixtures/**
 examples/docs/*/src/**
+
+# Generated pinned Android toolchain, not repository source.
+.cache/android-device-acceptance/**

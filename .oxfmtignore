@@ -10,3 +10,6 @@ dev/benchmarks/**/*.html
 **/ENV.md
 **/.jazz-schema-*.mjs
 dev/benchmarks/realistic/history/bench_history.json
+
+# Generated pinned Android toolchain, not repository source.
+.cache/android-device-acceptance/**

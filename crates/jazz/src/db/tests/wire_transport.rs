@@ -903,10 +903,10 @@ fn wire_transport_adapter_carries_only_admitted_session_context() {
             node: NodeUuid::from_bytes([0x81; 16]),
             epoch: 17,
         },
-        remote: crate::wire::WireAuthorityEndpoint {
+        remote: Some(crate::wire::WireAuthorityEndpoint {
             node: NodeUuid::from_bytes([0x82; 16]),
             epoch: 19,
-        },
+        }),
         link_identity: AuthorSubject::for_test_bytes([0x83; 16]),
         negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
     };

@@ -254,6 +254,81 @@ pub enum SyncMessage {
     /// Complete edge-admitted frontier, accepted only on an authenticated
     /// authority link. Core reconciles after all members have been admitted.
     AuthorityPublication(AuthorityPublication),
+    /// Bounded known-row revalidation in the current default view.
+    CurrentRowsRequest(CurrentRowsRequest),
+    /// Core-backed current-row evidence, scoped to one admitted request.
+    CurrentRowsReceipt(CurrentRowsReceipt),
+    /// Retire a request on this connection; never cancels another connection.
+    CurrentRowsCancel {
+        /// Nonce allocated on this connection.
+        request_id: PermissionAdviceRequestId,
+    },
+}
+
+/// Maximum known rows in one current-availability request.
+pub const MAX_CURRENT_ROWS: usize = 64;
+
+/// Exact current-default-view coordinate. Local physical aliases never cross this wire.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentRowCoordinate {
+    /// Exact current schema identity.
+    pub schema: SchemaVersionId,
+    /// Logical table in that schema.
+    pub table: String,
+    /// Permanent physical lineage, never a node-local alias.
+    pub physical_table: crate::ids::GlobalPhysicalTableId,
+    /// Known physical row UUID.
+    pub row: RowUuid,
+}
+
+/// Caller supplies known coordinates, never an enumeration query or policy predicate.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentRowsRequest {
+    /// Opaque correlation restricted to this live connection.
+    pub request_id: PermissionAdviceRequestId,
+    /// Exact request coordinates in request order.
+    pub rows: Vec<CurrentRowCoordinate>,
+    /// Immutable host-admitted delegated binding, absent on ordinary clients.
+    pub delegated_session: Option<DelegatedSessionBinding>,
+}
+
+/// No unavailable outcome distinguishes missing, deleted, and denied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum CurrentRowOutcome {
+    /// Authorized current content, including an authorized deletion preimage.
+    Readable,
+    /// No authorized current representation; no cause is disclosed.
+    CurrentUnavailable,
+    /// No definitive current evidence is available.
+    Unknown,
+}
+
+/// Core evaluation evidence. The authenticated serving Edge may proxy this after
+/// validating its selected upstream nonce/epoch; this is not a signature chain.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentRowsReceipt {
+    /// Opaque correlation restricted to this live connection.
+    pub request_id: PermissionAdviceRequestId,
+    /// Exact request coordinates in request order.
+    pub rows: Vec<CurrentRowCoordinate>,
+    /// One outcome for every coordinate, with identical ordering.
+    pub outcomes: Vec<CurrentRowOutcome>,
+    /// Exact admitted policy snapshot.
+    pub context: PolicyBindingKey,
+    /// Core mint identity validated by the forwarding owner.
+    pub core: NodeUuid,
+    /// Core connection epoch; old epochs cannot discharge new requests.
+    pub core_epoch: u64,
+    /// Core claims revision captured during evaluation.
+    pub claims_revision: u64,
+    /// Core catalogue/policy epoch captured during evaluation.
+    pub policy_epoch: u64,
+    /// Complete authoritative history cut reflected by evaluation.
+    pub settled_through: GlobalTime,
+    /// Monotonic evaluation sequence in this Core connection epoch; independent of cut.
+    pub authorization_progress: u64,
+    /// Authorized requested rows only. No unavailable outcome has a version witness.
+    pub version_carriers: Vec<VersionCarrier>,
 }
 
 /// Shared payload for ordinary and authorization-scope view updates.
@@ -264,24 +339,17 @@ pub enum SyncMessage {
 /// authorization-scope wrappers impossible to construct and decode.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ViewUpdatePayload {
-    /// Target subscription whose result set this update changes.
+    /// Target subscription whose supporting input set this update changes.
     pub subscription: SubscriptionKey,
     /// Authority cut through which this view has settled.
     pub settled_through: GlobalTime,
-    /// Whether the receiver must replace its current result membership.
-    pub reset_result_set: bool,
     /// Compact carriers for versions referenced by this update.
     pub version_carriers: Vec<VersionCarrier>,
     /// Per-peer payload coverage and authorization progress.
     pub peer_payload_inventory: PeerPayloadInventory,
-    /// Result members added by the update.
-    pub result_member_adds: Vec<ResultMemberEntry>,
-    /// Result members removed by the update.
-    pub result_member_removes: Vec<ResultMemberEntry>,
-    /// Program facts added by this update.
-    pub program_fact_adds: Vec<ProgramFactEntry>,
-    /// Program facts removed by this update.
-    pub program_fact_removes: Vec<ProgramFactEntry>,
+    /// Complete authorized supporting physical row/version set for this subscription.
+    /// Install atomically after every referenced native version is available.
+    pub supporting_rows: Vec<SupportingRow>,
 }
 
 impl ViewUpdatePayload {
@@ -639,6 +707,15 @@ impl SyncMessage {
             Self::RowVersionPayloads { version_bundles } => {
                 validate_version_bundles(version_bundles)
             }
+            Self::CurrentRowsReceipt(receipt) => {
+                validate_version_carrier_runs(&receipt.version_carriers)?;
+                for carrier in &receipt.version_carriers {
+                    for bundle in carrier.bundle_refs()? {
+                        validate_version_records(bundle.versions)?;
+                    }
+                }
+                Ok(())
+            }
             _ => self.carried_view_update().map_or(Ok(()), |view| {
                 validate_version_carrier_runs(&view.version_carriers)?;
                 for carrier in &view.version_carriers {
@@ -659,69 +736,14 @@ impl SyncMessage {
         let Some(view) = self.carried_view_update() else {
             return Ok(());
         };
-        // Peer view frames carry only the authority-selected source closure.
-        // Result membership and materialized result payloads are authority
-        // output, never receiver input: accepting either would bypass the
-        // receiver-local maintained graph and its exact coverage receipt.
-        if !view.result_member_adds.is_empty()
-            || !view.result_member_removes.is_empty()
-            || view
-                .program_fact_adds
-                .iter()
-                .chain(&view.program_fact_removes)
-                .any(|fact| !fact.is_peer_source_closure_fact())
-        {
-            return Err(WireContractError::NonClosurePeerViewFact);
-        }
-        if view
-            .program_fact_adds
-            .iter()
-            .chain(&view.program_fact_removes)
-            .any(|fact| matches!(fact, ProgramFactEntry::CoveredInput(input) if !input.is_wire_valid()))
-        {
-            return Err(WireContractError::InvalidCoveredInput);
-        }
-        if view
-            .program_fact_adds
-            .iter()
-            .chain(&view.program_fact_removes)
-            .any(|fact| {
-                matches!(
-                    fact,
-                    ProgramFactEntry::ProgramSourceCoverage(coverage)
-                        if !coverage.complete || !coverage.source.is_wire_valid()
-                )
-            })
-        {
-            return Err(WireContractError::InvalidProgramSourceCoverage);
-        }
-        // A peer update is an unordered predecessor→successor set delta. A
-        // fact in both sides has no stable meaning at ingress (and would make
-        // a receiver depend on arbitrary application order), so only the
-        // authority may collapse terminal batches into a disjoint transition.
-        let added_facts = view
-            .program_fact_adds
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>();
-        if view
-            .program_fact_removes
-            .iter()
-            .any(|fact| added_facts.contains(fact))
-        {
-            return Err(WireContractError::OverlappingPeerSourceClosureDelta);
-        }
-        // A closure is a set of exact compiled source occurrences. Rejecting
-        // duplicate entries at the wire boundary preserves the distinction
-        // between one empty source and two competing receipts before the
-        // receiver's durable fact set can coalesce them.
-        let mut coverage_sources = std::collections::BTreeSet::new();
-        if view.program_fact_adds.iter().any(|fact| {
-            let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact else {
-                return false;
-            };
-            !coverage_sources.insert(coverage.source.clone())
-        }) {
-            return Err(WireContractError::InvalidProgramSourceCoverage);
+        let mut identities = std::collections::BTreeSet::new();
+        for row in &view.supporting_rows {
+            if !row.is_wire_valid() {
+                return Err(WireContractError::InvalidSupportingRow);
+            }
+            if !identities.insert(row) {
+                return Err(WireContractError::DuplicateSupportingRow);
+            }
         }
         Ok(())
     }
@@ -739,35 +761,21 @@ impl SyncMessage {
 pub enum WireContractError {
     /// A version carrier is structurally malformed.
     VersionCarrier(VersionBundleRunError),
-    /// A covered source input has no canonical source identity.
-    InvalidCoveredInput,
-    /// A program-source closure receipt is incomplete or noncanonical.
-    InvalidProgramSourceCoverage,
-    /// A peer frame attempted to carry authority terminal output, an internal
-    /// proof, or another fact outside the receiver source-closure contract.
-    NonClosurePeerViewFact,
-    /// One unordered peer source-closure frame attempted to both add and
-    /// remove the same fact rather than naming a canonical net transition.
-    OverlappingPeerSourceClosureDelta,
+    /// A supporting native row reference is malformed.
+    InvalidSupportingRow,
+    /// A snapshot repeats the same exact physical row version.
+    DuplicateSupportingRow,
 }
 
 impl std::fmt::Display for WireContractError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::VersionCarrier(error) => error.fmt(f),
-            Self::InvalidCoveredInput => write!(f, "covered input source identity is invalid"),
-            Self::InvalidProgramSourceCoverage => {
-                write!(f, "program-source coverage receipt is invalid")
-            }
-            Self::NonClosurePeerViewFact => {
-                write!(f, "peer view update carries a non-closure program fact")
-            }
-            Self::OverlappingPeerSourceClosureDelta => {
-                write!(
-                    f,
-                    "peer view update overlaps source-closure adds and removes"
-                )
-            }
+            Self::InvalidSupportingRow => write!(f, "supporting row reference is invalid"),
+            Self::DuplicateSupportingRow => write!(
+                f,
+                "supporting snapshot duplicates an exact physical row version"
+            ),
         }
     }
 }
@@ -2835,6 +2843,8 @@ pub struct RegisterShapeOptions {
     #[serde(default)]
     pub read_view: ReadViewSpec,
     /// Whether the serving node may register matching coverage with its own upstream.
+    /// Retained for wire compatibility; remote registrations require true.
+    /// LocalOnly is a caller-local setting and never crosses a node boundary.
     #[serde(default = "default_propagate_upstream")]
     pub propagate_upstream: bool,
     /// Internal ownership of the binding whose ViewUpdates an Edge relay may
@@ -3900,6 +3910,29 @@ impl PartialEq<ResultRowEntry> for ResultMemberEntry {
 impl PartialEq<ResultMemberEntry> for ResultRowEntry {
     fn eq(&self, other: &ResultMemberEntry) -> bool {
         other == self
+    }
+}
+
+/// One exact native row version in a subscription's atomic supporting set.
+///
+/// No query source occurrence, role or completeness claim crosses this boundary.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct SupportingRow {
+    /// Permanent physical table identity; logical scan aliases never identify a row.
+    pub physical_table: crate::ids::GlobalPhysicalTableId,
+    /// Authored native-record table name used by the existing exact version repair API.
+    /// This is lookup metadata, not a query-source label; physical identity is authoritative.
+    pub version_table: groove::Intern<String>,
+    /// Physical row identity.
+    pub row: RowUuid,
+    /// Exact content or deletion-register version.
+    pub version: RowVersionRefEntry,
+}
+
+impl SupportingRow {
+    /// Validate the native reference before catalogue-dependent receiver admission.
+    pub fn is_wire_valid(&self) -> bool {
+        !self.version_table.is_empty() && self.version.layer != ResultRowLayer::ContentOrDeletion
     }
 }
 
@@ -5936,14 +5969,23 @@ mod tests {
     use groove::schema::{ColumnSchema, ColumnType};
 
     #[test]
-    fn peer_view_rejects_overlapping_source_closure_delta() {
-        let fact = ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
-            source: ProgramSourceId {
-                table: "todos".to_owned().into(),
-                path: vec![ProgramSourceRole::Root],
+    fn peer_view_rejects_duplicate_exact_supporting_row() {
+        let row = SupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([3; 16])),
+            version_table: "todos".to_owned().into(),
+            row: RowUuid::from_bytes([4; 16]),
+            version: RowVersionRefEntry {
+                tx: TxId::new(
+                    crate::time::TxTime(1),
+                    crate::ids::NodeUuid::from_bytes([5; 16]),
+                ),
+                schema_version: None,
+                layer: ResultRowLayer::Content,
+                batch: None,
+                branch_or_prefix: None,
+                row_digest: None,
             },
-            complete: true,
-        });
+        };
         let message = SyncMessage::ViewUpdate(ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
@@ -5951,18 +5993,13 @@ mod tests {
                 read_view: ReadViewKey::default(),
             },
             settled_through: GlobalTime(0),
-            reset_result_set: false,
             version_carriers: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            program_fact_adds: vec![fact.clone()],
-            program_fact_removes: vec![fact],
+            supporting_rows: vec![row.clone(), row],
         });
-
         assert!(matches!(
             message.validate_wire_contract(),
-            Err(WireContractError::OverlappingPeerSourceClosureDelta)
+            Err(WireContractError::DuplicateSupportingRow)
         ));
     }
 

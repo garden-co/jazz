@@ -69,10 +69,7 @@ fn main() {
         let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
+            supporting_rows,
             ..
         }) = &update
         else {
@@ -83,10 +80,17 @@ fn main() {
         let emitted_bundles = expanded_bundles.len();
         let expected_bundles = rows - known_count;
         assert_eq!(emitted_bundles, expected_bundles);
-        assert_eq!(result_member_adds.len(), rows);
-        assert!(result_member_removes.is_empty());
-        assert!(program_fact_adds.is_empty());
-        assert!(program_fact_removes.is_empty());
+        let result_members = supporting_rows
+            .iter()
+            .map(|input| {
+                jazz::protocol::ResultMemberEntry::from((
+                    input.version_table.clone(),
+                    input.row,
+                    input.version.tx,
+                ))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(result_members.len(), rows);
         let expected_versions = versions
             .iter()
             .map(|(row_uuid, tx_id)| RowVersionRef::new(TABLE, *row_uuid, *tx_id))
@@ -102,7 +106,7 @@ fn main() {
             .collect::<BTreeSet<_>>();
         assert_eq!(covered_versions, expected_versions);
 
-        let digest = membership_digest(result_member_adds);
+        let digest = membership_digest(&result_members);
         match &expected_digest {
             Some(expected) => assert_eq!(&digest, expected, "known-state changed membership"),
             None => expected_digest = Some(digest.clone()),
@@ -124,11 +128,7 @@ fn main() {
             "complete_tx_payload_refs".to_owned(),
             json!(peer_payload_inventory.complete_tx_payloads.len()),
         );
-        fields.insert("result_adds".to_owned(), json!(result_member_adds.len()));
-        fields.insert(
-            "result_removes".to_owned(),
-            json!(result_member_removes.len()),
-        );
+        fields.insert("supporting_rows".to_owned(), json!(result_members.len()));
         fields.insert("membership_digest".to_owned(), json!(digest));
         fields.insert("storage_reads".to_owned(), json!(metrics.total.reads));
         fields.insert("storage_ranges".to_owned(), json!(metrics.total.ranges));
@@ -235,7 +235,8 @@ fn open_node(
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
             .expect("open RocksDB");
-    let node = NodeState::new(node_uuid, schema, storage).expect("open node");
+    let node =
+        NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).expect("open node");
     (temp_dir, node)
 }
 

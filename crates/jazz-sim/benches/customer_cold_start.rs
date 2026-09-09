@@ -603,11 +603,9 @@ impl OperatorAttribution {
 struct ViewUpdateSummary {
     subscription: String,
     messages: u64,
-    resets: u64,
+    supporting_snapshots: u64,
     bundles: u64,
-    reset_bundles: u64,
-    non_reset_bundles: u64,
-    result_adds: u64,
+    supporting_rows: u64,
 }
 
 struct SubscriptionTimeline {
@@ -758,9 +756,8 @@ impl Transport for DuplexTransport {
         self.metrics.messages.set(self.metrics.messages.get() + 1);
         if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription,
-            reset_result_set,
+            supporting_rows,
             version_carriers,
-            result_member_adds,
             ..
         }) = &message
         {
@@ -775,15 +772,10 @@ impl Transport for DuplexTransport {
                     ..ViewUpdateSummary::default()
                 });
             entry.messages += 1;
-            entry.resets += u64::from(*reset_result_set);
+            entry.supporting_snapshots += 1;
+            entry.supporting_rows += supporting_rows.len() as u64;
             let bundles = version_bundle_refs(version_carriers).count() as u64;
             entry.bundles += bundles;
-            if *reset_result_set {
-                entry.reset_bundles += bundles;
-            } else {
-                entry.non_reset_bundles += bundles;
-            }
-            entry.result_adds += result_member_adds.len() as u64;
         }
         if let SyncMessage::Subscribe(subscribe) = &message
             && subscribe.known_state.is_some()
@@ -2394,11 +2386,9 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
                     json!({
                         "subscription": served.subscription,
                         "messages": served.messages,
-                        "resets": served.resets,
+                        "supporting_snapshots": served.supporting_snapshots,
                         "bundles": served.bundles,
-                        "reset_bundles": served.reset_bundles,
-                        "non_reset_bundles": served.non_reset_bundles,
-                        "result_adds": served.result_adds,
+                        "supporting_rows": served.supporting_rows,
                     })
                 })
                 .collect(),

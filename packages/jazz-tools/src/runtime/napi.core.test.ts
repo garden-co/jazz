@@ -1747,7 +1747,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await runtime.rollbackTransaction(transactionId);
   });
 
-  it("keeps NAPI websocket preflights unknown when the browser link is authority-unbound", async () => {
+  it("authorizes NAPI websocket preflights through the admitted client session", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
     const { NapiDb } = await loadNapiModule();
@@ -1817,31 +1817,31 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         done: { type: "Boolean", value: false },
         owner_id: { type: "Text", value: ALICE_ID },
       }),
-    ).resolves.toBe("unknown");
+    ).resolves.toBe("allowed");
     await expect(
       alice.requestInsertPermissionAdvice("todos", {
         title: { type: "Text", value: "denied candidate" },
         done: { type: "Boolean", value: false },
         owner_id: { type: "Text", value: BOB_ID },
       }),
-    ).resolves.toBe("unknown");
+    ).resolves.toBe("denied");
 
-    await expect(alice.requestReadPermissionAdvice("todos", aliceTodo.id)).resolves.toBe("unknown");
-    await expect(alice.requestReadPermissionAdvice("todos", bobTodo.id)).resolves.toBe("unknown");
+    await expect(alice.requestReadPermissionAdvice("todos", aliceTodo.id)).resolves.toBe("allowed");
+    await expect(alice.requestReadPermissionAdvice("todos", bobTodo.id)).resolves.toBe("denied");
     await expect(
       alice.requestUpdatePermissionAdvice("todos", aliceTodo.id, {
         done: { type: "Boolean", value: true },
       }),
-    ).resolves.toBe("unknown");
+    ).resolves.toBe("allowed");
     await expect(
       alice.requestUpdatePermissionAdvice("todos", bobTodo.id, {
         done: { type: "Boolean", value: true },
       }),
-    ).resolves.toBe("unknown");
+    ).resolves.toBe("denied");
     await expect(alice.requestDeletePermissionAdvice("todos", aliceTodo.id)).resolves.toBe(
-      "unknown",
+      "allowed",
     );
-    await expect(alice.requestDeletePermissionAdvice("todos", bobTodo.id)).resolves.toBe("unknown");
+    await expect(alice.requestDeletePermissionAdvice("todos", bobTodo.id)).resolves.toBe("denied");
 
     await alice.disconnect();
     await expect(

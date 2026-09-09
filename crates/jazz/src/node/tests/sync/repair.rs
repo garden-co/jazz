@@ -42,7 +42,9 @@ fn repair_frame_rejects_late_invalid_provenance_before_any_ingest() {
             &mut core,
             MergeableCommit::new("todos", row_uuid, now_ms).cells(title_cells("repair")),
         );
-        requests.push(crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id));
+        requests.push(crate::protocol::RowVersionRef::new(
+            "todos", row_uuid, tx_id,
+        ));
     }
     let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
     let messages = peer
@@ -144,7 +146,10 @@ fn repair_response_omits_local_system_permission_subject() {
     };
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
-    assert_eq!(version_bundles[0].tx.made_by, AuthorSubject::system_at(node(9)));
+    assert_eq!(
+        version_bundles[0].tx.made_by,
+        AuthorSubject::system_at(node(9))
+    );
     assert_eq!(version_bundles[0].tx.permission_subject, None);
 }
 
@@ -203,10 +208,15 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
         ));
     }
     assert!(matches!(
-        alice_peer.handle_row_versions_fetch(
-            &mut core,
-            SyncMessage::FetchRowVersions { requests: too_many, delegated_session: None },
-        ).resolve(),
+        alice_peer
+            .handle_row_versions_fetch(
+                &mut core,
+                SyncMessage::FetchRowVersions {
+                    requests: too_many,
+                    delegated_session: None
+                },
+            )
+            .resolve(),
         Err(Error::UnsupportedSyncMessage(
             "row-version repair request exceeds limit"
         ))
@@ -254,7 +264,11 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
         .into_iter()
         .filter(|bundle| bundle.tx.tx_id == tx_id)
         .collect::<Vec<_>>();
-    assert_eq!(bundles.len(), 1, "test setup must retain one delivered body");
+    assert_eq!(
+        bundles.len(),
+        1,
+        "test setup must retain one delivered body"
+    );
     relay_node
         .record_scope_relay_authoritative_bundles(&bundles)
         .resolve()
@@ -275,8 +289,7 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
         )
         .resolve()
         .unwrap();
-    let [SyncMessage::RowVersionPayloads { version_bundles }] = retained_response.as_slice()
-    else {
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = retained_response.as_slice() else {
         panic!("expected retained same-scope repair response");
     };
     assert_eq!(version_bundles.len(), 1);
@@ -290,8 +303,7 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
         )
         .resolve()
         .unwrap();
-    let [SyncMessage::RowVersionPayloads { version_bundles }] = hidden_response.as_slice()
-    else {
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = hidden_response.as_slice() else {
         panic!("expected retained same-scope repair response");
     };
     assert!(version_bundles.is_empty(), "unrecorded ref stays hidden");
@@ -310,18 +322,18 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
             .unwrap();
         store
             .set(
-            &[
-                Value::Bytes(scope_digest.to_vec()),
-                Value::U64(table_id.0),
-                Value::Uuid(row_uuid.0),
-                Value::U64(tx_id.time.0),
-                Value::Uuid(tx_id.node.0),
-            ],
-            &[
-                Value::U64(1),
-                Value::String("wrong scope".to_owned()),
-                Value::Nullable(None),
-            ],
+                &[
+                    Value::Bytes(scope_digest.to_vec()),
+                    Value::U64(table_id.0),
+                    Value::Uuid(row_uuid.0),
+                    Value::U64(tx_id.time.0),
+                    Value::Uuid(tx_id.node.0),
+                ],
+                &[
+                    Value::U64(1),
+                    Value::String("wrong scope".to_owned()),
+                    Value::Nullable(None),
+                ],
             )
             .resolve()
             .unwrap();
@@ -334,7 +346,9 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
                 crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
             )
             .resolve(),
-        Err(Error::InvalidStoredValue("scope relay ledger value does not match admitted scope"))
+        Err(Error::InvalidStoredValue(
+            "scope relay ledger value does not match admitted scope"
+        ))
     ));
     {
         let store = relay_node
@@ -343,18 +357,18 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
             .unwrap();
         store
             .set(
-            &[
-                Value::Bytes(scope_digest.to_vec()),
-                Value::U64(table_id.0),
-                Value::Uuid(row_uuid.0),
-                Value::U64(tx_id.time.0),
-                Value::Uuid(tx_id.node.0),
-            ],
-            &[
-                Value::U64(2),
-                Value::String("wrong scope".to_owned()),
-                Value::Nullable(None),
-            ],
+                &[
+                    Value::Bytes(scope_digest.to_vec()),
+                    Value::U64(table_id.0),
+                    Value::Uuid(row_uuid.0),
+                    Value::U64(tx_id.time.0),
+                    Value::Uuid(tx_id.node.0),
+                ],
+                &[
+                    Value::U64(2),
+                    Value::String("wrong scope".to_owned()),
+                    Value::Nullable(None),
+                ],
             )
             .resolve()
             .unwrap();
@@ -367,7 +381,9 @@ fn scope_relay_repair_uses_durable_authority_ledger_not_live_policy() {
                 crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
             )
             .resolve(),
-        Err(Error::InvalidStoredValue("unknown scope relay ledger format"))
+        Err(Error::InvalidStoredValue(
+            "unknown scope relay ledger format"
+        ))
     ));
 }
 
@@ -392,7 +408,9 @@ fn scope_relay_repair_requires_a_live_scope_capability() {
     let response = PeerState::relay()
         .serve_row_versions(
             &mut relay_node,
-            &[crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)],
+            &[crate::protocol::RowVersionRef::new(
+                "todos", row_uuid, tx_id,
+            )],
             crate::peer::RepairServingContext::ScopeIsolatedClientRelay,
         )
         .resolve()
@@ -422,11 +440,16 @@ fn stale_repair_payload_is_cached_without_granting_scope_ledger_access() {
             .made_by(alice)
             .cells(owner_cells(alice, "stale repair payload")),
     );
-    let SyncMessage::ViewUpdate(payload) = relay_node.view_update_for_current_rows("todos").unwrap() else {
+    let SyncMessage::ViewUpdate(payload) =
+        relay_node.view_update_for_current_rows("todos").unwrap()
+    else {
         panic!("expected authority view update");
     };
     let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
-    let bundle = bundles.into_iter().find(|bundle| bundle.tx.tx_id == tx_id).unwrap();
+    let bundle = bundles
+        .into_iter()
+        .find(|bundle| bundle.tx.tx_id == tx_id)
+        .unwrap();
     let table_id = relay_node
         .physical_table_id_for_schema(bundle.versions[0].schema_version(), "todos")
         .unwrap();
@@ -435,7 +458,10 @@ fn stale_repair_payload_is_cached_without_granting_scope_ledger_access() {
         .resolve()
         .unwrap();
     assert!(
-        !relay_node.row_history("todos", row_uuid).unwrap().is_empty(),
+        !relay_node
+            .row_history("todos", row_uuid)
+            .unwrap()
+            .is_empty(),
         "stale payload may still leave a locally cached row version"
     );
     assert!(
@@ -473,8 +499,7 @@ fn repair_ledger_ignores_unsolicited_resident_payload_versions() {
         MergeableCommit::new("todos", unsolicited_row, 11).cells(title_cells("unsolicited")),
     );
     let requested = crate::protocol::RowVersionRef::new("todos", requested_row, requested_tx);
-    let unsolicited =
-        crate::protocol::RowVersionRef::new("todos", unsolicited_row, unsolicited_tx);
+    let unsolicited = crate::protocol::RowVersionRef::new("todos", unsolicited_row, unsolicited_tx);
     let response = PeerState::client_link(AuthorSubject::SYSTEM)
         .handle_row_versions_fetch(
             &mut core,
@@ -484,8 +509,7 @@ fn repair_ledger_ignores_unsolicited_resident_payload_versions() {
             },
         )
         .unwrap();
-    let [SyncMessage::RowVersionPayloads { version_bundles }] = response.as_slice()
-    else {
+    let [SyncMessage::RowVersionPayloads { version_bundles }] = response.as_slice() else {
         panic!("expected repair payload frame");
     };
     let table_id = relay_node
@@ -501,7 +525,10 @@ fn repair_ledger_ignores_unsolicited_resident_payload_versions() {
         .resolve()
         .unwrap();
     assert!(
-        !relay_node.row_history("todos", unsolicited_row).unwrap().is_empty(),
+        !relay_node
+            .row_history("todos", unsolicited_row)
+            .unwrap()
+            .is_empty(),
         "setup: unsolicited version is locally resident"
     );
     let applied = relay_node
@@ -561,7 +588,9 @@ fn scope_relay_repair_ledger_survives_reopen_only_for_exact_scope() {
             .made_by(alice)
             .cells(owner_cells(alice, "reopen retained authority delivery")),
     );
-    let SyncMessage::ViewUpdate(payload) = relay_node.view_update_for_current_rows("todos").unwrap() else {
+    let SyncMessage::ViewUpdate(payload) =
+        relay_node.view_update_for_current_rows("todos").unwrap()
+    else {
         panic!("expected authority view update");
     };
     let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
@@ -641,12 +670,20 @@ fn scope_relay_authored_pending_repairs_require_exact_author_scope() {
             .made_by(bob)
             .cells(owner_cells(bob, "pending foreign write")),
     );
-    let SyncMessage::ViewUpdate(payload) = relay_node.view_update_for_current_rows("todos").unwrap() else {
+    let SyncMessage::ViewUpdate(payload) =
+        relay_node.view_update_for_current_rows("todos").unwrap()
+    else {
         panic!("expected authority view update");
     };
     let bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
-    let alice_bundle = bundles.iter().find(|bundle| bundle.tx.tx_id == alice_tx).unwrap();
-    let bob_bundle = bundles.iter().find(|bundle| bundle.tx.tx_id == bob_tx).unwrap();
+    let alice_bundle = bundles
+        .iter()
+        .find(|bundle| bundle.tx.tx_id == alice_tx)
+        .unwrap();
+    let bob_bundle = bundles
+        .iter()
+        .find(|bundle| bundle.tx.tx_id == bob_tx)
+        .unwrap();
     let table_id = relay_node
         .physical_table_id_for_schema(alice_bundle.versions[0].schema_version(), "todos")
         .unwrap();
@@ -766,7 +803,7 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
-        program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = &mut update
     else {
@@ -774,9 +811,9 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     };
     version_carriers.clear();
     assert!(program_fact_adds.iter().any(|fact| {
-        matches!(fact, crate::protocol::ProgramFactEntry::CoveredInput(input)
+        matches!(fact, input
             if input.version_table.as_str() == "todos"
-                && input.source_row == row_uuid
+                && input.row == row_uuid
                 && input.version.tx == tx_id)
     }));
 
@@ -822,8 +859,8 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         ]),
     );
     let applied = crate::db::block_on(reader.database.apply_batch(batch)).unwrap();
-let persisted = crate::db::block_on(applied.persist());
-reader.database.finish_persistence(persisted).unwrap();
+    let persisted = crate::db::block_on(applied.persist());
+    reader.database.finish_persistence(persisted).unwrap();
     assert_eq!(
         reader
             .missing_known_state_row_version_refs(&update)
@@ -863,14 +900,8 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     let base_version = base.version_id();
     let renamed_schema = build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("tasks")
-                    .column("name", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("notes")
-                    .column("body", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("tasks").column("name", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text)),
     );
     let renamed = SchemaVersion::new(renamed_schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x91), base.clone());
@@ -899,7 +930,8 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
                     },
                 ],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         ["notes"],
         Vec::<String>::new(),
     )
@@ -931,20 +963,22 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
-        program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = &mut update
     else {
         panic!("expected view update");
     };
-    assert!(program_fact_adds.iter().any(|fact| matches!(
-        fact,
-        crate::protocol::ProgramFactEntry::CoveredInput(input)
-            if input.source.table.as_str() == "tasks"
-                && input.version_table.as_str() == "todos"
-                && input.source_row == row_uuid
-                && input.version.tx == tx_id
-    )), "the exact closure names the receiver's projected source row");
+    assert!(
+        program_fact_adds.iter().any(|fact| matches!(
+            fact,
+            input
+                if input.version_table.as_str() == "todos"
+                    && input.row == row_uuid
+                    && input.version.tx == tx_id
+        )),
+        "the snapshot names the native authored row independently of its projected table name"
+    );
     version_carriers.clear();
 
     let requests = reader
@@ -952,7 +986,9 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         .unwrap();
     assert_eq!(
         requests,
-        vec![crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)],
+        vec![crate::protocol::RowVersionRef::new(
+            "todos", row_uuid, tx_id
+        )],
         "with no carrier, fetch the authored coordinate, not the projected source name"
     );
     let mut peer = PeerState::client_link(AuthorSubject::SYSTEM);
@@ -971,7 +1007,10 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].table(), "todos");
-    assert_eq!(version_bundles[0].versions[0].schema_version(), base_version);
+    assert_eq!(
+        version_bundles[0].versions[0].schema_version(),
+        base_version
+    );
     let mut inline_update = update.clone();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers: inline_carriers,
@@ -1024,19 +1063,21 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         .iter()
         .find(|table| table.name == "notes")
         .expect("notes table");
-    cross_physical.versions = vec![VersionRecord::from_cells(
-        notes,
-        renamed.id,
-        row_uuid,
-        Vec::new(),
-        AuthorSubject::system_at(node(1)),
-        tx_id.time.physical_ms(),
-        AuthorSubject::system_at(node(1)),
-        tx_id.time.physical_ms(),
-        &BTreeMap::from([("body".to_owned(), v("wrong physical table"))]),
-        None,
-    )
-    .unwrap()];
+    cross_physical.versions = vec![
+        VersionRecord::from_cells(
+            notes,
+            renamed.id,
+            row_uuid,
+            Vec::new(),
+            AuthorSubject::system_at(node(1)),
+            tx_id.time.physical_ms(),
+            AuthorSubject::system_at(node(1)),
+            tx_id.time.physical_ms(),
+            &BTreeMap::from([("body".to_owned(), v("wrong physical table"))]),
+            None,
+        )
+        .unwrap(),
+    ];
     let (_negative_dir, mut negative) = open_node_with_schema(node(0x94), schema());
     negative
         .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
@@ -1081,7 +1122,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
             std::slice::from_ref(&unknown),
             crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(AuthorSubject::SYSTEM),
         )
-            .is_err(),
+        .is_err(),
         "the serving repair path must reject an unknown projected table too"
     );
     assert!(
@@ -1099,20 +1140,13 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
 fn inline_known_state_witness_rejects_reused_logical_table_name() {
     let original = renamed_tasks_schema();
     let without_tasks = build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text)),
     );
     let reintroduced = build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("notes")
-                    .column("body", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("tasks")
-                    .column("name", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("tasks").column("name", PublicColumnType::Text)),
     );
     let without_tasks_version = SchemaVersion::new(without_tasks.clone());
     let reintroduced_version = SchemaVersion::new(reintroduced.clone());
@@ -1120,11 +1154,8 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
     publish_schema_lineage(
         &mut receiver,
         without_tasks_version.clone(),
-        MigrationLens::new(
-            original.version_id(),
-            without_tasks_version.id,
-            Vec::new(),
-        ).expect("valid migration lens"),
+        MigrationLens::new(original.version_id(), without_tasks_version.id, Vec::new())
+            .expect("valid migration lens"),
         ["notes"],
         ["tasks"],
     )
@@ -1140,7 +1171,8 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
                 target_table: "notes".to_owned(),
                 ops: Vec::new(),
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         ["tasks"],
         Vec::<String>::new(),
     )
@@ -1203,7 +1235,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
             read_view: Default::default(),
         },
         settled_through: GlobalTime::default(),
-        reset_result_set: false,
+
         version_carriers: vec![VersionCarrier::Bundle(VersionBundle {
             scope: crate::protocol::VersionBundleScope::CompleteTransaction,
             tx: transaction,
@@ -1213,16 +1245,10 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
             durability: DurabilityTier::Global,
         })],
         peer_payload_inventory: Default::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: vec![crate::protocol::ProgramFactEntry::CoveredInput(
-            crate::protocol::CoveredInputEntry {
-                source: crate::protocol::ProgramSourceId {
-                    table: "tasks".to_owned().into(),
-                    path: vec![crate::protocol::ProgramSourceRole::Root],
-                },
+        supporting_rows: vec![crate::protocol::SupportingRow {
+                physical_table: receiver.local_availability_table_id(reintroduced.version_id(), "tasks").unwrap(),
                 version_table: "tasks".to_owned().into(),
-                source_row: task_row,
+                row: task_row,
                 version: crate::protocol::RowVersionRefEntry {
                     tx: tx_id,
                     schema_version: Some(reintroduced.version_id()),
@@ -1231,13 +1257,106 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
                     branch_or_prefix: None,
                     row_digest: None,
                 },
-            },
-        )],
-        program_fact_removes: Vec::new(),
+            }],
     });
     assert_eq!(
-        receiver.missing_known_state_row_version_refs(&update).unwrap(),
+        receiver
+            .missing_known_state_row_version_refs(&update)
+            .unwrap(),
         vec![RowVersionRef::new("tasks", task_row, tx_id)],
         "an old same-named inline body does not cover the registered shape's reintroduced lineage"
     );
+}
+/// Alice restores a row with new content in one transaction. Bob receives the
+/// content body but needs the distinct deletion-register body before accepting
+/// the complete supporting set. A matching content body is not that witness.
+///
+/// Alice ──content + restore──► Core ──content only──► Bob
+/// Bob ──exact row/transaction repair──► Core ──both layers──► Bob
+#[test]
+fn supporting_snapshot_repairs_missing_same_transaction_deletion_layer() {
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let row_uuid = row(0xc7);
+    let open = OpenTransactionId::new();
+    core.open_exclusive(open).unwrap();
+    core.tx_write(open, "todos", row_uuid, title_cells("restored"), None).unwrap();
+    core.tx_write(open, "todos", row_uuid, BTreeMap::<String, Value>::new(), Some(DeletionEvent::Restored)).unwrap();
+    let (tx_id, _) = core.commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10).unwrap();
+    core.apply_fate_update(tx_id, Fate::Accepted, Some(GlobalTime(1)), Some(DurabilityTier::Global)).unwrap();
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
+    let SyncMessage::ViewUpdate(payload) = &mut update else { panic!("expected supporting snapshot") };
+    // A complete input set may retain both independently stored layers.
+    let content = payload.supporting_rows.iter().find(|row| row.version.tx == tx_id).unwrap().clone();
+    let mut restore = content.clone();
+    restore.version.layer = crate::protocol::ResultRowLayer::Deletion;
+    payload.supporting_rows = vec![restore];
+    let mut bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    for bundle in &mut bundles {
+        bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
+        bundle.versions.retain(|version| version.deletion().is_none());
+        bundle.tx.n_total_writes = bundle.versions.len().try_into().unwrap();
+    }
+    payload.version_carriers = bundles.into_iter().map(crate::protocol::VersionCarrier::Bundle).collect();
+    let expected = vec![crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id)];
+    assert_eq!(reader.missing_known_state_row_version_refs(&update).unwrap(), expected,
+        "an inline content sibling must not hide the missing deletion witness");
+    let SyncMessage::ViewUpdate(payload) = &mut update else { unreachable!() };
+    let content_only = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
+    reader.apply_row_version_payloads_for_requests(&expected, content_only).unwrap();
+    payload.version_carriers.clear();
+    assert_eq!(reader.missing_known_state_row_version_refs(&update).unwrap(), expected,
+        "a resident content sibling must not hide the missing deletion witness");
+    let repaired = core.row_version_payloads_for_refs(&expected, RowVersionRepairAuthorization::EnforceReadPolicy(AuthorSubject::SYSTEM)).unwrap();
+    assert!(repaired.iter().flat_map(|bundle| &bundle.versions).any(|version| version.deletion() == Some(DeletionEvent::Restored)),
+        "repair must return every layer of the requested physical row/transaction");
+    reader.apply_row_version_payloads_for_requests(&expected, repaired).unwrap();
+    assert!(reader.missing_known_state_row_version_refs(&update).unwrap().is_empty());
+    let mut both_layers = update.clone();
+    let SyncMessage::ViewUpdate(payload) = &mut both_layers else { unreachable!() };
+    payload.supporting_rows.push(content);
+    reader.apply_sync_message_settled(update).unwrap();
+    reader.apply_sync_message_settled(both_layers).expect("content and deletion are independent supporting versions");
+    assert_eq!(reader.current_rows("todos", DurabilityTier::Local).unwrap().len(), 1);
+}
+
+/// Alice may repair a deleted row's witness when its read policy still permits
+/// her to read the row through includeDeleted. Bob must learn no row bytes.
+///
+/// Alice ──create, delete──► Core
+/// Alice ──repair deletion──► Core ──authorized witness──► Alice
+/// Bob   ──same request─────► Core ──empty response──────► Bob
+#[test]
+fn deleted_row_repair_checks_read_permission_without_current_membership() {
+    let schema = owner_policy_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, alice);
+    install_test_uuid_sub_claim(&mut core, bob);
+    let row_uuid = row(0xc8);
+    commit_mergeable_global(&mut writer, &mut core,
+        MergeableCommit::new("todos", row_uuid, 10).made_by(alice).cells(owner_cells(alice, "deleted but readable")));
+    let deletion = commit_mergeable_global(&mut writer, &mut core,
+        MergeableCommit::new("todos", row_uuid, 11).made_by(alice).deletion(DeletionEvent::Deleted));
+    let request = crate::protocol::RowVersionRef::new("todos", row_uuid, deletion);
+    for (identity, allowed) in [(alice, true), (bob, false)] {
+        let mut peer = PeerState::client_link(identity);
+        let messages = peer.handle_row_versions_fetch(&mut core, SyncMessage::FetchRowVersions {
+            requests: vec![request.clone()], delegated_session: None,
+        }).unwrap();
+        let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
+            panic!("expected repair response");
+        };
+        assert_eq!(!version_bundles.is_empty(), allowed,
+            "deletion changes query membership, not the row's read permission");
+        if allowed {
+            assert!(version_bundles.iter().flat_map(|bundle| &bundle.versions)
+                .any(|version| version.deletion() == Some(DeletionEvent::Deleted)));
+        }
+    }
 }

@@ -1664,7 +1664,7 @@ const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
 struct AuthorityViewReceipts {
     connection_epoch: u64,
     confirmation_floor: GlobalTime,
-    /// Exact query-coverage subscriptions confirmed on this authority link.
+    /// Exact live usage subscriptions confirmed on this authority link.
     ///
     /// Binding-view generations are shared by equal query shapes, so they
     /// cannot distinguish a late update for a detached predecessor.
@@ -2210,6 +2210,9 @@ enum CoveragePolicyBindingOrigin {
 /// identifies this connection's local evaluator. Only releasing the final pin
 /// retires the upstream handle; local evaluator cleanup remains per connection.
 struct RelayUpstreamSubscriptionOwner {
+    request: PendingUpstreamSubscription,
+    scalar_authority_revision: u64,
+    scalar_reconciliation: ScalarReconciliation,
     downstream_connection_epoch: u64,
     coverage: CoverageKey,
     policy_binding: (AuthorSubject, BTreeMap<String, Value>),
@@ -2495,7 +2498,7 @@ pub struct QueryAttachment {
 }
 
 impl QueryAttachment {
-    /// Wire subscription id owned by this attachment.
+    /// Unique usage id; LocalOnly attachments retain it without sending a wire subscription.
     pub fn subscription(&self) -> SubscriptionKey {
         self.subscriptions[0]
     }
@@ -2618,6 +2621,8 @@ mod node_runtime;
 use node_runtime::register_upstream_subscription_owner;
 pub use node_runtime::{ConnectionSessionContext, Node, Transport};
 mod peer_connection;
+mod row_availability;
+mod row_version_repairs;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
 mod config;
@@ -2847,12 +2852,13 @@ fn upstream_register_shape_options(
     tier: DurabilityTier,
     read_view: ReadViewSpec,
     upstream_durability_floor: DurabilityTier,
-    propagate_upstream: bool,
 ) -> RegisterShapeOptions {
     RegisterShapeOptions {
         tier: remote_subscription_tier(tier, upstream_durability_floor),
         read_view,
-        propagate_upstream,
+        // LocalOnly controls whether the caller attaches a remote usage.
+        // Every usage that crosses a node boundary propagates normally.
+        propagate_upstream: true,
         ..RegisterShapeOptions::default()
     }
 }
@@ -2914,6 +2920,12 @@ fn ensure_supported_register_shape_options(
     delegated_session_capability: bool,
 ) -> Result<(), Error> {
     ensure_supported_register_shape_read_view(opts)?;
+    if !opts.propagate_upstream {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "remote subscriptions cannot disable upstream propagation; LocalOnly is a local read setting",
+        ));
+    }
     if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(
@@ -3124,6 +3136,14 @@ fn admitted_request_policy_binding(
         }
         Some(delegated)
             if ingest.trust == CommitUnitTrust::TrustedBackend
+                && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+        {
+            Some((delegated.identity, delegated.claims))
+        }
+        Some(delegated)
+            if peer.authority_query_delegate
+                && ingest.trust == CommitUnitTrust::TrustedAuthority
+                && ingest.identity == AuthorSubject::SYSTEM
                 && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
         {
             Some((delegated.identity, delegated.claims))
@@ -4234,12 +4254,30 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
     Ok(ResultTree { roots })
 }
 
+struct ScalarProbe {
+    deadline: web_time::Instant,
+    rows: Vec<RowUuid>,
+    future: Pin<Box<dyn Future<Output = row_availability::CurrentRowsResult>>>,
+}
+
+#[derive(Default)]
+struct ScalarReconciliation {
+    generation: Option<(u64, SubscriptionKey, u64)>,
+    pending: VecDeque<RowUuid>,
+    active: Option<ScalarProbe>,
+    retry_at: Option<web_time::Instant>,
+    retry_delay_ms: u64,
+}
+
 struct SubscriptionState {
     /// Set synchronously by stream finalization, before its async cleanup is
     /// drained. Refresh observes this independently owned cell before it can
     /// install a replacement maintained subscription.
     closed: Rc<Cell<bool>>,
     terminal_rows: bool,
+    scalar_reconciliation_enabled: bool,
+    scalar_authority_revision: u64,
+    scalar_reconciliation: ScalarReconciliation,
     kind: SubscriptionKind,
     groove_runtime_token: u64,
     /// The maintained subscription currently owned by this public stream.

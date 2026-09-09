@@ -412,7 +412,7 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::client_link(reader);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let (adds, removes) = canonical_view_update_rows(&update);
+    let adds = canonical_view_update_rows(&update);
 
     assert_eq!(
         adds,
@@ -429,7 +429,6 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
             ),
         ]
     );
-    assert!(removes.is_empty());
 }
 
 #[test]
@@ -510,14 +509,13 @@ fn projected_frontier_authorizes_unseeded_parent_and_terminates_team_cycle() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::client_link(reader);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let (adds, removes) = canonical_view_update_rows(&update);
+    let adds = canonical_view_update_rows(&update);
     let visible = adds
         .into_iter()
         .map(|(_, row, _)| row)
         .collect::<BTreeSet<_>>();
 
     assert_eq!(visible, BTreeSet::from([child_doc, parent_doc]));
-    assert!(removes.is_empty());
 }
 
 fn projected_frontier_visibility_at_depth(
@@ -581,8 +579,7 @@ fn projected_frontier_visibility_at_depth(
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::client_link(reader);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let (adds, removes) = canonical_view_update_rows(&update);
-    assert!(removes.is_empty());
+    let adds = canonical_view_update_rows(&update);
     (
         adds
             .into_iter()
@@ -705,28 +702,19 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         canonical_view_update_rows(&initial),
-        (Vec::new(), Vec::new())
+        Vec::<ResultRowEntry>::new()
     );
     assert_view_update_only_ships_rows(&initial, BTreeSet::new());
 
-    let doc_delta = |update: &SyncMessage| {
-        let (adds, removes) = canonical_view_update_rows(update);
-        assert!(
-            adds.iter()
-                .chain(removes.iter())
-                .all(|(table, _, _)| table.as_str() == "docs"),
-            "policy evidence must never become an independently visible result member"
-        );
-        (
-            adds
-                .into_iter()
-                .map(|(_, row_uuid, _)| row_uuid)
-                .collect::<BTreeSet<_>>(),
-            removes
-                .into_iter()
-                .map(|(_, row_uuid, _)| row_uuid)
-                .collect::<BTreeSet<_>>(),
-        )
+    let mut previous_docs = BTreeSet::new();
+    let mut doc_delta = |update: &SyncMessage| {
+        let rows = canonical_view_update_rows(update);
+        assert!(rows.iter().all(|(table, _, _)| table.as_str() == "docs"));
+        let current = rows.into_iter().map(|(_, row, _)| row).collect::<BTreeSet<_>>();
+        let added = current.difference(&previous_docs).copied().collect();
+        let removed = previous_docs.difference(&current).copied().collect();
+        previous_docs = current;
+        (added, removed)
     };
 
     let seed_row = row(0x51);
@@ -929,7 +917,7 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
     let read = read_peer
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
-    let (read_adds, read_removes) = canonical_view_update_rows(&read);
+    let read_adds = canonical_view_update_rows(&read);
     assert_eq!(
         read_adds
             .into_iter()
@@ -937,7 +925,6 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([update_doc, delete_doc])
     );
-    assert!(read_removes.is_empty());
     assert_view_update_only_ships_rows(&read, BTreeSet::from([update_doc, delete_doc]));
 
     let mut apply = |commit: MergeableCommit| {
@@ -1011,7 +998,7 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
     let final_read = final_peer
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
-    let (final_adds, final_removes) = canonical_view_update_rows(&final_read);
+    let final_adds = canonical_view_update_rows(&final_read);
     assert_eq!(
         final_adds
             .into_iter()
@@ -1019,7 +1006,6 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([update_doc, allowed_insert])
     );
-    assert!(final_removes.is_empty());
     assert_view_update_only_ships_rows(
         &final_read,
         BTreeSet::from([update_doc, allowed_insert, delete_doc]),

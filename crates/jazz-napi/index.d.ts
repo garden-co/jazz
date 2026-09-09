@@ -78,6 +78,8 @@ export declare class NapiDb {
    * never crosses the language boundary.
    */
   all(query: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
+  /** Bind receipt-correlation claims to this client's own admitted identity. */
+  setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
   /**
    * Set ambient claims for mutation and other explicitly serialized
    * identity operations. Prepared queries capture scoped identity and

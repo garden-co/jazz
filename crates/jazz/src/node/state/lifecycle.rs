@@ -44,6 +44,29 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, false).await
     }
 
+    /// Direct-message test peers share one authority catalogue for each fixture
+    /// schema, just as network peers exchange the catalogue before row versions.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn new_with_shared_test_catalogue(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+    ) -> Result<Self, Error>
+    where S: ReopenableStorage + 'static,
+    {
+        static CATALOGUES: std::sync::OnceLock<std::sync::Mutex<BTreeMap<SchemaVersionId, PhysicalIdentityManifest>>> = std::sync::OnceLock::new();
+        let schema_id = schema.version_id();
+        let identities = CATALOGUES.get_or_init(Default::default).lock().unwrap()
+            .entry(schema_id).or_insert_with(|| PhysicalIdentityManifest::allocate(&schema)).clone();
+        Self::new_with_options_inner(
+            node_uuid, schema, storage, false, CatalogueBootstrapState::Ready,
+            #[cfg(feature = "testing")]
+            None,
+            Some(identities),
+        ).await
+    }
+
     /// Open an edge-local runtime before it has received an authenticated
     /// authority catalogue.
     ///
@@ -73,6 +96,8 @@ where
                 CatalogueBootstrapState::Ready,
                 #[cfg(feature = "testing")]
                 None,
+                #[cfg(any(test, feature = "testing"))]
+                None,
             )
             .await;
         }
@@ -83,6 +108,8 @@ where
             false,
             CatalogueBootstrapState::Uninitialized,
             #[cfg(feature = "testing")]
+            None,
+            #[cfg(any(test, feature = "testing"))]
             None,
         )
         .await
@@ -347,6 +374,7 @@ where
             database,
             chunk_resolver,
             history_complete,
+            authoritative_scalar_exit_refresh,
             ..
         } = self;
         let storage = database.into_inner().into_storage();
@@ -370,6 +398,7 @@ where
         reopened.local_chunk_reader = reopened.database.local_chunk_reader();
         reopened.chunk_resolver = chunk_resolver;
         reopened.content_runtime_provider = reopened.database.owned_chunk_provider();
+        reopened.authoritative_scalar_exit_refresh = authoritative_scalar_exit_refresh;
         Ok(reopened)
     }
 
@@ -402,6 +431,8 @@ where
             CatalogueBootstrapState::Ready,
             #[cfg(feature = "testing")]
             None,
+            #[cfg(any(test, feature = "testing"))]
+            None,
         )
         .await
     }
@@ -425,6 +456,8 @@ where
             history_complete,
             CatalogueBootstrapState::Ready,
             Some(&mut receipt),
+            #[cfg(any(test, feature = "testing"))]
+            None,
         )
         .await?;
         Ok((node, receipt))
@@ -437,6 +470,7 @@ where
         history_complete: bool,
         catalogue_bootstrap_state: CatalogueBootstrapState,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
+        #[cfg(any(test, feature = "testing"))] genesis_identities: Option<PhysicalIdentityManifest>,
     ) -> Result<Self, Error>
     where
         T: ReopenableStorage + 'static,
@@ -460,7 +494,11 @@ where
             next_physical_column_id,
             current_write_schema,
             catalogue_bootstrap_marker,
-        } = Self::open_catalogue_stage(schema.clone(), storage, catalogue_bootstrap_state).await?;
+        } = Self::open_catalogue_stage(
+            schema.clone(), storage, catalogue_bootstrap_state,
+            #[cfg(any(test, feature = "testing"))]
+            genesis_identities,
+        ).await?;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.catalogue_open = started.elapsed();
@@ -583,6 +621,11 @@ where
             },
             parking: Parking::default(),
             query: QueryServing {
+                local_availability_records: BTreeMap::new(),
+                local_availability_authorities: BTreeMap::new(),
+                edge_availability_owners: BTreeMap::new(),
+                edge_availability_retirements: Default::default(),
+                local_unavailable_inputs: BTreeMap::new(),
                 query_shape_cache: BTreeMap::new(),
                 read_policy_authorization_request_cache: BTreeMap::new(),
                 policy_authorization_graph_cache: BTreeMap::new(),
@@ -620,6 +663,8 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
+            authoritative_scalar_exit_refresh: false,
+            edge_query_serving: false,
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
@@ -669,6 +714,7 @@ where
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
         node.recover_known_state_facts().await?;
+        node.recover_local_availability_records().await?;
         if !node.history_complete {
             let recovered_authority_cut = node
                 .query
@@ -772,6 +818,15 @@ where
         self.authored_commit_durability = DurabilityTier::None;
     }
 
+    /// Enable only for a host that owns complete current policy inputs. The
+    /// historical-read flag is insufficient: server edge shells also use it.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn enable_authoritative_scalar_exit_refresh(&mut self) {
+        if self.client_relay_scope().is_none() {
+            self.authoritative_scalar_exit_refresh = true;
+        }
+    }
+
     /// Mark this process as the durable half of a browser client/worker relay.
     /// The marker only selects an internal upstream binding identity for Edge
     /// coverage; it is neither persisted nor an authorization policy input.
@@ -786,6 +841,7 @@ where
                 "a relay cannot be rebound to a different storage ownership scope".into(),
             ));
         }
+        self.authoritative_scalar_exit_refresh = false;
         self.relay_authority_session_owner = Some(scope);
         Ok(())
     }
@@ -1624,6 +1680,7 @@ where
         schema: JazzSchema,
         storage: T,
         catalogue_bootstrap_state: CatalogueBootstrapState,
+        #[cfg(any(test, feature = "testing"))] genesis_identities: Option<PhysicalIdentityManifest>,
     ) -> Result<CatalogueOpenState, Error>
     where
         T: ReopenableStorage + 'static,
@@ -1961,7 +2018,13 @@ where
                 Some(mapping) => mapping.clone(),
                 None => allocate_provisional_physical_mapping(
                     &schema,
-                    PhysicalIdentityManifest::allocate(&schema),
+                    {
+                        #[cfg(any(test, feature = "testing"))]
+                        let identities = genesis_identities.unwrap_or_else(|| PhysicalIdentityManifest::allocate(&schema));
+                        #[cfg(not(any(test, feature = "testing")))]
+                        let identities = PhysicalIdentityManifest::allocate(&schema);
+                        identities
+                    },
                     &mut next_physical_table_id,
                     &mut next_physical_column_id,
                 )?,

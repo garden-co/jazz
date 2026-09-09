@@ -1785,22 +1785,18 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = message
     else {
         panic!("expected include subscription view update, got {message:?}");
     };
     assert_eq!(served, subscription);
-    let tables = program_fact_adds
+    let mut tables = program_fact_adds
         .iter()
-        .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
-                Some(input.version_table.as_str())
-            }
-            _ => None,
-        })
+        .map(|input| input.version_table.as_str())
         .collect::<Vec<_>>();
+    tables.sort_unstable();
     assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
 
     client_transport
@@ -1827,22 +1823,18 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
-        program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = message
     else {
         panic!("expected reopened include subscription view update, got {message:?}");
     };
     assert_eq!(served, subscription);
-    let tables = program_fact_adds
+    let mut tables = program_fact_adds
         .iter()
-        .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) => {
-                Some(input.version_table.as_str())
-            }
-            _ => None,
-        })
+        .map(|input| input.version_table.as_str())
         .collect::<Vec<_>>();
+    tables.sort_unstable();
     assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
 }
 

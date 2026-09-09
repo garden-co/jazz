@@ -3,22 +3,11 @@
 use super::*;
 use futures::executor::block_on;
 
-fn covered_input_rows(update: &SyncMessage, additions: bool) -> BTreeSet<RowUuid> {
+fn covered_input_rows(update: &SyncMessage) -> BTreeSet<RowUuid> {
     let SyncMessage::ViewUpdate(payload) = update else {
         panic!("expected ViewUpdate");
     };
-    let facts = if additions {
-        &payload.program_fact_adds
-    } else {
-        &payload.program_fact_removes
-    };
-    facts
-        .iter()
-        .filter_map(|fact| match fact {
-            ProgramFactEntry::CoveredInput(input) => Some(input.source_row),
-            _ => None,
-        })
-        .collect()
+    payload.supporting_rows.iter().map(|row| row.row).collect()
 }
 
 /// These direct controls model an actual trusted backend reader.  The
@@ -896,7 +885,7 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
         .unwrap();
     let mut peer = PeerState::new();
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let initial_rows = covered_input_rows(&initial, true);
+    let initial_rows = covered_input_rows(&initial);
     assert!(initial_rows.contains(&resource1));
     assert!(!initial_rows.contains(&resource2));
 
@@ -913,11 +902,11 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
         7,
     );
     let grant = peer.query_update(&mut core, &shape, &binding).unwrap();
-    assert!(covered_input_rows(&grant, true).contains(&resource2));
+    assert!(covered_input_rows(&grant).contains(&resource2));
 
     delete_global(&mut core, "teamTeamMemberships", row(302), 18, 8);
     let revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let removed = covered_input_rows(&revoke, false);
-    assert!(removed.contains(&resource1));
-    assert!(removed.contains(&resource2));
+    let remaining = covered_input_rows(&revoke);
+    assert!(!remaining.contains(&resource1));
+    assert!(!remaining.contains(&resource2));
 }

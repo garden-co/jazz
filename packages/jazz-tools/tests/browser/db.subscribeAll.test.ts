@@ -570,7 +570,7 @@ describe("internal subscription delta browser integration", () => {
     await waitForCondition(
       () => deltas.some((delta) => hasChangeForId(delta, 0, id)),
       4000,
-      "expected bytea add delta",
+      () => `expected bytea add delta: ${JSON.stringify(describeSubscriptionHistory(deltas))}`,
     );
 
     const added = deltas.flatMap((delta) => delta.all).find((row) => row.id === id);

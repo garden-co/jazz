@@ -21,11 +21,72 @@ import {
   isWireError,
   isWireMessage,
   peerIdentityForWebSocketAuth,
+  policyClaimsForAdmittedWebSocket,
 } from "./websocket.js";
 
 function authorBytes(issuer: string, subject: string): Uint8Array {
   return new TextEncoder().encode(JSON.stringify([issuer, subject]));
 }
+
+describe("admitted websocket policy claims", () => {
+  const token = (payload: Record<string, unknown>) =>
+    `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
+
+  it("uses the same provider projection and credential precedence as session admission", () => {
+    const jwt_token = token({
+      iss: "https://issuer.example",
+      sub: "alice",
+      iat: 1,
+      exp: 2,
+      aud: "app",
+      role: "reader",
+      metadata: { ignored: true },
+    });
+    expect(
+      policyClaimsForAdmittedWebSocket(
+        JSON.stringify({ jwt_token, backend_session: { claims: { role: "wrong" } } }),
+      ),
+    ).toEqual({ role: "reader" });
+    expect(
+      policyClaimsForAdmittedWebSocket(
+        JSON.stringify({
+          jwt_token,
+          backend_secret: "synthetic",
+          backend_session: { claims: { role: "editor" } },
+        }),
+      ),
+    ).toEqual({ role: "editor" });
+    expect(
+      policyClaimsForAdmittedWebSocket(JSON.stringify({ jwt_token, admin_secret: "synthetic" })),
+    ).toEqual({});
+  });
+
+  it("omits reserved proof material without inventing a provider authMode", () => {
+    expect(
+      policyClaimsForAdmittedWebSocket(
+        JSON.stringify({
+          jwt_token: token({
+            iss: "urn:jazz:local-first",
+            sub: "alice",
+            jazz_pub_key: "proof",
+            role: "reader",
+          }),
+        }),
+      ),
+    ).toEqual({ role: "reader" });
+    expect(
+      policyClaimsForAdmittedWebSocket(
+        JSON.stringify({
+          jwt_token: token({
+            iss: "https://issuer.example",
+            sub: "alice",
+            authMode: "provider-owned",
+          }),
+        }),
+      ),
+    ).toEqual({ authMode: "provider-owned" });
+  });
+});
 
 describe("websocket frame carrier", () => {
   it("types close listeners with close event details", () => {

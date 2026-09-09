@@ -266,7 +266,7 @@ export interface TransactionalRuntime extends Runtime {
     id: OpenTransactionId,
     sessionJson?: string | null,
   ): OpenTransactionId;
-  commitTransaction(id: OpenTransactionId): TxId;
+  commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
   rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
 }
 

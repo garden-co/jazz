@@ -130,7 +130,10 @@ fn open_node(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
+    let node = block_on(NodeState::new_with_shared_test_catalogue(
+        node_uuid, schema, storage,
+    ))
+    .unwrap();
     (temp_dir, node)
 }
 

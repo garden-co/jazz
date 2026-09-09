@@ -7,20 +7,14 @@ fn core_creates_merge_versions_for_concurrent_heads() {
     let row = row(7);
 
     let (left, left_message) = writer_a
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
-                "title".to_owned(),
-                "older-title".to_owned(),
-            )])),
-        )
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(
+            BTreeMap::from([("title".to_owned(), "older-title".to_owned())]),
+        ))
         .unwrap();
     let (right, right_message) = writer_b
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
-                "body".to_owned(),
-                "right-body".to_owned(),
-            )])),
-        )
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 11).cells(
+            BTreeMap::from([("body".to_owned(), "right-body".to_owned())]),
+        ))
         .unwrap();
 
     core.apply_sync_message_settled(right_message).unwrap();
@@ -29,21 +23,16 @@ fn core_creates_merge_versions_for_concurrent_heads() {
     let update = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = update
     else {
         panic!("expected view update");
     };
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
-    let covered_rows = program_fact_adds.iter().filter_map(|fact| match fact {
-        crate::protocol::ProgramFactEntry::CoveredInput(input) =>
-            Some((input.version_table.clone(), input.source_row, input.version.tx)),
-        _ => None,
-    }).collect::<Vec<_>>();
+    let covered_rows = program_fact_adds
+        .iter()
+        .map(|input| (input.version_table.clone(), input.row, input.version.tx))
+        .collect::<Vec<_>>();
     assert_eq!(covered_rows.len(), 1);
     let merge = version_bundles
         .iter()
@@ -178,7 +167,9 @@ fn counter_merge_seeded_concurrent_increments_converge_to_exact_sum() {
             let mut peer = PeerState::new();
             register_whole_table_receiver(writer, "counters");
             writer
-                .apply_sync_message_settled(peer.current_rows_update(&mut core, "counters").unwrap())
+                .apply_sync_message_settled(
+                    peer.current_rows_update(&mut core, "counters").unwrap(),
+                )
                 .unwrap();
             let current = writer
                 .current_rows("counters", DurabilityTier::Local)
@@ -216,7 +207,8 @@ fn counter_merge_of_divergent_merges_sums_raw_frontier_once() {
 
     core.rebuild_merge_heads_from_history_for_test("counters", row)
         .unwrap();
-    let outcome = crate::db::block_on(core.create_merge_version_if_needed("counters", row)).unwrap();
+    let outcome =
+        crate::db::block_on(core.create_merge_version_if_needed("counters", row)).unwrap();
     settle_outcome(&mut core, outcome).unwrap();
 
     let merge = merge_with_parent_set(&mut core, row, &[h1, h2, h3]);
@@ -240,8 +232,24 @@ fn lww_merge_of_divergent_merges_uses_raw_argmax() {
     ingest_todos_version(&mut core, &schema, table, row, h1, vec![], "h1");
     ingest_todos_version(&mut core, &schema, table, row, h2, vec![], "h2");
     ingest_todos_version(&mut core, &schema, table, row, h3, vec![], "h3");
-    ingest_todos_version(&mut core, &schema, table, row, m12, vec![h1, h2], "stale-m12");
-    ingest_todos_version(&mut core, &schema, table, row, m23, vec![h2, h3], "stale-m23");
+    ingest_todos_version(
+        &mut core,
+        &schema,
+        table,
+        row,
+        m12,
+        vec![h1, h2],
+        "stale-m12",
+    );
+    ingest_todos_version(
+        &mut core,
+        &schema,
+        table,
+        row,
+        m23,
+        vec![h2, h3],
+        "stale-m23",
+    );
 
     core.rebuild_merge_heads_from_history_for_test("todos", row)
         .unwrap();
@@ -305,11 +313,14 @@ fn raw_merge_heads_drop_transitive_ancestors_after_late_child() {
 
     merge_with_parent_set(&mut core, row, &[left, right_child]);
     assert!(
-        core.query_all_versions().unwrap().into_iter().all(|version| {
-            let mut parents = version.parents();
-            parents.sort();
-            parents != vec![left, right_parent, right_child]
-        }),
+        core.query_all_versions()
+            .unwrap()
+            .into_iter()
+            .all(|version| {
+                let mut parents = version.parents();
+                parents.sort();
+                parents != vec![left, right_parent, right_child]
+            }),
         "merge parent set must not include an ancestor and its descendant"
     );
 }
@@ -416,19 +427,21 @@ fn ingest_direct_version(
             user_metadata_json: None,
             contribution_merge: None,
         },
-        vec![VersionRecord::from_cells(
-            table,
-            schema.version_id(),
-            row_uuid,
-            parents,
-            AuthorSubject::system_at(tx_id.node),
-            10,
-            AuthorSubject::system_at(tx_id.node),
-            10,
-            &cells,
-            None,
-        )
-        .unwrap()],
+        vec![
+            VersionRecord::from_cells(
+                table,
+                schema.version_id(),
+                row_uuid,
+                parents,
+                AuthorSubject::system_at(tx_id.node),
+                10,
+                AuthorSubject::system_at(tx_id.node),
+                10,
+                &cells,
+                None,
+            )
+            .unwrap(),
+        ],
         Fate::Accepted,
         None,
         DurabilityTier::Local,

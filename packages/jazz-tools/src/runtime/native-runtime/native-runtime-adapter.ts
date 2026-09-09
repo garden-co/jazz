@@ -1,5 +1,5 @@
 import { Utf8Decoder } from "../utf8.js";
-import { runtimeRandomBytes } from "../runtime-entropy.js";
+import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import type {
   ColumnDescriptor,
@@ -73,6 +73,7 @@ import {
   isRetryablePreHelloWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
+  policyClaimsForAdmittedWebSocket,
   type WebSocketNegotiation,
   type WireError,
   wireAuthFailureReason,
@@ -227,6 +228,7 @@ type NativeDb = {
     claims?: Record<string, unknown>,
   ): NativeReadResult | Promise<NativeReadResult>;
   admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
+  setSessionClaims?(claims: Record<string, unknown> | undefined | null): void | Promise<void>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   foregroundTxTimeHighWater?(): bigint;
   seedForegroundTxTimeHighWater?(highWater: bigint): void;
@@ -353,12 +355,14 @@ type NativeDb = {
   acceptSubscriber?(
     author: Uint8Array,
     claims: Record<string, unknown>,
+    localEpoch?: bigint,
   ): Transport | Promise<Transport>;
   acceptSubscriberWithSelfSignedProof?(
     claims: Record<string, unknown>,
     token: string,
     appId: string,
     claimedAuthor: string,
+    localEpoch?: bigint,
   ): Transport | Promise<Transport>;
   tick(): void | Promise<void>;
   close?(): void;
@@ -666,7 +670,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
-  private nextServerConnectionEpoch = 1n;
   private serverEndpointUrl: string | null = null;
   private serverAuthJson: string | null = null;
   private serverReconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -830,9 +833,27 @@ export class NativeRuntimeAdapter implements Runtime {
     }) as (error: Error | null, urgency: string) => void);
   }
 
-  async connectUpstreamPeer(): Promise<Transport> {
-    if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer();
+  createPeerAuthority(): { node: Uint8Array; epoch: bigint; features: number } {
+    return {
+      node: this.node,
+      epoch: runtimeConnectionIncarnation(),
+      features: this.nativeWireFeatures(),
+    };
+  }
+
+  async connectUpstreamPeer(authority?: {
+    node: Uint8Array;
+    epoch: bigint;
+    features: number;
+  }): Promise<Transport> {
+    if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer(authority);
     this.peerUpstreamAttached = true;
+    if (authority)
+      return this.connectNegotiatedUpstream({
+        protocolVersion: 1,
+        features: authority.features,
+        authority,
+      });
     return await this.db.connectUpstream();
   }
 
@@ -1003,8 +1024,8 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.evictExpiredStagedLargeValues();
   }
 
-  async acceptPeer(claims: Record<string, unknown> = {}): Promise<Transport> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
+  async acceptPeer(claims: Record<string, unknown> = {}, localEpoch?: bigint): Promise<Transport> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims, localEpoch);
     if (this.closed) throw new Error("Native runtime is closed");
     return this.runWhenCoreIdle(async () => {
       if (this.closed) throw new Error("Native runtime is closed");
@@ -1031,12 +1052,13 @@ export class NativeRuntimeAdapter implements Runtime {
             proof.token,
             proof.appId,
             proof.claimedAuthor,
+            localEpoch,
           );
         } else {
           if (!this.db.acceptSubscriber) {
             throw new Error("Native runtime does not expose subscriber links");
           }
-          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims);
+          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims, localEpoch);
         }
         if (this.closed) {
           // We still own the slot. Awaiting gated retirement here would wait
@@ -1474,16 +1496,21 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Upsert");
     if (tx) this.assertTransactionAttribution(tx, attribution);
+    // Ordinary upserts are queued by Rust, which resolves existence and merges
+    // the patch under the write's identity. A synchronous preflight read here
+    // can wait on a suspended core tick while blocking the host that must
+    // resume it. Only staged transaction bookkeeping needs a local preimage.
     const existing = branchView
       ? true
       : tx
         ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
-        : this.readRow(table, rowId, attribution ? undefined : writeIdentity);
+        : undefined;
     let cells: Uint8Array;
     try {
-      cells = existing
-        ? encodeCellsForPatch(definition, values)
-        : encodeCellsForRow(definition, values, table);
+      cells =
+        !tx || branchView || existing
+          ? encodeCellsForPatch(definition, values)
+          : encodeCellsForRow(definition, values, table);
     } catch (error) {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
@@ -1820,6 +1847,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
     const query = nativeQueryInput(coreQueryJson, this.schema);
+    await this.ensureClientSessionClaims(session);
     await this.waitForStrictRemoteQueryTransport(tier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed) return [];
@@ -1898,7 +1926,8 @@ export class NativeRuntimeAdapter implements Runtime {
         : native;
     };
     try {
-      const opening = open();
+      const claims = this.ensureClientSessionClaims(session);
+      const opening = claims instanceof Promise ? claims.then(open) : open();
       if (opening instanceof Promise) void opening.then(install).catch(fail);
       else install(opening);
     } catch (error) {
@@ -1997,7 +2026,8 @@ export class NativeRuntimeAdapter implements Runtime {
       },
       onTerminal: (error) => {
         if (!attempt) return;
-        if (error.code === "not_ready" && error.retry === "later") return;
+        if (error.code === "not_ready" && error.retry === "later" && !attempt.carrier.hasNegotiated)
+          return;
         if (this.canRetryNetworkConnection(attempt, error)) {
           const recovery = this.retryNetworkConnection(attempt, error);
           if (recovery) return;
@@ -2030,6 +2060,19 @@ export class NativeRuntimeAdapter implements Runtime {
         ) {
           carrier.close();
           return carrier;
+        }
+        if (!this.trustedBackend) {
+          await this.runWhenCoreIdle(() => {
+            if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier)
+              return;
+            return this.installClientSessionClaims(
+              policyClaimsForAdmittedWebSocket(normalizedAuthJson),
+            );
+          });
+          if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
+            carrier.close();
+            return carrier;
+          }
         }
         this.preHelloRetryCount = 0;
         const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
@@ -2087,7 +2130,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const authority = negotiation.authority;
     const connectWithSession = this.db.connectUpstreamWithSession;
     if (!authority || !connectWithSession) return await this.db.connectUpstream();
-    const localEpoch = this.nextServerConnectionEpoch++;
+    const localEpoch = runtimeConnectionIncarnation();
     return await connectWithSession.call(
       this.db,
       negotiation.protocolVersion,
@@ -2612,6 +2655,28 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  private clientSessionClaimsKey: string | undefined;
+
+  private installClientSessionClaims(claims: Record<string, unknown>): void | Promise<void> {
+    const key = canonicalJson(claims);
+    if (key === this.clientSessionClaimsKey) return;
+    const installed = this.db.setSessionClaims?.(claims);
+    if (installed instanceof Promise)
+      return installed.then(() => {
+        this.clientSessionClaimsKey = key;
+      });
+    this.clientSessionClaimsKey = key;
+  }
+
+  private ensureClientSessionClaims(session: RuntimeSession | null): void | Promise<void> {
+    if (!session || session.backendAuthority || this.readAuthorizationHost === "trusted-serving")
+      return;
+    if (canonicalJson(session.claims) === this.clientSessionClaimsKey) return;
+    // Installing correlation claims mutates native state; wait for any active
+    // core operation without reintroducing query preparation in TypeScript.
+    const install = () => this.installClientSessionClaims(session.claims);
+    return this.ownerRuntime.coreOperation ? this.runWhenCoreIdle(install) : install();
+  }
   /**
    * A strict remote query cannot materialize its local snapshot before an
    * in-flight server handshake has either admitted its authority transport or
@@ -3289,8 +3354,10 @@ export class NativeRuntimeAdapter implements Runtime {
       attempt === this.serverConnectionAttempt &&
       attempt.generation === this.serverConnectionGeneration &&
       error.retry === "later" &&
-      (error.code === "websocket_closed" || error.code === "websocket_error") &&
-      (attempt.transport !== null || this.networkRetryCount > 0) &&
+      (error.code === "websocket_closed" ||
+        error.code === "websocket_error" ||
+        error.code === "not_ready") &&
+      (attempt.carrier.hasNegotiated || this.networkRetryCount > 0) &&
       this.networkRetryCount < NETWORK_RETRY_LIMIT
     );
   }
@@ -3946,7 +4013,6 @@ function sessionClaims(
     ...(isRecord(rawClaims) ? rawClaims : {}),
     iss: session.issuer,
     sub: session.user_id,
-    authMode: session.authMode ?? "external",
   };
 }
 
@@ -6057,6 +6123,22 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
     (bytes[offset + 2]! << 16) |
     (bytes[offset + 3]! << 24)
   );
+}
+
+/** Deterministic cache-key encoding for JSON-derived session claims. */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return "null";
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {

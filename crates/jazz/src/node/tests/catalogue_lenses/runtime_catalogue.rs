@@ -23,25 +23,32 @@ fn commit_arrival_preserves_known_noncurrent_authored_variant() {
                     default: v(""),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
     .unwrap();
-    assert_eq!(core.current_write_schema().unwrap().schema, base.version_id());
+    assert_eq!(
+        core.current_write_schema().unwrap().schema,
+        base.version_id()
+    );
 
     let row = row(0x5c);
     let (_tx_id, unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(
+            BTreeMap::from([
                 ("title".to_owned(), v("newer-client")),
                 ("body".to_owned(), v("authored-v2")),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     core.apply_sync_message_settled(unit).unwrap();
 
-    assert_eq!(core.current_write_schema().unwrap().schema, base.version_id());
+    assert_eq!(
+        core.current_write_schema().unwrap().schema,
+        base.version_id()
+    );
     let stored = core.query_table_versions("todos").unwrap();
     assert_eq!(stored.len(), 1);
     let stored_wire = core.version_record_from_row(&stored[0]).unwrap();
@@ -74,7 +81,8 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -88,7 +96,10 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     })
     .unwrap();
     assert_eq!(core.current_write_schema().unwrap().revision, 2);
-    assert_eq!(core.current_write_schema().unwrap().schema, evolved_payload.id);
+    assert_eq!(
+        core.current_write_schema().unwrap().schema,
+        evolved_payload.id
+    );
 
     let stale = core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorSubject::SYSTEM,
@@ -116,7 +127,10 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     })
     .unwrap();
     assert_eq!(core.current_write_schema().unwrap().revision, 3);
-    assert_eq!(core.current_write_schema().unwrap().schema, base.version_id());
+    assert_eq!(
+        core.current_write_schema().unwrap().schema,
+        base.version_id()
+    );
 }
 #[test]
 fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
@@ -135,7 +149,8 @@ fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
                 default: Value::String(String::new()),
             }],
         }],
-    ).expect("valid migration lens");
+    )
+    .expect("valid migration lens");
     publish_schema_lineage(
         &mut core,
         evolved_payload.clone(),
@@ -212,7 +227,8 @@ fn shape_registration_parks_until_schema_version_catalogue_arrives() {
                 target_table: "todos".to_owned(),
                 ops: vec![],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         ["notes"],
         Vec::<String>::new(),
     )
@@ -248,7 +264,8 @@ fn publishing_schema_registers_new_physical_tables_live() {
                     default: Value::String(String::new()),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
@@ -289,7 +306,8 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
                 target_table: "todos".to_owned(),
                 ops: vec![],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         ["notes"],
         Vec::<String>::new(),
     )
@@ -311,13 +329,10 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         ))
         .unwrap()
     );
-    let tx_id = core
-        .commit_mergeable_settled(
-            MergeableCommit::new("notes", note, 10).cells(BTreeMap::from([(
-                "body".to_owned(),
-                v("live add-table write"),
-            )])),
-        )
+    let tx_id =
+        core.commit_mergeable_settled(MergeableCommit::new("notes", note, 10).cells(
+            BTreeMap::from([("body".to_owned(), v("live add-table write"))]),
+        ))
         .unwrap();
     let shape = Query::from("notes").validate(&evolved).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -356,24 +371,20 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
     let update = peer.current_rows_update(&mut core, "notes").unwrap();
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
+        supporting_rows: program_fact_adds,
         ..
     }) = &update
     else {
         panic!("current-row subscription should produce a view update");
     };
-    assert!(result_member_adds.is_empty());
-    assert!(result_member_removes.is_empty());
     assert_eq!(
         program_fact_adds
             .iter()
             .filter(|fact| matches!(
                 fact,
-                crate::protocol::ProgramFactEntry::CoveredInput(input)
+                input
                     if input.version_table.as_str() == "notes"
-                        && input.source_row == note
+                        && input.row == note
                         && input.version.layer == crate::protocol::ResultRowLayer::Content
             ))
             .count(),
@@ -401,7 +412,8 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
                 target_table: "todos".to_owned(),
                 ops: vec![],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         ["notes"],
         Vec::<String>::new(),
     )

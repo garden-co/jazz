@@ -1112,6 +1112,7 @@ fn supported_current_storage_projection(
             projection,
             binding_view: _,
             authority_result_key: _,
+            current_default: _,
         } => Some(projection),
         SourceExpr::WithOverlays { input, overlays } => {
             if (overlays.entries == [OverlayRef::PendingLocal]

@@ -55,7 +55,9 @@ function compiledRustIgnores() {
       "--message-format",
       "json",
     ],
-    { cwd: root, encoding: "utf8" },
+    // Keep JSON stdout private to the parser, but stream compiler progress
+    // and failures instead of appearing idle throughout the workspace build.
+    { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
   );
   const inventory = JSON.parse(raw);
   const ignored = [];
