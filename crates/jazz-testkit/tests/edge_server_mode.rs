@@ -1167,7 +1167,8 @@ async fn edge_reconnects_after_established_core_drop() {
                     .start(),
             )
             .await
-            .expect("initial Core start timed out");
+            .expect("initial Core start timed out")
+            .expect("start Core server");
             let edge = tokio::time::timeout(
                 Duration::from_secs(10),
                 JazzServer::builder()
@@ -1178,7 +1179,8 @@ async fn edge_reconnects_after_established_core_drop() {
                     .start(),
             )
             .await
-            .expect("Edge start timed out");
+            .expect("Edge start timed out")
+            .expect("start Edge server");
             let edge_state = edge.server_state();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while edge_state.edge_upstream_health()
@@ -1213,7 +1215,8 @@ async fn edge_reconnects_after_established_core_drop() {
                     .start(),
             )
             .await
-            .expect("replacement Core start timed out");
+            .expect("replacement Core start timed out")
+            .expect("restart Core server");
             tokio::time::timeout(Duration::from_secs(5), async {
                 while edge_state.edge_upstream_health()
                     != jazz_server::EdgeUpstreamHealth::Connected
