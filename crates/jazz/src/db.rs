@@ -3462,50 +3462,9 @@ where
         cells: RowCells,
         options: UpsertOptions,
     ) -> Result<(), Error> {
-        ensure_transaction_identity(options.identity)?;
-        match options.target {
-            WriteTarget::Root => {
-                let exists = self
-                    .db()
-                    .mergeable_transaction_upsert_exists(self.tx_id(), table, row)
-                    .await?;
-                if exists {
-                    self.db()
-                        .stage_mergeable_update(
-                            self.tx_id(),
-                            table,
-                            row,
-                            cells,
-                            options.updated_at_ms,
-                        )
-                        .await
-                } else {
-                    self.db()
-                        .stage_mergeable_insert(
-                            self.tx_id(),
-                            table,
-                            row,
-                            cells,
-                            options.updated_at_ms,
-                            false,
-                        )
-                        .await
-                }
-            }
-            WriteTarget::BranchView { head, base } => {
-                self.db()
-                    .stage_mergeable_upsert_in_branch_view(
-                        self.tx_id(),
-                        table,
-                        head,
-                        base,
-                        row,
-                        cells,
-                        options.updated_at_ms,
-                    )
-                    .await
-            }
-        }
+        self.db()
+            .stage_mergeable_upsert(self.tx_id(), table, row, cells, options, false)
+            .await
     }
 
     /// Stage one soft delete.
@@ -3923,7 +3882,14 @@ where
         ensure_transaction_identity(options.identity)?;
         ensure_exclusive_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_upsert(self.tx_id(), table, row, cells, options.updated_at_ms)
+            .stage_exclusive_upsert(
+                self.tx_id(),
+                table,
+                row,
+                cells,
+                options.updated_at_ms,
+                false,
+            )
             .await
     }
 

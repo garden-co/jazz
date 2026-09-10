@@ -427,14 +427,7 @@ type PendingTx = {
   requestSession?: RuntimeSession;
   /** External provenance fixed at begin, never supplied per staged operation. */
   attribution?: Uint8Array;
-  writes: PendingTxWrite[];
-};
-
-type PendingTxWrite = {
-  table: string;
-  rowId: Uint8Array;
-  row?: RowState;
-  deleted?: boolean;
+  hasStagedMutations: boolean;
 };
 
 type CompletedTx = {
@@ -1218,7 +1211,7 @@ export class NativeRuntimeAdapter implements Runtime {
         throw new Error("Native runtime transaction insert did not return a row id");
       }
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, row });
+      tx.hasStagedMutations = true;
       return {
         id: row.id,
         values: row.values,
@@ -1376,7 +1369,7 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, row });
+      tx.hasStagedMutations = true;
       return {
         id: row.id,
         values: row.values,
@@ -1422,11 +1415,7 @@ export class NativeRuntimeAdapter implements Runtime {
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
       });
-      tx.writes.push({
-        table,
-        rowId,
-        row: this.mergeRowState(table, rowId, values, tx, writeIdentity),
-      });
+      tx.hasStagedMutations = true;
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () =>
@@ -1497,21 +1486,11 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Upsert");
     if (tx) this.assertTransactionAttribution(tx, attribution);
-    // Ordinary upserts are queued by Rust, which resolves existence and merges
-    // the patch under the write's identity. A synchronous preflight read here
-    // can wait on a suspended core tick while blocking the host that must
-    // resume it. Only staged transaction bookkeeping needs a local preimage.
-    const existing = branchView
-      ? true
-      : tx
-        ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
-        : undefined;
+    // Rust resolves existence, defaults, and patch merging against the
+    // transaction's own state, just as it does for ordinary upserts.
     let cells: Uint8Array;
     try {
-      cells =
-        !tx || branchView || existing
-          ? encodeCellsForPatch(definition, values)
-          : encodeCellsForRow(definition, values, table);
+      cells = encodeCellsForPatch(definition, values);
     } catch (error) {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
@@ -1522,13 +1501,7 @@ export class NativeRuntimeAdapter implements Runtime {
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
       });
-      tx.writes.push({
-        table,
-        rowId,
-        row: existing
-          ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
-          : this.rowStateFromValues(table, rowId, values),
-      });
+      tx.hasStagedMutations = true;
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
@@ -1565,7 +1538,7 @@ export class NativeRuntimeAdapter implements Runtime {
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
       });
-      tx.writes.push({ table, rowId, deleted: true });
+      tx.hasStagedMutations = true;
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
@@ -1743,7 +1716,7 @@ export class NativeRuntimeAdapter implements Runtime {
       identity: admission,
       requestSession: admission ? (session ?? undefined) : undefined,
       attribution,
-      writes: [],
+      hasStagedMutations: false,
     });
     return id;
   }
@@ -1757,7 +1730,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!pending) {
       throw new Error(commitTransactionMessage(openTransactionId, this.completedTxs));
     }
-    if (pending.writes.length === 0 && pending.kind === "mergeable") {
+    if (!pending.hasStagedMutations && pending.kind === "mergeable") {
       throw new Error(
         "Commit transaction failed: empty mergeable transaction has no committed unit; roll it back instead",
       );
@@ -2337,48 +2310,6 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
-    if (!identity) return this.readRowForWriteMerge(table, rowId);
-    const query = nativeQueryInput(JSON.stringify({ table }), this.schema);
-    const rows = this.readRowsForContext(
-      query,
-      readOptions(),
-      this.nativeReadContext({ identity } as RuntimeSession),
-    );
-    return rowsFromBatches(readRowBatches(rows), this.schema).find(
-      (row) => row.table === table && row.id === formatUuid(rowId),
-    );
-  }
-
-  private readRowForWriteMerge(table: string, rowId: Uint8Array): RowState | undefined {
-    const exactReader = (
-      this.db as { localCurrentRow?: (table: string, rowId: Uint8Array) => Uint8Array }
-    ).localCurrentRow;
-    if (exactReader) {
-      const rows = rowsFromBatches(
-        readRowBatches(exactReader.call(this.db, table, rowId)),
-        this.schema,
-      );
-      return rows[0];
-    }
-    const query = nativeQueryInput(JSON.stringify({ table }), this.schema);
-    const rows = this.db.all(query, {
-      ...(readOptions() as Record<string, unknown>),
-      sync: true,
-    });
-    if (typeof (rows as Promise<unknown>).then === "function") {
-      throw new Error("write merge requires the synchronous native read boundary");
-    }
-    if (isPendingNativeRead(rows)) {
-      throw new Error(
-        "write merge cannot synchronously hydrate a large value; use the exact local row reader",
-      );
-    }
-    return rowsFromBatches(readRowBatches(rows as Uint8Array), this.schema).find(
-      (row) => row.table === table && row.id === formatUuid(rowId),
-    );
-  }
-
   private rowStateFromValues(
     table: string,
     rowId: Uint8Array,
@@ -2401,24 +2332,6 @@ export class NativeRuntimeAdapter implements Runtime {
       },
       valuesByColumn,
     );
-  }
-
-  private mergeRowState(
-    table: string,
-    rowId: Uint8Array,
-    patch: Record<string, Value>,
-    tx: PendingTx,
-    _identity?: Uint8Array,
-  ): RowState {
-    const current =
-      this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId);
-    const merged: Record<string, Value> = {};
-    for (const column of this.table(table).columns) {
-      const existing = current?.valuesByColumn?.get(column.name);
-      if (existing !== undefined) merged[column.name] = existing;
-    }
-    Object.assign(merged, patch);
-    return this.rowStateFromValues(table, rowId, merged);
   }
 
   private async readPlainRows(
@@ -2580,20 +2493,6 @@ export class NativeRuntimeAdapter implements Runtime {
     const session = sessionFromWriteContext(writeContext);
     if (!session) throw new Error("backend attribution requires a valid author");
     return session.identity;
-  }
-
-  private stagedRowForWriteMerge(
-    tx: PendingTx,
-    table: string,
-    rowId: Uint8Array,
-  ): RowState | undefined {
-    const id = formatUuid(rowId);
-    for (let index = tx.writes.length - 1; index >= 0; index -= 1) {
-      const write = tx.writes[index]!;
-      if (write.table !== table || formatUuid(write.rowId) !== id) continue;
-      return write.deleted ? undefined : write.row;
-    }
-    return undefined;
   }
 
   private awaitNativeOperation<T>(
@@ -5293,11 +5192,7 @@ export function encodeCellsForRow(
   table?: string,
 ): Uint8Array {
   assertRequiredRowColumnsPresent(definition.columns, row, table);
-  const columns = definition.columns.filter(
-    (column) =>
-      Object.hasOwn(row, column.name) ||
-      (column.column_type.type === "Array" && column.default == null),
-  );
+  const columns = definition.columns.filter((column) => Object.hasOwn(row, column.name));
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
@@ -5313,10 +5208,7 @@ function encodeCellsForStreamingRow(
     table,
   );
   const columns = definition.columns.filter(
-    (column) =>
-      column.name !== streamedColumn &&
-      (Object.hasOwn(row, column.name) ||
-        (column.column_type.type === "Array" && column.default == null)),
+    (column) => column.name !== streamedColumn && Object.hasOwn(row, column.name),
   );
   return encodeCells(columns, (column) => row[column.name], true);
 }
@@ -5388,7 +5280,7 @@ function assertRequiredRowColumnsPresent(
   for (const column of columns) {
     const value = row[column.name] ?? column.default;
     if (value && value.type !== "Null") continue;
-    if (column.nullable || column.column_type.type === "Array") continue;
+    if (column.nullable) continue;
     throw new Error(
       table
         ? `encoding error: missing required field \`${column.name}\` on table \`${table}\``
@@ -5412,9 +5304,6 @@ function encodeCellValue(
   const resolved = value;
   if (!resolved) {
     if (column.nullable) return encodeNativeNullValue(storageColumnValueType(column));
-    if (column.column_type.type === "Array") {
-      return encodeNativeColumnValue(column, { type: "Array", value: [] });
-    }
     if (requireMissingDefaults && column.default == null) {
       throw new Error(`missing required column ${column.name}`);
     }
