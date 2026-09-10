@@ -9,7 +9,7 @@ const app = schema.defineApp({
 });
 
 describe("exact local transaction write merging", () => {
-  it("preserves large content and does not commit a patch whose merge read failed", async () => {
+  it("preserves large content after commit rejection and a caught merge-read failure", async () => {
     const db = await createBrowserTestDb({
       appId: "transaction-staging-large-rejection",
       driver: { type: "memory" },
@@ -25,9 +25,11 @@ describe("exact local transaction write merging", () => {
       await large.wait({ tier: "local" });
       const small = db.insert(app.todos, { title: "small", done: false });
       await small.wait({ tier: "local" });
-      const successful = db.beginTransaction();
-      successful.update(app.todos, large.value.id, { done: true });
-      await successful.commit().wait({ tier: "local" });
+      const unsupported = db.beginTransaction();
+      unsupported.update(app.todos, large.value.id, { done: true });
+      await expect(unsupported.commit().wait({ tier: "local" })).rejects.toThrow(
+        "callers must author logical scalar values, not physical large descriptors",
+      );
       const tx = db.beginTransaction();
       const { WasmDb } = await loadWasmModule();
       const exact = vi.spyOn(WasmDb.prototype, "localCurrentRow");
@@ -35,7 +37,7 @@ describe("exact local transaction write merging", () => {
         throw new Error("synthetic exact read failure");
       });
       try {
-        expect(() => tx.update(app.todos, large.value.id, { done: false })).toThrow(
+        expect(() => tx.update(app.todos, large.value.id, { done: true })).toThrow(
           "synthetic exact read failure",
         );
       } finally {
@@ -45,7 +47,7 @@ describe("exact local transaction write merging", () => {
       await tx.commit().wait({ tier: "local" });
       expect(await db.all(app.todos)).toEqual(
         expect.arrayContaining([
-          { id: large.value.id, title, done: true },
+          { id: large.value.id, title, done: false },
           { id: small.value.id, title: "small", done: true },
         ]),
       );
