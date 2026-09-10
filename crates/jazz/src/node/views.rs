@@ -1627,6 +1627,7 @@ where
         let mut receiver_batch_global_times = Vec::new();
         let mut receiver_batch_content_versions = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
+        let mut deferred_bundles = Vec::new();
         for bundle in receiver_candidates.values() {
             let staged = self
                 .stage_view_bundle(
@@ -1639,6 +1640,8 @@ where
                 .await?;
             if staged {
                 receiver_batch_bundle_count += 1;
+            } else {
+                deferred_bundles.push(bundle.clone());
             }
         }
         self.write_merge_heads_for_bulk_content_versions(
@@ -1667,6 +1670,14 @@ where
         }
         let mut preloaded_tx_ids = bulk_loaded_tx_ids;
         preloaded_tx_ids.extend(receiver_batch_tx_ids);
+        // Supplying preloaded IDs bypasses per-update bundle ingestion below,
+        // so deferred known transactions must explicitly apply their new fate.
+        for bundle in deferred_bundles {
+            let tx_id = bundle.tx.tx_id;
+            self.sync_metrics.receiver_per_bundle_ingests += 1;
+            self.ingest_view_bundle(bundle).await?;
+            preloaded_tx_ids.insert(tx_id);
+        }
         // Cross-subscription ordering within one receiver tick carries no
         // protocol semantics beyond per-link FIFO. Table writes are coalesced
         // above; per-subscription settled-state mutations still apply in
