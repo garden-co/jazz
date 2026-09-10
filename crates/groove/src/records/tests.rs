@@ -353,7 +353,7 @@ fn record_values_reject_non_canonical_child_bytes() {
 }
 
 #[test]
-fn structural_validation_matches_full_decode_for_corrupt_composite_records() {
+fn structural_validation_rejects_corrupt_composite_records_before_lazy_access() {
     let child = RecordDescriptor::new([
         ("maybe_id", ValueType::Nullable(Box::new(ValueType::U8))),
         ("active", ValueType::Bool),
@@ -381,11 +381,16 @@ fn structural_validation_matches_full_decode_for_corrupt_composite_records() {
         .unwrap();
 
     let equivalent = |raw: &[u8]| {
+        // Lazy reads no longer validate descendants. Explicit canonical
+        // validation must retain its recursive rejection behavior.
         assert_eq!(
             descriptor.bind(raw).validate().is_ok(),
-            descriptor.bind(raw).to_values().is_ok(),
-            "structural validation and decoding disagreed for {raw:?}"
+            descriptor.bind(raw).validate_canonical().is_ok(),
+            "structural and canonical validation disagreed for {raw:?}"
         );
+        if descriptor.bind(raw).validate().is_ok() {
+            assert!(descriptor.bind(raw).to_values().is_ok());
+        }
     };
 
     equivalent(&valid);
@@ -1351,7 +1356,7 @@ fn epoch_1_variable_scalar_array_and_payload_enum_goldens_are_exact_and_fail_clo
     assert!(
         descriptor
             .bind(&frozen[..frozen.len() - 1])
-            .to_values()
+            .validate_canonical()
             .is_err()
     );
 }
@@ -2514,4 +2519,31 @@ fn embedded_record_admission_matches_legacy_roundtrip_corpus() {
             }
         }
     }
+}
+
+// This internal counter checks work, which public query results cannot expose.
+// Reading valid nested bytes must not invoke the record encoder.
+#[test]
+fn nested_record_read_does_not_reencode_descendants() {
+    let leaf = RecordDescriptor::new([("value", ValueType::String)]);
+    let leaf_record = OwnedRecord::new(leaf.create(&[Value::String("kept".into())]).unwrap(), leaf);
+    let middle = RecordDescriptor::new([("leaf", ValueType::Record(Box::new(leaf)))]);
+    let middle_record = OwnedRecord::new(
+        middle
+            .create(&[Value::Record(leaf_record.clone())])
+            .unwrap(),
+        middle,
+    );
+    let root = RecordDescriptor::new([("middle", ValueType::Record(Box::new(middle)))]);
+    let raw = root
+        .create(&[Value::Record(middle_record.clone())])
+        .unwrap();
+    RECORD_ENCODE_COUNT.with(|count| count.set(0));
+    let value = root.bind(&raw).get_idx(0).unwrap();
+    assert_eq!(value, Value::Record(middle_record));
+    let Value::Record(record) = value else {
+        panic!("record expected")
+    };
+    assert_eq!(record.get_idx(0).unwrap(), Value::Record(leaf_record));
+    assert_eq!(RECORD_ENCODE_COUNT.with(|count| count.get()), 0);
 }

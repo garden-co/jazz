@@ -41,7 +41,7 @@ Invariant digest:
 - `INV-STORAGE-24`: Persisted index scans MUST decode the persisted index record's `"value"` as primary-key bytes and fetch the current base table record; if the base record is missing for a primary-key table, the index MUST be treated as invalid.
 - `INV-STORAGE-25`: Ordered index key encoding via `encode_key_part` MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys.
 - `INV-STORAGE-26`: Record-store persistence is row-only: each logical stored record has its canonical row key/value entry, and no storage maintenance may replace a run of rows with a second logical representation.
-- `INV-STORAGE-27`: A record-valued `ValueType` MUST carry its descriptor inline and accept only canonical child bytes; it MUST NOT appear, directly or recursively, in a durable primary key.
+- `INV-STORAGE-27`: A record-valued `ValueType` MUST carry its descriptor inline and its encoder MUST emit canonical child bytes; it MUST NOT appear, directly or recursively, in a durable primary key.
 - `INV-STORAGE-28`: Every enum occurrence has an independent persistent registry identity; nested enums and the hidden whole-row enum never share or flatten registry state.
 
 Engine-owned schema catalogues and operator-supplied native schema files are trusted
@@ -89,6 +89,34 @@ Whole-row storage uses the same bounded-tag machinery through `VariantRecord`; i
 registry is hidden inside the table implementation. Jazz normalizes these opaque
 physical rows at `VariantProject` before exposing logical rows, so no physical tag or
 whole-row enum appears in Jazz's public schema, wire values, lenses, or query API.
+
+## Encoder trust and byte preservation
+
+Storage and transport own byte integrity: they MUST preserve the bytes supplied
+by the encoder. Record getters MUST NOT compensate for hypothetical corruption
+by repeatedly validating or re-encoding stored values. Storage-layer integrity
+mechanisms and explicit format/version dispatch remain owned by those layers.
+
+A trusted encoder MUST produce the specified representation. Its output MUST be
+decoded directly, without structural or canonicality pre-validation, recursive
+validation on access, or decode/re-encode comparisons. This includes locally
+encoded records and their storage round trips. Canonical encoding remains an
+encoder obligation, not a requirement to prove canonicality on every read.
+Ordinary decoding still interprets tags and offsets; this contract does not
+require unsafe memory access or bypassing language memory safety.
+
+For untrusted encoder input, pre-decoding checks MUST be limited to correct
+pointer/offset ranges and bounded resource use, including data-lookup fanout,
+lengths, allocation, nesting and decompression amplification. Decoder failure
+may terminate the originating connection gracefully, but MUST NOT affect another
+connection, poison shared state, abort the process, or exhaust node-wide resources.
+Jazz's sync and topology chapters define the connection boundary. Storage must
+not acquire partially decoded state from a failed connection.
+
+These rules supersede blanket decoder rejection/validation language elsewhere in
+this chapter: byte-layout constraints specify what encoders emit, while the
+encoder's trust determines runtime prechecks. Application type checking,
+transaction constraints and authorization are separate semantic responsibilities.
 
 ## Details
 
@@ -527,19 +555,15 @@ a descriptor registry or encode descriptor bytes beside every child value. The
 record values therefore uses the existing array framing around the canonical raw
 bytes of each element descriptor; no second outer-record layout is introduced.
 
-Record values are admitted only when their embedded descriptor equals the
-declared `ValueType::Record` descriptor and their raw bytes are canonical for
-that descriptor: decode every child value, recreate the record, and require
-byte equality. This defines the acceptance rule; tuple-free descriptors may
-use an equivalent recursive canonical-byte validator without allocating the
-intermediate values or recreated bytes. That validator checks the entire packed
-layout, offsets, null padding, enum tags, scalar envelopes, and nested records.
-Generic structural validation alone is insufficient because `OwnedRecord::new`
-accepts arbitrary raw bytes. Descriptors recursively containing tuples retain
-the decode/recreate/compare implementation, including its historical tuple
-constructibility and nullable-member byte-order behavior. Exact canonical
-admission is required for byte-based weighted consolidation and deterministic
-final tie-breaking; this optimization changes no persisted encoding.
+Record-valued encoders MUST use the declared embedded descriptor and emit its
+specified canonical bytes. Readers follow “Encoder trust and byte preservation”
+above; neither tuple-containing nor tuple-free records require decode/recreate/
+compare on access. Byte-based consolidation and deterministic tie-breaking rely
+on the trusted encoder contract. Untrusted client input is contained at its
+connection boundary before trusted state publication; copying untrusted bytes
+alone MUST NOT confer trusted-encoder provenance. The exact handling of client
+representations at that boundary must preserve these semantics without adding
+blanket canonical pre-validation.
 
 `Record`, `Array<Record>`, and any recursively containing value type MUST be
 rejected as a durable primary-key part. The primary-key codec has no

@@ -1800,11 +1800,9 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         ValueType::Array(element_type) => decode_array(bytes, element_type),
         ValueType::Nullable(inner_type) => decode_nullable(bytes, inner_type),
         ValueType::Record(descriptor) => {
-            let values = descriptor.bind(bytes).to_values()?;
-            let canonical = descriptor.create(&values)?;
-            if canonical != bytes {
-                return Err(Error::NonCanonicalRecord);
-            }
+            // Nested values are lazy records, just like top-level OwnedRecord.
+            // Encoding/admission owns validity; reading a field must not decode
+            // and re-encode every descendant to establish canonicality again.
             Ok(Value::Record(OwnedRecord::new(
                 bytes.to_vec(),
                 **descriptor,
@@ -1817,11 +1815,6 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
                     other => other,
                 })?;
             let case = schema.case(tag)?;
-            let values = case.payload.bind(payload).to_values()?;
-            let canonical = case.payload.create(&values)?;
-            if canonical != payload {
-                return Err(Error::NonCanonicalRecord);
-            }
             Ok(Value::Enum(EnumValue::new(
                 tag,
                 OwnedRecord::new(payload.to_vec(), case.payload),

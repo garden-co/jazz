@@ -131,6 +131,11 @@ pub(crate) fn decode_single_field_value(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RecordDescriptor(Intern<RecordDescriptorData>);
 
+#[cfg(test)]
+thread_local! {
+    static RECORD_ENCODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl RecordDescriptor {
     pub fn new(fields: impl IntoIterator<Item = (impl Into<String>, ValueType)>) -> Self {
         let fields = fields
@@ -187,6 +192,8 @@ impl RecordDescriptor {
     }
 
     pub fn create(&self, values: &[Value]) -> Result<Vec<u8>, Error> {
+        #[cfg(test)]
+        RECORD_ENCODE_COUNT.with(|count| count.set(count.get() + 1));
         if self.fields.len() != values.len() {
             return Err(Error::ArityMismatch {
                 expected: self.fields.len(),

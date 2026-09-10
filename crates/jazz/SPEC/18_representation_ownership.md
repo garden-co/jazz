@@ -1,5 +1,20 @@
 # jazz — Representation ownership map
 
+## Validation ownership
+
+Chapter 8's encoder-trust contract governs decoding; Groove chapter 2 governs
+stored record access. Encoders own representational correctness, storage and
+wire own byte preservation, and connection admission owns bounded decoding of
+untrusted client input. Ordinary trusted reads MUST NOT reconstruct values or
+re-encode bytes to prove canonicality. Golden byte fixtures constrain encoders;
+malformed-input fixtures must identify their trust boundary rather than impose
+universal validation on every getter. Semantic authorization and schema checks
+remain distinct from representation checks.
+
+This is a normative target, not a claim that current getters or decoder failure
+handling implement it. In particular, existing generic nested-record decoding
+and receipt validation still perform redundant canonical round trips.
+
 This is the short map of the representations a query crosses. It answers two
 questions that are easy to blur together: which module owns a representation,
 and whether it is a public API value, a cross-process wire value, or an

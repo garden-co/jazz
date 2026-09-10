@@ -62,6 +62,46 @@ Invariant digest:
 
 - `INV-SYNC-46`: A delayed native-version repair MUST NOT reinstall a supporting snapshot superseded by a later complete snapshot for the same subscription. This ordering state is receiver-local and MUST NOT require query-input labels or a new wire field. A receiver yielding to fetch missing bodies MUST first finish applying complete updates already consumed in that receive batch; a later repair must never discard another subscription’s received update or an admitted publication.
 
+## Encoder trust, bounded decoding, and failure containment
+
+Encoder trust is established by the local authenticated topology, never by a
+message claiming to be trusted. The required decoding contract is:
+
+| Direction                               | Encoder contract                                      |
+| --------------------------------------- | ----------------------------------------------------- |
+| Edge → client                           | Trusted encoder; decode directly                      |
+| Core → edge                             | Trusted encoder; decode directly                      |
+| Edge → core                             | Trusted encoder; decode directly                      |
+| Client → edge (or direct client → core) | Untrusted encoder; bounded connection-scoped decoding |
+
+Trusted output MUST NOT undergo canonical-byte comparisons, round-trip
+re-encoding, or structural validation passes before or during reads. Wire and
+storage layers MUST preserve encoder bytes. A storage round trip does not erase
+trusted provenance or require the record layer to prove integrity again.
+
+For an untrusted encoder, prechecks are only for pointer/offset range correctness
+and resource/lookup amplification: lengths, allocation, nesting, decompression,
+and induced data lookups must fit the connection's bounded budget. There is no
+requirement to eagerly prove all values canonical or even fully decodable.
+Malformed input may fail the decoder and gracefully close that connection.
+Failure MUST remain inside that scope: no process abort, shared lock poisoning,
+partial shared-state publication, or impact on unrelated connections. Merely
+catching a panic is not proof of containment; allocation failure and shared-state
+mutation must also be bounded/isolated.
+
+Authentication, write authorization, schema/application constraints, transaction
+identity and fate rules still apply. They are semantic admission, not defensive
+record decoding. A trusted edge encoder does not grant its client permission to
+write arbitrary data. Forwarding raw client bytes alone does not turn the client
+into a trusted encoder; the edge's trusted publication boundary owns the output
+contract.
+
+This section governs runtime validation policy where older codec descriptions
+or malformed-input fixtures demand universal rejection. Encoder layout/version
+specifications remain unchanged. Existing rejection tests are implementation
+receipts, not a requirement to revalidate trusted bytes. Implementation must
+establish and test connection containment before relying on decoder failure.
+
 ## Details
 
 ### 8.1 One protocol, roles not code

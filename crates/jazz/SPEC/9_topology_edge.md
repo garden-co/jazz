@@ -46,6 +46,21 @@ Invariant digest:
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
 
+## Encoder trust is distinct from authorization
+
+The direction-specific encoder contract is defined in chapter 8, “Encoder
+trust, bounded decoding, and failure containment.” Edge → client, core → edge,
+and edge → core trust the encoder. Client → edge does not. Role authentication
+establishes this distinction; clients cannot choose it with a wire flag.
+
+Trusting an encoder means relying on its representation, not bypassing the
+receiving node's transaction/fate responsibilities or the client's write policy.
+A malformed client's decoder may fail only its own connection gracefully.
+Shared runtime locks, storage batches and caches MUST remain usable and correct
+for all other connections. A node-wide panic/abort or resource exhaustion is a
+violation, even if triggered by only one client. Raw passthrough is not trusted
+re-encoding.
+
 ## Details
 
 ### 9.1 The role ladder
