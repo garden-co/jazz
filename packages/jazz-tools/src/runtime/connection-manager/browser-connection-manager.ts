@@ -37,7 +37,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private initialExplicitOfflineStateKnown = false;
   private connectionError: Error | null = null;
   private disconnected = false;
-  private readonly reconnectWaiters = new Set<() => void>();
+  private readonly reconnectWaiters = new Set<(error?: Error) => void>();
   private transportTransition: Promise<void> = Promise.resolve();
   private storageReset: Promise<void> | null = null;
   private storageResetError: Error | null = null;
@@ -165,6 +165,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.connection !== connection) return;
     this.connectionError = error;
     this.recoverableConnectionFailure = true;
+    this.rejectReconnectWaiters(error);
   }
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
@@ -242,17 +243,21 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (signal?.aborted) return;
     if (!this.disconnected) {
       await this.transportTransition;
+      if (this.connectionError) throw this.connectionError;
       if (!this.disconnected) return;
     }
-    await new Promise<void>((resolve) => {
-      const finish = () => {
-        this.reconnectWaiters.delete(finish);
+    await new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        if (!this.reconnectWaiters.delete(finish)) return;
         signal?.removeEventListener("abort", onAbort);
-        resolve();
+        if (error) reject(error);
+        else resolve();
       };
       const onAbort = () => finish();
       signal?.addEventListener("abort", onAbort, { once: true });
       this.reconnectWaiters.add(finish);
+      if (signal?.aborted) finish();
+      else if (this.connectionError) finish(this.connectionError);
     });
   }
 
@@ -530,7 +535,13 @@ export class BrowserConnectionManager extends ConnectionManager {
   private resolveReconnectWaiters(): void {
     const waiters = [...this.reconnectWaiters];
     this.reconnectWaiters.clear();
-    for (const resolve of waiters) resolve();
+    for (const settle of waiters) settle();
+  }
+
+  private rejectReconnectWaiters(error: Error): void {
+    const waiters = [...this.reconnectWaiters];
+    this.reconnectWaiters.clear();
+    for (const settle of waiters) settle(error);
   }
 
   /**
