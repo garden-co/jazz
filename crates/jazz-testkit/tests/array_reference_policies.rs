@@ -198,7 +198,8 @@ async fn array_reference_membership_grants_read_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "projects", READY_TIMEOUT).await;
 
     let atlas = create_project(&admin, "Atlas").await;
@@ -232,7 +233,8 @@ async fn array_reference_grant_updates_incrementally_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "projects", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,
@@ -327,7 +329,8 @@ async fn unindexed_array_reference_still_grants_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "projects", READY_TIMEOUT).await;
 
     let atlas = create_project(&admin, "Atlas").await;

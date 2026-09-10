@@ -135,7 +135,7 @@ impl JazzServerBuilder {
         self
     }
 
-    pub async fn start(self) -> JazzServer {
+    pub async fn start(self) -> Result<JazzServer, String> {
         JazzServer::from_builder(self).await
     }
 }
@@ -257,15 +257,15 @@ impl JazzServer {
         JazzServerBuilder::new()
     }
 
-    pub async fn start() -> Self {
+    pub async fn start() -> Result<Self, String> {
         Self::builder().start().await
     }
 
-    pub async fn start_with_schema(schema: Schema) -> Self {
+    pub async fn start_with_schema(schema: Schema) -> Result<Self, String> {
         Self::builder().with_schema(schema).start().await
     }
 
-    async fn from_builder(builder: JazzServerBuilder) -> Self {
+    async fn from_builder(builder: JazzServerBuilder) -> Result<Self, String> {
         let JazzServerBuilder {
             port,
             app_id,
@@ -332,13 +332,16 @@ impl JazzServer {
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
         }
-        let built = server_builder.build().await.expect("build test server");
+        let built = server_builder
+            .build()
+            .await
+            .map_err(|error| error.to_string())?;
 
         let mut server =
-            Self::from_built(built, port, app_id, data_dir, admin_secret, backend_secret).await;
+            Self::from_built(built, port, app_id, data_dir, admin_secret, backend_secret).await?;
         server.embedded_jwks_server = embedded_jwks_server;
         server.auth_clock = auth_clock;
-        server
+        Ok(server)
     }
 
     /// Create a Jazz server from an already-built router/state pair.
@@ -353,11 +356,14 @@ impl JazzServer {
         data_dir: ServerDataDir,
         admin_secret: String,
         backend_secret: String,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
             .await
-            .expect("bind server listener");
-        let port = listener.local_addr().expect("local addr").port();
+            .map_err(|error| format!("bind server listener: {error}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| format!("read server listener local address: {error}"))?
+            .port();
 
         let (serve_shutdown_tx, serve_shutdown_rx) = oneshot::channel();
         let shutdown_state = built.state.clone();
@@ -390,7 +396,7 @@ impl JazzServer {
             auth_clock: crate::middleware::auth::AuthClock::default(),
         };
         server.wait_ready().await;
-        server
+        Ok(server)
     }
 
     pub fn default_app_id() -> AppId {
@@ -659,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn internal_shutdown_stops_jazz_server() {
-        let server = JazzServer::start().await;
+        let server = JazzServer::start().await.expect("start test server");
         let base_url = server.base_url();
         let admin_secret = server.admin_secret().to_string();
         let client = reqwest::Client::new();
@@ -718,7 +724,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_jazz_server_keeps_built_in_jwt_helpers_enabled() {
-        let server = JazzServer::start().await;
+        let server = JazzServer::start().await.expect("start test server");
         let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
 
         assert!(context.jwt_token.is_some());
@@ -733,7 +739,8 @@ mod tests {
         let server = JazzServer::builder()
             .with_jwks_url(external_jwks.endpoint())
             .start()
-            .await;
+            .await
+            .expect("start test server");
 
         let health = reqwest::Client::new()
             .get(format!("{}/health", server.base_url()))
@@ -783,7 +790,8 @@ mod tests {
             JazzServer::ADMIN_SECRET.to_owned(),
             JazzServer::BACKEND_SECRET.to_owned(),
         )
-        .await;
+        .await
+        .expect("start embedded server");
 
         assert_eq!(server.shutdown().await, ShutdownPhase::Failed);
         drop(active_request);

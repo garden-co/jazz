@@ -89,7 +89,9 @@ async fn rebac_exists_clause_denies_non_matching_insert_inner() {
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let bob = connect_ready_user(
         &server,
         &schema,
@@ -170,7 +172,9 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice =
         jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::ALICE_ID))
             .await
@@ -276,7 +280,9 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = super::support::connect_ready_client(
         &server,
         &schema,

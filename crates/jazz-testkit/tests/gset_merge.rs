@@ -138,7 +138,9 @@ async fn concurrent_writes_converge_to_sorted_union() {
 async fn concurrent_writes_converge_to_sorted_union_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -235,7 +237,9 @@ async fn concurrent_writes_never_remove_a_shared_element() {
 async fn concurrent_writes_never_remove_a_shared_element_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -338,7 +342,9 @@ async fn same_elements_in_different_orders_converge_to_one_canonical_order() {
 async fn same_elements_in_different_orders_converge_to_one_canonical_order_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -408,7 +414,9 @@ async fn duplicate_insertions_are_idempotent() {
 async fn duplicate_insertions_are_idempotent_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -474,7 +482,9 @@ async fn later_writes_cannot_remove_existing_elements() {
 async fn later_writes_cannot_remove_existing_elements_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)
@@ -526,7 +536,9 @@ async fn empty_and_non_empty_sets_union_in_both_propagation_orders() {
 async fn empty_and_non_empty_sets_union_in_both_propagation_orders_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -662,7 +674,9 @@ async fn distinct_float_representations_converge_deterministically() {
 async fn distinct_float_representations_converge_deterministically_impl() {
     let _suite_guard = lock_gset_suite().await;
     let schema = gset_float_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
 
     let alice = TestingClient::builder()
         .with_server(&server)

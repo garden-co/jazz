@@ -110,7 +110,8 @@ mod tests {
                         .with_jwks_url(issuer.endpoint())
                         .with_native_transport_connector(native_connector())
                         .start()
-                        .await;
+                        .await
+                        .expect("start test server");
                     let mut clients = Vec::new();
                     let mut dirs = Vec::new();
                     for scope in ["a", "b"] {

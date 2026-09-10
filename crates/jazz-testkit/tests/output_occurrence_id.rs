@@ -91,7 +91,9 @@ async fn forwarded_flat_join_reset_keeps_contributor_facts_visible_to_one_shot_r
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todos_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -179,7 +181,9 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todos_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -258,7 +262,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todos_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone()).await.expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -544,7 +548,9 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todos_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)

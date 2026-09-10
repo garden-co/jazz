@@ -81,7 +81,9 @@ pub(crate) struct ClientPair {
 impl ClientPair {
     pub(crate) async fn start() -> Self {
         let schema = subscription_schema();
-        let server = JazzServer::start_with_schema(schema.clone()).await;
+        let server = JazzServer::start_with_schema(schema.clone())
+            .await
+            .expect("start test server");
         let writer = TestingClient::builder()
             .with_server(&server)
             .with_schema(schema.clone())

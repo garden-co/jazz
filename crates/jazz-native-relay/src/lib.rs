@@ -7619,7 +7619,8 @@ mod tests {
             .with_jwks_url(issuer.endpoint())
             .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
-            .await;
+            .await
+            .expect("start test server");
         let storage = tempfile::tempdir().unwrap();
         let fixture = NativeHostAbiFixture::new();
         let bearer = TestJwtIssuer::jwt_for_user("native-advice-alice");
@@ -7716,7 +7717,8 @@ mod tests {
             .with_jwks_url(issuer.endpoint())
             .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
-            .await;
+            .await
+            .expect("start test server");
         let storage = tempfile::tempdir().unwrap();
         let fixture = NativeHostAbiFixture::new();
         let bearer = TestJwtIssuer::jwt_for_user("native-advice-alice");
@@ -7934,7 +7936,8 @@ mod tests {
             .with_jwks_url(issuer.endpoint())
             .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
-            .await;
+            .await
+            .expect("start test server");
         let storage = tempfile::tempdir().unwrap();
         let fixture = NativeHostAbiFixture::new();
         let mut bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
@@ -7993,7 +7996,8 @@ mod tests {
             .with_jwks_url(issuer.endpoint())
             .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
-            .await;
+            .await
+            .expect("start test server");
         let edge = JazzServer::builder()
             .with_app_id(core.app_id())
             .with_schema(public_schema)
@@ -8002,7 +8006,8 @@ mod tests {
             .with_upstream_url(core.base_url())
             .with_native_transport_connector(jazz_testkit::native_connector())
             .start()
-            .await;
+            .await
+            .expect("start test server");
 
         jazz_testkit::wait_for(
             Duration::from_secs(15),

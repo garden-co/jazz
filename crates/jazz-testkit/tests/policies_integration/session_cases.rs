@@ -292,7 +292,8 @@ async fn select_policies_filter_subscription_results_per_client_session_inner() 
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -393,7 +394,8 @@ async fn select_policy_pagination_offsets_over_visible_rows_only_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -498,7 +500,8 @@ async fn session_claims_sub_scopes_each_provider_subject_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -605,7 +608,8 @@ async fn anonymous_client_cannot_see_owner_restricted_rows_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -705,7 +709,8 @@ async fn session_claims_sub_policies_scope_crud_to_owned_rows_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -916,7 +921,8 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -1144,7 +1150,8 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1238,7 +1245,8 @@ async fn in_session_array_policy_gates_visibility_by_membership_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1341,7 +1349,8 @@ async fn insert_policies_are_enforced_by_server_for_client_sync_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let intruder = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1442,7 +1451,8 @@ async fn update_policies_block_unauthorized_server_mutations_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1549,7 +1559,8 @@ async fn insert_policy_violation_does_not_leak_to_pristine_subscriber_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let mallory = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1652,7 +1663,8 @@ async fn update_policy_read_clause_differs_from_write_clause_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1753,7 +1765,8 @@ async fn delete_then_reinsert_by_owner_visible_to_others_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1851,7 +1864,8 @@ async fn delete_policies_block_unauthorized_server_mutations_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1967,7 +1981,8 @@ async fn single_client_operations_reach_server_in_causal_order_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
 
     let alice = TestingClient::builder()
         .with_server(&server)
@@ -2075,7 +2090,8 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
 
     let alice = TestingClient::builder()
         .with_server(&server)

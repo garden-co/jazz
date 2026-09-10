@@ -28,7 +28,9 @@ async fn remote_whole_json_row_matches_explicit_projection() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = documents_schema(None);
-            let server = jazz_server::JazzServer::start().await;
+            let server = jazz_server::JazzServer::start()
+                .await
+                .expect("start test server");
             jazz_testkit::push_catalogue_in_memory(
                 server.server_state(),
                 server.app_id(),

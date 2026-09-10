@@ -82,7 +82,9 @@ async fn rebac_declared_fk_inheritance_grants_select_access() {
 
 async fn rebac_declared_fk_inheritance_grants_select_access_inner() {
     let schema = declared_file_inheritance_schema(false);
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -121,7 +123,9 @@ async fn rebac_declared_fk_inheritance_grants_update_access() {
 
 async fn rebac_declared_fk_inheritance_grants_update_access_inner() {
     let schema = declared_file_inheritance_schema(false);
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -172,7 +176,9 @@ async fn rebac_declared_fk_inheritance_array_membership_grants_access() {
 
 async fn rebac_declared_fk_inheritance_array_membership_grants_access_inner() {
     let schema = declared_file_inheritance_schema(true);
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -241,7 +247,9 @@ async fn rebac_declared_fk_inheritance_cycle_fails_closed_inner() {
                 .policies(b_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -304,7 +312,9 @@ async fn rebac_declared_fk_inheritance_reacts_to_fk_updates() {
 
 async fn rebac_declared_fk_inheritance_reacts_to_fk_updates_inner() {
     let schema = declared_file_inheritance_schema(false);
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,

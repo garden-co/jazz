@@ -515,12 +515,13 @@ mod tests {
     /// one immutable assignment, including when routed through an edge.
     #[tokio::test]
     async fn login_or_register_is_atomic_and_revocation_is_permanent() {
-        let core = JazzServer::start().await;
+        let core = JazzServer::start().await.expect("start test server");
         let edge = JazzServer::builder()
             .with_app_id(core.app_id())
             .with_upstream_url(core.base_url())
             .start()
-            .await;
+            .await
+            .expect("start test server");
         let client = reqwest::Client::new();
         let base = format!("{}/apps/{}/accounts", edge.base_url(), edge.app_id());
         let token = TestJwtIssuer::jwt_for_user("new-account");
@@ -584,12 +585,13 @@ mod tests {
     /// Service lookup is deliberately read-only and rejects user credentials.
     #[tokio::test]
     async fn edge_forwards_identity_proof_and_core_resolves_revocation() {
-        let core = JazzServer::start().await;
+        let core = JazzServer::start().await.expect("start test server");
         let edge = JazzServer::builder()
             .with_app_id(core.app_id())
             .with_upstream_url(core.base_url())
             .start()
-            .await;
+            .await
+            .expect("start test server");
         let client = reqwest::Client::new();
         let base = format!("{}/apps/{}/accounts", edge.base_url(), edge.app_id());
         let alice = TestJwtIssuer::jwt_for_user("alice");
@@ -677,7 +679,7 @@ mod tests {
     /// alice -> request(bob) -> bob accepts -> alice revokes -> replay denied
     #[tokio::test]
     async fn ordinary_jwts_link_only_the_target_and_replay_cannot_undo_revocation() {
-        let server = JazzServer::start().await;
+        let server = JazzServer::start().await.expect("start test server");
         let client = reqwest::Client::new();
         let base = format!("{}/apps/{}/accounts", server.base_url(), server.app_id());
         let alice = TestJwtIssuer::jwt_for_user("alice");

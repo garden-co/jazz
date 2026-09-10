@@ -196,7 +196,7 @@ async fn newest_write_wins_when_row_history_spans_variable_column_generations() 
 }
 
 async fn newest_write_wins_when_row_history_spans_variable_column_generations_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],
@@ -261,7 +261,7 @@ async fn cold_client_converges_row_with_mixed_generation_history() {
 }
 
 async fn cold_client_converges_row_with_mixed_generation_history_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],
@@ -322,7 +322,7 @@ async fn late_write_under_prior_generation_converges_with_current_schema_update(
 }
 
 async fn late_write_under_prior_generation_converges_with_current_schema_update_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],
@@ -435,7 +435,7 @@ async fn read_paths_agree_on_newest_state_after_mixed_generation_writes() {
 }
 
 async fn read_paths_agree_on_newest_state_after_mixed_generation_writes_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],
@@ -569,7 +569,7 @@ async fn migration_published_at_runtime_still_converges_mixed_generation_row() {
 }
 
 async fn migration_published_at_runtime_still_converges_mixed_generation_row_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_catalogue(&server, &[tasks_schema_v1()], &[]).await;
     activate_generation(&server, &tasks_schema_v1()).await;
 
@@ -638,7 +638,7 @@ async fn draft_schema_without_lineage_does_not_affect_active_generation_reads() 
 }
 
 async fn draft_schema_without_lineage_does_not_affect_active_generation_reads_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_catalogue(&server, &[tasks_schema_v1()], &[]).await;
     activate_generation(&server, &tasks_schema_v1()).await;
 
@@ -763,7 +763,7 @@ async fn partial_current_schema_update_keeps_untouched_added_column_readable() {
 }
 
 async fn partial_current_schema_update_keeps_untouched_added_column_readable_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_catalogue(
         &server,
         &[tasks_schema_v1(), tasks_schema_v2()],

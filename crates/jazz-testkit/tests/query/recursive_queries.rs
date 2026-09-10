@@ -51,7 +51,9 @@ struct Clients {
 
 impl Clients {
     async fn start(schema: Schema) -> Self {
-        let server = JazzServer::start_with_schema(schema.clone()).await;
+        let server = JazzServer::start_with_schema(schema.clone())
+            .await
+            .expect("start test server");
         let alice = TestingClient::builder()
             .with_server(&server)
             .with_schema(schema.clone())

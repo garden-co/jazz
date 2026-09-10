@@ -34,7 +34,9 @@ local_tokio_test! {
 /// ```
 async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
     let schema = subscription_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -154,7 +156,9 @@ local_tokio_test! {
 /// returns all rows after the requested offset.
 async fn subscribe_all_cold_ordered_subscription_supports_offset_without_limit() {
     let schema = subscription_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())

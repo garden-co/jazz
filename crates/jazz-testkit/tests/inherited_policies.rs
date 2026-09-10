@@ -320,7 +320,7 @@ async fn connect_ready_user(
 async fn inherited_select_policy_exposes_child_row_through_parent() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -408,7 +408,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
 async fn reverse_inherited_select_retains_nested_source_inheritance() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = reverse_inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -487,7 +487,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
 async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chain() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -565,7 +565,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
 async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -643,7 +643,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
 async fn inherited_select_policy_expands_both_forward_parent_branches() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -732,7 +732,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
 async fn inherited_update_policy_allows_update_through_parent() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_update_schema();
 
             push_catalogue_in_memory(
@@ -846,7 +846,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
 async fn inherited_update_policy_allows_multi_hop_update_chain() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_update_schema();
 
             push_catalogue_in_memory(
@@ -945,7 +945,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
 async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_grant() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_update_schema();
 
             push_catalogue_in_memory(

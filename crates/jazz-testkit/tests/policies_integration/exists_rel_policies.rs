@@ -43,7 +43,9 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
                 .policies(projects_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,
@@ -106,7 +108,9 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
                 .policies(projects_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,
@@ -161,7 +165,9 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
                 .policies(projects_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,
@@ -218,7 +224,9 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
                 .policies(projects_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,
@@ -284,7 +292,9 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
                 .policies(protected_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,

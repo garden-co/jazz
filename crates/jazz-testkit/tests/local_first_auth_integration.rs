@@ -125,7 +125,9 @@ async fn same_seed_syncs_across_devices() {
 }
 
 async fn same_seed_syncs_across_devices_impl() {
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice_device_a = jazz_testkit::connect(local_first_context(
         &server,
@@ -173,7 +175,9 @@ async fn different_seeds_produce_distinct_principals() {
 }
 
 async fn different_seeds_produce_distinct_principals_impl() {
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice_user_id = identity::derive_user_id(&alice_seed()).to_string();
     let bob_user_id = identity::derive_user_id(&bob_seed()).to_string();
@@ -246,7 +250,9 @@ async fn persistent_seed_reconnects_as_same_principal() {
 }
 
 async fn persistent_seed_reconnects_as_same_principal_impl() {
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let context = local_first_context(
         &server,
@@ -320,7 +326,9 @@ async fn local_first_writes_carry_derived_principal_as_created_by() {
 }
 
 async fn local_first_writes_carry_derived_principal_as_created_by_impl() {
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = jazz_testkit::connect(local_first_context(
         &server,
@@ -366,7 +374,9 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let alice = jazz_testkit::connect(local_first_context(
                 &server,
                 schema,
@@ -436,7 +446,9 @@ async fn local_first_and_jwt_clients_coexist() {
 }
 
 async fn local_first_and_jwt_clients_coexist_impl() {
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = jazz_testkit::connect(local_first_context(
         &server,
@@ -526,7 +538,8 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
         .with_schema(test_schema())
         .with_auth_clock(auth_clock.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
 
     let audience = server.app_id().to_string();
     let seed = alice_seed();

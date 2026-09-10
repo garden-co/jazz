@@ -22,7 +22,9 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = hydration_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa401",
@@ -111,7 +113,9 @@ async fn fresh_empty_subscription_waits_for_and_reports_the_settled_empty_view()
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = hydration_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa403"),
             )

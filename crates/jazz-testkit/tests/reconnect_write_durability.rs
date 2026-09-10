@@ -39,7 +39,9 @@ async fn offline_durable_write_keeps_global_target_and_replays_on_reconnect() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = document_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let alice = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema.clone())

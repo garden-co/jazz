@@ -118,7 +118,9 @@ async fn concurrent_column_writes_merge_and_reach_a_third_subscriber() {
 
 async fn concurrent_column_writes_merge_and_reach_a_third_subscriber_impl() {
     let _suite_guard = MERGED_REDELIVERY_SUITE_LOCK.lock().await;
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = connect_writer(&server, "alice-merge-subscriber").await;
     let bob = connect_writer(&server, "bob-merge-subscriber").await;
@@ -246,7 +248,9 @@ async fn offline_merge_redelivers_after_reconnect() {
 
 async fn offline_merge_redelivers_after_reconnect_impl() {
     let _suite_guard = MERGED_REDELIVERY_SUITE_LOCK.lock().await;
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = connect_writer(&server, "alice-offline-merge").await;
     let bob = connect_writer(&server, "bob-offline-merge").await;
@@ -372,7 +376,9 @@ async fn same_value_write_still_advances_visible_row_metadata() {
 
 async fn same_value_write_still_advances_visible_row_metadata_impl() {
     let _suite_guard = MERGED_REDELIVERY_SUITE_LOCK.lock().await;
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = connect_writer(&server, "alice-metadata-only").await;
     let charlie = connect_writer(&server, "charlie-metadata-only").await;
@@ -485,7 +491,9 @@ async fn late_subscriber_updates_merged_row_without_full_history() {
 
 async fn late_subscriber_updates_merged_row_without_full_history_impl() {
     let _suite_guard = MERGED_REDELIVERY_SUITE_LOCK.lock().await;
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = connect_writer(&server, "alice-late-writer").await;
     let bob = connect_writer(&server, "bob-late-writer").await;

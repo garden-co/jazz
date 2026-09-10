@@ -56,7 +56,9 @@ async fn local_rows(client: &JazzClient, query: Query) -> Vec<(ObjectId, Vec<Val
 
 async fn run_readable_exit(relayed: bool) {
     let schema = schema();
-    let authority = JazzServer::start_with_schema(schema.clone()).await;
+    let authority = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let relay = if relayed {
         Some(
             JazzServer::builder()
@@ -66,7 +68,8 @@ async fn run_readable_exit(relayed: bool) {
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await,
+                .await
+                .expect("start test server"),
         )
     } else {
         None
@@ -306,7 +309,9 @@ async fn run_revoked_exit_shared_case(
     shared_cache: bool,
 ) {
     let schema = revocation_schema(dependency);
-    let authority = JazzServer::start_with_schema(schema.clone()).await;
+    let authority = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let relay = if relayed {
         Some(
             JazzServer::builder()
@@ -316,7 +321,8 @@ async fn run_revoked_exit_shared_case(
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await,
+                .await
+                .expect("start test server"),
         )
     } else {
         None
@@ -525,7 +531,9 @@ async fn run_reconnect_scalar_query(count: usize) {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = schema();
-            let authority = JazzServer::start_with_schema(schema.clone()).await;
+            let authority = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let relay = JazzServer::builder()
                 .with_schema(schema.clone())
                 .with_app_id(authority.app_id())
@@ -533,7 +541,8 @@ async fn run_reconnect_scalar_query(count: usize) {
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let bob = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema.clone())
@@ -648,7 +657,9 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = revocation_schema(dependency);
-            let authority = JazzServer::start_with_schema(schema.clone()).await;
+            let authority = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let relay = JazzServer::builder()
                 .with_schema(schema.clone())
                 .with_app_id(authority.app_id())
@@ -656,7 +667,8 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let bob = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema.clone())
@@ -942,7 +954,9 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = schema();
-            let authority = JazzServer::start_with_schema(schema.clone()).await;
+            let authority = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let relay = JazzServer::builder()
                 .with_schema(schema.clone())
                 .with_app_id(authority.app_id())
@@ -950,7 +964,8 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let writer = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema.clone())

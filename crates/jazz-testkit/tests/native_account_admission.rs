@@ -11,7 +11,9 @@ async fn public_native_client_requires_enrollment_and_cannot_choose_another_acco
             let schema = SchemaBuilder::new()
                 .table(TableSchema::builder("notes").column("title", ColumnType::Text))
                 .build();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let mut context = server.make_client_context_for_user(schema, "native-account-fixture");
             context.backend_secret = None;
             context.admin_secret = None;

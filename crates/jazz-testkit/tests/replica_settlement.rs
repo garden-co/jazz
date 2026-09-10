@@ -733,7 +733,9 @@ mod client_transport {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let schema = document_schema();
-                let server = JazzServer::start_with_schema(schema.clone()).await;
+                let server = JazzServer::start_with_schema(schema.clone())
+                    .await
+                    .expect("start test server");
                 let alice = TestingClient::builder()
                     .with_server(&server)
                     .with_schema(schema)
@@ -882,7 +884,8 @@ mod client_transport {
                     .with_data_dir(data_dir.path())
                     .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start()
-                    .await;
+                    .await
+                    .expect("start test server");
                 let mut gate = RestartGate::start(first_server.port()).await;
                 let mut context = first_server
                     .make_client_context_for_user(schema.clone(), "alice-connect-failure");
@@ -942,7 +945,8 @@ mod client_transport {
                     .with_data_dir(data_dir.path())
                     .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start()
-                    .await;
+                    .await
+                    .expect("start test server");
                 gate.forward_to(Some(second_server.port()));
                 assert!(
                     reconnect_client(&alice)
@@ -994,7 +998,8 @@ mod client_transport {
                     .with_schema(schema.clone())
                     .with_auth_clock(auth_clock.clone())
                     .start()
-                    .await;
+                    .await
+                    .expect("start test server");
                 let alice = TestingClient::builder()
                     .with_server(&server)
                     .with_schema(schema)
