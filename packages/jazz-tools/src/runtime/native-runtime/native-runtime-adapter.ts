@@ -2148,7 +2148,9 @@ export class NativeRuntimeAdapter implements Runtime {
           this.handleServerTransportError(error, generation),
         );
         this.flushQueuedServerFrames(carrier);
-        await this.pumpServerTransport();
+        this.pumpServerTransport().catch((error) =>
+          this.handleServerTransportError(error, generation),
+        );
         this.pumpSubscriptions();
         return carrier;
       })
