@@ -15,7 +15,12 @@ describe("exact local transaction write merging", () => {
     });
     try {
       const title = "large text ".repeat(20_000);
-      const large = db.insert(app.todos, { title, done: false });
+      const large = await db.insertStreaming(app.todos, {
+        title: (async function* () {
+          yield title;
+        })(),
+        done: false,
+      });
       await large.wait({ tier: "local" });
       const small = db.insert(app.todos, { title: "small", done: false });
       await small.wait({ tier: "local" });
@@ -36,7 +41,7 @@ describe("exact local transaction write merging", () => {
     }
   }, 30_000);
 
-  it("retains the previous staged state when native staging rejects a later patch", async () => {
+  it("does not cache a patch rejected by native staging", async () => {
     const db = await createBrowserTestDb({
       appId: "transaction-staging-native-rejection",
       driver: { type: "memory" },
@@ -45,8 +50,8 @@ describe("exact local transaction write merging", () => {
       const inserted = db.insert(app.todos, { title: "original", done: false });
       await inserted.wait({ tier: "local" });
       const tx = db.beginTransaction();
-      tx.update(app.todos, inserted.value.id, { title: "first patch" });
       const { WasmDb } = await loadWasmModule();
+      const exact = vi.spyOn(WasmDb.prototype, "localCurrentRow");
       const nativeUpdate = vi.spyOn(WasmDb.prototype, "updateInTransaction");
       nativeUpdate.mockImplementationOnce(() => {
         throw new Error("synthetic staging failure");
@@ -58,10 +63,15 @@ describe("exact local transaction write merging", () => {
       } finally {
         nativeUpdate.mockRestore();
       }
-      tx.update(app.todos, inserted.value.id, { done: true });
+      try {
+        tx.update(app.todos, inserted.value.id, { done: true });
+        expect(exact).toHaveBeenCalledTimes(2);
+      } finally {
+        exact.mockRestore();
+      }
       await tx.commit().wait({ tier: "local" });
       expect(await db.all(app.todos)).toEqual([
-        { id: inserted.value.id, title: "first patch", done: true },
+        { id: inserted.value.id, title: "original", done: true },
       ]);
     } finally {
       await db.shutdown();
