@@ -6151,6 +6151,8 @@ fn maintained_publication_reuses_complete_successor_closure() {
     assert_eq!(traversals, 2, "one closure for canonical transition and one for the complete wire manifest; bookkeeping must reuse the former");
     let SyncMessage::ViewUpdate(view) = update else { panic!("expected complete manifest") };
     assert_eq!(view.supporting_rows.iter().map(|row| row.row).collect::<BTreeSet<_>>(), expected);
+    assert_eq!(view.supporting_rows.len(), 150, "complete manifest has no duplicate rows");
+    assert_eq!(view.supporting_rows.iter().find(|row| row.row == row_from_u64(0)).unwrap().version.tx, tx, "changed row carries its current exact version");
     let state = &peer.publication_states[&subscription];
     assert_eq!(state.program_fact_set, state.maintained_subscription_view.as_ref().unwrap().maintained.active_peer_source_closure_facts());
 }
