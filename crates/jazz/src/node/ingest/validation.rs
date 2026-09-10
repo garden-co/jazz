@@ -20,6 +20,22 @@ where
         let Some(parent_tx) = self.query_transaction(parent).await? else {
             return Ok(ParentCoordinateValidation::Inconclusive);
         };
+        // Retain the resident cache's all-branch/all-layer lookup. On a cold
+        // cache, a valid parent needs one exact history read rather than every
+        // sibling row in its transaction. A miss still uses the completeness
+        // and wrong-coordinate rules below without changing their semantics.
+        if !self.query.tx_versions_cache.contains_key(&parent)
+            && let Some(candidate) = self
+                .query_exact_parent_version(parent, parent_tx.node_alias, coordinate)
+                .await?
+        {
+            if self.version_tx_id(&candidate)? != parent
+                || !self.version_row_matches_parent_coordinate(&candidate, coordinate)?
+            {
+                return Err(Error::InvalidStoredValue("parent history key does not match stored coordinate"));
+            }
+            return Ok(ParentCoordinateValidation::Exact);
+        }
         let coordinate_versions = self
             .query_versions_for_tx_physical_coordinate(
                 parent,
