@@ -528,7 +528,6 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       let settled = false;
       let cancelled = false;
       let closingLatePeer = false;
-      let alive = false;
       let lastTick = Date.now();
       // A delayed alive reply is not evidence that this realm released its
       // physical database lock. Only worker-closing authorizes a generation
@@ -626,13 +625,9 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           port.close();
           return;
         }
-        if (event.data?.type === "worker-alive") {
-          if (!alive) {
-            alive = true;
-            refreshGrace();
-          }
-          return;
-        }
+        // Liveness is not completed initialization. A first or repeated
+        // alive reply must not restart the single startup budget.
+        if (event.data?.type === "worker-alive") return;
         if (event.data?.type === "runtime-error") {
           cleanup();
           port.close();

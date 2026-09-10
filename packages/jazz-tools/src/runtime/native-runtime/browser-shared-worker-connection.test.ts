@@ -695,6 +695,30 @@ describe("browser SharedWorker realm identity", () => {
     expect(port.closed).toBe(true);
   });
 
+  it("does not restart the startup budget when the first alive reply arrives late", async () => {
+    vi.useFakeTimers();
+    const { connection, port, sent } = runtimeBootstrapFixture(299_000);
+    let outcome = "pending";
+    void connection.ready().then(
+      () => {
+        outcome = "ready";
+      },
+      () => {
+        outcome = "failed";
+      },
+    );
+    await vi.advanceTimersByTimeAsync(299_000);
+    expect(outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(outcome).toBe("failed");
+    await expect(connection.ready()).rejects.toBeInstanceOf(BrowserWorkerUnresponsiveError);
+    expect(sent.filter((message) => message.type === "connect-runtime")).toHaveLength(1);
+    expect(sent.filter((message) => message.type === "cancel-runtime-bootstrap")).toHaveLength(1);
+    port.emit({ type: "runtime-bootstrap-cancelled" });
+    await connection.shutdown();
+    expect(port.closed).toBe(true);
+  });
+
   it("does not let duplicate alive messages extend runtime startup", async () => {
     vi.useFakeTimers();
     const { connection, port, sent } = runtimeBootstrapFixture();
