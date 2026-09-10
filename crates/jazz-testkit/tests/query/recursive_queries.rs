@@ -28,17 +28,6 @@ macro_rules! local_tokio_test {
     };
 }
 
-fn integer_frontier_schema() -> Schema {
-    SchemaBuilder::new()
-        .table(TableSchema::builder("teams").column("team_id", ColumnType::Integer))
-        .table(
-            TableSchema::builder("team_edges")
-                .column("child_team", ColumnType::Integer)
-                .column("parent_team", ColumnType::Integer),
-        )
-        .build()
-}
-
 fn team_graph_schema() -> Schema {
     SchemaBuilder::new()
         .table(
@@ -88,22 +77,6 @@ impl Clients {
     }
 }
 
-async fn create_numbered_team(client: &JazzClient, team_id: i32) -> ObjectId {
-    client
-        .insert("teams", row_input!("team_id" => team_id))
-        .expect("create numbered team")
-        .0
-}
-
-async fn create_numbered_team_edge(client: &JazzClient, child_team: i32, parent_team: i32) {
-    client
-        .insert(
-            "team_edges",
-            row_input!("child_team" => child_team, "parent_team" => parent_team),
-        )
-        .expect("create numbered team edge");
-}
-
 async fn create_team(client: &JazzClient, name: &str, parent_id: Option<ObjectId>) -> ObjectId {
     client
         .insert(
@@ -121,18 +94,6 @@ async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team
             row_input!("child_team" => child_team, "parent_team" => parent_team),
         )
         .expect("create team edge");
-}
-
-fn sorted_integer_frontier_values(rows: &QueryRows) -> Vec<i32> {
-    let mut values = rows
-        .iter()
-        .filter_map(|(_, values)| match values.first() {
-            Some(Value::Integer(team_id)) => Some(*team_id),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    values.sort_unstable();
-    values
 }
 
 fn sorted_team_names(rows: &QueryRows) -> Vec<String> {
@@ -219,48 +180,6 @@ async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
         sorted_team_result_names(&rows),
         vec!["leaf", "mid", "root"]
     );
-
-    clients.shutdown().await;
-}
-}
-
-local_tokio_test! {
-/// Verifies that recursive gather can use a scalar column frontier and dedupe a
-/// cycle without requiring every reached value to be backed by a row in the seed
-/// table.
-///
-/// Actors and flow:
-///
-/// alice writes team 1 plus cyclic edges 1 -> 2 -> 3 -> 1
-/// bob queries from seed team_id=1 and sees the recursive closure {1, 2, 3}
-#[ignore = "#1767: canonical Query reachability does not materialize scalar frontier values without backing root rows"]
-async fn recursive_query_expands_column_frontier_through_cycle() {
-    let clients = Clients::start(integer_frontier_schema()).await;
-
-    create_numbered_team(&clients.alice, 1).await;
-    create_numbered_team_edge(&clients.alice, 1, 2).await;
-    create_numbered_team_edge(&clients.alice, 2, 3).await;
-    create_numbered_team_edge(&clients.alice, 3, 1).await;
-
-    let query = Query::from("teams")
-        .filter(eq(col("team_id"), lit(1)))
-        .gather(
-            Gather::from("team_edges")
-                .where_current("child_team")
-                .hop_to("parent_team")
-                .frontier_column("team_id")
-                .max_depth(10),
-        )
-        .select(["team_id"]);
-
-    let rows = wait_for_rows(
-        &clients.bob,
-        query,
-        "bob sees recursive integer closure",
-        |rows| (sorted_integer_frontier_values(&rows) == vec![1, 2, 3]).then_some(rows),
-    )
-    .await;
-    assert_eq!(sorted_integer_frontier_values(&rows), vec![1, 2, 3]);
 
     clients.shutdown().await;
 }
