@@ -692,6 +692,29 @@ mod tests {
 
         panic!("jazz server did not stop after internal shutdown");
     }
+    #[tokio::test]
+    async fn occupied_explicit_port_returns_contextual_error() {
+        let blocker = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve occupied server port");
+        let port = blocker
+            .local_addr()
+            .expect("read occupied server port")
+            .port();
+
+        let result: Result<JazzServer, String> =
+            JazzServer::builder().with_port(port).start().await;
+        drop(blocker);
+
+        let error = match result {
+            Ok(_) => panic!("occupied explicit port should reject server startup"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("bind") || error.contains("server listener"),
+            "startup error should identify the server listener: {error}"
+        );
+    }
 
     #[tokio::test]
     async fn default_jazz_server_keeps_built_in_jwt_helpers_enabled() {
