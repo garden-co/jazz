@@ -414,7 +414,7 @@ fn open_persistent_browser_worker(
         },
     )))
     .expect("open persistent browser worker");
-    db.restore_browser_relay_pending_uploads()
+    block_on(db.restore_browser_relay_pending_uploads())
         .expect("restore browser relay pending uploads");
     db
 }

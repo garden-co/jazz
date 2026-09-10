@@ -878,11 +878,13 @@ where
 
     /// Restore locally originated, unsettled durable writes into the
     /// process-local upload queue after reopening client storage.
-    pub(super) fn restore_pending_uploads(&self, identity: DbIdentity) -> Result<(), Error> {
-        let mut node = self.node.borrow_mut();
-        let pending = node.pending_transaction_ids_for(identity.node, identity.author);
-        let pending = crate::db::block_on(pending)?;
-        drop(node);
+    pub(super) async fn restore_pending_uploads(&self, identity: DbIdentity) -> Result<(), Error> {
+        let pending = self
+            .node
+            .lock()
+            .await
+            .pending_transaction_ids_for(identity.node, identity.author)
+            .await?;
         let mut restored = HashSet::new();
         for tx_id in pending {
             if restored.insert(tx_id) {
@@ -908,14 +910,16 @@ where
         Ok(())
     }
 
-    pub(super) fn restore_browser_relay_pending_uploads(
+    pub(super) async fn restore_browser_relay_pending_uploads(
         &self,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        let mut node = self.node.borrow_mut();
-        let pending = node.pending_transaction_ids_for_author(author);
-        let pending = crate::db::block_on(pending)?;
-        drop(node);
+        let pending = self
+            .node
+            .lock()
+            .await
+            .pending_transaction_ids_for_author(author)
+            .await?;
         self.browser_relay_recovered_tx_ids
             .borrow_mut()
             .extend(pending.iter().copied());
