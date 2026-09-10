@@ -700,8 +700,11 @@ describe("NativeRuntimeAdapter server transport", () => {
 
       expect(sockets.map((socket) => socket.url)).toEqual([
         "ws://127.0.0.1:4200/apps/app-a/ws",
+        "ws://127.0.0.1:4200/apps/app-b/ws",
         "ws://127.0.0.1:4200/apps/app-c/ws",
       ]);
+      expect(sockets[1]!.closed).toBe(true);
+      expect(sockets[2]!.closed).toBe(false);
       expect(connectCalls).toBe(3);
       expect(admitted).toEqual([oldTransport, supersededTransport, replacementTransport]);
       expect(supersededTransport.closed).toBe(true);

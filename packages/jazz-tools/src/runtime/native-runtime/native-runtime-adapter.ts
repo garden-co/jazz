@@ -1985,7 +1985,17 @@ export class NativeRuntimeAdapter implements Runtime {
           const latest = this.serverReplacementIntent;
           if (!latest || this.closed) throw new Error("server transport disconnected");
           this.serverReplacementIntent = null;
-          await this.startServerConnection(latest);
+          try {
+            await this.startServerConnection(latest);
+          } catch (error) {
+            if (
+              this.serverReplacementIntent &&
+              errorMessage(error) === "server transport replaced"
+            ) {
+              continue;
+            }
+            throw error;
+          }
           if (!this.serverReplacementIntent) {
             if (!this.serverCarrierPromise) {
               throw new Error("server transport connection was not started");
