@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use crate::support::{
-    QueryRows, TestingClient, collect_stream_deltas, has_added, has_added_id,
-    wait_for_query_results, wait_for_rows, wait_for_subscription_update,
+    QueryRows, TestingClient, collect_stream_deltas, has_added, wait_for_query_results,
+    wait_for_rows, wait_for_subscription_update,
 };
 use jazz::query::{Gather, Query, col, eq, lit};
 use jazz::row_input;
@@ -193,7 +193,6 @@ local_tokio_test! {
 ///
 /// alice writes team-1 -> team-2, bob subscribes from team-1
 /// alice adds team-2 -> team-3, bob receives team-3 and the query has all teams
-#[ignore = "#1767: canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
     let clients = Clients::start(team_graph_schema()).await;
 
@@ -230,7 +229,7 @@ async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
         &mut log,
         QUERY_TIMEOUT,
         "initial recursive closure add",
-        |log| has_added_id(log, team2),
+        |log| has_added(log, &[("name", Value::Text("team-2".to_owned()))]),
     )
     .await;
     collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
@@ -243,7 +242,7 @@ async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
         &mut log,
         QUERY_TIMEOUT,
         "team-3 add after recursive edge insert",
-        |log| has_added_id(log, team3),
+        |log| has_added(log, &[("name", Value::Text("team-3".to_owned()))]),
     )
     .await;
 
