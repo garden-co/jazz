@@ -47,7 +47,7 @@ impl AccountRegistryOwner {
                             .and_then(|profile| {
                                 // Versions this isolated root's journal keys and closed
                                 // descriptor; values use ordinary Groove records.
-                                profile.with_additional_codecs(["jazz.account-journal.v2"])
+                                profile.with_additional_codecs(["jazz.account-journal.v1"])
                             });
                         profile
                             .map_err(|error| error.to_string())
@@ -205,21 +205,23 @@ mod tests {
     #[test]
     fn old_preview_registry_profile_is_rejected() {
         use jazz::groove::storage::OrderedKvStorage;
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("accounts.rocksdb");
-        let factory = jazz_storage_rocksdb::RocksDbStorageFactory;
-        let old_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-            .unwrap()
-            .with_additional_codecs(["jazz.account-command.v1"])
-            .unwrap();
-        jazz::db::block_on(async {
-            let storage = factory
-                .open(path.clone(), vec!["default".into()], old_profile)
-                .await
+        for codec in ["jazz.account-command.v1", "jazz.account-journal.v2"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("accounts.rocksdb");
+            let factory = jazz_storage_rocksdb::RocksDbStorageFactory;
+            let old_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
+                .unwrap()
+                .with_additional_codecs([codec])
                 .unwrap();
-            storage.close().await.unwrap();
-        });
-        assert!(AccountRegistryOwner::open(Some((Arc::new(factory), path))).is_err());
+            jazz::db::block_on(async {
+                let storage = factory
+                    .open(path.clone(), vec!["default".into()], old_profile)
+                    .await
+                    .unwrap();
+                storage.close().await.unwrap();
+            });
+            assert!(AccountRegistryOwner::open(Some((Arc::new(factory), path))).is_err());
+        }
     }
 
     // Internal durable-owner test: HTTP tests cover authentication, while this
