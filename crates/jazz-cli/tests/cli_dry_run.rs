@@ -2,12 +2,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::rc::Rc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -432,22 +431,276 @@ fn pump_websocket_once_allow_close(
     block_on(db.tick()).expect("apply server frames");
 }
 
-#[cfg(unix)]
-fn constrain_receive_buffer(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, bytes: libc::c_int) {
-    let MaybeTlsStream::Plain(stream) = socket.get_mut() else {
-        panic!("loopback test must use a plain TCP stream");
-    };
-    let result = unsafe {
-        libc::setsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            (&bytes as *const libc::c_int).cast(),
-            std::mem::size_of_val(&bytes) as libc::socklen_t,
-        )
-    };
-    assert_eq!(result, 0, "set loopback receive buffer");
+#[derive(Default)]
+struct BackpressureGate {
+    state: Mutex<BackpressureGateState>,
+    changed: Condvar,
 }
+
+#[derive(Default)]
+struct BackpressureGateState {
+    armed: bool,
+    large_frame_started: bool,
+    released: bool,
+}
+
+impl BackpressureGate {
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, BackpressureGateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn arm(&self) {
+        self.lock_state().armed = true;
+    }
+
+    fn should_gate(&self) -> bool {
+        self.lock_state().armed
+    }
+
+    fn mark_large_frame_started(&self) {
+        let mut state = self.lock_state();
+        state.large_frame_started = true;
+        self.changed.notify_all();
+    }
+
+    fn wait_for_large_frame(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock_state();
+        while !state.large_frame_started {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "server never started A's large response behind the proxy gate"
+            );
+            let (next, result) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+            assert!(
+                !result.timed_out(),
+                "server never started A's large response behind the proxy gate"
+            );
+        }
+    }
+
+    fn wait_until_released(&self) {
+        let mut state = self.lock_state();
+        while !state.released {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn is_released(&self) -> bool {
+        self.lock_state().released
+    }
+    fn release(&self) {
+        let mut state = self.lock_state();
+        state.released = true;
+        self.changed.notify_all();
+    }
+}
+
+struct BackpressureProxy {
+    ws_url: String,
+    gate: Arc<BackpressureGate>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl BackpressureProxy {
+    fn start(upstream_ws_url: &str) -> Self {
+        let upstream_authority = upstream_ws_url
+            .strip_prefix("ws://")
+            .expect("loopback server uses ws://")
+            .split('/')
+            .next()
+            .expect("loopback WebSocket URL authority");
+        let upstream_addr = upstream_authority
+            .to_socket_addrs()
+            .expect("resolve loopback server address")
+            .next()
+            .expect("loopback server address");
+        let route = upstream_ws_url
+            .strip_prefix("ws://")
+            .and_then(|url| url.find('/').map(|index| url[index..].to_owned()))
+            .unwrap_or_else(|| "/sync".to_owned());
+        let proxy_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind backpressure proxy");
+        let proxy_addr = proxy_listener
+            .local_addr()
+            .expect("read backpressure proxy address");
+        let gate = Arc::new(BackpressureGate::default());
+        let thread_gate = Arc::clone(&gate);
+        let thread = thread::spawn(move || {
+            let (mut client, _) = proxy_listener.accept().expect("accept A at proxy");
+            let mut upstream = TcpStream::connect(upstream_addr).expect("connect proxy upstream");
+            relay_http_upgrade(&mut client, &mut upstream);
+            upstream
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .expect("set proxy upstream read timeout");
+            let client_to_server = client.try_clone().expect("clone proxy client stream");
+            let upstream_for_client = upstream.try_clone().expect("clone proxy upstream stream");
+            thread::spawn(move || relay_client_to_server(client_to_server, upstream_for_client));
+            relay_server_to_client(&mut upstream, &mut client, &thread_gate);
+        });
+        Self {
+            ws_url: format!("ws://127.0.0.1:{}{}", proxy_addr.port(), route),
+            gate,
+            thread: Some(thread),
+        }
+    }
+
+    fn arm(&self) {
+        self.gate.arm();
+    }
+
+    fn wait_for_large_frame(&self, timeout: Duration) {
+        self.gate.wait_for_large_frame(timeout);
+    }
+
+    fn release(&self) {
+        self.gate.release();
+    }
+
+    fn shutdown(mut self) {
+        self.release();
+        self.thread
+            .take()
+            .expect("backpressure proxy thread")
+            .join()
+            .expect("backpressure proxy exits");
+    }
+}
+
+fn relay_http_upgrade(client: &mut TcpStream, upstream: &mut TcpStream) {
+    let request = read_http_headers(client).expect("read proxy WebSocket request");
+    upstream
+        .write_all(&request)
+        .expect("forward proxy WebSocket request");
+    let response = read_http_headers(upstream).expect("read proxy WebSocket response");
+    client
+        .write_all(&response)
+        .expect("forward proxy WebSocket response");
+}
+
+fn read_http_headers(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut headers = Vec::new();
+    let mut byte = [0; 1];
+    loop {
+        stream.read_exact(&mut byte)?;
+        headers.push(byte[0]);
+        if headers.ends_with(b"\r\n\r\n") {
+            return Ok(headers);
+        }
+    }
+}
+
+fn relay_client_to_server(mut client: TcpStream, mut upstream: TcpStream) {
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let count = match client.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        if upstream.write_all(&buffer[..count]).is_err() {
+            break;
+        }
+    }
+}
+
+fn relay_server_to_client(
+    upstream: &mut TcpStream,
+    client: &mut TcpStream,
+    gate: &BackpressureGate,
+) {
+    const LARGE_FRAME_BYTES: u64 = 64 * 1024;
+    upstream
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("set proxy upstream read timeout");
+    loop {
+        let mut header = [0; 2];
+        for byte in &mut header {
+            *byte = match read_proxy_byte(upstream, gate) {
+                Some(byte) => byte,
+                None => return,
+            };
+        }
+        let mut payload_len = u64::from(header[1] & 0x7f);
+        if payload_len == 126 {
+            let mut extended = [0; 2];
+            for byte in &mut extended {
+                *byte = read_proxy_byte(upstream, gate).expect("read proxy WebSocket length");
+            }
+            payload_len = u64::from(u16::from_be_bytes(extended));
+            client
+                .write_all(&header)
+                .and_then(|_| client.write_all(&extended))
+                .expect("forward proxy WebSocket extended header");
+        } else if payload_len == 127 {
+            let mut extended = [0; 8];
+            for byte in &mut extended {
+                *byte = read_proxy_byte(upstream, gate).expect("read proxy WebSocket length");
+            }
+            payload_len = u64::from_be_bytes(extended);
+            client
+                .write_all(&header)
+                .and_then(|_| client.write_all(&extended))
+                .expect("forward proxy WebSocket extended header");
+        } else {
+            client
+                .write_all(&header)
+                .expect("forward proxy WebSocket header");
+        }
+
+        if payload_len >= LARGE_FRAME_BYTES && gate.should_gate() {
+            gate.mark_large_frame_started();
+            gate.wait_until_released();
+        }
+        upstream
+            .set_read_timeout(None)
+            .expect("disable proxy upstream read timeout for payload");
+
+        let mut remaining = payload_len;
+        let mut buffer = [0; 16 * 1024];
+        while remaining != 0 {
+            let read_len = remaining.min(buffer.len() as u64) as usize;
+            let count = upstream
+                .read(&mut buffer[..read_len])
+                .expect("read proxy WebSocket payload");
+            assert_ne!(count, 0, "proxy upstream closed inside WebSocket frame");
+            client
+                .write_all(&buffer[..count])
+                .expect("forward proxy WebSocket payload");
+            remaining -= count as u64;
+        }
+        upstream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("restore proxy upstream read timeout");
+    }
+}
+
+fn read_proxy_byte(upstream: &mut TcpStream, gate: &BackpressureGate) -> Option<u8> {
+    let mut byte = [0; 1];
+    loop {
+        match upstream.read(&mut byte) {
+            Ok(0) => return None,
+            Ok(1) => return Some(byte[0]),
+            Ok(_) => unreachable!("single-byte proxy read returned multiple bytes"),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) && !gate.is_released() => {}
+            Err(_) => return None,
+        }
+    }
+}
+
 
 fn wait_for_settled_reset(
     client: &mut ConnectedClient,
@@ -1458,11 +1711,10 @@ fn websocket_reconnect_preserves_local_structured_terminal_patches() {
     server.shutdown();
 }
 
-/// The first client receives a multi-megabyte subscription response while it
-/// deliberately advertises a tiny TCP receive window and never reads it.
-/// Client B's independent reset must still complete before A is drained, and
-/// A's rows must arrive in their original order once the window is opened.
-#[cfg(unix)]
+/// A's large subscription response is held by an in-test bounded WebSocket
+/// proxy gate rather than by a requested socket receive-buffer size.
+/// Client B's independent reset must complete before that gate is released,
+/// and A's rows must arrive in their original order afterwards.
 #[test]
 fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_fifo() {
     const ROW_COUNT: usize = 64;
@@ -1481,6 +1733,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
 
     let schema = structured_schema();
     let server = RunningServer::start_schema(&schema);
+    let proxy = BackpressureProxy::start(&server.ws_url);
 
     let mut seed = open_connected_client(
         schema.clone(),
@@ -1540,7 +1793,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
 
     let mut stalled = open_connected_client(
         schema.clone(),
-        &server.ws_url,
+        &proxy.ws_url,
         "bug-196-stalled",
         identity_for_subject(0xa2, "bug-196-stalled"),
     );
@@ -1564,7 +1817,6 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         &stalled.db,
         &stalled.wire
     ));
-    constrain_receive_buffer(&mut stalled.socket, 1024);
 
     let data_query = stalled.db.prepare_query(&Query::from("users")).unwrap();
     let mut stalled_data_subscription = block_on(stalled.db.subscribe(
@@ -1622,6 +1874,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         },
     ))
     .expect("stage A's unread response trigger");
+    proxy.arm();
     let mut sent_trigger = false;
     for _ in 0..8 {
         block_on(stalled.db.tick()).expect("queue A's unread response trigger");
@@ -1640,8 +1893,10 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     }
     assert!(sent_trigger, "A must send its response trigger");
 
-    // Let the server reach A's unread large reset before B is introduced.
-    thread::sleep(Duration::from_millis(250));
+    // The proxy has now observed A's large response header and is withholding
+    // its payload. This is the concrete bounded-backpressure barrier: no fixed
+    // sleep or socket-buffer request decides when B is introduced.
+    proxy.wait_for_large_frame(Duration::from_secs(3));
 
     let mut independent = open_connected_client(
         schema.clone(),
@@ -1672,10 +1927,9 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     );
     drop(_auxiliary_subscription);
 
-
-    // Reopen A's receive window only after B has completed. This releases the
-    // blocked WebSocket frame so the strict FIFO assertion can consume it.
-    constrain_receive_buffer(&mut stalled.socket, 8 * 1024 * 1024);
+    proxy.release();
+    // Release A only after B has completed. The gate then forwards the held
+    // frame so the strict FIFO assertion can consume it.
     if let MaybeTlsStream::Plain(stream) = stalled.socket.get_mut() {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1732,10 +1986,12 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         observed_indices, expected_indices,
         "client A's eventual subscription batches must stay FIFO"
     );
+
     drop(stalled_data_subscription);
     drop(stalled.socket);
     drop(independent.socket);
     drop(seed.socket);
+    proxy.shutdown();
     server.shutdown();
 }
 
