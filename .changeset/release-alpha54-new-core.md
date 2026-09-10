@@ -6,14 +6,31 @@
 "create-jazz": patch
 ---
 
-Release the new incremental query and subscription core. Migrate `Db.subscribeAll` to `Db.subscribe` for complete current results, and React/React Native `useAll` array results to `{ data, isLoading, error }`; `useAllSuspense` continues to return rows. Replace removed `localUpdates`/`propagation` options with read-tier selection.
+Jazz now runs on Groove, a new low-level database engine built around incremental view maintenance. It shares work between similar query subscriptions and provides a foundation for improving correctness and performance. This release remains an alpha: please report anything that breaks or feels slow.
 
-This alpha includes the private-session React Native relay with sealed Android/iOS artifacts, safer concurrent query admission and transaction recovery, and fixes to persistence, permissions, branch views, authentication and browser worker lifecycles. It also updates Better Auth compatibility to 1.7.1, pins generated starter source snapshots to the installed release, and verifies the packaged native runtime loaders.
+### Breaking storage change
 
-Apps now use `createJazzSession` to configure their account and client once. Its `registerJWT`, `loginJWT`, `linkJWT`, `restoreLocalFirst`, and `logout` actions own graceful client replacement; linking happens outside contexts after pending writes have synced. React and React Native expose the same state through `JazzSessionProvider` and `useJazzSession`, with adapters for Svelte, Vue, and Solid. Low-level opaque account handles remain available. Node backends use `initial: { backendSecret }` or `becomeBackend({ backendSecret })` on the same session API; ready `client.db` supplies backend authority and immutable request scopes preserve user permissions. `$createdBy` and `$updatedBy` are non-null structured `{ account, identity: { issuer, subject } }` values; use `.account` for account ownership. SYSTEM authorship uses a reserved account and issuer with the originating node as subject. Local-first recovery uses `exportLocalFirstSecret` and `restoreLocalFirst`.
+Alpha.54 changes the storage format without automatic migration from alpha.53. If you have existing production data, contact us for migration help before upgrading. For a fresh start, create a new Jazz Cloud app, or use the alpha.54 CLI with fresh server storage when self-hosting. Future storage-format changes will include automatic migration.
 
-Persistent browser clients now recover locally acknowledged pending writes after an offline restart without blocking IndexedDB I/O. Subscriber admission remains ordered with evaluator work, authentication changes and peer shutdown. Direct `jazz-wasm` callers must now await `acceptSubscriber` and `acceptSubscriberWithSelfSignedProof`; the public `createDb` interface is unchanged.
+### Four major changes
 
-Fix JSON values in relation includes, historical aggregate reads, nested relation pagination, SQL NULL joins, and typed scalar filters. Improve scoped query availability and identity admission retries, reject ambiguous schema and aggregate names, and roll back failed query preparation safely.
+**Simpler read tiers.** Choose `local-first` for immediate local results with background sync; `remote-if-possible` for remotely confirmed state when online, local fallback when offline, and immediate local writes; or `remote` for remotely confirmed state only, including confirmation of local writes before they appear.
 
-Stabilize browser workers, Inspector connections, and Svelte/Vue provider lifecycles; bound prepared-query caches and clean up interrupted native uploads. Restore WASM tracing, preserve native account decoding and schema defaults, and provide actionable diagnostics for removed Jazz Classic APIs. Harden streamed JSON validation and JWKS transport, reject unsupported session-claim ranges, and fix application-scoped server storage and starter app-name parsing.
+**Clearer account lifecycle.** Configure your account and client once with `createJazzSession`. The session manages auth transitions, graceful shutdown and client replacement. Framework adapters expose that state without app-owned lifecycle plumbing. External authentication can use `loginOrRegisterJWT`; explicit linking remains available for attaching a fresh external identity to an existing account. Backends use the same session API with `initial: { backendSecret }` or `becomeBackend({ backendSecret })`.
+
+**Build-your-own branching.** Define branched table views with `branchBy` columns and explicit head/base view options. Branch identifiers can be strings or references to your own branch table, letting your app define branch metadata, workflows and row-level permissions.
+
+**Large values are ordinary columns.** Store files and streams in `s.bytes()`, large JSON documents in `s.json()`, and text in `s.string()`. Read complete values or stream supported ranges and JSON subpaths; update them with byte patches, appends, JSON edits or string splices. Content-based chunking in a Prolly Tree makes these operations efficient while retaining ordinary column permissions and query semantics. JSON and rich-text merge strategies are planned for a later release.
+
+### API migration checklist
+
+- Replace `Db.subscribeAll` with `Db.subscribe` for complete current results.
+- React and React Native `useAll` now return `{ data, isLoading, error }`; `useAllSuspense` still returns rows.
+- Replace `localUpdates` and `propagation` options with read-tier selection.
+- Move account/client lifecycle handling to `createJazzSession` and the framework adapters. Linking happens outside contexts; the session gracefully shuts down the old client and syncs pending writes before replacing it.
+- `$createdBy` and `$updatedBy` are non-null `{ account, identity: { issuer, subject } }` values. Use `.account` for ownership comparisons. SYSTEM authorship uses a reserved account and issuer, with the originating node as subject.
+- Direct `jazz-wasm` consumers must await `acceptSubscriber` and `acceptSubscriberWithSelfSignedProof`.
+
+### Reliability improvements
+
+This release also improves browser and React Native persistence, offline recovery and reconnect behavior; query correctness across relations, aggregates, branches and permissions; and authentication and framework lifecycles. It includes fixes for large JSON relation values, native runtime packaging and generated starter apps.
