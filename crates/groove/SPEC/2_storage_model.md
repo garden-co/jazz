@@ -474,8 +474,11 @@ ancestors, and the overflow chains owned by replaced/deleted values together wit
 publication, only when the PageStore proves exclusive tree ownership. Generic and
 memory stores default to retaining durable pages so independent cold handles can
 finish reading their older complete closure and reach generation-conflict recovery.
+All writers sharing those handles must remain non-reclaiming: low-level direct
+handles may not coexist with an exclusive browser worker owner.
 The browser capability consumes one live database Web Lock/worker epoch proof for
-one tree; tree clones share its root. It expires before release/close/invalidation,
+one live tree at a time; tree clones share its root, and the last clone dropping
+releases tree admission for a fresh open. It expires before release/close/invalidation,
 and deletion commits recheck it at publication. Unpublished superseded fresh pages
 are omitted from the commit regardless of ownership. A separate reachability
 collector is still required for historical garbage; this policy changes neither

@@ -245,6 +245,28 @@ describe("IndexedDbPageStore", () => {
     await epoch.release();
   });
 
+  it("does not reactivate a pending ownership claim after close or release", async () => {
+    for (const close of [false, true]) {
+      const store = await IndexedDbPageStore.open(databaseName());
+      const epoch = await acquireBrowserPhysicalDatabaseEpoch(store.name, {
+        async request(_name, _options, callback) {
+          return await callback({});
+        },
+      });
+      const claim = store.claimBrowserWorkerEpoch(epoch.id, epoch);
+      const rejected = expect(claim).rejects.toThrow();
+      if (close) {
+        store.close();
+      } else {
+        await store.releaseBrowserWorkerEpoch(epoch.id);
+      }
+      await rejected;
+      expect(store.canReclaimObsoletePages).toBe(false);
+      store.close();
+      await epoch.release();
+    }
+  });
+
   it("rejects a stale generation instead of overwriting a newer root", async () => {
     const name = databaseName();
     const store = await IndexedDbPageStore.open(name);

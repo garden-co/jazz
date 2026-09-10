@@ -57,7 +57,9 @@ pub trait PageStore {
     /// handle may retain an older root. The store must also reject reclamation
     /// commits after ownership expires, including already prepared commits.
     /// Clones of one IdbTree share a root and are permitted. Independent trees
-    /// (including ones built from cloned stores) require this to remain false.
+    /// (including ones built from cloned stores) require this to remain false
+    /// for every writer sharing their store. Default-off does not make a reader
+    /// safe alongside another writer that violates this exclusivity contract.
     fn claim_tree_ownership(&self) -> Result<TreeOwnership, String> {
         Ok(TreeOwnership::default())
     }

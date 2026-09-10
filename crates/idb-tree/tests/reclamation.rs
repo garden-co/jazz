@@ -20,6 +20,7 @@ struct Store {
     live: Rc<RefCell<BTreeSet<u64>>>,
     deleted: Rc<RefCell<BTreeSet<u64>>>,
     pause: Rc<Cell<bool>>,
+    fail_paused_read: Rc<Cell<bool>>,
     commit_resume: Rc<RefCell<Option<futures::channel::oneshot::Receiver<()>>>>,
     read_resume: Rc<RefCell<Option<futures::channel::oneshot::Receiver<()>>>>,
 }
@@ -57,6 +58,9 @@ impl PageStore for Store {
             };
             if let Some(resume) = resume {
                 resume.await.map_err(|e| e.to_string())?;
+                if self.fail_paused_read.replace(false) {
+                    return Err("old read failed".into());
+                }
             }
             self.memory.read_page(id).await
         })
@@ -247,5 +251,110 @@ fn reload_retains_exclusive_admission_and_discards_failed_staging() {
         tree.put(b"key".to_vec(), vec![3; 4000]).await.unwrap();
         tree.flush().await.unwrap();
         assert!(store.live.borrow().len() <= 6);
+    });
+}
+
+#[test]
+fn pending_read_error_from_before_reload_retries_even_when_root_id_is_unchanged() {
+    block_on(async {
+        let store = Store::exclusive();
+        let initial = IdbTree::open(store.clone(), options()).await.unwrap();
+        initial.put(b"key".to_vec(), vec![1; 4000]).await.unwrap();
+        initial.flush().await.unwrap();
+        drop(initial);
+        let tree = IdbTree::open(store.clone(), options()).await.unwrap();
+        let (resume, receiver) = futures::channel::oneshot::channel();
+        *store.read_resume.borrow_mut() = Some(receiver);
+        store.pause.set(true);
+        store.fail_paused_read.set(true);
+        let mut read = Box::pin(tree.get(b"key"));
+        assert!(read.as_mut().now_or_never().is_none());
+        let root = tree.metadata().root_page_id;
+        tree.reload().await.unwrap();
+        assert_eq!(tree.metadata().root_page_id, root);
+        resume.send(()).unwrap();
+        assert_eq!(read.await.unwrap(), Some(vec![1; 4000]));
+    });
+}
+
+#[test]
+fn failed_batch_restores_retirement_and_multilevel_replacements_stay_bounded() {
+    block_on(async {
+        let store = Store::exclusive();
+        let tree = IdbTree::open(store.clone(), options()).await.unwrap();
+        for n in 0u32..1000 {
+            tree.put(n.to_be_bytes().to_vec(), vec![1; 80])
+                .await
+                .unwrap();
+        }
+        tree.flush().await.unwrap();
+        let initial_pages = store.live.borrow().len();
+        assert!(initial_pages > 100, "fixture must span multiple leaves");
+        for generation in 2..6 {
+            let operations = (0u32..1000)
+                .map(|n| WriteOperation::Set {
+                    key: n.to_be_bytes().to_vec(),
+                    value: vec![generation; 80],
+                })
+                .collect();
+            tree.write_many(operations).await.unwrap();
+            tree.flush().await.unwrap();
+            assert!(
+                store.live.borrow().len() <= initial_pages,
+                "replaced ancestors leaked"
+            );
+        }
+        let failed = tree
+            .write_many(vec![
+                WriteOperation::Set {
+                    key: 0u32.to_be_bytes().to_vec(),
+                    value: vec![7; 5000],
+                },
+                WriteOperation::Set {
+                    key: vec![255; 2000],
+                    value: vec![8; 5000],
+                },
+            ])
+            .await;
+        assert!(failed.is_err());
+        tree.put(999u32.to_be_bytes().to_vec(), vec![9; 80])
+            .await
+            .unwrap();
+        tree.flush().await.unwrap();
+        drop(tree);
+        let reopened = IdbTree::open(store.clone(), options()).await.unwrap();
+        assert_eq!(
+            reopened.get(&0u32.to_be_bytes()).await.unwrap(),
+            Some(vec![5; 80])
+        );
+        assert_eq!(
+            reopened.get(&999u32.to_be_bytes()).await.unwrap(),
+            Some(vec![9; 80])
+        );
+        assert!(store.live.borrow().len() <= initial_pages);
+    });
+}
+
+#[test]
+fn successful_publication_keeps_newer_staged_generation_and_reclaims_it_on_next_flush() {
+    block_on(async {
+        let store = Store::exclusive();
+        let tree = IdbTree::open(store.clone(), options()).await.unwrap();
+        tree.put(b"key".to_vec(), vec![1; 4000]).await.unwrap();
+        tree.flush().await.unwrap();
+        tree.put(b"key".to_vec(), vec![2; 4000]).await.unwrap();
+        let (resume, receiver) = futures::channel::oneshot::channel();
+        *store.commit_resume.borrow_mut() = Some(receiver);
+        let mut flush = Box::pin(tree.flush());
+        assert!(flush.as_mut().now_or_never().is_none());
+        tree.put(b"key".to_vec(), vec![3; 4000]).await.unwrap();
+        resume.send(()).unwrap();
+        flush.await.unwrap();
+        assert_eq!(tree.get(b"key").await.unwrap(), Some(vec![3; 4000]));
+        tree.flush().await.unwrap();
+        assert!(store.live.borrow().len() <= 6);
+        drop(tree);
+        let reopened = IdbTree::open(store, options()).await.unwrap();
+        assert_eq!(reopened.get(b"key").await.unwrap(), Some(vec![3; 4000]));
     });
 }

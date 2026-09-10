@@ -167,6 +167,7 @@ export class IndexedDbPageStore {
   private invalidated = false;
   private reclamationOwnership: (() => boolean) | null = null;
   private treeClaims = 0;
+  private ownershipRevision = 0;
 
   /** One independently opened tree per exclusive owner; IdbTree clones share it. */
   claimTreeOwnership(): void {
@@ -372,6 +373,7 @@ export class IndexedDbPageStore {
     if (ownership && (ownership.id !== epoch || this.treeClaims > 0)) {
       throw new Error("IndexedDB reclamation ownership must precede tree construction");
     }
+    const revision = this.ownershipRevision;
     const proof = ownership ? claimBrowserReclamationOwnership(ownership, this.name) : null;
     const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
     const done = transactionDone(tx);
@@ -380,11 +382,16 @@ export class IndexedDbPageStore {
       INDEXEDDB_BROWSER_WORKER_EPOCH_KEY,
     );
     await done;
+    this.assertValid();
+    if (revision !== this.ownershipRevision) {
+      throw new Error("IndexedDB worker ownership was released while claiming");
+    }
     this.reclamationOwnership = proof;
   }
 
   /** Delete only this realm's epoch; a stale realm must never clear its successor. */
   async releaseBrowserWorkerEpoch(epoch: string): Promise<void> {
+    this.ownershipRevision++;
     this.reclamationOwnership = null;
     if (!isBrowserWorkerEpoch(epoch)) throw new Error("Invalid browser worker epoch");
     this.assertValid();
@@ -622,6 +629,8 @@ export class IndexedDbPageStore {
   }
 
   close(): void {
+    this.invalidated = true;
+    this.ownershipRevision++;
     this.reclamationOwnership = null;
     this.removeInvalidationListeners();
     this.db.close();
