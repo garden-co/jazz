@@ -23,6 +23,7 @@ import {
   ExclusiveWriteResult,
   WriteResult,
   JazzClient,
+  type AuthUpdate,
   type MutationErrorEvent,
   WriteHandle,
   setWriteWaitReadiness,
@@ -1725,69 +1726,67 @@ export class Db {
     if (!nativeAccountRefresh) this.runtimeSource.assertAuthUpdateAllowed();
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
-    const previousState = this.authStateStore.getState();
-    const nextInternalSession = resolveClientInternalSessionSync({
+    const previousCookieSession = this.config.cookieSession;
+    const previousTrustedReservedSession = getTrustedReservedSession(this.config);
+    const nextConfig = {
       ...this.config,
       jwtToken,
-      trustedReservedSession,
-    });
-    const tokenChanged = previousToken !== jwtToken;
-    // Browser persistent roots are principal-bound. Let the connection manager
-    // reject a token-carried incompatible switch while config, local auth state
-    // and worker claims still describe the preceding principal.
-    if (
-      !nativeAccountRefresh &&
-      tokenChanged &&
-      this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)
-    ) {
-      this.connection.updateAuth({ jwtToken, trustedReservedSession });
+      cookieSession: undefined,
+    } as DbConfig;
+    setTrustedReservedSession(nextConfig, trustedReservedSession);
+    const credentialsChanged =
+      previousToken !== nextConfig.jwtToken ||
+      previousCookieSession !== undefined ||
+      JSON.stringify(previousTrustedReservedSession) !== JSON.stringify(trustedReservedSession);
+    if (!credentialsChanged && this.authStateStore.getState().error === undefined) return false;
+
+    if (!nativeAccountRefresh) {
+      if (!this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) return false;
+      this.connection.updateAuth({
+        mode: "bearer",
+        jwtToken,
+        trustedReservedSession,
+      });
     }
 
-    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+    const nextInternalSession = resolveClientInternalSessionSync(nextConfig);
+    this.publishAuthStateWithInternalSession(nextInternalSession, () =>
       this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession),
     );
-    if (!tokenChanged && published.value === previousState) {
-      published.rollback();
-      return false;
-    }
 
     this.config.jwtToken = jwtToken;
+    this.config.cookieSession = undefined;
     setTrustedReservedSession(this.config, trustedReservedSession);
-
-    // A same-token package-private session refresh cannot cross the public
-    // principal boundary above; preserve the old no-op/refresh behavior.
-    if (!nativeAccountRefresh && !tokenChanged)
-      this.connection.updateAuth({ jwtToken, trustedReservedSession });
-
     return true;
   }
 
   protected applyCookieSessionUpdate(session: Session | null): boolean {
     this.runtimeSource.assertAuthUpdateAllowed();
     const cookieSession = session ?? undefined;
-    const previousSession = this.config.cookieSession;
-    const previousState = this.authStateStore.getState();
-    const nextInternalSession = resolveClientInternalSessionSync({
-      ...this.config,
-      cookieSession,
-    });
-    const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
-    if (sessionChanged && this.authStateStore.validateCookieSession(cookieSession)) {
-      this.connection.updateAuth({ cookieSession });
-    }
+    const previousCookieSession = this.config.cookieSession;
+    const previousToken = this.config.jwtToken;
+    const previousTrustedReservedSession = getTrustedReservedSession(this.config);
+    const sessionChanged = JSON.stringify(previousCookieSession) !== JSON.stringify(cookieSession);
+    const credentialsChanged =
+      previousToken !== undefined || sessionChanged || previousTrustedReservedSession !== undefined;
+    if (!credentialsChanged && this.authStateStore.getState().error === undefined) return false;
 
-    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+    if (!this.authStateStore.validateCookieSession(cookieSession)) return false;
+    this.connection.updateAuth({ mode: "cookie", cookieSession });
+
+    const nextConfig = {
+      ...this.config,
+      jwtToken: undefined,
+      cookieSession,
+    } as DbConfig;
+    const nextInternalSession = resolveClientInternalSessionSync(nextConfig);
+    this.publishAuthStateWithInternalSession(nextInternalSession, () =>
       this.authStateStore.applyCookieSession(cookieSession),
     );
-    if (!sessionChanged && published.value === previousState) {
-      published.rollback();
-      return false;
-    }
 
+    this.config.jwtToken = undefined;
     this.config.cookieSession = cookieSession;
-
-    if (!sessionChanged) this.connection.updateAuth({ cookieSession });
-
+    setTrustedReservedSession(this.config, undefined);
     return true;
   }
 

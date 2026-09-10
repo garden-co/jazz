@@ -1,8 +1,7 @@
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import type { DurabilityTier, JazzClient } from "../client.js";
+import type { DurabilityTier, JazzClient, AuthUpdate } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
-import type { Session } from "../context.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { BrowserForegroundNodeLease, BrowserWorkerConnection } from "../runtime-source.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
@@ -298,20 +297,19 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (!this.disconnected) this.resolveReconnectWaiters();
   }
 
-  override updateAuth(auth: {
-    jwtToken?: string;
-    cookieSession?: Session;
-    trustedReservedSession?: Session;
-  }): void {
+  override updateAuth(auth: AuthUpdate): void {
     // The persistent root belongs to the principal that opened it. Check
     // before mutating Db config or forwarding anything to the worker, so a
     // rejected Alice -> Bob switch cannot expose Alice's local rows to Bob.
-    const nextConfig = { ...this.host.config, ...auth } as DbForConnection["config"];
+    const nextConfig = {
+      ...this.host.config,
+      ...(auth.mode === "bearer"
+        ? { jwtToken: auth.jwtToken, cookieSession: undefined }
+        : { jwtToken: undefined, cookieSession: auth.cookieSession }),
+    } as DbForConnection["config"];
     setTrustedReservedSession(
       nextConfig,
-      "trustedReservedSession" in auth
-        ? auth.trustedReservedSession
-        : getTrustedReservedSession(this.host.config),
+      auth.mode === "bearer" ? auth.trustedReservedSession : undefined,
     );
     assertBrowserStorageOwnerUnchanged(this.host.config, nextConfig);
     super.updateAuth(auth);
