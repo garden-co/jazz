@@ -247,8 +247,11 @@ export class BrowserConnectionManager extends ConnectionManager {
       if (!this.disconnected) return;
     }
     await new Promise<void>((resolve, reject) => {
+      let settled = false;
       const finish = (error?: Error) => {
-        if (!this.reconnectWaiters.delete(finish)) return;
+        if (settled) return;
+        settled = true;
+        this.reconnectWaiters.delete(finish);
         signal?.removeEventListener("abort", onAbort);
         if (error) reject(error);
         else resolve();
