@@ -6120,3 +6120,37 @@ fn duplicate_usage_reopens_stale_canonical_query_before_cloning() {
 fn apply_test_result_delta(peer: &mut PeerState, update: &(SubscriptionKey, bool, Vec<ResultMemberEntry>, Vec<ResultMemberEntry>)) {
     peer.apply_outgoing_view_delta(update.0, update.1, &update.2, &update.3, &[], &[]);
 }
+
+#[test]
+fn maintained_publication_reuses_complete_successor_closure() {
+    // The traversal bound is internal bookkeeping, not a wire delta promise.
+    // Assert full supporting-row manifests as well as the cost boundary.
+    use crate::node::maintained_subscription_view::SOURCE_CLOSURE_TRAVERSALS;
+    let (_dir, mut core) = open_node_with_uuid(node(0x93));
+    let mut expected = BTreeSet::new();
+    for index in 0..150 {
+        let id = row_from_u64(index);
+        let tx = core.commit_mergeable_settled(
+            MergeableCommit::new("todos", id, 1_000 + index).cells(title_cells("initial")),
+        ).unwrap();
+        accept_global(&mut core, tx, index + 1);
+        expected.insert(id);
+    }
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::new();
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let tx = core.commit_mergeable_settled(
+        MergeableCommit::new("todos", row_from_u64(0), 2_000).cells(title_cells("updated")),
+    ).unwrap();
+    accept_global(&mut core, tx, 151);
+    SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(0));
+    let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let traversals = SOURCE_CLOSURE_TRAVERSALS.with(|count| count.get());
+    assert_eq!(traversals, 2, "one closure for canonical transition and one for the complete wire manifest; bookkeeping must reuse the former");
+    let SyncMessage::ViewUpdate(view) = update else { panic!("expected complete manifest") };
+    assert_eq!(view.supporting_rows.iter().map(|row| row.row).collect::<BTreeSet<_>>(), expected);
+    let state = &peer.publication_states[&subscription];
+    assert_eq!(state.program_fact_set, state.maintained_subscription_view.as_ref().unwrap().maintained.active_peer_source_closure_facts());
+}

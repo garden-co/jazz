@@ -1219,9 +1219,7 @@ impl PeerState {
             .map(|view| view.maintained.active_peer_source_closure_facts())
             .ok_or(Error::InvalidStoredValue(
                 "maintained subscription view is missing source closure state",
-            ))?
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+            ))?;
         let (program_fact_adds, program_fact_removes) = if initial_snapshot_completed {
             // A reopened evaluator can finish hydration after the opening
             // call returned, with the previous publication closure retained.
@@ -1340,7 +1338,17 @@ impl PeerState {
         }
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(subscription);
-        self.record_outgoing_view_update(&update);
+        // The maintained view was only borrowed while constructing this
+        // update. Reuse its already-computed complete successor closure for
+        // predecessor bookkeeping; no second traversal or cache lifetime is
+        // needed, and the complete wire manifest is constructed unchanged.
+        self.record_outgoing_view_update_metadata(&update);
+        if let SyncMessage::ViewUpdate(view) = &update {
+            self.publication_states
+                .entry(view.subscription)
+                .or_default()
+                .program_fact_set = current_program_fact_set;
+        }
         Ok(Some(MaintainedCanonicalUpdate {
                 changed: true,            update,
             allow_storage_witness_fallback,

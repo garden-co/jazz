@@ -831,6 +831,8 @@ impl MaintainedSubscriptionView {
     /// This intentionally exposes neither rendered result rows nor internal
     /// proof/relationship facts.
     pub(crate) fn active_peer_source_closure_facts(&self) -> BTreeSet<ProgramFactEntry> {
+        #[cfg(test)]
+        SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(count.get() + 1));
         self.source_fact_weights
             .iter()
             .filter(|(fact, weights)| {
@@ -4909,4 +4911,9 @@ mod terminal_role_hash_tests {
         );
         assert_ne!(first.id, terminal_root_layout(&changed_name).id);
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static SOURCE_CLOSURE_TRAVERSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
