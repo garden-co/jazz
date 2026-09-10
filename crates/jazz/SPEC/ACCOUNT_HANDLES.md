@@ -334,8 +334,7 @@ ASCII `account-command:v1:` followed by the big-endian eight-byte revision,
 starting at zero without gaps. Recovery scans the entire `account-command:`
 prefix and rejects other versions, malformed keys, and invalid commands.
 
-The former prerelease `jazz.account-command.v1` profile used bespoke `JACC`
-framing. The release `jazz.account-journal.v1` profile versions the root-local journal
+The `jazz.account-journal.v1` profile versions the root-local journal
 key and closed descriptor contract, not a new value codec. It uses canonical Groove
 records exclusively. Its one field, `command`, is an Enum named
 `jazz.account-command.v1` with fixed registry identity 1 in this isolated root.
@@ -352,10 +351,9 @@ UTF-8, with each nonempty component limited to 16 KiB. Groove supplies enum
 framing, record offsets, strings, UUIDs, and integers; no account-specific byte
 tags or serializer defaults define their encoding. The command and descriptor
 bytes are pinned in `src/account_registry/command-v1.corpus` (five command lines,
-then the canonical descriptor). This release intentionally rejects both historical
-bespoke `JACC` roots (with the distinct `jazz.account-command.v1` profile) and
-prerelease RecordStore roots using `jazz.account-journal.v2`; it does not change
-ordinary row or wire encodings. As in ordinary Groove records, a terminal String consumes its record remainder:
+then the canonical descriptor). Roots must match the journal profile exactly;
+unknown profiles are rejected before replay. As in ordinary Groove records,
+a terminal String consumes its record remainder:
 appending valid UTF-8 can change that principal component rather than represent
 trailing garbage. Invalid UTF-8, invalid offsets, unknown enum cases, and
 invalid principal components are rejected. No private length framing is added.

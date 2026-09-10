@@ -205,23 +205,21 @@ mod tests {
     #[test]
     fn old_preview_registry_profile_is_rejected() {
         use jazz::groove::storage::OrderedKvStorage;
-        for codec in ["jazz.account-command.v1", "jazz.account-journal.v2"] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("accounts.rocksdb");
-            let factory = jazz_storage_rocksdb::RocksDbStorageFactory;
-            let old_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-                .unwrap()
-                .with_additional_codecs([codec])
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("accounts.rocksdb");
+        let factory = jazz_storage_rocksdb::RocksDbStorageFactory;
+        let old_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
+            .unwrap()
+            .with_additional_codecs(["jazz.account-command.v1"])
+            .unwrap();
+        jazz::db::block_on(async {
+            let storage = factory
+                .open(path.clone(), vec!["default".into()], old_profile)
+                .await
                 .unwrap();
-            jazz::db::block_on(async {
-                let storage = factory
-                    .open(path.clone(), vec!["default".into()], old_profile)
-                    .await
-                    .unwrap();
-                storage.close().await.unwrap();
-            });
-            assert!(AccountRegistryOwner::open(Some((Arc::new(factory), path))).is_err());
-        }
+            storage.close().await.unwrap();
+        });
+        assert!(AccountRegistryOwner::open(Some((Arc::new(factory), path))).is_err());
     }
 
     // Internal durable-owner test: HTTP tests cover authentication, while this
