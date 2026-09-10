@@ -437,7 +437,9 @@ where
         }
     }
 
-    /// Return the legacy transaction fate tuple.
+    /// Return the legacy transaction fate tuple by projecting stored status.
+    /// Payload author/contribution validation belongs to full transaction reads;
+    /// this read retains storage framing and status-field validation.
     pub async fn transaction_state(
         &mut self,
         tx_id: TxId,
