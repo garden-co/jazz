@@ -51,13 +51,7 @@ fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
     let row_id = row(0x32);
     db.insert(
         "todos",
-        BTreeMap::from([
-            (
-                "title".to_owned(),
-                Value::String("descriptor parity".to_owned()),
-            ),
-            ("done".to_owned(), Value::Bool(false)),
-        ]),
+        cells("descriptor parity", false, owner),
         crate::db::InsertOptions {
             row_id: Some(row_id),
             ..Default::default()

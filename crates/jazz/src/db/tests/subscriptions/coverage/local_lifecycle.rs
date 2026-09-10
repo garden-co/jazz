@@ -210,7 +210,7 @@ fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
     ))
     .unwrap();
 
-    assert!(opened_rows(doctest_support::block_on(subscription.next_raw()).unwrap()).is_empty());
+    assert!(subscription.try_next_event().is_none());
     assert_eq!(scheduler.take(), Vec::<TickUrgency>::new());
     assert!(db.node.upstream_subscriptions.borrow().is_empty());
 }
@@ -230,11 +230,11 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
     };
 
     let mut first = doctest_support::block_on(db.subscribe(&prepared_query, opts.clone())).unwrap();
-    let _ = doctest_support::block_on(first.next_raw()).unwrap();
+    assert!(first.try_next_event().is_none());
     assert_eq!(pending_upstream_subscribe_count(&db), 1);
 
     let mut second = doctest_support::block_on(db.subscribe(&prepared_query, opts)).unwrap();
-    let _ = doctest_support::block_on(second.next_raw()).unwrap();
+    assert!(second.try_next_event().is_none());
     assert_eq!(
         db.runtime_stats_for_test().active_subscriptions,
         baseline + 2
@@ -281,7 +281,7 @@ fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
         },
     ))
     .unwrap();
-    let _ = doctest_support::block_on(inspector.next_raw()).unwrap();
+    assert!(inspector.try_next_event().is_none());
 
     let (client_transport, _server_transport) = duplex();
     let upstream = crate::db::block_on(db.connect_upstream(client_transport));
@@ -322,7 +322,7 @@ fn upstream_inbound_application_completes_synchronously_or_schedules_continuatio
 
     let query = client.table("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+    assert!(subscription.try_next_event().is_none());
     scheduler.take();
 
     client.tick().unwrap();

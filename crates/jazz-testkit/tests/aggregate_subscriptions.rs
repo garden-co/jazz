@@ -457,39 +457,6 @@ async fn wait_for_one_shot_values(
     .await;
 }
 
-async fn wait_for_subscription_driven_values(
-    client: &JazzClient,
-    stream: &mut jazz::tools::SubscriptionStream,
-    query: jazz::query::Query,
-    expected: Vec<Vec<Value>>,
-    label: &str,
-) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let last_actual;
-    loop {
-        tokio::time::timeout_at(deadline, stream.next())
-            .await
-            .unwrap_or_else(|_| panic!("{label}: timed out waiting for subscription delta"))
-            .unwrap_or_else(|| panic!("{label}: subscription ended"));
-        let mut actual = client
-            .query(query.clone(), None)
-            .await
-            .unwrap_or_else(|err| panic!("{label}: query after subscription event failed: {err}"))
-            .into_iter()
-            .map(|(_, values)| values)
-            .collect::<Vec<_>>();
-        actual.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
-        if actual == expected {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            last_actual = actual;
-            break;
-        }
-    }
-    assert_eq!(last_actual, expected, "{label}");
-}
-
 async fn insert_metric(client: &JazzClient, bucket: &str, score: i32) {
     let (_, _, tx) = client
         .insert("metrics", row_input!("bucket" => bucket, "score" => score))
@@ -883,10 +850,18 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
             .await
             .expect("connect client");
             let sum_query = jazz::query::Query::from("metrics").sum("score");
-            let mut stream = client
-                .subscribe(sum_query.clone())
-                .await
-                .expect("subscribe sum aggregate");
+            // SUM stays null when the first null input arrives. COUNT makes
+            // that input observable without demanding a redundant SUM delta.
+            let subscription_query = jazz::query::Query::from("metrics")
+                .aggregate([Aggregate::sum("score"), Aggregate::count()]);
+            let mut stream = ObservedSubscription::new(
+                client
+                    .subscribe(subscription_query.clone())
+                    .await
+                    .expect("subscribe nullable sum and count"),
+                &subscription_query,
+                aggregate_descriptor([("count", ValueType::U64), ("sum_score", ValueType::I32)]),
+            );
 
             wait_for_values(
                 &client,
@@ -895,14 +870,12 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
                 "one-shot empty sum is public null",
             )
             .await;
-            wait_for_subscription_driven_values(
-                &client,
-                &mut stream,
-                sum_query.clone(),
-                vec![vec![Value::Null]],
-                "subscription empty sum is public null",
-            )
-            .await;
+            stream
+                .wait_for_values(
+                    vec![vec![Value::Null, Value::Timestamp(0)]],
+                    "subscription empty sum is public null with count zero",
+                )
+                .await;
 
             let (_null_row, _, tx) = client
                 .insert(
@@ -924,14 +897,12 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
                 "one-shot all-null sum is public null",
             )
             .await;
-            wait_for_subscription_driven_values(
-                &client,
-                &mut stream,
-                sum_query,
-                vec![vec![Value::Null]],
-                "subscription all-null sum is public null",
-            )
-            .await;
+            stream
+                .wait_for_values(
+                    vec![vec![Value::Null, Value::Timestamp(1)]],
+                    "subscription processes the null input without changing the null sum",
+                )
+                .await;
 
             // The mixed null/non-null case is not covered here: writing a
             // non-null value into a nullable column through the public client
