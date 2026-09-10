@@ -2024,3 +2024,166 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     assert_eq!(stored.tx.n_total_writes, 2);
     assert!(!stored.view_scoped_cardinality);
 }
+
+
+#[test]
+fn receiver_batch_prepares_all_author_aliases_before_exact_ingestion() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(2));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (_second_dir, mut second_writer) = open_node_with_uuid(node(4));
+    register_whole_table_receiver(&mut reader, "todos");
+
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("one")),
+    );
+    commit_mergeable_global(
+        &mut second_writer,
+        &mut core,
+        MergeableCommit::new("todos", row(2), 11).cells(title_cells("two")),
+    );
+
+    let update = core.view_update_for_current_rows("todos").unwrap();
+    let mut version_bundles = version_bundles_for_update(&update);
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        settled_through,
+        peer_payload_inventory,
+        supporting_rows: program_fact_adds,
+        ..
+    }) = update
+    else {
+        panic!("expected view update");
+    };
+    assert_eq!(version_bundles.len(), 2);
+    for bundle in &mut version_bundles {
+        bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
+    }
+    version_bundles.reverse();
+    // Both entries are complete sets; exact native payloads ingest only once.
+
+    reader
+        .apply_view_updates_in_batch(vec![
+            todos_receiver_reset(subscription),
+            ViewUpdateParts {
+                wire_rows: Some(program_fact_adds),
+                subscription,
+                settled_through,
+                defer_settlement: false,
+                reset_input_set: true,
+                version_carriers: crate::protocol::build_version_carriers_from_singletons(
+                    version_bundles,
+                )
+                .unwrap(),
+                peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                authorization_progress: None,
+                opening_pending: false,
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ])
+        .unwrap();
+
+    let version_rows = reader.query_all_versions().unwrap();
+    assert_eq!(version_rows.len(), 2);
+    assert!(
+        version_rows
+            .iter()
+            .any(|version| version.table() == "todos" && version.row_uuid() == row(1))
+    );
+    assert!(
+        version_rows
+            .iter()
+            .any(|version| version.table() == "todos" && version.row_uuid() == row(2))
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 2);
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+}
+
+#[test]
+fn receiver_batch_defers_known_transaction_publication_until_new_rows_commit() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(2));
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let (_second_dir, mut second_writer) = open_node_with_uuid(node(4));
+    register_whole_table_receiver(&mut reader, "todos");
+
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("one")),
+    );
+    commit_mergeable_global(
+        &mut second_writer,
+        &mut core,
+        MergeableCommit::new("todos", row(2), 11).cells(title_cells("two")),
+    );
+
+    let update = core.view_update_for_current_rows("todos").unwrap();
+    let mut version_bundles = version_bundles_for_update(&update);
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        settled_through,
+        peer_payload_inventory,
+        supporting_rows: program_fact_adds,
+        ..
+    }) = update
+    else {
+        panic!("expected view update");
+    };
+    assert_eq!(version_bundles.len(), 2);
+    for bundle in &mut version_bundles {
+        bundle.global_time = None;
+        bundle.durability = DurabilityTier::Local;
+    }
+    let known = version_bundles.iter().find(|bundle| bundle.tx.tx_id.node == node(4)).unwrap();
+    let known_tx_id = known.tx.tx_id;
+    reader.ingest_known_transaction(known.tx.clone(), known.versions.clone(), Fate::Pending, known.global_time, known.durability).unwrap();
+    version_bundles.reverse();
+    // Both entries are complete sets; exact native payloads ingest only once.
+
+    reader
+        .apply_view_updates_in_batch(vec![
+            todos_receiver_reset(subscription),
+            ViewUpdateParts {
+                wire_rows: Some(program_fact_adds),
+                subscription,
+                settled_through,
+                defer_settlement: false,
+                reset_input_set: false,
+                version_carriers: crate::protocol::build_version_carriers_from_singletons(
+                    version_bundles,
+                )
+                .unwrap(),
+                peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                authorization_progress: None,
+                opening_pending: false,
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ])
+        .unwrap();
+
+    assert_eq!(reader.query_transaction(known_tx_id).unwrap().unwrap().fate, Fate::Accepted);
+    let version_rows = reader.query_all_versions().unwrap();
+    assert_eq!(version_rows.len(), 2);
+    assert!(
+        version_rows
+            .iter()
+            .any(|version| version.table() == "todos" && version.row_uuid() == row(1))
+    );
+    assert!(
+        version_rows
+            .iter()
+            .any(|version| version.table() == "todos" && version.row_uuid() == row(2))
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+}

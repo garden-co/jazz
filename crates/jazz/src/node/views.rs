@@ -1610,6 +1610,18 @@ where
         for tx_id in &bulk_loaded_tx_ids {
             receiver_candidates.remove(tx_id);
         }
+        // Alias registration publishes metadata. Resolve every author, parent
+        // and schema before preparing any immutable row in this shared batch.
+        for bundle in receiver_candidates.values() {
+            self.ensure_node_alias(bundle.tx.tx_id.node).await?;
+            for version in &bundle.versions {
+                self.ensure_schema_version_alias(version.schema_version())
+                    .await?;
+                for parent in version.parents() {
+                    self.ensure_node_alias(parent.node).await?;
+                }
+            }
+        }
         let mut receiver_batch = self.database.open_batch();
         let mut receiver_batch_tx_ids = BTreeSet::new();
         let mut receiver_batch_global_times = Vec::new();
@@ -2635,14 +2647,17 @@ where
             .await?;
             return Ok(true);
         }
+        // Known complete transactions take the fate/update path below, after
+        // this batch commits. That path may publish independently and must not
+        // invalidate exact-match preparation for preceding new transactions.
+        if self.query_transaction(bundle.tx.tx_id).await?.is_some() {
+            return Ok(false);
+        }
         if bundle.tx.kind == TxKind::Exclusive {
             let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
                 Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
             })?;
             if bundle.versions.len() != complete_len {
-                return Ok(false);
-            }
-            if self.query_transaction(bundle.tx.tx_id).await?.is_some() {
                 return Ok(false);
             }
         }

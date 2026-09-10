@@ -51,3 +51,20 @@ Other candidates for subsequent slices:
   ingestion costs and should not lead the next slice.
 
 This note records the baseline; no new performance improvement is claimed until remeasurement.
+
+### Receiver batching boundary found during browser acceptance
+
+The first optimized browser run rejected a post-update reopen: two authoring
+nodes appeared in one received snapshot, and registration of the second node's
+alias published metadata after the first row's exact-match preparation. A native
+multi-author receiver test reproduces this failure. Receiver batching now resolves
+all author, parent and schema aliases before preparing rows.
+
+Known complete transactions can also publish through their fate-update path.
+They are handled after the prepared receiver batch commits, rather than publishing
+inside it. A regression covers a new row alongside a previously pending known
+transaction becoming accepted. Removing the deferral reproduces the stale-batch
+failure; the fixed path preserves both rows and the accepted fate.
+
+The failed intermediate browser run is not a valid performance measurement.
+The final optimized build and fresh timing/profile round are pending.
