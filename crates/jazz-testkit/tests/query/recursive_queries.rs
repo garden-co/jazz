@@ -167,7 +167,6 @@ local_tokio_test! {
 ///
 /// alice writes leaf -> mid -> root in `team_edges`
 /// bob subscribes to the recursive query from leaf and sees all three teams
-#[ignore = "#1767: recursive gather subscription rows omit the gathered teams' user fields"]
 async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
     let clients = Clients::start(team_graph_schema()).await;
     let query = Query::from("teams")
@@ -350,7 +349,6 @@ local_tokio_test! {
 ///
 /// alice writes root <- mid <- leaf
 /// bob seeds on leaf and follows parent_id until root, seeing all ancestors
-#[ignore = "#1767: canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_query_expands_self_parent_ancestors() {
     let clients = Clients::start(team_graph_schema()).await;
 

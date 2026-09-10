@@ -230,7 +230,6 @@ local_tokio_test! {
 ///
 /// Actors: alice writes one user with no posts, bob subscribes to users with
 /// included posts and sees an empty array for that include.
-#[ignore = "#1765: maintained array subscriptions emit no add delta for a parent inserted after subscribe"]
 async fn array_subquery_subscription_adds_parent_with_empty_array() {
     let clients = Clients::start().await;
     let query = users_with_posts_query();
@@ -477,7 +476,6 @@ local_tokio_test! {
 ///
 /// bob subscribes -> alice inserts Alice without posts -> bob sees empty array
 /// alice inserts post -> bob sees Alice unchanged with one included post
-#[ignore = "#1765: maintained array subscriptions emit no add delta for a parent inserted after subscribe"]
 async fn array_subquery_preserves_parent_columns_when_inner_row_arrives() {
     let clients = Clients::start().await;
 
@@ -551,7 +549,6 @@ local_tokio_test! {
 ///
 /// alice -> insert Bob's post -> server -> bob subscribes
 /// alice -> insert Bob -> server -> bob receives Bob with that post included
-#[ignore = "#1765: maintained array subscriptions emit no add delta for a late parent with existing children"]
 async fn array_subquery_subscription_adds_parent_with_existing_inner_rows() {
     let clients = Clients::start().await;
 
@@ -770,7 +767,6 @@ local_tokio_test! {
 /// Verifies that an array subquery can limit ordered inner rows.
 ///
 /// Actors: alice writes five posts, bob reads only the first two ordered by id.
-#[ignore = "#1765: bounded array subqueries materialize an empty child array regardless of sort column"]
 async fn array_subquery_limits_ordered_inner_rows() {
     let clients = Clients::start().await;
 
