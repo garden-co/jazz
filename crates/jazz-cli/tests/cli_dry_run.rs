@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::rc::Rc;
@@ -383,6 +385,96 @@ fn pump_websocket(
     saw_server_frames
 }
 
+fn pump_websocket_once(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    db: &Db<MemoryStorage>,
+    wire: &QueuedWireTransport,
+) -> bool {
+    block_on(db.tick()).expect("drive client db");
+    let frames = wire.drain_outbound();
+    if !frames.is_empty() {
+        socket
+            .send(Message::Binary(
+                postcard::to_allocvec(&frames)
+                    .expect("encode wire frame batch")
+                    .into(),
+            ))
+            .expect("send binary wire frame batch");
+    }
+
+    let mut saw_server_frames = false;
+    for frame in read_available_binary_frames(socket) {
+        saw_server_frames = true;
+        wire.push_inbound(frame);
+    }
+    block_on(db.tick()).expect("apply server frames");
+    saw_server_frames
+}
+fn pump_websocket_once_allow_close(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    db: &Db<MemoryStorage>,
+    wire: &QueuedWireTransport,
+) {
+    block_on(db.tick()).expect("drive client db");
+    let frames = wire.drain_outbound();
+    if !frames.is_empty() {
+        socket
+            .send(Message::Binary(
+                postcard::to_allocvec(&frames)
+                    .expect("encode wire frame batch")
+                    .into(),
+            ))
+            .expect("send binary wire frame batch");
+    }
+    for frame in read_available_binary_frames_allow_close(socket) {
+        wire.push_inbound(frame);
+    }
+    block_on(db.tick()).expect("apply server frames");
+}
+
+#[cfg(unix)]
+fn constrain_receive_buffer(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, bytes: libc::c_int) {
+    let MaybeTlsStream::Plain(stream) = socket.get_mut() else {
+        panic!("loopback test must use a plain TCP stream");
+    };
+    let result = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&bytes as *const libc::c_int).cast(),
+            std::mem::size_of_val(&bytes) as libc::socklen_t,
+        )
+    };
+    assert_eq!(result, 0, "set loopback receive buffer");
+}
+
+fn wait_for_settled_reset(
+    client: &mut ConnectedClient,
+    subscription: &mut jazz::db::SubscriptionStream,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        pump_websocket_once_allow_close(&mut client.socket, &client.db, &client.wire);
+        while let Some(event) = subscription.next().now_or_never().flatten() {
+            if matches!(
+                event,
+                SubscriptionEvent::Delta {
+                    reset: true,
+                    settled: true,
+                    ..
+                }
+            ) {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+    }
+}
+
 fn read_available_binary_frames(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Vec<Vec<u8>> {
     let mut frames = Vec::new();
     loop {
@@ -392,6 +484,32 @@ fn read_available_binary_frames(socket: &mut WebSocket<MaybeTlsStream<TcpStream>
             }
             Ok(Message::Ping(payload)) => socket.send(Message::Pong(payload)).unwrap(),
             Ok(Message::Pong(_)) => {}
+            Ok(message) => panic!("unexpected websocket message: {message:?}"),
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => panic!("read websocket frame: {error}"),
+        }
+    }
+    frames
+}
+fn read_available_binary_frames_allow_close(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    loop {
+        match socket.read() {
+            Ok(Message::Binary(batch)) => {
+                frames.extend(postcard::from_bytes::<Vec<Vec<u8>>>(&batch).unwrap());
+            }
+            Ok(Message::Ping(payload)) => socket.send(Message::Pong(payload)).unwrap(),
+            Ok(Message::Pong(_)) => {}
+            Ok(Message::Close(_)) => break,
             Ok(message) => panic!("unexpected websocket message: {message:?}"),
             Err(tungstenite::Error::Io(error))
                 if matches!(
@@ -1337,6 +1455,274 @@ fn websocket_reconnect_preserves_local_structured_terminal_patches() {
 
     drop(reader.socket);
     drop(writer.socket);
+    server.shutdown();
+}
+
+/// The first client receives a multi-megabyte subscription response while it
+/// deliberately advertises a tiny TCP receive window and never reads it.
+/// Client B's independent reset must still complete before A is drained, and
+/// A's rows must arrive in their original order once the window is opened.
+#[cfg(unix)]
+#[test]
+fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_fifo() {
+    const ROW_COUNT: usize = 64;
+    const PAYLOAD_BYTES: usize = 48 * 1024;
+    let make_payload = |index: usize| {
+        let mut payload = format!("{index:03}:");
+        let mut state = index as u64 + 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..(PAYLOAD_BYTES - 4) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            payload.push(char::from(b'a' + state as u8 % 26));
+        }
+        payload
+    };
+
+    let schema = structured_schema();
+    let server = RunningServer::start_schema(&schema);
+
+    let mut seed = open_connected_client(
+        schema.clone(),
+        &server.ws_url,
+        "bug-196-stalled",
+        identity_for_subject(0xa0, "bug-196-stalled"),
+    );
+    let mut seeded_writes = Vec::with_capacity(ROW_COUNT);
+    for index in 0..ROW_COUNT {
+        let payload = make_payload(index);
+        let write = block_on(seed.db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(payload))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([index as u8; 16])),
+                ..Default::default()
+            },
+        ))
+        .expect("stage backpressure fixture row");
+        seeded_writes.push(write);
+    }
+    let mut sent_seed_update = false;
+    for _ in 0..8 {
+        block_on(seed.db.tick()).expect("queue backpressure fixture rows");
+        let frames = seed.wire.drain_outbound();
+        if !frames.is_empty() {
+            seed.socket
+                .send(Message::Binary(
+                    postcard::to_allocvec(&frames)
+                        .expect("encode backpressure fixture rows")
+                        .into(),
+                ))
+                .expect("send backpressure fixture rows");
+            sent_seed_update = true;
+        }
+    }
+    assert!(sent_seed_update, "seed client must send its fixture rows");
+
+    // Settle the fixture before opening A, so A's protocol handshake cannot
+    // contend with seed admission.
+    let settlement_deadline = Instant::now() + Duration::from_secs(3);
+    let mut seed_settled = false;
+    while Instant::now() < settlement_deadline {
+        pump_websocket_once_allow_close(&mut seed.socket, &seed.db, &seed.wire);
+        if seeded_writes
+            .iter()
+            .all(|write| block_on(write.wait(DurabilityTier::Global)).is_ok())
+        {
+            seed_settled = true;
+            break;
+        }
+    }
+    assert!(
+        seed_settled,
+        "seed fixture writes must settle globally before client A opens"
+    );
+
+    let mut stalled = open_connected_client(
+        schema.clone(),
+        &server.ws_url,
+        "bug-196-stalled",
+        identity_for_subject(0xa2, "bug-196-stalled"),
+    );
+    block_on(stalled.db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("handshake".to_owned())),
+            (
+                "owner_id".to_owned(),
+                Value::Uuid(RowUuid::from_bytes([0xfe; 16]).0),
+            ),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xfe; 16])),
+            ..Default::default()
+        },
+    ))
+    .expect("stage stalled client's handshake mutation");
+    assert!(pump_websocket(
+        &mut stalled.socket,
+        &stalled.db,
+        &stalled.wire
+    ));
+    constrain_receive_buffer(&mut stalled.socket, 1024);
+
+    let data_query = stalled.db.prepare_query(&Query::from("users")).unwrap();
+    let mut stalled_data_subscription = block_on(stalled.db.subscribe(
+        &data_query,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let auxiliary_query = stalled
+        .db
+        .prepare_query(&Query::from("users").limit(ROW_COUNT + 1))
+        .unwrap();
+    let _auxiliary_subscription = block_on(stalled.db.subscribe(
+        &auxiliary_query,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let mut sent_data_subscription = false;
+    for _ in 0..8 {
+        block_on(stalled.db.tick()).expect("queue stalled data subscription");
+        let frames = stalled.wire.drain_outbound();
+        if !frames.is_empty() {
+            stalled
+                .socket
+                .send(Message::Binary(
+                    postcard::to_allocvec(&frames)
+                        .expect("encode stalled data subscription")
+                        .into(),
+                ))
+                .expect("send stalled data subscription");
+            sent_data_subscription = true;
+        }
+    }
+    assert!(
+        sent_data_subscription,
+        "stalled client must announce its data subscription"
+    );
+    let _trigger_write = block_on(stalled.db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("trigger".to_owned())),
+            (
+                "owner_id".to_owned(),
+                Value::Uuid(RowUuid::from_bytes([0xfd; 16]).0),
+            ),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xfd; 16])),
+            ..Default::default()
+        },
+    ))
+    .expect("stage A's unread response trigger");
+    let mut sent_trigger = false;
+    for _ in 0..8 {
+        block_on(stalled.db.tick()).expect("queue A's unread response trigger");
+        let frames = stalled.wire.drain_outbound();
+        if !frames.is_empty() {
+            stalled
+                .socket
+                .send(Message::Binary(
+                    postcard::to_allocvec(&frames)
+                        .expect("encode A's unread response trigger")
+                        .into(),
+                ))
+                .expect("send A's unread response trigger");
+            sent_trigger = true;
+        }
+    }
+    assert!(sent_trigger, "A must send its response trigger");
+
+    // Let the server reach A's unread large reset before B is introduced.
+    thread::sleep(Duration::from_millis(250));
+
+    let mut independent = open_connected_client(
+        schema.clone(),
+        &server.ws_url,
+        "bug-196-independent",
+        identity_for_subject(0xa2, "bug-196-independent"),
+    );
+    let control_query = independent.db.prepare_query(&Query::from("todos")).unwrap();
+    let mut independent_subscription = block_on(independent.db.subscribe(
+        &control_query,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+
+    // This must complete while A remains unread. On the buggy server,
+    // service_connection keeps the shell mutex across A's blocked send, so
+    // B's subscription cannot reach its independent reset.
+    assert!(
+        wait_for_settled_reset(
+            &mut independent,
+            &mut independent_subscription,
+            Duration::from_secs(3),
+        ),
+        "client B must complete while client A remains backpressured"
+    );
+
+    // Reopen A's receive window only after B has completed. This releases the
+    // blocked WebSocket frame so the strict FIFO assertion can consume it.
+    constrain_receive_buffer(&mut stalled.socket, 8 * 1024 * 1024);
+    if let MaybeTlsStream::Plain(stream) = stalled.socket.get_mut() {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("increase A read timeout before draining its large frame");
+    }
+
+    let users_table = schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "users")
+        .expect("users table");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut saw_server_frames = false;
+    let mut observed_payloads = Vec::new();
+    while observed_payloads.len() < ROW_COUNT && Instant::now() < deadline {
+        saw_server_frames |= pump_websocket_once(&mut stalled.socket, &stalled.db, &stalled.wire);
+        while let Some(event) = stalled_data_subscription.next().now_or_never().flatten() {
+            let SubscriptionEvent::Delta { added, .. } = event else {
+                continue;
+            };
+            for row in added {
+                let Some(Value::String(payload)) = row.cell(users_table, "name") else {
+                    panic!("FIFO reset row must contain its payload");
+                };
+                observed_payloads.push(payload);
+            }
+        }
+    }
+    assert!(
+        saw_server_frames,
+        "A must receive server frames after reopening"
+    );
+
+    let observed_indices = observed_payloads
+        .iter()
+        .map(|payload| {
+            payload
+                .get(..3)
+                .and_then(|prefix| prefix.parse::<usize>().ok())
+        })
+        .collect::<Option<Vec<_>>>();
+    let expected_indices = Some((0..ROW_COUNT).collect::<Vec<_>>());
+    assert_eq!(
+        observed_indices, expected_indices,
+        "client A's eventual subscription batches must stay FIFO"
+    );
+    drop(stalled.socket);
+    drop(independent.socket);
+    drop(seed.socket);
     server.shutdown();
 }
 
