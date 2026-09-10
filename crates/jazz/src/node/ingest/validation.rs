@@ -410,8 +410,39 @@ where
         Ok(PublishedTransaction { tx_id, persistence })
     }
 
+    async fn prepare_exact_history_version(
+        &mut self, tx_node_alias: NodeAlias, tx_time: TxTime, version: &VersionRecord,
+    ) -> Result<VersionRow, Error> {
+        let author_schema = version.schema_version();
+        let table = self.table_in_schema(version.table(), author_schema)?;
+        let schema_alias = self.ensure_schema_version_alias(author_schema).await?;
+        let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
+        VersionRow::from_wire_with_schema_version(
+            &table, version, authored, tx_node_alias, schema_alias, tx_time,
+            (author_schema != self.catalogue.current_schema_version_id).then_some(author_schema),
+        )
+    }
+
     async fn ingest_transaction_and_versions_with_current_indexes(
         &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+        update_current_indexes: bool,
+        view_scoped_cardinality: bool,
+    ) -> Result<(), Error> {
+        let batch = self.database.open_batch();
+        self.ingest_transaction_and_versions_with_current_indexes_in_batch(
+            batch, tx, versions, fate, global_time, durability, update_current_indexes,
+            view_scoped_cardinality,
+        ).await
+    }
+
+    async fn ingest_transaction_and_versions_with_current_indexes_in_batch(
+        &mut self,
+        mut batch: DatabaseBatch,
         tx: Transaction,
         versions: Vec<VersionRecord>,
         fate: Fate,
@@ -426,7 +457,6 @@ where
         } else {
             self.complete_parent_versions(&tx, &versions).await?
         };
-        let mut batch = self.database.open_batch();
         if let Some(complete_parent_versions) = complete_parent_versions.as_deref() {
             self.preflight_complete_parent_constraints(
                 &mut batch,
@@ -504,6 +534,9 @@ where
             .collect::<BTreeSet<_>>();
         for parent_node in parent_nodes {
             self.ensure_node_alias(parent_node).await?;
+        }
+        for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
+            self.ensure_schema_version_alias(schema).await?;
         }
         let stored_tx = self.query_transaction(tx.tx_id).await?;
         let tx_already_known = stored_tx.is_some();
@@ -651,28 +684,10 @@ where
             }
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             let storage_key = self.version_storage_primary_key(&stored)?;
-            if tx_already_known {
-                let existing = self.database.primary_key_get_raw_in_batch(
-                    batch,
-                    history_table.as_ref(),
-                    &self.version_storage_primary_key_values(&stored)?,
-                )
-                .await?;
-                if let Some(existing) = existing {
-                    if existing.record().raw() != groove_record.record().raw() {
-                        return Err(Error::ConflictingCommitUnit(tx.tx_id));
-                    }
-                } else {
-                    batch.insert_raw(history_table.as_ref(), storage_key, groove_record);
-                }
-            } else {
-                // SAFETY: transaction metadata and immutable history rows persist atomically, so
-                // an unknown transaction id proves that this history key is absent from storage.
-                // The bulk-ingest path also deduplicates transaction ids before staging, proving
-                // there is no earlier operation for this key in the same batch.
-                unsafe {
-                    batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
-                }
+            if batch.ensure_exact(&self.database, history_table.as_ref(), storage_key, groove_record).await?
+                == groove::db::EnsureExactOutcome::Conflict
+            {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_time.is_none()
             {

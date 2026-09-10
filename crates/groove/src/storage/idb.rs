@@ -230,6 +230,28 @@ impl<S> OrderedKvStorage for IdbStorage<S>
 where
     S: PageStore + Clone + 'static,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<super::ValueComparison, Error>> {
+        Box::pin(async move {
+            let key = self.encoded_key(&cf, &key)?;
+            let result = self
+                .read_resident(|tree| {
+                    let (key, expected) = (key.clone(), expected.clone());
+                    async move { tree.value_equals(&key, &expected).await }
+                })
+                .await?;
+            Ok(match result {
+                None => super::ValueComparison::Absent,
+                Some(true) => super::ValueComparison::Identical,
+                Some(false) => super::ValueComparison::Different,
+            })
+        })
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             let key = self.encoded_key(&cf, &key)?;

@@ -1007,28 +1007,29 @@ where
         let versions = canonical_versions(versions);
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
-            let mut existing_versions = self
-                .query_versions_for_tx(tx.tx_id).await?
-                .into_iter()
-                .map(|stored| self.version_record_from_row(&stored))
-                .collect::<Result<Vec<_>, Error>>()?;
-            existing_versions.sort();
             if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
                 || existing.view_scoped_cardinality
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
+            // Normalize aliases before establishing the batch's resident base.
+            for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
+                self.ensure_schema_version_alias(schema).await?;
+            }
+            for parent in versions.iter().flat_map(VersionRecord::parents) {
+                self.ensure_node_alias(parent.node).await?;
+            }
+            let mut batch = self.database.open_batch();
             let mut version_bundles = Vec::new();
             for version in versions {
-                match existing_versions.iter().find(|existing| {
-                    view_version_key_for_ingest(existing) == view_version_key_for_ingest(&version)
-                }) {
-                    Some(existing) if existing != &version => {
-                        return Err(Error::ConflictingCommitUnit(tx.tx_id));
-                    }
-                    Some(_) => {}
-                    None => version_bundles.push(version),
+                let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, &version).await?;
+                let (table, record) = self.version_storage_write_binding(&stored)?;
+                let key = self.version_storage_primary_key(&stored)?;
+                match batch.ensure_exact(&self.database, table.as_ref(), key, record).await? {
+                    groove::db::EnsureExactOutcome::Inserted => version_bundles.push(version),
+                    groove::db::EnsureExactOutcome::AlreadyIdentical => {},
+                    groove::db::EnsureExactOutcome::Conflict => return Err(Error::ConflictingCommitUnit(tx.tx_id)),
                 }
             }
             if version_bundles.is_empty() && !existing.view_scoped_cardinality {
@@ -1036,12 +1037,15 @@ where
                     .await?;
                 return Ok(());
             }
-            return self.ingest_transaction_and_versions(
+            return self.ingest_transaction_and_versions_with_current_indexes_in_batch(
+                batch,
                 tx,
                 version_bundles,
                 fate,
                 global_time,
                 durability,
+                true,
+                false,
             ).await;
         }
         self.ingest_transaction_and_versions(tx, versions, fate, global_time, durability)

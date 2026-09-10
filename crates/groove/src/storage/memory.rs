@@ -351,6 +351,21 @@ impl MemoryStorage {
 }
 
 impl OrderedKvStorage for MemoryStorage {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> super::StorageFuture<'_, Result<super::ValueComparison, Error>> {
+        Box::pin(async move {
+            self.with_cf(&cf, |values| match values.get(&key) {
+                None => super::ValueComparison::Absent,
+                Some(value) if value == &expected => super::ValueComparison::Identical,
+                Some(_) => super::ValueComparison::Different,
+            })
+        })
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         true
     }

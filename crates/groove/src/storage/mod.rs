@@ -330,6 +330,14 @@ pub type ScanVisitor<'visitor> =
 /// absences. Successful writes through the same storage instance must be
 /// reflected by those resident reads. A backend may evict retained data; after
 /// eviction, a later read may become pending again.
+/// Result of comparing an encoded value without returning its body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueComparison {
+    Absent,
+    Identical,
+    Different,
+}
+
 pub trait OrderedKvStorage {
     /// Whether a read that yields once may be immediately re-polled by the
     /// caller without turning an external storage wait into a synchronous
@@ -354,6 +362,23 @@ pub trait OrderedKvStorage {
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>>;
+    /// Compare at the storage boundary. Backends can avoid cloning resident values.
+    /// This is a read, not a conditional mutation or a cross-writer reservation.
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        Box::pin(async move {
+            Ok(match self.get(cf, key).await? {
+                None => ValueComparison::Absent,
+                Some(value) if value == expected => ValueComparison::Identical,
+                Some(_) => ValueComparison::Different,
+            })
+        })
+    }
+
     /// Atomically install `value` only when `key` is absent. Returns the
     /// pre-existing value when another writer already installed one.
     fn put_if_absent(
@@ -503,6 +528,15 @@ impl<S> OrderedKvStorage for Rc<S>
 where
     S: OrderedKvStorage,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        self.as_ref().compare_value(cf, key, expected)
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         self.as_ref().permits_eager_read_retry()
     }
@@ -597,6 +631,15 @@ impl<S> OrderedKvStorage for &S
 where
     S: OrderedKvStorage,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        S::compare_value(*self, cf, key, expected)
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         S::permits_eager_read_retry(*self)
     }
@@ -977,6 +1020,18 @@ impl LayoutStorage {
 }
 
 impl OrderedKvStorage for LayoutStorage {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        Box::pin(async move {
+            let (cf, key) = self.physical_key(&cf, &key)?;
+            self.inner.compare_value(cf, key, expected).await
+        })
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
@@ -1207,6 +1262,15 @@ impl BoxedStorage {
 }
 
 impl OrderedKvStorage for BoxedStorage {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        self.inner.compare_value(cf, key, expected)
+    }
+
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.inner.scan(request)
     }
@@ -1900,6 +1964,29 @@ impl<S: ?Sized> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        Box::pin(async move {
+            {
+                let mut staged = self.staged_writes.borrow_mut();
+                if let Some(index) = staged.latest_index(&cf, &key) {
+                    return Ok(match &staged.operations[index] {
+                        OwnedWriteOperation::Delete { .. } => ValueComparison::Absent,
+                        OwnedWriteOperation::Set { value, .. } if value == &expected => {
+                            ValueComparison::Identical
+                        }
+                        _ => ValueComparison::Different,
+                    });
+                }
+            }
+            self.base.compare_value(cf, key, expected).await
+        })
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         self.base.permits_eager_read_retry()
     }
@@ -2085,6 +2172,37 @@ pub mod conformance {
     where
         S: OrderedKvStorage,
     {
+        let key = b"comparison-only".to_vec();
+        assert_eq!(
+            storage
+                .compare_value("records".into(), key.clone(), b"first".to_vec())
+                .await
+                .unwrap(),
+            ValueComparison::Absent
+        );
+        storage
+            .set("records".into(), key.clone(), b"first".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .compare_value("records".into(), key.clone(), b"first".to_vec())
+                .await
+                .unwrap(),
+            ValueComparison::Identical
+        );
+        assert_eq!(
+            storage
+                .compare_value("records".into(), key.clone(), b"other".to_vec())
+                .await
+                .unwrap(),
+            ValueComparison::Different
+        );
+        assert_eq!(
+            storage.get("records".into(), key.clone()).await.unwrap(),
+            Some(b"first".to_vec())
+        );
+        storage.delete("records".into(), key).await.unwrap();
         storage
             .set("records".into(), b"user:2".to_vec(), b"two".to_vec())
             .await

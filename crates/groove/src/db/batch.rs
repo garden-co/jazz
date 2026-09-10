@@ -46,6 +46,10 @@ impl StagedDatabaseBatch<'_> {
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseBatch {
     pub(super) operations: Vec<BatchOperation>,
+    pub(super) exact_base: Option<(usize, u64)>,
+    pub(super) exact_conflict: bool,
+    pub(super) exact_owner: Option<Rc<()>>,
+    pub(super) exact_keys: BTreeMap<(String, Vec<u8>), Vec<u8>>,
     pub(super) txn_operations: RefCell<StagedWriteState>,
     pub(super) txn_indexed_operations: Cell<usize>,
     pub(super) notification_timing: NotificationTiming,
@@ -54,7 +58,10 @@ pub struct DatabaseBatch {
 
 impl PartialEq for DatabaseBatch {
     fn eq(&self, other: &Self) -> bool {
-        self.operations == other.operations
+        self.exact_base == other.exact_base
+            && self.exact_conflict == other.exact_conflict
+            && self.exact_keys == other.exact_keys
+            && self.operations == other.operations
             && self.notification_timing == other.notification_timing
             && self.accepted_large_values == other.accepted_large_values
     }
@@ -72,7 +79,79 @@ pub enum NotificationTiming {
     AfterPersistence,
 }
 
+/// Outcome of a batch-scoped immutable-record insertion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnsureExactOutcome {
+    Inserted,
+    AlreadyIdentical,
+    Conflict,
+}
+
 impl DatabaseBatch {
+    /// Stage an immutable record, or accept its identical existing bytes.
+    /// A conflict poisons this batch, never the database. Outcomes cannot be
+    /// applied to a different database or after another resident publication.
+    pub async fn ensure_exact(
+        &mut self,
+        database: &Database,
+        table: impl Into<String>,
+        key: PrimaryKeyValue,
+        record: impl Into<RawRecordInput>,
+    ) -> Result<EnsureExactOutcome, Error> {
+        database.ensure_not_poisoned()?;
+        self.check_exact_base(database)?;
+        self.exact_base = Some((
+            Rc::as_ptr(&database.immutable_batch_owner) as usize,
+            database.next_publication_id,
+        ));
+        self.exact_owner = Some(Rc::clone(&database.immutable_batch_owner));
+        let table = table.into();
+        let record = record.into();
+        let operation = BatchOperation::InsertRawFresh {
+            table: table.clone(),
+            key,
+            record,
+        };
+        let pending = database.pending_write_from_operation(&operation)?;
+        let expected = pending.stored_record().expect("immutable insert has bytes");
+        database.ensure_batch_storage_txn(self)?;
+        let resident = database.resident_storage();
+        let overlay = StagedWriteOverlay::new(&resident, &self.txn_operations);
+        let coordinate = (table.clone(), pending.key().to_vec());
+        let comparison = overlay
+            .compare_value(table, pending.key().to_vec(), expected.clone())
+            .await?;
+        if comparison != crate::storage::ValueComparison::Different {
+            self.exact_keys.insert(coordinate, expected);
+        }
+        match comparison {
+            crate::storage::ValueComparison::Absent => {
+                self.push_operation(operation);
+                Ok(EnsureExactOutcome::Inserted)
+            }
+            crate::storage::ValueComparison::Identical => Ok(EnsureExactOutcome::AlreadyIdentical),
+            crate::storage::ValueComparison::Different => {
+                self.exact_conflict = true;
+                Ok(EnsureExactOutcome::Conflict)
+            }
+        }
+    }
+
+    pub(super) fn check_exact_base(&self, database: &Database) -> Result<(), Error> {
+        if self.exact_conflict {
+            return Err(Error::ImmutableBatchConflict);
+        }
+        if self.exact_base.is_some_and(|base| {
+            base != (
+                Rc::as_ptr(&database.immutable_batch_owner) as usize,
+                database.next_publication_id,
+            )
+        }) {
+            return Err(Error::StaleImmutableBatch);
+        }
+        Ok(())
+    }
+
     pub fn deliver_notifications(&mut self, timing: NotificationTiming) {
         self.notification_timing = timing;
     }

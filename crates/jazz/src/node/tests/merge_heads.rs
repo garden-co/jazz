@@ -895,3 +895,22 @@ fn ancestry_lookup_avoids_transaction_wide_reads_resident_and_cold() {
             "row ancestry must never materialize a whole transaction (cold={cold})");
     }
 }
+
+// Internal work-count receipt: transaction fate handling may read the full
+// unit once; exact row matching must not add another transaction-wide read.
+#[test]
+fn known_transaction_matching_probes_only_incoming_history_keys() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xf1), schema);
+    let tx_id = writer.commit_mergeable_many_settled((0..32).map(|i| {
+        MergeableCommit::new("todos", row(i + 1), 10)
+            .cells(BTreeMap::from([("title".to_owned(), "same".to_owned())]))
+    }).collect()).unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(tx_id).unwrap() else { panic!("commit unit"); };
+    let state = writer.query_transaction(tx_id).unwrap().unwrap();
+    writer.query.tx_versions_cache.clear();
+    reset_query_versions_for_tx_call_count();
+    writer.ingest_known_transaction(tx, versions, state.fate.clone(), state.global_time, state.durability).unwrap();
+    assert_eq!(query_versions_for_tx_call_count(), 1, "only fate processing needs a whole-transaction read");
+    assert_eq!(writer.query_versions_for_tx(tx_id).unwrap().len(), 32);
+}

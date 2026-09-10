@@ -228,6 +228,17 @@ where
             .iter()
             .map(|unit| (unit.tx.tx_id, unit.versions.clone()))
             .collect::<Vec<_>>();
+        // Alias allocation is a separate monotone publication. Complete it for
+        // the whole input before any immutable-row decisions bind the batch.
+        for unit in &publication.commits {
+            self.ensure_node_alias(unit.tx.tx_id.node).await?;
+            for version in &unit.versions {
+                self.ensure_schema_version_alias(version.schema_version()).await?;
+                for parent in version.parents() {
+                    self.ensure_node_alias(parent.node).await?;
+                }
+            }
+        }
         let mut batch = self.database.open_batch();
         self.preflight_complete_parent_batch(&mut batch, &complete_parents)
             .await?;

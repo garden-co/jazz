@@ -206,3 +206,18 @@ encoders.
 This map intentionally defines ownership, not a second source of query or
 protocol semantics. The numbered chapters and invariant registries remain
 authoritative.
+
+### Immutable history admission batches
+
+Jazz resolves wire identities to its local physical history representation
+before calling Groove's batch-scoped `ensure_exact`. History equality is over
+that storage representation, not between wire bytes and a storage envelope.
+Known-transaction admission compares only incoming coordinates; it must not
+reconstruct every stored row and linearly search them for each incoming row.
+
+Jazz still owns transaction identity, authorization, parent constraints,
+partial cardinality, fate/durability transitions and current-row visibility.
+An identical history version does not imply a transaction-status no-op. The
+history insertions, transaction metadata and derived current/index effects
+share the existing database batch/publication boundary. Alias allocation for
+a multi-transaction publication precedes immutable-row batch decisions.

@@ -393,28 +393,6 @@ where
         Ok(history_primary_key(version))
     }
 
-    pub(super) fn version_storage_primary_key_values(
-        &self,
-        version: &VersionRow,
-    ) -> Result<Vec<Value>, Error> {
-        if version.layer() == VersionLayer::Deletion {
-            let table_id = self.physical_table_id_for_version(version)?;
-            return Ok(vec![
-                Value::Bytes(version.branch_key().canonical_bytes()),
-                Value::U64(table_id.0),
-                Value::Uuid(version.row_uuid().0),
-                Value::U64(version.tx_time().0),
-                Value::U64(version.tx_node_alias().0),
-            ]);
-        }
-        Ok(vec![
-            Value::Bytes(version.branch_key().canonical_bytes()),
-            Value::Uuid(version.row_uuid().0),
-            Value::U64(version.tx_time().0),
-            Value::U64(version.tx_node_alias().0),
-        ])
-    }
-
     /// Re-encode every enum occurrence in a logical storage record before it
     /// crosses into a physical table.  History, settled-current and
     /// ahead-current writes share this boundary; allowing one of those paths

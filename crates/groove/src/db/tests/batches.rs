@@ -5603,3 +5603,167 @@ async fn persistence_receipts_cannot_settle_another_database() {
         [(vec![Value::U64(2), Value::String("second".to_owned())], 1)]
     );
 }
+
+#[futures_test::test]
+async fn immutable_batch_is_idempotent_and_conflicts_abort_every_write() {
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut db = Database::new(schema, storage).await.unwrap();
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let record = |id, title: &str| {
+        descriptor
+            .create(&[Value::U64(id), Value::String(title.into())])
+            .unwrap()
+    };
+    let mut batch = db.open_batch();
+    assert_eq!(
+        batch
+            .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), record(1, "one"))
+            .await
+            .unwrap(),
+        EnsureExactOutcome::Inserted
+    );
+    assert_eq!(
+        batch
+            .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), record(1, "one"))
+            .await
+            .unwrap(),
+        EnsureExactOutcome::AlreadyIdentical
+    );
+    db.commit_batch(batch).await.unwrap();
+    let mut replay = db.open_batch();
+    assert_eq!(
+        replay
+            .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), record(1, "one"))
+            .await
+            .unwrap(),
+        EnsureExactOutcome::AlreadyIdentical
+    );
+    assert!(
+        replay.operations.is_empty(),
+        "identical history emits no writes or deltas"
+    );
+    db.commit_batch(replay).await.unwrap();
+    let mut conflict = db.open_batch();
+    assert_eq!(
+        conflict
+            .ensure_exact(&db, "albums", PrimaryKeyValue::U64(2), record(2, "two"))
+            .await
+            .unwrap(),
+        EnsureExactOutcome::Inserted
+    );
+    assert_eq!(
+        conflict
+            .ensure_exact(
+                &db,
+                "albums",
+                PrimaryKeyValue::U64(1),
+                record(1, "different")
+            )
+            .await
+            .unwrap(),
+        EnsureExactOutcome::Conflict
+    );
+    assert!(matches!(
+        db.commit_batch(conflict).await,
+        Err(Error::ImmutableBatchConflict)
+    ));
+    assert!(
+        db.primary_key_get_raw("albums", &[Value::U64(2)])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.primary_key_get_raw("albums", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .unwrap()
+            .raw(),
+        record(1, "one")
+    );
+    let mut usable = db.open_batch();
+    usable.insert(
+        "albums",
+        vec![Value::U64(3), Value::String("still usable".into())],
+    );
+    db.commit_batch(usable).await.unwrap();
+}
+
+#[futures_test::test]
+async fn immutable_batch_rejects_stale_resident_proofs() {
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut db = Database::new(schema, storage).await.unwrap();
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let mut old = db.open_batch();
+    old.ensure_exact(
+        &db,
+        "albums",
+        PrimaryKeyValue::U64(1),
+        descriptor
+            .create(&[Value::U64(1), Value::String("old".into())])
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut newer = db.open_batch();
+    newer.insert("albums", vec![Value::U64(1), Value::String("new".into())]);
+    let applied = db.apply_batch(newer).await.unwrap();
+    assert!(matches!(
+        db.apply_batch(old).await,
+        Err(Error::StaleImmutableBatch)
+    ));
+    db.finish_persistence(applied.persist().await).unwrap();
+    assert_eq!(
+        db.primary_key_get_raw("albums", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .unwrap()
+            .record()
+            .get_str(1)
+            .unwrap(),
+        "new"
+    );
+}
+
+#[futures_test::test]
+async fn immutable_batch_rejects_later_overwrite_and_other_database() {
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut db = Database::new(schema.clone(), storage).await.unwrap();
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let bytes = descriptor
+        .create(&[Value::U64(1), Value::String("original".into())])
+        .unwrap();
+    let mut batch = db.open_batch();
+    batch
+        .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), bytes.clone())
+        .await
+        .unwrap();
+    batch.update(
+        "albums",
+        vec![Value::U64(1), Value::String("overwrite".into())],
+    );
+    assert!(matches!(
+        db.commit_batch(batch).await,
+        Err(Error::ImmutableBatchConflict)
+    ));
+    assert!(
+        db.primary_key_get_raw("albums", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut batch = db.open_batch();
+    batch
+        .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), bytes)
+        .await
+        .unwrap();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut other = Database::new(schema, storage).await.unwrap();
+    assert!(matches!(
+        other.commit_batch(batch).await,
+        Err(Error::StaleImmutableBatch)
+    ));
+}

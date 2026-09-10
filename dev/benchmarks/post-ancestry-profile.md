@@ -26,12 +26,14 @@ of a transaction can therefore perform quadratic comparisons. Unlike ancestry,
 this operation does need the whole relevant transaction; it does not need a
 repeated search through it.
 
-Next implementation hypothesis: build a coordinate index once, compute each
-incoming key once, and preserve exact byte comparison for matches, conflict
-rejection, missing-version ingestion, partial cardinality and fate updates.
-Keep this separate from storage and protocol changes. Pin work scaling with a
-deterministic regression and confirm sensitivity before repeating measurements.
-The full 224 ms is an inclusive upper bound, not a promised saving.
+Implementation: use Groove's batch-scoped `ensure_exact` on each incoming
+physical history record. Storage compares encoded values without returning old
+row bodies; Groove stages only missing records and retains the lookup result
+for delta computation. Exact duplicates add no history writes. The batch is
+bound to its database/resident revision and a conflict invalidates it. Jazz
+retains transaction identity, partial cardinality, fate and visibility rules.
+This removes the repeated search rather than indexing all stored rows. No
+storage or wire encoding changes. Updated timings are pending.
 
 Other candidates for subsequent slices:
 
@@ -48,4 +50,4 @@ Other candidates for subsequent slices:
   time in the batch profile. These are smaller than current publication and
   ingestion costs and should not lead the next slice.
 
-No runtime change or measured improvement beyond #2785 is claimed by this note.
+This note records the baseline; no new performance improvement is claimed until remeasurement.

@@ -111,11 +111,22 @@ impl Database {
     /// no longer borrows this database, so resident queries may continue while
     /// storage suspends.
     pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
+        batch.check_exact_base(self)?;
         self.ensure_not_poisoned()?;
         let accepted_large_values = batch.accepted_large_values.clone();
         let defer_notifications_until_durable =
             batch.notification_timing == NotificationTiming::AfterPersistence;
+        // Later ordinary writes must not invalidate an ensure_exact result.
+        let exact_keys = batch.exact_keys.clone();
         let pending_writes = self.pending_writes_from_batch(batch)?;
+        for write in &pending_writes {
+            if let Some(expected) =
+                exact_keys.get(&(write.table().to_owned(), write.key().to_vec()))
+                && write.stored_record().as_ref() != Some(expected)
+            {
+                return Err(Error::ImmutableBatchConflict);
+            }
+        }
         let mut accepted_staging = Vec::new();
         for staged_id in &accepted_large_values {
             let key = staged_large_value_key(*staged_id);

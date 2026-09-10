@@ -198,6 +198,18 @@ impl<S: PageStore + Clone> IdbTree<S> {
         self.inner.borrow().dirty.len()
     }
 
+    /// Compare an existing value in place; None denotes an absent key.
+    pub async fn value_equals(&self, key: &[u8], expected: &[u8]) -> Result<Option<bool>, Error> {
+        loop {
+            self.ensure_live()?;
+            let attempt = self.inner.borrow().try_value_equals(key, expected)?;
+            match attempt {
+                Attempt::Ready(value) => return Ok(value),
+                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+            }
+        }
+    }
+
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         loop {
             self.ensure_live()?;
@@ -447,6 +459,54 @@ impl<S: PageStore> TreeCore<S> {
             tree.metadata.root_page_id = Some(root);
         }
         Ok(tree)
+    }
+
+    fn try_value_equals(
+        &self,
+        key: &[u8],
+        expected: &[u8],
+    ) -> Result<Attempt<Option<bool>>, Error> {
+        let Some((_, entries, _, mut visited)) = self.resident_descent(key)? else {
+            return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
+        };
+        let Ok(index) = entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+        else {
+            return Ok(Attempt::Ready(None));
+        };
+        match &entries[index].1 {
+            ValueCell::Inline(value) => Ok(Attempt::Ready(Some(value.as_slice() == expected))),
+            ValueCell::Overflow { head, len } => {
+                if u64::try_from(expected.len()).ok() != Some(*len) {
+                    return Ok(Attempt::Ready(Some(false)));
+                }
+                let mut current = Some(*head);
+                let mut offset = 0usize;
+                while let Some(page_id) = current {
+                    if !visited.insert(page_id) {
+                        return Err(Error::InvalidPage(
+                            "tree graph contains a cycle or shared page".to_owned(),
+                        ));
+                    }
+                    let Some(page) = self.pages.get(&page_id) else {
+                        return Ok(Attempt::Missing(page_id));
+                    };
+                    let Page::Overflow { next, bytes } = page else {
+                        return Err(Error::InvalidPage(
+                            "value references a non-overflow page".to_owned(),
+                        ));
+                    };
+                    let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+                        Error::InvalidPage("overflow value length overflow".to_owned())
+                    })?;
+                    if expected.get(offset..end) != Some(bytes.as_slice()) {
+                        return Ok(Attempt::Ready(Some(false)));
+                    }
+                    offset = end;
+                    current = *next;
+                }
+                Ok(Attempt::Ready(Some(offset == expected.len())))
+            }
+        }
     }
 
     fn try_get(&self, key: &[u8]) -> Result<Attempt<Option<Vec<u8>>>, Error> {
@@ -1152,6 +1212,47 @@ mod tests {
     // These are intentionally engine-level contract tests: page splitting,
     // reopen, and residency are not observably attributable through Jazz's
     // public query API, while every backend must preserve them.
+    #[test]
+    fn exact_value_comparison_handles_inline_overflow_and_cold_reopen() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options.clone()).await.unwrap();
+            tree.put(b"small".to_vec(), b"hello".to_vec())
+                .await
+                .unwrap();
+            let large = vec![7; 10000];
+            tree.put(b"large".to_vec(), large.clone()).await.unwrap();
+            tree.flush().await.unwrap();
+            drop(tree);
+            let tree = IdbTree::open(store, options).await.unwrap();
+            assert_eq!(tree.value_equals(b"missing", b"hello").await.unwrap(), None);
+            assert_eq!(
+                tree.value_equals(b"small", b"hello").await.unwrap(),
+                Some(true)
+            );
+            assert_eq!(
+                tree.value_equals(b"small", b"world").await.unwrap(),
+                Some(false)
+            );
+            assert_eq!(
+                tree.value_equals(b"large", &large).await.unwrap(),
+                Some(true)
+            );
+            let mut changed = large.clone();
+            changed[9999] = 8;
+            assert_eq!(
+                tree.value_equals(b"large", &changed).await.unwrap(),
+                Some(false)
+            );
+            assert_eq!(
+                tree.value_equals(b"large", &large[..9999]).await.unwrap(),
+                Some(false)
+            );
+            assert_eq!(tree.get(b"large").await.unwrap(), Some(large));
+        });
+    }
+
     #[test]
     fn inserts_split_reopen_and_scan_in_key_order() {
         futures::executor::block_on(async {

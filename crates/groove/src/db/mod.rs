@@ -1360,6 +1360,7 @@ pub struct Database {
     /// re-hash the same logical field list once per stored row.
     stored_record_descriptors: RefCell<BTreeMap<String, BTreeMap<u32, RecordDescriptor>>>,
     next_publication_id: u64,
+    immutable_batch_owner: Rc<()>,
     durable_publication_frontier: Option<PublicationId>,
     resident_publications: BTreeMap<PublicationId, Rc<RefCell<StagedWriteState>>>,
     persisted_publications: BTreeSet<PublicationId>,
@@ -1665,6 +1666,10 @@ pub use storage_helpers::{
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("immutable record conflict invalidated the batch")]
+    ImmutableBatchConflict,
+    #[error("immutable batch must be rebuilt against the current database state")]
+    StaleImmutableBatch,
     #[error("database instance is poisoned after a failed atomic commit")]
     DatabasePoisoned,
     #[error("publication does not belong to this database: {0:?}")]

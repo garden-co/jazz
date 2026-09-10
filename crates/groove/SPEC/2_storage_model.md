@@ -836,3 +836,35 @@ The former hybrid columnar-base proposal is rejected and is not part of Groove's
 - 🔶 [#1775](https://github.com/garden-co/jazz/issues/1775) — Current-base selection, compaction handoff, scan exclusion, and compaction-quality receipts.
 - 🔶 [#1774](https://github.com/garden-co/jazz/issues/1774) — Portable storage guarantees, reopen normativity, async persistence, serverless backends, row encoding, and compression policy.
 - 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Explicit index declarations and stale-index behavior.
+
+### Batch-scoped immutable record insertion
+
+`DatabaseBatch::ensure_exact(database, table, key, record)` resolves an immutable
+record against the resident database and preceding operations in that batch.
+It returns `Inserted`, `AlreadyIdentical`, or `Conflict`. `Inserted` stages the
+record but does not publish or persist it. `AlreadyIdentical` adds no physical
+write or query delta. `Conflict` invalidates the whole batch; attempting to
+apply it must fail before publishing any of its writes, without poisoning the
+database. Later operations must not contradict an ensured record.
+
+Equality compares the same locally encoded record representation, including
+its variant discriminator. It does not decode and reconstruct logical fields.
+The operation retains its absence decision for delta computation, avoiding a
+second storage read for inserted records. Repeated keys observe earlier staged
+writes. An empty duplicate-only history batch may still accompany mutable
+transaction/fate updates supplied by the higher layer.
+
+These decisions are scoped to one database owner and resident publication
+revision. Applying them to another database or after a resident publication
+fails with `StaleImmutableBatch`; callers rebuild instead of reusing stale
+outcomes. As with ordinary Groove index/IVM batches, the database owner must
+serialize mutations to its managed tables. This API is not a cross-owner
+compare-and-swap transaction and must not be used to coordinate independently
+mutating database instances over the same tables.
+
+The storage seam's `compare_value` is a side-effect-free read returning absent,
+identical or different. It does not reserve a key. Implementations may compare
+borrowed memory, pinned storage values or B-tree leaf/overflow bytes without
+returning an owned old value. The staged/resident overlays must participate in
+this lookup. Backends retain their existing atomic `write_many` persistence
+boundary. No new durable record or wire encoding is introduced.
