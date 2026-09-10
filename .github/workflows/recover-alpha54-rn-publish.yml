@@ -23,13 +23,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: '24'
+          node-version: "24"
           registry-url: https://registry.npmjs.org
       - run: sudo apt-get update && sudo apt-get install -y llvm-18
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           repository: garden-co/jazz
-          run-id: '34428566341'
+          run-id: "34428566341"
           name: pkg-jazz-rn-tarball
           path: input
           github-token: ${{ github.token }}
@@ -49,7 +49,7 @@ jobs:
           import { execFileSync } from 'node:child_process';
           import { readFileSync } from 'node:fs';
           import { createHash } from 'node:crypto';
-          const file = 'output/jazz-rn-2.0.0-alpha.54.tgz';
+          const file = './output/jazz-rn-2.0.0-alpha.54.tgz';
           const receipt = JSON.parse(readFileSync('output/receipt.json'));
           if (createHash('sha256').update(readFileSync(file)).digest('hex') !== receipt.outputSha256) throw new Error('output changed');
           const response = await fetch('https://registry.npmjs.org/jazz-rn/2.0.0-alpha.54');
