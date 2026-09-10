@@ -530,7 +530,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       let closingLatePeer = false;
       let alive = false;
       let lastTick = Date.now();
-      let deadline = lastTick + 1_000;
+      // A delayed alive reply is not evidence that this realm released its
+      // physical database lock. Only worker-closing authorizes a generation
+      // change; apply the bounded startup grace even before the first reply.
+      let deadline = lastTick + RUNTIME_STARTUP_TIMEOUT_MS;
       let suspended = typeof document !== "undefined" && document.hidden;
       let bootstrapTimer: ReturnType<typeof setTimeout> | undefined;
       const settle = (outcome: { connected: boolean; error?: Error }) => {
@@ -564,7 +567,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       this.cancelBootstrap = cancelForShutdown;
       const refreshGrace = () => {
         lastTick = Date.now();
-        deadline = lastTick + (alive ? RUNTIME_STARTUP_TIMEOUT_MS : 1_000);
+        deadline = lastTick + RUNTIME_STARTUP_TIMEOUT_MS;
       };
       const onVisibilityChange = () => {
         const hidden = typeof document !== "undefined" && document.hidden;
@@ -579,16 +582,12 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         if (suspended || now - lastTick > RUNTIME_STARTUP_CLOCK_INTERVAL_MS * 2) refreshGrace();
         lastTick = now;
         if (now >= deadline) {
-          cancel(
-            alive
-              ? {
-                  connected: false,
-                  error: new BrowserWorkerUnresponsiveError(
-                    "Shared browser runtime did not finish initialization within five minutes",
-                  ),
-                }
-              : { connected: false },
-          );
+          cancel({
+            connected: false,
+            error: new BrowserWorkerUnresponsiveError(
+              "Shared browser runtime did not finish initialization within five minutes",
+            ),
+          });
           return;
         }
         bootstrapTimer = setTimeout(
