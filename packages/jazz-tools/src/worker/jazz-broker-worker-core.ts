@@ -911,9 +911,10 @@ async function retireForegroundNodeLease(
 function retireUnclaimedRuntimeOwners(): void {
   if (pendingBootstrapOperations !== 0) return;
   for (const [dbName, owner] of pendingRuntimeOwnerRetirements) {
-    pendingRuntimeOwnerRetirements.delete(dbName);
-    if (physicalDatabaseOwners.get(dbName) !== owner) continue;
-    if (contexts.has(dbName)) continue;
+    if (physicalDatabaseOwners.get(dbName) !== owner || contexts.has(dbName)) {
+      pendingRuntimeOwnerRetirements.delete(dbName);
+      continue;
+    }
     const leaseOwner = foregroundLeaseOwners.get(dbName);
     if (
       leaseOwner &&
@@ -922,6 +923,7 @@ function retireUnclaimedRuntimeOwners(): void {
         leaseOwner.pendingLeaseFinalizations > 0)
     )
       continue;
+    pendingRuntimeOwnerRetirements.delete(dbName);
     foregroundLeaseOwners.delete(dbName);
     void releasePhysicalDatabaseOwner(dbName).catch(() => undefined);
   }
@@ -1974,10 +1976,6 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
 async function releaseIdleContext(context: RuntimeContext): Promise<void> {
   if (contexts.get(context.key) !== context) return;
   if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return;
-  // Foreground lease handoff can outlive the last runtime peer. Reuse this
-  // exact tree until the physical owner can retire; dropping only the wrapper
-  // would leave its storage alive through GC-retained WASM transport handles.
-  if (pendingBootstrapOperations !== 0 || hasForegroundLeaseWork(context.options.dbName)) return;
   if (!context.closing) {
     context.closing = (async () => {
       for (const peer of context.peers.values()) {
@@ -1989,6 +1987,10 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       // The last peer's flush barrier already drained evaluator persistence.
       // Do not retain a graceful close future after every page has gone: a
       // suspended cold/query lifecycle cannot add durability at this point.
+      // Revoke every old cached tree before dropping GC-retained WASM wrappers.
+      // Foreground leases belong to the physical owner, not to this schema pin.
+      const physicalOwner = physicalDatabaseOwners.get(context.options.dbName);
+      const treeRetirement = context.pageStore?.retireTreeOwnership();
       context.runtime?.discard();
       context.runtime = null;
       context.disposePageStoreInvalidation?.();
@@ -1998,17 +2000,13 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       context.disposeTelemetry = null;
       context.disposeAuxiliaryTrace?.();
       context.disposeAuxiliaryTrace = null;
-      // No lease work remains; remove its alias before a successor bootstrap
-      // can mistake the closing page store for a reusable lease owner.
-      foregroundLeaseOwners.delete(context.options.dbName);
-      // Start retirement before removing the context. A successor can create
-      // its context immediately, but ensurePhysicalDatabaseOwner waits for this
-      // exact release before opening a fresh page store. Close acknowledgement
-      // must not wait on a slow epoch transaction after the flush barrier.
-      void releasePhysicalDatabaseOwner(context.options.dbName)
-        .catch(() => undefined)
-        .then(maybeCloseWorker);
-      if (contexts.get(context.key) === context) contexts.delete(context.key);
+      await treeRetirement;
+      if (contexts.get(context.key) !== context) return;
+      contexts.delete(context.key);
+      if (physicalOwner && physicalDatabaseOwners.get(context.options.dbName) === physicalOwner) {
+        pendingRuntimeOwnerRetirements.set(context.options.dbName, physicalOwner);
+      }
+      retireUnclaimedRuntimeOwners();
     })();
   }
   await context.closing;
@@ -2026,23 +2024,7 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
 }
 
 function maybeCloseWorker(): void {
-  // Final lease return/retirement must break the retained-context ownership
-  // cycle, even if another database or inspector keeps this realm alive.
-  if (pendingBootstrapOperations === 0) {
-    for (const context of contexts.values()) {
-      if (
-        context.peers.size === 0 &&
-        context.pendingAdmissionTasks === 0 &&
-        !context.closing &&
-        !context.idleReleaseTimer &&
-        !hasForegroundLeaseWork(context.options.dbName)
-      ) {
-        void releaseIdleContext(context)
-          .catch(() => undefined)
-          .then(maybeCloseWorker);
-      }
-    }
-  }
+  retireUnclaimedRuntimeOwners();
   if (!workerHasLiveWork()) {
     if (pendingWorkerClose) return;
     const closeToken = Symbol("worker-idle-close");

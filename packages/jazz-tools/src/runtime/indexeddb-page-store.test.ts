@@ -26,8 +26,8 @@ async function ownReclamation(store: IndexedDbPageStore) {
     },
   });
   await store.claimBrowserWorkerEpoch(epoch.id, epoch);
-  store.claimTreeOwnership();
-  return epoch;
+  const treeToken = store.claimTreeOwnership();
+  return Object.assign(epoch, { treeToken });
 }
 
 const databaseNames: string[] = [];
@@ -209,7 +209,7 @@ describe("IndexedDbPageStore", () => {
     const epoch = await ownReclamation(store);
     expect(store.canReclaimObsoletePages).toBe(true);
     expect(() => store.claimTreeOwnership()).toThrow("already has a tree");
-    store.releaseTreeOwnership();
+    await store.retireTreeOwnership();
     expect(store.canReclaimObsoletePages).toBe(false);
     store.claimTreeOwnership();
     const pending = store.commit(retirement);
@@ -220,6 +220,69 @@ describe("IndexedDbPageStore", () => {
     expect(await store.readPage(2)).toEqual(new Uint8Array([2]));
     expect((await store.metadata())?.generation).toBe(1);
     store.close();
+  });
+
+  it("revokes exact tree generations and drains stale non-deletion commits before a successor", async () => {
+    const store = await IndexedDbPageStore.open(databaseName());
+    const epoch = await ownReclamation(store);
+    const oldToken = epoch.treeToken;
+    await store.commitPages(
+      0,
+      INDEXEDDB_BTREE_PAGE_SIZE,
+      1,
+      2,
+      [1],
+      [new Uint8Array([1])],
+      [],
+      oldToken,
+    );
+    const pending = store.commitPages(
+      1,
+      INDEXEDDB_BTREE_PAGE_SIZE,
+      2,
+      3,
+      [2],
+      [new Uint8Array([2])],
+      [],
+      oldToken,
+    );
+    const rejected = expect(pending).rejects.toThrow("tree ownership expired");
+    const retirement = store.retireTreeOwnership();
+    expect(store.isTreeOwnershipActive(oldToken)).toBe(false);
+    expect(() => store.claimTreeOwnership()).toThrow("pending transaction");
+    await retirement;
+    await rejected;
+    const successor = store.claimTreeOwnership();
+    store.releaseTreeOwnership(oldToken); // late destructor must not retire the successor
+    expect(store.isTreeOwnershipActive(successor)).toBe(true);
+    expect(store.canReclaimObsoletePages).toBe(true);
+    await expect(
+      store.commitPages(
+        1,
+        INDEXEDDB_BTREE_PAGE_SIZE,
+        3,
+        4,
+        [3],
+        [new Uint8Array([3])],
+        [],
+        oldToken,
+      ),
+    ).rejects.toThrow("tree ownership has expired");
+    await store.commitPages(
+      1,
+      INDEXEDDB_BTREE_PAGE_SIZE,
+      4,
+      5,
+      [4],
+      [new Uint8Array([4])],
+      [1],
+      successor,
+    );
+    expect((await store.metadata())?.rootPageId).toBe(4);
+    expect(await store.readPage(2)).toBeNull();
+    expect(await store.readPage(3)).toBeNull();
+    store.close();
+    await epoch.release();
   });
 
   it("rejects forged, mismatched and multiply consumed reclamation proofs", async () => {

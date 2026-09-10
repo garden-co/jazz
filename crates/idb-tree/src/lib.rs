@@ -65,6 +65,8 @@ pub enum Error {
     Store(String),
     #[error("IDBTree generation conflict: {0}")]
     GenerationConflict(String),
+    #[error("IDBTree ownership has expired")]
+    OwnershipExpired,
     #[error("an IDBTree commit is already in flight")]
     CommitInFlight,
 }
@@ -151,6 +153,9 @@ impl<S: PageStore + Clone> IdbTree<S> {
     pub async fn open(store: S, options: Options) -> Result<Self, Error> {
         let ownership = store.claim_tree_ownership().map_err(Error::Store)?;
         let tree = TreeCore::open(store, options).await?;
+        if !ownership.is_live() {
+            return Err(Error::OwnershipExpired);
+        }
         Ok(Self {
             inner: Rc::new(RefCell::new(tree)),
             _ownership: Rc::new(ownership),
@@ -158,9 +163,18 @@ impl<S: PageStore + Clone> IdbTree<S> {
         })
     }
 
+    fn ensure_live(&self) -> Result<(), Error> {
+        if self._ownership.is_live() {
+            Ok(())
+        } else {
+            Err(Error::OwnershipExpired)
+        }
+    }
+
     /// Discard staged writes and reload the durable root while retaining this
     /// handle's ownership. Callers must serialize this with writes/flushes.
     pub async fn reload(&self) -> Result<(), Error> {
+        self.ensure_live()?;
         let (store, options) = {
             let tree = self.inner.borrow();
             if tree.commit_in_flight {
@@ -169,6 +183,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
             (tree.store.clone(), tree.options)
         };
         let fresh = TreeCore::open(store, options).await?;
+        self.ensure_live()?;
         *self.inner.borrow_mut() = fresh;
         self.reload_epoch
             .set(self.reload_epoch.get().wrapping_add(1));
@@ -185,6 +200,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self.inner.borrow().try_get(key)?;
             match attempt {
                 Attempt::Ready(value) => return Ok(value),
@@ -195,6 +211,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self
                 .inner
                 .borrow_mut()
@@ -208,6 +225,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn delete(&self, key: &[u8]) -> Result<bool, Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self
                 .inner
                 .borrow_mut()
@@ -220,11 +238,13 @@ impl<S: PageStore + Clone> IdbTree<S> {
     }
 
     pub async fn write_many(&self, operations: Vec<WriteOperation>) -> Result<(), Error> {
+        self.ensure_live()?;
         for operation in &operations {
             let key = match operation {
                 WriteOperation::Set { key, .. } | WriteOperation::Delete { key } => key,
             };
             loop {
+                self.ensure_live()?;
                 let attempt = self.inner.borrow().write_path_resident(key)?;
                 match attempt {
                     Attempt::Ready(()) => break,
@@ -251,6 +271,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
         limit: usize,
     ) -> Result<Vec<KeyValue>, Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self.inner.borrow().try_range(start, end, limit)?;
             match attempt {
                 Attempt::Ready(rows) => return Ok(rows),
@@ -266,6 +287,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
         limit: usize,
     ) -> Result<Vec<KeyValue>, Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self.inner.borrow().try_range_reverse(start, end, limit)?;
             match attempt {
                 Attempt::Ready(rows) => return Ok(rows),
@@ -275,6 +297,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
     }
 
     pub async fn flush(&self) -> Result<(), Error> {
+        self.ensure_live()?;
         let (store, prepared) = {
             let mut tree = self.inner.borrow_mut();
             (tree.store.clone(), tree.prepare_commit()?)
@@ -297,6 +320,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
         let root_before = self.inner.borrow().metadata.root_page_id;
         let reload_before = self.reload_epoch.get();
         let result = store.read_page(page_id).await;
+        self.ensure_live()?;
         // The operation retries from the current root, so never import an old
         // completion (including an error) across publication or failure reset.
         // Reset can reuse fresh page IDs, making a cache insert unsafe even if

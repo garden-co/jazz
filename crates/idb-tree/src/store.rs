@@ -34,19 +34,40 @@ pub struct Commit {
     pub deleted_page_ids: Vec<PageId>,
 }
 
-/// Keeps a store's single-tree admission alive until the last tree clone drops.
+/// Keeps a store's single-tree admission alive until it is revoked or the
+/// last tree clone drops. Revocation fences even resident reads and writes.
 #[derive(Default)]
-pub struct TreeOwnership(Option<Box<dyn FnOnce()>>);
+pub struct TreeOwnership {
+    is_live: Option<Box<dyn Fn() -> bool>>,
+    release: Option<Box<dyn FnOnce()>>,
+}
 
 impl TreeOwnership {
     pub fn new(release: impl FnOnce() + 'static) -> Self {
-        Self(Some(Box::new(release)))
+        Self {
+            is_live: None,
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub fn revocable(
+        is_live: impl Fn() -> bool + 'static,
+        release: impl FnOnce() + 'static,
+    ) -> Self {
+        Self {
+            is_live: Some(Box::new(is_live)),
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.is_live.as_ref().is_none_or(|check| check())
     }
 }
 
 impl Drop for TreeOwnership {
     fn drop(&mut self) {
-        if let Some(release) = self.0.take() {
+        if let Some(release) = self.release.take() {
             release();
         }
     }

@@ -14,6 +14,8 @@ struct Store {
     memory: MemoryPageStore,
     exclusive: Rc<Cell<bool>>,
     claimed: Rc<Cell<bool>>,
+    ownership_generation: Rc<Cell<u64>>,
+    metadata_resume: Rc<RefCell<Option<futures::channel::oneshot::Receiver<()>>>>,
     fail: Rc<Cell<bool>>,
     fail_metadata: Rc<Cell<bool>>,
     metadata_reads: Rc<Cell<usize>>,
@@ -33,12 +35,28 @@ impl Store {
 }
 impl PageStore for Store {
     fn claim_tree_ownership(&self) -> Result<TreeOwnership, String> {
-        if self.exclusive.get() && self.claimed.replace(true) {
+        if !self.exclusive.get() {
+            return Ok(TreeOwnership::default());
+        }
+        if self.claimed.replace(true) {
             return Err("owner already has a tree".into());
         }
-        let claimed = self.claimed.clone();
-        Ok(TreeOwnership::new(move || claimed.set(false)))
+        let token = self.ownership_generation.get() + 1;
+        self.ownership_generation.set(token);
+        let live = self.claimed.clone();
+        let generation = self.ownership_generation.clone();
+        let release_live = live.clone();
+        let release_generation = generation.clone();
+        Ok(TreeOwnership::revocable(
+            move || live.get() && generation.get() == token,
+            move || {
+                if release_generation.get() == token {
+                    release_live.set(false);
+                }
+            },
+        ))
     }
+
     fn can_reclaim_obsolete_pages(&self) -> bool {
         self.exclusive.get()
     }
@@ -47,7 +65,14 @@ impl PageStore for Store {
         if self.fail_metadata.replace(false) {
             return Box::pin(async { Err("metadata unavailable".into()) });
         }
-        self.memory.load_metadata()
+        Box::pin(async move {
+            let metadata = self.memory.load_metadata().await?;
+            let resume = self.metadata_resume.borrow_mut().take();
+            if let Some(resume) = resume {
+                resume.await.map_err(|e| e.to_string())?;
+            }
+            Ok(metadata)
+        })
     }
     fn read_page(&self, id: u64) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>> {
         Box::pin(async move {
@@ -356,5 +381,102 @@ fn successful_publication_keeps_newer_staged_generation_and_reclaims_it_on_next_
         drop(tree);
         let reopened = IdbTree::open(store, options()).await.unwrap();
         assert_eq!(reopened.get(b"key").await.unwrap(), Some(vec![3; 4000]));
+    });
+}
+
+#[test]
+fn revoked_cached_and_pending_handles_cannot_access_or_release_successor() {
+    block_on(async {
+        let store = Store::exclusive();
+        let old = IdbTree::open(store.clone(), options()).await.unwrap();
+        old.put(b"key".to_vec(), vec![1; 4000]).await.unwrap();
+        old.flush().await.unwrap();
+        assert_eq!(old.get(b"key").await.unwrap(), Some(vec![1; 4000]));
+        let retained = old.clone();
+        store.claimed.set(false); // synchronous runtime retirement
+        let successor = IdbTree::open(store.clone(), options()).await.unwrap();
+        assert!(matches!(
+            old.get(b"key").await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(matches!(
+            old.put(b"key".to_vec(), vec![2]).await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(matches!(
+            old.delete(b"key").await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(matches!(
+            old.write_many(vec![]).await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(matches!(
+            old.range(b"", b"z").await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(matches!(
+            old.range_limit(b"", b"z", 0).await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(matches!(
+            old.range_reverse(b"", b"z", 0).await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(matches!(
+            old.range_reverse(b"", b"z", 1).await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(matches!(
+            old.flush().await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(matches!(
+            old.reload().await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        drop(old);
+        drop(retained);
+        assert!(IdbTree::open(store.clone(), options()).await.is_err());
+        successor.put(b"key".to_vec(), vec![3; 4000]).await.unwrap();
+        successor.flush().await.unwrap();
+        successor.reload().await.unwrap();
+        let (resume, receiver) = futures::channel::oneshot::channel();
+        *store.read_resume.borrow_mut() = Some(receiver);
+        store.pause.set(true);
+        let mut read = Box::pin(successor.get(b"key"));
+        assert!(read.as_mut().now_or_never().is_none());
+        store.claimed.set(false);
+        let final_owner = IdbTree::open(store.clone(), options()).await.unwrap();
+        final_owner
+            .put(b"key".to_vec(), vec![4; 4000])
+            .await
+            .unwrap();
+        final_owner.flush().await.unwrap();
+        resume.send(()).unwrap();
+        assert!(matches!(read.await, Err(idb_tree::Error::OwnershipExpired)));
+        assert_eq!(final_owner.get(b"key").await.unwrap(), Some(vec![4; 4000]));
+    });
+}
+
+#[test]
+fn revocation_during_open_rejects_old_metadata_and_preserves_new_guard() {
+    block_on(async {
+        let store = Store::exclusive();
+        let (resume, receiver) = futures::channel::oneshot::channel();
+        *store.metadata_resume.borrow_mut() = Some(receiver);
+        let mut old_open = Box::pin(IdbTree::open(store.clone(), options()));
+        assert!(old_open.as_mut().now_or_never().is_none());
+        store.claimed.set(false);
+        let new = IdbTree::open(store.clone(), options()).await.unwrap();
+        new.put(b"key".to_vec(), vec![7]).await.unwrap();
+        new.flush().await.unwrap();
+        resume.send(()).unwrap();
+        assert!(matches!(
+            old_open.await,
+            Err(idb_tree::Error::OwnershipExpired)
+        ));
+        assert!(IdbTree::open(store.clone(), options()).await.is_err());
+        assert_eq!(new.get(b"key").await.unwrap(), Some(vec![7]));
     });
 }

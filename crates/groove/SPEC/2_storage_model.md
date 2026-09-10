@@ -479,10 +479,16 @@ handles may not coexist with an exclusive browser worker owner.
 The browser capability consumes one live database Web Lock/worker epoch proof for
 one live tree at a time; tree clones share its root, and the last clone dropping
 releases tree admission for a fresh open. It expires before release/close/invalidation,
-and deletion commits recheck it at publication. An idle browser runtime is reused
-while foreground lease work retains its physical owner; once that work ends, the
-worker retires the page-store/epoch before a successor opens another tree. This
-boundary must not depend on garbage collection of closed WASM wrappers.
+and deletion commits recheck it at publication. A worker runtime owns a revocable
+tree token independent of foreground identity leases. After the last admitted
+peer's flush barrier, retirement revokes that token synchronously and drains its
+already-started page transactions before permitting a new runtime/schema to claim
+a successor token. Every cached read/write and pending hydration/open completion
+checks liveness; every token-bearing commit rechecks its exact token before page
+publication, including commits with no deletions. A late old guard release cannot
+release its successor. Foreground lease operations retain the same page store and
+Web Lock across this handoff. No boundary depends on garbage collection of closed
+WASM wrappers.
 Unpublished superseded fresh pages
 are omitted from the commit regardless of ownership. A separate reachability
 collector is still required for historical garbage; this policy changes neither
