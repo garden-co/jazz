@@ -439,7 +439,6 @@ type PendingTx = {
 type PendingTxWrite = {
   table: string;
   rowId: Uint8Array;
-  row?: RowState;
   deleted?: boolean;
 };
 
@@ -1241,7 +1240,7 @@ export class NativeRuntimeAdapter implements Runtime {
         throw new Error("Native runtime transaction insert did not return a row id");
       }
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, row });
+      tx.writes.push({ table, rowId });
       return {
         id: row.id,
         values: row.values,
@@ -1399,7 +1398,7 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, row });
+      tx.writes.push({ table, rowId });
       return {
         id: row.id,
         values: row.values,
@@ -1440,10 +1439,8 @@ export class NativeRuntimeAdapter implements Runtime {
     const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
-      // Resolve the synchronous preimage before staging. A rejected merge
-      // (for example an indirect large value) must not leave a native patch
-      // that a caller can accidentally commit after catching the error.
-      const row = this.mergeRowState(table, rowId, values, tx, writeIdentity);
+      // The owner queue resolves the transaction-visible preimage and merges
+      // this patch. A synchronous read here can deadlock on a suspended owner.
       this.db.updateInTransaction(tx.id, table, rowId, patch, {
         head: branchView?.head,
         base: branchView?.base,
@@ -1452,7 +1449,6 @@ export class NativeRuntimeAdapter implements Runtime {
       tx.writes.push({
         table,
         rowId,
-        row,
       });
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
@@ -1524,29 +1520,14 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Upsert");
     if (tx) this.assertTransactionAttribution(tx, attribution);
-    // Ordinary upserts are queued by Rust, which resolves existence and merges
-    // the patch under the write's identity. A synchronous preflight read here
-    // can wait on a suspended core tick while blocking the host that must
-    // resume it. Only staged transaction bookkeeping needs a local preimage.
-    const existing = branchView
-      ? true
-      : tx
-        ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
-        : undefined;
     let cells: Uint8Array;
     try {
-      cells =
-        !tx || branchView || existing
-          ? encodeCellsForPatch(definition, values)
-          : encodeCellsForRow(definition, values, table);
+      cells = encodeCellsForPatch(definition, values);
     } catch (error) {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
-      const row = existing
-        ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
-        : this.rowStateFromValues(table, rowId, values);
       this.db.upsertInTransaction(tx.id, table, rowId, cells, {
         head: branchView?.head,
         base: branchView?.base,
@@ -1555,7 +1536,6 @@ export class NativeRuntimeAdapter implements Runtime {
       tx.writes.push({
         table,
         rowId,
-        row,
       });
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
@@ -2511,24 +2491,6 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
-  private mergeRowState(
-    table: string,
-    rowId: Uint8Array,
-    patch: Record<string, Value>,
-    tx: PendingTx,
-    _identity?: Uint8Array,
-  ): RowState {
-    const current =
-      this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId);
-    const merged: Record<string, Value> = {};
-    for (const column of this.table(table).columns) {
-      const existing = current?.valuesByColumn?.get(column.name);
-      if (existing !== undefined) merged[column.name] = existing;
-    }
-    Object.assign(merged, patch);
-    return this.rowStateFromValues(table, rowId, merged);
-  }
-
   private async readPlainRows(
     query: PreparedQuery,
     opts: unknown,
@@ -2682,20 +2644,6 @@ export class NativeRuntimeAdapter implements Runtime {
     const session = sessionFromWriteContext(writeContext);
     if (!session) throw new Error("backend attribution requires a valid author");
     return session.identity;
-  }
-
-  private stagedRowForWriteMerge(
-    tx: PendingTx,
-    table: string,
-    rowId: Uint8Array,
-  ): RowState | undefined {
-    const id = formatUuid(rowId);
-    for (let index = tx.writes.length - 1; index >= 0; index -= 1) {
-      const write = tx.writes[index]!;
-      if (write.table !== table || formatUuid(write.rowId) !== id) continue;
-      return write.deleted ? undefined : write.row;
-    }
-    return undefined;
   }
 
   private warnedOnce = new Set<string>();

@@ -931,6 +931,15 @@ where
             id,
             Box::pin(async move {
                 let exclusive = db.transaction_is_exclusive(id).await?;
+                // Typed bindings submit patches without a synchronous preflight.
+                // Preserve complete-insert validation once the owner has resolved
+                // the transaction's staged overlay (raw Rust APIs allow sparse rows).
+                if matches!(&options.target, WriteTarget::Root)
+                    && db.transaction_read_raw(id, &table, row).await?.is_none()
+                {
+                    db.validate_complete_binding_insert(&table, &cells)?;
+                }
+
                 if exclusive {
                     db.exclusive_tx_ref(id)
                         .upsert(&table, row, cells, options)

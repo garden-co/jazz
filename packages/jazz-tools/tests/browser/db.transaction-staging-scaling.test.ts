@@ -9,7 +9,7 @@ const app = schema.defineApp({
 });
 
 describe("exact local transaction write merging", () => {
-  it("preserves large content after commit rejection and a caught merge-read failure", async () => {
+  it("preserves large content after commit rejection and a caught native staging failure", async () => {
     const db = await createBrowserTestDb({
       appId: "transaction-staging-large-rejection",
       driver: { type: "memory" },
@@ -32,13 +32,13 @@ describe("exact local transaction write merging", () => {
       );
       const tx = db.beginTransaction();
       const { WasmDb } = await loadWasmModule();
-      const exact = vi.spyOn(WasmDb.prototype, "localCurrentRow");
+      const exact = vi.spyOn(WasmDb.prototype, "updateInTransaction");
       exact.mockImplementationOnce(() => {
-        throw new Error("synthetic exact read failure");
+        throw new Error("synthetic staging failure");
       });
       try {
         expect(() => tx.update(app.todos, large.value.id, { done: true })).toThrow(
-          "synthetic exact read failure",
+          "synthetic staging failure",
         );
       } finally {
         exact.mockRestore();
@@ -80,7 +80,7 @@ describe("exact local transaction write merging", () => {
       }
       try {
         tx.update(app.todos, inserted.value.id, { done: true });
-        expect(exact).toHaveBeenCalledTimes(2);
+        expect(exact).not.toHaveBeenCalled();
       } finally {
         exact.mockRestore();
       }
@@ -123,7 +123,7 @@ describe("exact local transaction write merging", () => {
           // A second patch must merge with this transaction's first patch.
           tx.update(app.todos, updates[0].id, { title: "Second patch" });
           expect(all).not.toHaveBeenCalled();
-          expect(exact).toHaveBeenCalledTimes(updates.length);
+          expect(exact).not.toHaveBeenCalled();
         } finally {
           all.mockRestore();
           exact.mockRestore();
