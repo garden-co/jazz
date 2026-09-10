@@ -40,3 +40,7 @@ harness = false
 [[bench]]
 name = "micro"
 harness = false
+
+[[bench]]
+name = "record_validation"
+harness = false

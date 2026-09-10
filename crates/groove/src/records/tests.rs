@@ -2324,3 +2324,194 @@ fn unwrap_nested_nullable_preserves_outer_none_as_inner_null() {
         assert_eq!(target.get_idx(&output[span], 0).unwrap(), expected);
     }
 }
+
+// Internal byte-admission coverage is necessary here: database APIs cannot
+// construct malformed OwnedRecord payloads or expose canonicality errors.
+#[test]
+fn embedded_record_admission_matches_legacy_roundtrip_corpus() {
+    fn check(descriptor: RecordDescriptor, raw: &[u8]) {
+        let expected = descriptor.bind(raw).to_values().and_then(|values| {
+            if descriptor.create(&values)? == raw {
+                Ok(())
+            } else {
+                Err(Error::NonCanonicalRecord)
+            }
+        });
+        let record = OwnedRecord::new(raw.to_vec(), descriptor);
+        let actual = values::ensure_value_type(
+            &Value::Record(record.clone()),
+            &ValueType::Record(Box::new(descriptor)),
+        );
+        assert_eq!(
+            actual, expected,
+            "record {descriptor:?}: {raw:?}, old={expected:?}, new={actual:?}"
+        );
+        let schema = EnumSchema::new("fixture", [EnumCase::new("payload", descriptor)]).unwrap();
+        let actual = values::ensure_value_type(
+            &Value::Enum(EnumValue::new(0, record)),
+            &ValueType::Enum(Box::new(schema)),
+        );
+        assert_eq!(
+            actual, expected,
+            "enum {descriptor:?}: {raw:?}, old={expected:?}, new={actual:?}"
+        );
+    }
+    let child = descriptor([
+        ValueType::Bool,
+        ValueType::Nullable(Box::new(ValueType::U16)),
+    ]);
+    let event = EnumSchema::new(
+        "event",
+        [
+            EnumCase::new("empty", RecordDescriptor::default()),
+            EnumCase::new("value", child),
+        ],
+    )
+    .unwrap();
+    let cases = vec![
+        (RecordDescriptor::default(), vec![]),
+        (
+            epoch_1_scalar_record_descriptor(),
+            EPOCH_1_SCALAR_RECORD_FIXTURE.to_vec(),
+        ),
+        (
+            descriptor([ValueType::F64]),
+            f64::NAN.to_le_bytes().to_vec(),
+        ),
+        (
+            descriptor([ValueType::Nullable(Box::new(ValueType::F64))]),
+            [b"\x01".as_slice(), f64::NAN.to_le_bytes().as_slice()].concat(),
+        ),
+        (descriptor([ValueType::raw_bytes()]), vec![]),
+        (descriptor([ValueType::raw_string()]), b"text".to_vec()),
+        (
+            descriptor([ValueType::Tuple(vec![ValueType::F64])]),
+            1.0f64.to_le_bytes().to_vec(),
+        ),
+        (
+            descriptor([ValueType::Tuple(vec![ValueType::Nullable(Box::new(
+                ValueType::U32,
+            ))])]),
+            vec![1, 1, 2, 3, 4],
+        ),
+        (
+            descriptor([ValueType::Nullable(Box::new(ValueType::Tuple(vec![
+                ValueType::F64,
+            ])))]),
+            vec![0; 9],
+        ),
+        (
+            descriptor([ValueType::Array(Box::new(ValueType::Tuple(vec![])))]),
+            vec![],
+        ),
+    ];
+    let mut cases = cases;
+    // Exercise recursive tuple detection through every containing type. Raw
+    // wrappers are intentional: public encoding rejects some legacy tuple
+    // representations before they can reach the embedding admission boundary.
+    for (inner, raw) in cases.clone() {
+        let record_type = ValueType::Record(Box::new(inner));
+        cases.push((descriptor([record_type.clone()]), raw.clone()));
+        cases.push((
+            descriptor([ValueType::Array(Box::new(record_type.clone()))]),
+            [1u32.to_le_bytes().as_slice(), raw.as_slice()].concat(),
+        ));
+        cases.push((
+            descriptor([ValueType::Nullable(Box::new(record_type))]),
+            [b"\x01".as_slice(), raw.as_slice()].concat(),
+        ));
+        let schema = EnumSchema::new("wrapper", [EnumCase::new("value", inner)]).unwrap();
+        cases.push((
+            descriptor([ValueType::Enum(Box::new(schema))]),
+            [b"\x00".as_slice(), raw.as_slice()].concat(),
+        ));
+    }
+    for value_type in [
+        ValueType::String,
+        ValueType::Bytes,
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::Json),
+    ] {
+        let value = if value_type == ValueType::Bytes {
+            Value::Bytes(vec![0, 128, 255])
+        } else {
+            Value::String("null".into())
+        };
+        let d = descriptor([value_type]);
+        cases.push((d, d.create(&[value]).unwrap()));
+        // Primitive, chunked, unknown/future format and nonminimal envelopes.
+        for raw in [
+            vec![2],
+            vec![2, 255],
+            vec![3],
+            vec![3, 255],
+            vec![4, 0],
+            vec![0x82, 0, 1],
+        ] {
+            cases.push((d, raw));
+        }
+    }
+    for (kind, logical) in [
+        (
+            crate::large_values::LargeValueKind::Bytes,
+            b"bytes".as_slice(),
+        ),
+        (
+            crate::large_values::LargeValueKind::String,
+            b"text".as_slice(),
+        ),
+        (
+            crate::large_values::LargeValueKind::Json,
+            b"null".as_slice(),
+        ),
+    ] {
+        let prepared = crate::large_values::prepare(kind, logical).unwrap();
+        let d = descriptor([ValueType::stored_scalar(kind)]);
+        cases.push((d, d.create(&[Value::Large(prepared.value_ref)]).unwrap()));
+    }
+    let composite = descriptor([
+        ValueType::Record(Box::new(child)),
+        ValueType::Enum(Box::new(event)),
+        ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        ValueType::EnumTag(ScalarEnumSchema::new("status", ["one", "two"]).unwrap()),
+    ]);
+    let child_value = OwnedRecord::new(
+        child
+            .create(&[Value::Bool(true), Value::Nullable(None)])
+            .unwrap(),
+        child,
+    );
+    cases.push((
+        composite,
+        composite
+            .create(&[
+                Value::Record(child_value.clone()),
+                Value::Enum(EnumValue::new(1, child_value.clone())),
+                Value::Array(vec![
+                    Value::Nullable(None),
+                    Value::Nullable(Some(Box::new(Value::String("abc".into())))),
+                ]),
+                Value::Array(vec![Value::Record(child_value)]),
+                Value::EnumTag(1),
+            ])
+            .unwrap(),
+    ));
+    for (descriptor, raw) in cases {
+        check(descriptor, &raw);
+        for length in 0..raw.len() {
+            check(descriptor, &raw[..length]);
+        }
+        for extra in [0, 1, 255] {
+            let mut changed = raw.clone();
+            changed.push(extra);
+            check(descriptor, &changed);
+        }
+        for index in 0..raw.len() {
+            for byte in [0, 1, 2, 3, 127, 128, 254, 255] {
+                let mut changed = raw.clone();
+                changed[index] = byte;
+                check(descriptor, &changed);
+            }
+        }
+    }
+}

@@ -508,10 +508,16 @@ bytes of each element descriptor; no second outer-record layout is introduced.
 Record values are admitted only when their embedded descriptor equals the
 declared `ValueType::Record` descriptor and their raw bytes are canonical for
 that descriptor: decode every child value, recreate the record, and require
-byte equality. Validation alone is insufficient because `OwnedRecord::new`
-currently accepts arbitrary raw bytes (`src/records/mod.rs:1577-1582`). The
-recreate-and-compare rule is required for byte-based weighted consolidation and
-deterministic final tie-breaking.
+byte equality. This defines the acceptance rule; tuple-free descriptors may
+use an equivalent recursive canonical-byte validator without allocating the
+intermediate values or recreated bytes. That validator checks the entire packed
+layout, offsets, null padding, enum tags, scalar envelopes, and nested records.
+Generic structural validation alone is insufficient because `OwnedRecord::new`
+accepts arbitrary raw bytes. Descriptors recursively containing tuples retain
+the decode/recreate/compare implementation, including its historical tuple
+constructibility and nullable-member byte-order behavior. Exact canonical
+admission is required for byte-based weighted consolidation and deterministic
+final tie-breaking; this optimization changes no persisted encoding.
 
 `Record`, `Array<Record>`, and any recursively containing value type MUST be
 rejected as a durable primary-key part. The primary-key codec has no
