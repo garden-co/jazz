@@ -3123,70 +3123,165 @@ fn deferred_queued_mergeable_visibility_does_not_claim_blocked_or_failed_durabil
 // writes, without a synchronous bridge preflight or a whole-table read.
 #[test]
 fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
-    let schema = doctest_support::schema();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let db = block_on(Db::open_history_complete(DbConfig::new(
-        schema.clone(),
-        doctest_support::MemoryStorage::new(&refs).unwrap(),
-        DbIdentity {
-            node: NodeUuid::from_bytes([0x95; 16]),
-            author: AuthorSubject::for_test_bytes([0xa5; 16]),
-        },
-    )))
-    .unwrap();
-    let missing = RowUuid::from_bytes([0x96; 16]);
-    let bad = OpenTransactionId::new();
-    db.begin_mergeable(bad).unwrap();
-    db.enqueue_transaction_upsert(
-        bad,
-        "todos".into(),
-        missing,
-        BTreeMap::from([("done".into(), Value::Bool(true))]),
-        Default::default(),
-    )
-    .unwrap();
-    let rejected = db.enqueue_commit_mergeable_handle(bad).unwrap();
-    for _ in 0..16 {
-        db.drive_queued_mutation_once();
-    }
-    let error = block_on(rejected.wait(DurabilityTier::Local)).unwrap_err();
-    assert!(error.message.contains("missing required field"), "{error}");
-    assert!(
-        block_on(db.local_current_row("todos", missing))
-            .unwrap()
-            .is_none()
-    );
-
-    let good = OpenTransactionId::new();
-    db.begin_mergeable(good).unwrap();
-    db.enqueue_transaction_upsert(
-        good,
-        "todos".into(),
-        missing,
-        doctest_support::todo_cells("retained title", false),
-        Default::default(),
-    )
-    .unwrap();
-    db.enqueue_transaction_upsert(
-        good,
-        "todos".into(),
-        missing,
-        BTreeMap::from([("done".into(), Value::Bool(true))]),
-        Default::default(),
-    )
-    .unwrap();
-    let committed = db.enqueue_commit_mergeable_handle(good).unwrap();
-    for _ in 0..16 {
-        db.drive_queued_mutation_once();
-    }
-    block_on(committed.wait(DurabilityTier::Local)).unwrap();
-    let row = block_on(db.local_current_row("todos", missing))
-        .unwrap()
+    for exclusive in [false, true] {
+        let schema = build_public_db_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column_with_default(
+                        "done",
+                        PublicColumnType::Boolean,
+                        crate::tools::public_api::types::Value::Boolean(false),
+                    ),
+            ),
+        );
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            doctest_support::MemoryStorage::new(&refs).unwrap(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x95; 16]),
+                author: AuthorSubject::for_test_bytes([0xa5; 16]),
+            },
+        )))
         .unwrap();
-    assert_eq!(
-        row.cell(&schema.tables[0], "title"),
-        Some(Value::String("retained title".into()))
-    );
-    assert_eq!(row.cell(&schema.tables[0], "done"), Some(Value::Bool(true)));
+        let missing = RowUuid::from_bytes([0x96; 16]);
+        let bad = OpenTransactionId::new();
+        if exclusive {
+            db.begin_exclusive(bad).unwrap();
+        } else {
+            db.begin_mergeable(bad).unwrap();
+        }
+        db.enqueue_transaction_upsert(
+            bad,
+            "todos".into(),
+            missing,
+            BTreeMap::from([("done".into(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+        let rejected = if exclusive {
+            db.enqueue_commit_exclusive_handle(bad).unwrap()
+        } else {
+            db.enqueue_commit_mergeable_handle(bad).unwrap()
+        };
+        for _ in 0..16 {
+            db.drive_queued_mutation_once();
+        }
+        let error = block_on(rejected.wait(DurabilityTier::Local)).unwrap_err();
+        assert!(error.message.contains("missing required field"), "{error}");
+        assert!(
+            block_on(db.local_current_row("todos", missing))
+                .unwrap()
+                .is_none()
+        );
+
+        let good = OpenTransactionId::new();
+        if exclusive {
+            db.begin_exclusive(good).unwrap();
+        } else {
+            db.begin_mergeable(good).unwrap();
+        }
+        db.enqueue_transaction_upsert(
+            good,
+            "todos".into(),
+            missing,
+            doctest_support::todo_cells("retained title", false),
+            Default::default(),
+        )
+        .unwrap();
+        db.enqueue_transaction_upsert(
+            good,
+            "todos".into(),
+            missing,
+            BTreeMap::from([("done".into(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+        let committed = if exclusive {
+            db.enqueue_commit_exclusive_handle(good).unwrap()
+        } else {
+            db.enqueue_commit_mergeable_handle(good).unwrap()
+        };
+        for _ in 0..16 {
+            db.drive_queued_mutation_once();
+        }
+        block_on(committed.wait(DurabilityTier::Local)).unwrap();
+        let row = block_on(db.local_current_row("todos", missing))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.cell(&schema.tables[0], "title"),
+            Some(Value::String("retained title".into()))
+        );
+        assert_eq!(row.cell(&schema.tables[0], "done"), Some(Value::Bool(true)));
+
+        // A new row may omit a defaulted field, but later partial patches must
+        // preserve both that field and the preceding staged title.
+        let default_row = RowUuid::from_bytes([0x97; 16]);
+        let defaults = OpenTransactionId::new();
+        if exclusive {
+            db.begin_exclusive(defaults).unwrap();
+        } else {
+            db.begin_mergeable(defaults).unwrap();
+        }
+        db.enqueue_transaction_upsert(
+            defaults,
+            "todos".into(),
+            default_row,
+            BTreeMap::from([("title".into(), Value::String("defaulted".into()))]),
+            Default::default(),
+        )
+        .unwrap();
+        let committed = if exclusive {
+            db.enqueue_commit_exclusive_handle(defaults).unwrap()
+        } else {
+            db.enqueue_commit_mergeable_handle(defaults).unwrap()
+        };
+        for _ in 0..16 {
+            db.drive_queued_mutation_once();
+        }
+        block_on(committed.wait(DurabilityTier::Local)).unwrap();
+        assert_eq!(
+            block_on(db.local_current_row("todos", default_row))
+                .unwrap()
+                .unwrap()
+                .cell(&schema.tables[0], "done"),
+            Some(Value::Bool(false))
+        );
+
+        let chain = OpenTransactionId::new();
+        if exclusive {
+            db.begin_exclusive(chain).unwrap();
+        } else {
+            db.begin_mergeable(chain).unwrap();
+        }
+        db.enqueue_transaction_delete(chain, "todos".into(), missing, Default::default())
+            .unwrap();
+        db.enqueue_transaction_upsert(
+            chain,
+            "todos".into(),
+            missing,
+            doctest_support::todo_cells("replacement", false),
+            Default::default(),
+        )
+        .unwrap();
+        let committed = if exclusive {
+            db.enqueue_commit_exclusive_handle(chain).unwrap()
+        } else {
+            db.enqueue_commit_mergeable_handle(chain).unwrap()
+        };
+        for _ in 0..16 {
+            db.drive_queued_mutation_once();
+        }
+        block_on(committed.wait(DurabilityTier::Local)).unwrap();
+        assert_eq!(
+            block_on(db.local_current_row("todos", missing))
+                .unwrap()
+                .unwrap()
+                .cell(&schema.tables[0], "title"),
+            Some(Value::String("replacement".into()))
+        );
+    }
 }
