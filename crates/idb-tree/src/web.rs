@@ -1,15 +1,32 @@
 use js_sys::{Array, Promise, Reflect, Uint8Array};
+use std::cell::Cell;
+use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::{BoxFuture, Commit, Metadata, PageStore};
+use crate::{BoxFuture, Commit, Metadata, PageStore, TreeOwnership};
 
 #[wasm_bindgen]
 extern "C" {
     #[derive(Clone)]
     #[wasm_bindgen(typescript_type = "IndexedDbPageStore")]
     type IndexedDbPageStoreHandle;
+
+    #[wasm_bindgen(method, catch, js_name = claimTreeOwnership)]
+    fn claim_tree_ownership_js(this: &IndexedDbPageStoreHandle) -> Result<f64, JsValue>;
+
+    #[wasm_bindgen(method, js_name = releaseTreeOwnership)]
+    fn release_tree_ownership_js(this: &IndexedDbPageStoreHandle, token: f64);
+
+    #[wasm_bindgen(method, catch, js_name = isTreeOwnershipActive)]
+    fn tree_ownership_active_js(
+        this: &IndexedDbPageStoreHandle,
+        token: f64,
+    ) -> Result<bool, JsValue>;
+
+    #[wasm_bindgen(method, getter, js_name = canReclaimObsoletePages)]
+    fn can_reclaim_obsolete_pages_js(this: &IndexedDbPageStoreHandle) -> bool;
 
     #[wasm_bindgen(method, js_name = metadata)]
     fn metadata_js(this: &IndexedDbPageStoreHandle) -> Promise;
@@ -27,6 +44,7 @@ extern "C" {
         page_ids: &Array,
         page_bytes: &Array,
         deleted_page_ids: &Array,
+        tree_token: JsValue,
     ) -> Promise;
 }
 
@@ -35,17 +53,62 @@ extern "C" {
 #[derive(Clone)]
 pub struct IndexedDbPageStore {
     handle: IndexedDbPageStoreHandle,
+    tree_token: Rc<Cell<Option<f64>>>,
 }
 
 impl IndexedDbPageStore {
     pub fn from_js(handle: JsValue) -> Self {
         Self {
             handle: handle.unchecked_into(),
+            tree_token: Rc::new(Cell::new(None)),
         }
+    }
+
+    // Existing/custom JS stores implement only metadata/readPage/commitPages.
+    // They remain non-reclaiming unless they explicitly implement the complete
+    // single-tree ownership contract as well.
+    fn supports_tree_ownership(&self) -> bool {
+        [
+            "claimTreeOwnership",
+            "releaseTreeOwnership",
+            "isTreeOwnershipActive",
+        ]
+        .into_iter()
+        .all(|name| {
+            Reflect::get(&self.handle, &JsValue::from_str(name))
+                .is_ok_and(|value| value.is_function())
+        })
     }
 }
 
 impl PageStore for IndexedDbPageStore {
+    fn claim_tree_ownership(&self) -> Result<TreeOwnership, String> {
+        if !self.supports_tree_ownership() {
+            return Ok(TreeOwnership::default());
+        }
+        let token = self.handle.claim_tree_ownership_js().map_err(js_error)?;
+        self.tree_token.set(Some(token));
+        let live_handle = self.handle.clone();
+        let release_handle = self.handle.clone();
+        let current_token = self.tree_token.clone();
+        Ok(TreeOwnership::revocable(
+            move || live_handle.tree_ownership_active_js(token).unwrap_or(false),
+            move || {
+                release_handle.release_tree_ownership_js(token);
+                if current_token.get() == Some(token) {
+                    current_token.set(None);
+                }
+            },
+        ))
+    }
+
+    fn can_reclaim_obsolete_pages(&self) -> bool {
+        self.tree_token.get().is_some_and(|token| {
+            self.handle.tree_ownership_active_js(token).unwrap_or(false)
+                && self.handle.can_reclaim_obsolete_pages_js()
+        })
+    }
+
     fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
         Box::pin(async move {
             let value = JsFuture::from(self.handle.metadata_js())
@@ -96,6 +159,9 @@ impl PageStore for IndexedDbPageStore {
                     &page_ids,
                     &page_bytes,
                     &deleted_page_ids,
+                    self.tree_token
+                        .get()
+                        .map_or(JsValue::UNDEFINED, JsValue::from_f64),
                 ),
             )
             .await

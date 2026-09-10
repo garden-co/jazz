@@ -468,9 +468,31 @@ Tree writes are copy-on-write: the changed leaf and every changed ancestor get
 fresh page ids, then one IndexedDB transaction writes the new immutable closure
 and replaces `current` after checking the observed generation. A crash before
 publication leaves at most unreachable new pages; a published root never names
-a torn or missing child. Reclamation is a separate reachability operation and
-may delete only pages proven unreachable from the published root, never pages
-merely replaced by an in-flight write. Reopening observes either the old root
+a torn or missing child. Reclamation may delete only pages proven unreachable
+from the published root. Path-local retirement atomically deletes replaced leaves,
+ancestors, and the overflow chains owned by replaced/deleted values together with
+publication, only when the PageStore proves exclusive tree ownership. Generic and
+memory stores default to retaining durable pages so independent cold handles can
+finish reading their older complete closure and reach generation-conflict recovery.
+All writers sharing those handles must remain non-reclaiming: low-level direct
+handles may not coexist with an exclusive browser worker owner.
+The browser capability consumes one live database Web Lock/worker epoch proof for
+one live tree at a time; tree clones share its root, and the last clone dropping
+releases tree admission for a fresh open. It expires before release/close/invalidation,
+and deletion commits recheck it at publication. A worker runtime owns a revocable
+tree token independent of foreground identity leases. After the last admitted
+peer's flush barrier, retirement revokes that token synchronously and drains its
+already-started page transactions before permitting a new runtime/schema to claim
+a successor token. Every cached read/write and pending hydration/open completion
+checks liveness; every token-bearing commit rechecks its exact token before page
+publication, including commits with no deletions. A late old guard release cannot
+release its successor. Foreground lease operations retain the same page store and
+Web Lock across this handoff. No boundary depends on garbage collection of closed
+WASM wrappers.
+Unpublished superseded fresh pages
+are omitted from the commit regardless of ownership. A separate reachability
+collector is still required for historical garbage; this policy changes neither
+the durable page encoding nor the storage epoch. Reopening observes either the old root
 and complete closure or the new root and complete closure.
 Before persistence, one logical write—including every operation in a
 `write_many` call—is also locally atomic. If page construction or validation

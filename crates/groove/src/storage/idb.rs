@@ -24,7 +24,6 @@ const MAX_CONFLICT_BACKOFF_YIELDS: usize = 16;
 #[derive(Clone)]
 pub struct IdbStorage<S> {
     tree: Rc<RefCell<IdbTree<S>>>,
-    store: S,
     column_families: Rc<RefCell<BTreeSet<String>>>,
     mutation_gate: Rc<Mutex<()>>,
     needs_reset: Rc<Cell<bool>>,
@@ -41,7 +40,6 @@ where
             tree: Rc::new(RefCell::new(
                 IdbTree::open(store.clone(), Options::default()).await?,
             )),
-            store,
             column_families: Rc::new(RefCell::new(
                 column_families.iter().map(|cf| (*cf).to_owned()).collect(),
             )),
@@ -125,8 +123,7 @@ where
         // commit between our read and flush. Discard this stale cache rather
         // than replaying its dirty pages, then recompute the whole logical
         // batch from the newly durable tree.
-        let tree = IdbTree::open(self.store.clone(), Options::default()).await?;
-        *self.tree.borrow_mut() = tree;
+        self.tree().reload().await?;
         self.tree_epoch.set(self.tree_epoch.get().wrapping_add(1));
         self.needs_reset.set(false);
         Ok(())

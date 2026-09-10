@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => {
   const pageStores: Array<{
     close: Mock;
     claimBrowserWorkerEpoch: Mock;
+    retireTreeOwnership: Mock;
     releaseBrowserWorkerEpoch: Mock;
     onInvalidated: Mock;
     acquireForegroundNodeLease: Mock;
@@ -92,6 +93,7 @@ const mocks = vi.hoisted(() => {
         const pageStore = {
           close: vi.fn(),
           claimBrowserWorkerEpoch: vi.fn(async () => undefined),
+          retireTreeOwnership: vi.fn(async () => undefined),
           releaseBrowserWorkerEpoch: vi.fn(async () => undefined),
           onInvalidated: vi.fn(() => () => undefined),
           acquireForegroundNodeLease: vi.fn(async () => ({
@@ -1402,6 +1404,110 @@ describe("broker worker context initialization", () => {
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
   });
 
+  it("retires schema pins while keeping the leased physical owner and fences its final successor", async () => {
+    const openedStores = new Set<unknown>();
+    mocks.openBrowser.mockImplementation(async (pageStore: unknown) => {
+      if (openedStores.has(pageStore)) throw new Error("physical owner already has a tree");
+      openedStores.add(pageStore);
+      (pageStore as (typeof mocks.pageStores)[number]).retireTreeOwnership.mockImplementation(
+        async () => {
+          openedStores.delete(pageStore);
+        },
+      );
+      return mocks.createBrowserDb();
+    });
+    const unrelated = await connect(options("reclamation-unrelated-root"), "unrelated");
+    await initializeFollower(unrelated.port, 1);
+    const target = options("reclamation-leased-root");
+    const lease = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: target.dbName,
+      storageOwner: target.storageOwner,
+    });
+    await lease.outcome;
+    const first = await connect(target, "first");
+    await initializeFollower(first.port, 1);
+    const originalStore = mocks.pageStores[1]!;
+    await followerResult(first.port, { type: "close", id: 2, releaseContext: true });
+    expect(mocks.runtimes[1]?.discard).toHaveBeenCalledOnce();
+    expect(originalStore.close).not.toHaveBeenCalled();
+    const sameOwner = await connect(target, "same-owner", "next-schema-fingerprint");
+    expect(sameOwner.outcome.type).toBe("runtime-ready");
+    expect(mocks.openBrowser).toHaveBeenCalledTimes(3);
+    await followerResult(sameOwner.port, { type: "close", id: 1, releaseContext: true });
+    lease.port.emitMessage({ type: "retire-foreground-node-lease" });
+    await vi.waitFor(() => expect(originalStore.close).toHaveBeenCalledOnce());
+    expect(mocks.runtimes[1]?.discard).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
+    const successorLease = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: target.dbName,
+      storageOwner: target.storageOwner,
+    });
+    await successorLease.outcome;
+    expect(mocks.pageStores).toHaveLength(3);
+    const successor = await connect(
+      { ...target, author: new Uint8Array([7]) },
+      "successor",
+      "new-fingerprint",
+    );
+    expect(successor.outcome.type).toBe("runtime-ready");
+    await followerResult(successor.port, { type: "close", id: 1, releaseContext: true });
+    successorLease.port.emitMessage({ type: "retire-foreground-node-lease" });
+    await vi.waitFor(() => expect(mocks.pageStores[2]?.close).toHaveBeenCalledOnce());
+    await followerResult(unrelated.port, { type: "close", id: 2, releaseContext: true });
+  });
+
+  it("waits for revoked tree transactions before admitting a new schema on the leased store", async () => {
+    const target = options("tree-generation-barrier");
+    const lease = connectLease({
+      type: "acquire-foreground-node-lease",
+      dbName: target.dbName,
+      storageOwner: target.storageOwner,
+    });
+    await lease.outcome;
+    const first = await connect(target, "first", "old-schema");
+    const retirement = deferred<void>();
+    mocks.pageStores[0]!.retireTreeOwnership.mockImplementationOnce(() => retirement.promise);
+    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 1);
+    first.port.emitMessage({ type: "close", id: 1, releaseContext: true });
+    await vi.waitFor(() => expect(mocks.pageStores[0]?.retireTreeOwnership).toHaveBeenCalledOnce());
+    const successor = connect(target, "second", "new-schema");
+    await nextTask();
+    expect(mocks.openBrowser).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
+    retirement.resolve();
+    await closed;
+    const second = await successor;
+    expect(second.outcome.type).toBe("runtime-ready");
+    expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
+    expect(mocks.pageStores).toHaveLength(1);
+    await followerResult(second.port, { type: "close", id: 1, releaseContext: true });
+    lease.port.emitMessage({ type: "retire-foreground-node-lease" });
+    await vi.waitFor(() => expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce());
+  });
+
+  it("retires an unleased tree on close even when another database keeps the worker alive", async () => {
+    const openedStores = new Set<unknown>();
+    mocks.openBrowser.mockImplementation(async (pageStore: unknown) => {
+      if (openedStores.has(pageStore)) throw new Error("physical owner already has a tree");
+      openedStores.add(pageStore);
+      return mocks.createBrowserDb();
+    });
+    const unrelated = await connect(options("reclamation-keepalive-root"), "unrelated");
+    const target = options("reclamation-reopened-root");
+    const first = await connect(target, "first");
+    await followerResult(first.port, { type: "close", id: 1, releaseContext: true });
+    const second = await connect(target, "second");
+    expect(second.outcome.type).toBe("runtime-ready");
+    expect(mocks.pageStores[1]?.releaseBrowserWorkerEpoch).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[1]?.close).toHaveBeenCalledOnce();
+    expect(mocks.pageStores).toHaveLength(3);
+    expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
+    await followerResult(second.port, { type: "close", id: 1, releaseContext: true });
+    await followerResult(unrelated.port, { type: "close", id: 1, releaseContext: true });
+  });
+
   it("can immediately reopen an account root for a linked identity after close acknowledgement", async () => {
     const initial = options("linked-account-handoff");
     const first = await connect(initial, "identity-a", "identity-a-fingerprint");
@@ -1573,6 +1679,7 @@ describe("broker worker context initialization", () => {
       const pageStore = {
         close: vi.fn(),
         claimBrowserWorkerEpoch: vi.fn(async () => undefined),
+        retireTreeOwnership: vi.fn(async () => undefined),
         releaseBrowserWorkerEpoch: vi.fn(() => releasePhysicalOwner.promise),
         onInvalidated: vi.fn(() => () => undefined),
         acquireForegroundNodeLease: vi.fn(async () => ({
@@ -2493,7 +2600,8 @@ describe("broker worker context initialization", () => {
       cancelled.port.postMessage({ type: "cancel-runtime-bootstrap" });
       await cancelled.waitFor("runtime-bootstrap-cancelled");
       opened.resolve(db);
-      await vi.waitFor(() => expect(mocks.runtimes[1]?.discard).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(mocks.runtimes).toHaveLength(2));
+      expect(mocks.runtimes[1]?.discard).toHaveBeenCalledOnce();
       expect(pageStore.close).not.toHaveBeenCalled();
       expect(pageStore.releaseBrowserWorkerEpoch).not.toHaveBeenCalled();
       pendingLease.port.emitMessage({

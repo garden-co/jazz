@@ -10,11 +10,11 @@ mod store;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-pub use store::{BoxFuture, Commit, MemoryPageStore, Metadata, PageStore};
+pub use store::{BoxFuture, Commit, MemoryPageStore, Metadata, PageStore, TreeOwnership};
 #[cfg(target_arch = "wasm32")]
 pub use web::IndexedDbPageStore;
 
@@ -65,6 +65,8 @@ pub enum Error {
     Store(String),
     #[error("IDBTree generation conflict: {0}")]
     GenerationConflict(String),
+    #[error("IDBTree ownership has expired")]
+    OwnershipExpired,
     #[error("an IDBTree commit is already in flight")]
     CommitInFlight,
 }
@@ -105,7 +107,8 @@ struct TreeCore<S> {
     metadata: Metadata,
     pages: HashMap<PageId, Page>,
     dirty: BTreeMap<PageId, Page>,
-    deleted: Vec<PageId>,
+    deleted: BTreeSet<PageId>,
+    retirement_undo: Vec<PageId>,
     commit_in_flight: bool,
 }
 
@@ -114,12 +117,12 @@ struct TreeCore<S> {
 /// cache for every operation.
 struct WriteCheckpoint {
     metadata: Metadata,
-    deleted: Vec<PageId>,
 }
 
 #[derive(Debug)]
 pub struct PreparedCommit {
     commit: Commit,
+    retired: BTreeSet<PageId>,
 }
 
 enum Attempt<T> {
@@ -142,13 +145,49 @@ impl<T> Attempt<T> {
 #[derive(Clone)]
 pub struct IdbTree<S> {
     inner: Rc<RefCell<TreeCore<S>>>,
+    _ownership: Rc<TreeOwnership>,
+    reload_epoch: Rc<Cell<u64>>,
 }
 
 impl<S: PageStore + Clone> IdbTree<S> {
     pub async fn open(store: S, options: Options) -> Result<Self, Error> {
+        let ownership = store.claim_tree_ownership().map_err(Error::Store)?;
+        let tree = TreeCore::open(store, options).await?;
+        if !ownership.is_live() {
+            return Err(Error::OwnershipExpired);
+        }
         Ok(Self {
-            inner: Rc::new(RefCell::new(TreeCore::open(store, options).await?)),
+            inner: Rc::new(RefCell::new(tree)),
+            _ownership: Rc::new(ownership),
+            reload_epoch: Rc::new(Cell::new(0)),
         })
+    }
+
+    fn ensure_live(&self) -> Result<(), Error> {
+        if self._ownership.is_live() {
+            Ok(())
+        } else {
+            Err(Error::OwnershipExpired)
+        }
+    }
+
+    /// Discard staged writes and reload the durable root while retaining this
+    /// handle's ownership. Callers must serialize this with writes/flushes.
+    pub async fn reload(&self) -> Result<(), Error> {
+        self.ensure_live()?;
+        let (store, options) = {
+            let tree = self.inner.borrow();
+            if tree.commit_in_flight {
+                return Err(Error::CommitInFlight);
+            }
+            (tree.store.clone(), tree.options)
+        };
+        let fresh = TreeCore::open(store, options).await?;
+        self.ensure_live()?;
+        *self.inner.borrow_mut() = fresh;
+        self.reload_epoch
+            .set(self.reload_epoch.get().wrapping_add(1));
+        Ok(())
     }
 
     pub fn metadata(&self) -> Metadata {
@@ -161,6 +200,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self.inner.borrow().try_get(key)?;
             match attempt {
                 Attempt::Ready(value) => return Ok(value),
@@ -171,6 +211,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self
                 .inner
                 .borrow_mut()
@@ -184,6 +225,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn delete(&self, key: &[u8]) -> Result<bool, Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self
                 .inner
                 .borrow_mut()
@@ -196,11 +238,13 @@ impl<S: PageStore + Clone> IdbTree<S> {
     }
 
     pub async fn write_many(&self, operations: Vec<WriteOperation>) -> Result<(), Error> {
+        self.ensure_live()?;
         for operation in &operations {
             let key = match operation {
                 WriteOperation::Set { key, .. } | WriteOperation::Delete { key } => key,
             };
             loop {
+                self.ensure_live()?;
                 let attempt = self.inner.borrow().write_path_resident(key)?;
                 match attempt {
                     Attempt::Ready(()) => break,
@@ -227,6 +271,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
         limit: usize,
     ) -> Result<Vec<KeyValue>, Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self.inner.borrow().try_range(start, end, limit)?;
             match attempt {
                 Attempt::Ready(rows) => return Ok(rows),
@@ -242,6 +287,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
         limit: usize,
     ) -> Result<Vec<KeyValue>, Error> {
         loop {
+            self.ensure_live()?;
             let attempt = self.inner.borrow().try_range_reverse(start, end, limit)?;
             match attempt {
                 Attempt::Ready(rows) => return Ok(rows),
@@ -251,6 +297,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
     }
 
     pub async fn flush(&self) -> Result<(), Error> {
+        self.ensure_live()?;
         let (store, prepared) = {
             let mut tree = self.inner.borrow_mut();
             (tree.store.clone(), tree.prepare_commit()?)
@@ -270,9 +317,20 @@ impl<S: PageStore + Clone> IdbTree<S> {
             }
             tree.store.clone()
         };
-        let bytes = store
-            .read_page(page_id)
-            .await
+        let root_before = self.inner.borrow().metadata.root_page_id;
+        let reload_before = self.reload_epoch.get();
+        let result = store.read_page(page_id).await;
+        self.ensure_live()?;
+        // The operation retries from the current root, so never import an old
+        // completion (including an error) across publication or failure reset.
+        // Reset can reuse fresh page IDs, making a cache insert unsafe even if
+        // the old read returned successfully.
+        if self.reload_epoch.get() != reload_before
+            || self.inner.borrow().metadata.root_page_id != root_before
+        {
+            return Ok(());
+        }
+        let bytes = result
             .map_err(Error::Store)?
             .ok_or(Error::MissingPage(page_id))?;
         let page_size = self.inner.borrow().options.page_size;
@@ -310,7 +368,6 @@ impl<S: PageStore> TreeCore<S> {
     fn write_checkpoint(&self) -> WriteCheckpoint {
         WriteCheckpoint {
             metadata: self.metadata.clone(),
-            deleted: self.deleted.clone(),
         }
     }
 
@@ -320,7 +377,10 @@ impl<S: PageStore> TreeCore<S> {
     ) -> Result<T, Error> {
         let checkpoint = self.write_checkpoint();
         match write(self) {
-            Ok(value) => Ok(value),
+            Ok(value) => {
+                self.retirement_undo.clear();
+                Ok(value)
+            }
             Err(error) => {
                 self.rollback_write(checkpoint);
                 Err(error)
@@ -334,7 +394,10 @@ impl<S: PageStore> TreeCore<S> {
     ) -> Result<Attempt<T>, Error> {
         let checkpoint = self.write_checkpoint();
         match write(self) {
-            Ok(Attempt::Ready(value)) => Ok(Attempt::Ready(value)),
+            Ok(Attempt::Ready(value)) => {
+                self.retirement_undo.clear();
+                Ok(Attempt::Ready(value))
+            }
             Ok(Attempt::Missing(page_id)) => {
                 self.rollback_write(checkpoint);
                 Ok(Attempt::Missing(page_id))
@@ -354,7 +417,9 @@ impl<S: PageStore> TreeCore<S> {
             self.pages.remove(&page_id);
             self.dirty.remove(&page_id);
         }
-        self.deleted = checkpoint.deleted;
+        for page_id in self.retirement_undo.drain(..) {
+            self.deleted.remove(&page_id);
+        }
         self.metadata = checkpoint.metadata;
     }
 
@@ -367,7 +432,8 @@ impl<S: PageStore> TreeCore<S> {
             metadata: metadata.unwrap_or_else(|| Metadata::empty(options.page_size)),
             pages: HashMap::new(),
             dirty: BTreeMap::new(),
-            deleted: Vec::new(),
+            deleted: BTreeSet::new(),
+            retirement_undo: Vec::new(),
             commit_in_flight: false,
         };
         if tree.metadata.page_size != options.page_size {
@@ -417,6 +483,7 @@ impl<S: PageStore> TreeCore<S> {
         let new_value = self.build_value(value.to_vec())?;
         match entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key)) {
             Ok(index) => {
+                self.retire_value(&entries[index].1);
                 entries[index].1 = new_value;
             }
             Err(index) => entries.insert(index, (key.to_vec(), new_value)),
@@ -438,6 +505,7 @@ impl<S: PageStore> TreeCore<S> {
             return Ok(Attempt::Missing(page_id));
         }
         let mut entries = entries;
+        self.retire_value(&entries[index].1);
         entries.remove(index);
         self.finish_leaf_write(page_id, entries, path)?;
         Ok(Attempt::Ready(true))
@@ -518,6 +586,9 @@ impl<S: PageStore> TreeCore<S> {
         }
         let mut pages = Vec::with_capacity(self.dirty.len());
         for (&page_id, page) in &self.dirty {
+            if self.deleted.contains(&page_id) {
+                continue;
+            }
             let bytes = encode_page(page).map_err(Error::InvalidPage)?;
             if bytes.len() > self.options.page_size {
                 return Err(Error::PageTooLarge {
@@ -532,10 +603,21 @@ impl<S: PageStore> TreeCore<S> {
             expected_generation: self.metadata.generation,
             metadata: self.metadata.clone(),
             pages,
-            deleted_page_ids: std::mem::take(&mut self.deleted),
+            deleted_page_ids: if self.store.can_reclaim_obsolete_pages() {
+                self.deleted
+                    .iter()
+                    .filter(|id| !self.dirty.contains_key(id))
+                    .copied()
+                    .collect()
+            } else {
+                Vec::new()
+            },
         };
         self.dirty.clear();
-        Ok(Some(PreparedCommit { commit }))
+        Ok(Some(PreparedCommit {
+            commit,
+            retired: std::mem::take(&mut self.deleted),
+        }))
     }
 
     /// Reconcile an atomic commit result with writes made after
@@ -563,6 +645,9 @@ impl<S: PageStore> TreeCore<S> {
                 }
                 // Root and allocation metadata may already describe writes in
                 // the next dirty generation. Only advance its durable base.
+                for page_id in prepared.retired {
+                    self.pages.remove(&page_id);
+                }
                 self.metadata.generation = committed.generation;
                 Ok(())
             }
@@ -575,11 +660,7 @@ impl<S: PageStore> TreeCore<S> {
                         self.dirty.insert(page_id, page.clone());
                     }
                 }
-                for page_id in prepared.commit.deleted_page_ids {
-                    if !self.pages.contains_key(&page_id) && !self.deleted.contains(&page_id) {
-                        self.deleted.push(page_id);
-                    }
-                }
+                self.deleted.extend(prepared.retired);
                 if error.contains("generation changed") {
                     Err(Error::GenerationConflict(error))
                 } else {
@@ -823,13 +904,13 @@ impl<S: PageStore> TreeCore<S> {
                 })?,
             }
         };
+        self.retire_page(page_id);
         self.publish_replacement(replacement, path)
     }
 
     /// Rebuild every changed ancestor under fresh page ids. A committed root
-    /// therefore names a complete immutable closure. Reclamation is deferred
-    /// to a reachability-based maintenance pass, rather than deleting pages
-    /// while an older root could still name them.
+    /// therefore names a complete immutable closure. Retire the replaced path
+    /// atomically with publication, only when the store proves exclusive ownership.
     fn publish_replacement(
         &mut self,
         mut replacement: PageReplacement,
@@ -849,6 +930,7 @@ impl<S: PageStore> TreeCore<S> {
                     "descent parent is not internal".to_owned(),
                 ));
             };
+            self.retire_page(parent_id);
             replacement = match replacement {
                 PageReplacement::One(page_id) => {
                     children[child_index] = page_id;
@@ -902,9 +984,35 @@ impl<S: PageStore> TreeCore<S> {
             })?,
         };
         self.metadata.root_page_id = Some(root);
-        // The old closure remains durable until a future mark/sweep collector
-        // proves it unreachable from the published root.
+
         Ok(())
+    }
+
+    // Track only new retirements in the current attempt. A failed operation
+    // removes these IDs; successful writes retain the set and discard the log.
+    // Cloning the whole growing set at every checkpoint made staged writes O(n²).
+    fn retire_page(&mut self, page_id: PageId) {
+        if self.deleted.insert(page_id) {
+            self.retirement_undo.push(page_id);
+        }
+    }
+
+    // The complete leaf ownership graph has already been validated and hydrated.
+    // Only the replaced value owns this chain; surviving values retain theirs.
+    fn retire_value(&mut self, value: &ValueCell) {
+        let ValueCell::Overflow { head, .. } = value else {
+            return;
+        };
+        let mut current = Some(*head);
+        while let Some(id) = current {
+            let Page::Overflow { next, .. } =
+                self.pages.get(&id).expect("validated overflow is resident")
+            else {
+                unreachable!()
+            };
+            current = *next;
+            self.retire_page(id);
+        }
     }
 
     fn page_fits(&self, page: &Page) -> Result<bool, Error> {
