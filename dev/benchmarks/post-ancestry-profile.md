@@ -67,4 +67,46 @@ transaction becoming accepted. Removing the deferral reproduces the stale-batch
 failure; the fixed path preserves both rows and the accepted fate.
 
 The failed intermediate browser run is not a valid performance measurement.
-The final optimized build and fresh timing/profile round are pending.
+The corrected optimized build passed the fresh timing/profile round below.
+
+### Final measurements
+
+Implementation revision: `e05e400dd5`; measurement checkout: `64de44ea7e`.
+All changed Rust files were byte-identical. Hosted CI passed on the implementation
+revision. Local Jazz library tests: 1,998 passed, 2 ignored; Groove: 732 passed,
+2 ignored. Backend comparison tests and the mutation checks described above pass.
+
+Same optimized WASM and persistent-browser harness as the previous slice:
+
+| Operation, 1,500 rows                          | Previous slice | This slice, two quiet runs |
+| ---------------------------------------------- | -------------: | -------------------------: |
+| First read after runtime reopen                |         965 ms |                 778–808 ms |
+| 1,350 updates, commit through local durability |       1,167 ms |             1,116–1,181 ms |
+| First read after post-update runtime reopen    |       1,011 ms |                 856–865 ms |
+
+These are runtime reopens in a loaded Chromium session, not browser-process cold
+starts. The first-read improvement is roughly 16–19%, and post-update read improvement
+is 14–15%; bulk-write latency is effectively
+unchanged in this small sample. The four-size batch sweep measured 119, 226, 541,
+and 1,181 ms at 150, 300, 750, and 1,500 rows respectively. Browser correctness:
+four-size sweep 4 passed, single-size repeat 1 passed, profiling run 1 passed.
+
+Rust-function CPU profiles show the intended path improved substantially:
+foreground `ingest_known_transaction` fell from 224 to 43 ms on initial read,
+223 to 46 ms during the batch, and 183 to 39 ms on post-update reopen. Whole-unit
+fate handling still legitimately reads transaction history; immutable matching
+no longer adds a second full-transaction read.
+
+The next bottlenecks are outside exact matching. During the batch, the worker
+profile attributes about 340 ms to supporting-row update construction, 132 ms
+to record field-byte access, 153 ms to Groove batch application and 116 ms to page
+encoding. Allocation/deallocation account for about 191 ms of self time across
+these operations. Worker `ensure_exact` is about 7 ms, including about 2 ms in
+backend comparison. These are overlapping inclusive categories except the stated
+allocator self time; do not add them together or add foreground and worker totals.
+
+The next thesis is to carry shared batch records through current-index maintenance
+and publication instead of repeatedly extracting fields and reconstructing records
+and descriptors. Further tuning of the exact comparison alone cannot deliver the
+requested order-of-magnitude end-to-end gains. No further optimization is included
+in this slice.
