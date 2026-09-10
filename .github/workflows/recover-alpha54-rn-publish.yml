@@ -1,0 +1,61 @@
+name: Recover alpha54 RN publish
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: recover-alpha54-rn-publish
+  cancel-in-progress: false
+jobs:
+  recover:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: aa32349d7d51762e55b019c8b83d2bdbe4d14f16
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: 71676612e331d7bc0f554a8e0fcba244d9b786ec
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - run: sudo apt-get update && sudo apt-get install -y llvm-18
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          repository: garden-co/jazz
+          run-id: '34428566341'
+          name: pkg-jazz-rn-tarball
+          path: input
+          github-token: ${{ github.token }}
+      - name: Repack and verify trusted alpha54 artifact
+        run: python3 tooling/dev/artifacts/repack-alpha54-rn.py input/jazz-rn-2.0.0-alpha.54.tgz output --source-root source
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: recovered-alpha54-rn-tarball-and-receipt
+          path: output/*
+          compression-level: 0
+          if-no-files-found: error
+      - name: Publish verified alpha54 RN
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { readFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          const file = 'output/jazz-rn-2.0.0-alpha.54.tgz';
+          const receipt = JSON.parse(readFileSync('output/receipt.json'));
+          if (createHash('sha256').update(readFileSync(file)).digest('hex') !== receipt.outputSha256) throw new Error('output changed');
+          const response = await fetch('https://registry.npmjs.org/jazz-rn/2.0.0-alpha.54');
+          if (response.ok) {
+            console.log('jazz-rn@2.0.0-alpha.54 already exists; skipping');
+          } else if (response.status === 404) {
+            execFileSync('npm', ['publish', file, '--tag', 'alpha', '--access', 'public', '--ignore-scripts'], { stdio: 'inherit' });
+          } else throw new Error(`registry lookup failed: ${response.status}`);
+          JS
