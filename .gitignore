@@ -69,3 +69,5 @@ data-multi/
 
 # Lane-local Android SDK, NDK, JDK and emulator cache.
 /.cache/android-device-acceptance/
+# Generated browser benchmark phase receipts.
+packages/jazz-tools/.vitest-browser-bench/
