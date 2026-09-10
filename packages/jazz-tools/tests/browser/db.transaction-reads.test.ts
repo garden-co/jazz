@@ -210,10 +210,14 @@ describe("db exclusive transaction reads browser integration", () => {
 
   it("rejects partial upserts for missing rows inside transactions", async () => {
     const tx = db.beginExclusiveTransaction();
+    tx.insert(app.todos, { title: "Must not be committed", done: false });
+    tx.upsert(app.todos, "00000000-0000-0000-0000-000000000125", { done: true });
 
-    expect(() =>
-      tx.upsert(app.todos, "00000000-0000-0000-0000-000000000125", { done: true }),
-    ).toThrow("missing required field `title`");
+    // A partial upsert is valid for an existing row but not for a new one. Resolving existence
+    // may require async storage access, so validation failure is observed through commit().wait(),
+    // not synchronously through upsert().
+    await expect(tx.commit().wait()).rejects.toThrow("missing required field `title`");
+    await expect(db.all(app.todos, { tier: "local" })).resolves.toEqual([]);
   });
 
   describe("db.exclusiveTransaction(cb)", () => {
@@ -486,10 +490,16 @@ describe("db mergeable transaction reads browser integration", () => {
 
   it("rejects partial upserts for missing rows inside mergeable transactions", async () => {
     const tx = db.beginTransaction();
+    tx.insert(app.todos, { title: "Must not be committed", done: false });
+    tx.upsert(app.todos, "00000000-0000-0000-0000-000000000225", { done: true });
 
-    expect(() =>
-      tx.upsert(app.todos, "00000000-0000-0000-0000-000000000225", { done: true }),
-    ).toThrow("missing required field `title`");
+    // A partial upsert is valid for an existing row but not for a new one. Resolving existence
+    // may require async storage access, so validation failure is observed through commit().wait(),
+    // not synchronously through upsert().
+    await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow(
+      "missing required field `title`",
+    );
+    await expect(db.all(app.todos, { tier: "local" })).resolves.toEqual([]);
   });
 
   describe("db.transaction(cb)", () => {
