@@ -468,6 +468,17 @@ type ServerReplacementIntent = {
   url: string;
   authJson: string;
 };
+function joinServerTransportRetirements(
+  previous: Promise<void> | null,
+  next: Promise<void>,
+): Promise<void> {
+  if (!previous) return next;
+  return Promise.allSettled([previous, next]).then((results) => {
+    for (const result of results) {
+      if (result.status === "rejected") throw result.reason;
+    }
+  });
+}
 
 type AuxiliaryRelayTrace = {
   event: string;
@@ -667,6 +678,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverCarrier: WebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverConnectionAttempt: ServerConnectionAttempt | null = null;
+  private serverReplacementRetirement: Promise<void> | null = null;
   private serverReplacementIntent: ServerReplacementIntent | null = null;
   private serverReplacementPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
@@ -1978,10 +1990,17 @@ export class NativeRuntimeAdapter implements Runtime {
       authJson: normalizedAuthJson,
     };
     this.serverReplacementIntent = intent;
+    this.serverReplacementRetirement = joinServerTransportRetirements(
+      this.serverReplacementRetirement,
+      predecessorRetirement,
+    );
     let replacement = this.serverReplacementPromise;
     if (!replacement) {
-      replacement = predecessorRetirement.then(async () => {
+      replacement = (async () => {
         for (;;) {
+          const retirement = this.serverReplacementRetirement;
+          this.serverReplacementRetirement = null;
+          if (retirement) await retirement;
           const latest = this.serverReplacementIntent;
           if (!latest || this.closed) throw new Error("server transport disconnected");
           this.serverReplacementIntent = null;
@@ -1996,14 +2015,14 @@ export class NativeRuntimeAdapter implements Runtime {
             }
             throw error;
           }
-          if (!this.serverReplacementIntent) {
+          if (!this.serverReplacementIntent && !this.serverReplacementRetirement) {
             if (!this.serverCarrierPromise) {
               throw new Error("server transport connection was not started");
             }
             return await this.serverCarrierPromise;
           }
         }
-      });
+      })();
       this.serverReplacementPromise = replacement;
       replacement.then(
         () => {
