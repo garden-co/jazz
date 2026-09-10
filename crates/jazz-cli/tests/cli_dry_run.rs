@@ -1926,6 +1926,14 @@ fn websocket_reconnect_preserves_local_structured_terminal_patches() {
 /// reset must complete before that gate is released, and A's rows must arrive in
 /// order.
 #[cfg(all(unix, target_os = "linux"))]
+fn indexed_fixture_row_id(index: usize) -> RowUuid {
+    let index = u64::try_from(index).expect("fixture row index fits in u64");
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&index.to_be_bytes());
+    RowUuid::from_bytes(bytes)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
 #[test]
 fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_fifo() {
     const PAYLOAD_BYTES: usize = 48 * 1024;
@@ -1965,7 +1973,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
             "users",
             BTreeMap::from([("name".to_owned(), Value::String(payload))]),
             jazz::db::InsertOptions {
-                row_id: Some(RowUuid::from_bytes([index as u8; 16])),
+                row_id: Some(indexed_fixture_row_id(index)),
                 ..Default::default()
             },
         ))
@@ -2221,8 +2229,8 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         .iter()
         .map(|payload| {
             payload
-                .get(..3)
-                .and_then(|prefix| prefix.parse::<usize>().ok())
+                .split_once(':')
+                .and_then(|(index, _)| index.parse::<usize>().ok())
         })
         .collect::<Option<Vec<_>>>();
     let expected_indices = Some((0..row_count).collect::<Vec<_>>());
