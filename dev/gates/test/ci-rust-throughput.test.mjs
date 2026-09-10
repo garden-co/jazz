@@ -2145,3 +2145,58 @@ test("parallel TypeScript runner terminates both child process groups", async ()
   assert.equal(fs.existsSync(browserMarker), false, "browser descendant survived TERM");
   fs.rmSync(fixture, { recursive: true, force: true });
 });
+
+for (const [signal, expected] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+]) {
+  test(`parallel TypeScript runner retains bounded diagnostics on ${signal}`, async () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-tails-"));
+    const command = (suite) =>
+      `printf '%20000s\\n' x; echo ${suite}-last-test; touch "$RUNNER_TEMP/${suite}-ready"; sleep 30`;
+    const child = spawn("bash", [path.join(root, "dev/gates/run-ts-tests.sh")], {
+      cwd: root,
+      env: {
+        ...process.env,
+        RUNNER_TEMP: fixture,
+        JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
+        JAZZ_NODE_TEST_COMMAND: command("node"),
+        JAZZ_BROWSER_TEST_COMMAND: command("browser"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk;
+    });
+    const closed = new Promise((resolve) => child.once("close", (code) => resolve(code)));
+    const watchdog = setTimeout(() => child.kill("SIGKILL"), 5000);
+    try {
+      const deadline = Date.now() + 3000;
+      while (
+        !["node", "browser"].every((suite) => fs.existsSync(path.join(fixture, `${suite}-ready`)))
+      ) {
+        assert.ok(Date.now() < deadline, "synthetic suites did not start");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      child.kill(signal);
+      assert.equal(await closed, expected, output);
+      assert.match(output, /node-last-test/);
+      assert.match(output, /browser-last-test/);
+      assert.ok(Buffer.byteLength(output) < 34000, "interruption diagnostics were not bounded");
+      for (const suite of ["node", "browser"]) {
+        const log = fs.readdirSync(fixture).find((name) => name.startsWith(`jazz-${suite}-tests-`));
+        assert.ok(log, "complete suite log was not retained");
+        assert.ok(fs.statSync(path.join(fixture, log)).size > 20000);
+      }
+    } finally {
+      clearTimeout(watchdog);
+      if (child.exitCode === null) child.kill("SIGTERM");
+      await closed;
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+}

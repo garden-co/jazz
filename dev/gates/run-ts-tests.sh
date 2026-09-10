@@ -97,6 +97,17 @@ terminate_children() {
 
 interrupt() {
   local signal_status=$1
+  # Replay before waiting for children: a stuck shutdown must not hide the
+  # last test output. Bound bytes as well as lines (a test may print one huge
+  # line), and retain the complete regular files at the printed paths.
+  echo "TypeScript suites interrupted (exit ${signal_status}); retained log tails:"
+  for suite_log in "${node_tests_log}" "${browser_tests_log}"; do
+    echo "--- ${suite_log} (last 16 KiB, at most 100 lines) ---"
+    if [[ -f "${suite_log}" ]]; then
+      tail -c 16384 "${suite_log}" | tail -n 100 || true
+      echo
+    fi
+  done
   terminate_children
   exit "${signal_status}"
 }
