@@ -714,6 +714,101 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("waits for an admitted predecessor retirement before admitting its successor", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const oldTransport = new FakeTransport([]);
+    const predecessorTransport = new FakeTransport([]);
+    const successorTransport = new FakeTransport([]);
+    const predecessorTick = deferred<number>();
+    let predecessorTickStarted = false;
+    predecessorTransport.tick = (() => {
+      predecessorTickStarted = true;
+      return predecessorTick.promise;
+    }) as never;
+    let successorScheduled = false;
+    const predecessorAdmission = deferred<void>();
+    const successorRequested = deferred<void>();
+    let runtime!: NativeRuntimeAdapter;
+    let progress: Promise<void> | undefined;
+    predecessorTransport.setAuxiliaryTraceEnabled = () => {
+      predecessorAdmission.resolve();
+      if (successorScheduled) return;
+      successorScheduled = true;
+      queueMicrotask(() => {
+        successorRequested.resolve();
+        runtime.connect("ws://127.0.0.1:4200/apps/app-c/ws", "{}");
+      });
+    };
+    const admitted: FakeTransport[] = [];
+    const transports = [oldTransport, predecessorTransport, successorTransport];
+    let connectCalls = 0;
+    runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              connectCalls += 1;
+              const transport = transports.shift();
+              if (!transport) throw new Error("unexpected extra upstream admission");
+              admitted.push(transport);
+              if (connectCalls === 2) {
+                queueMicrotask(() => {
+                  progress = runtime.progressPeerTransport();
+                });
+              }
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+    await predecessorAdmission.promise;
+    await successorRequested.promise;
+    try {
+      await vi.waitFor(() => expect(predecessorTickStarted).toBe(true));
+      await waitForFakeWebSocketNegotiation();
+
+      expect(sockets).toHaveLength(2);
+      expect(admitted).toEqual([oldTransport, predecessorTransport]);
+      expect(predecessorTransport.closed).toBe(false);
+
+      predecessorTick.resolve(0);
+      await progress;
+      await runtime.waitForUpstreamServerConnection();
+
+      expect(sockets.map((socket) => socket.url)).toEqual([
+        "ws://127.0.0.1:4200/apps/app-a/ws",
+        "ws://127.0.0.1:4200/apps/app-b/ws",
+        "ws://127.0.0.1:4200/apps/app-c/ws",
+      ]);
+      expect(admitted).toEqual([oldTransport, predecessorTransport, successorTransport]);
+      expect(predecessorTransport.closed).toBe(true);
+      expect(successorTransport.closed).toBe(false);
+    } finally {
+      predecessorTick.resolve(0);
+      await progress?.catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
   it("reports predecessor retirement failure once without admitting its successor", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
