@@ -2770,11 +2770,18 @@ fn cold_parent_coordinate_lookup_decodes_one_witness_from_large_transactions() {
     // Internal coverage is necessary to evict the transaction-version cache
     // and count actual storage decodes around parent validation in isolation.
     // Fixture creation still uses the ordinary public schema/commit builders.
-    for width in [1_u128, 1500] {
+    for width in [1500_u128, 1] {
         let schema = branch_view_schema();
         let branch = branch_selector(0x71);
         let branch_key = schema
-            .project_branch_view_selector(schema.tables.iter().find(|table| table.name == "todos").unwrap(), &branch)
+            .project_branch_view_selector(
+                schema
+                    .tables
+                    .iter()
+                    .find(|table| table.name == "todos")
+                    .unwrap(),
+                &branch,
+            )
             .unwrap()
             .0;
         let (_dir, mut core) = open_history_complete_node_with_schema(
@@ -2820,6 +2827,7 @@ fn cold_parent_coordinate_lookup_decodes_one_witness_from_large_transactions() {
             };
             core.invalidate_tx_version_tables_cache(parent);
             super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.set(0));
+            super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(0));
             core.reset_storage_read_metrics();
             assert_eq!(
                 core.validate_known_parent_coordinate(parent, &coordinate)
@@ -2834,6 +2842,11 @@ fn cold_parent_coordinate_lookup_decodes_one_witness_from_large_transactions() {
                 "one parent witness must decode one history row even for a {width}-row transaction"
             );
             assert_eq!(
+                super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.get()),
+                1,
+                "the parent transaction must still cross the full payload audit before exact lookup"
+            );
+            assert_eq!(
                 reads.history_indexes.ranges, 0,
                 "exact parent lookup must not scan by_tx: {reads:?}"
             );
@@ -2844,7 +2857,14 @@ fn cold_parent_coordinate_lookup_decodes_one_witness_from_large_transactions() {
 
             let wrong_branch = ParentCoordinate {
                 branch_key: schema
-                    .project_branch_view_selector(schema.tables.iter().find(|table| table.name == "todos").unwrap(), &branch_selector(0x74))
+                    .project_branch_view_selector(
+                        schema
+                            .tables
+                            .iter()
+                            .find(|table| table.name == "todos")
+                            .unwrap(),
+                        &branch_selector(0x74),
+                    )
                     .unwrap()
                     .0,
                 ..coordinate.clone()
@@ -2866,7 +2886,22 @@ fn cold_parent_coordinate_lookup_decodes_one_witness_from_large_transactions() {
                     .unwrap(),
                 ..coordinate.clone()
             };
-            for wrong in [wrong_branch, wrong_row, wrong_layer, wrong_table] {
+            let malformed_branch = ParentCoordinate {
+                branch_key: BranchKey {
+                    values: vec![(
+                        "branch_id".to_owned(),
+                        crate::protocol::BranchColumnValue(vec![0xff]),
+                    )],
+                },
+                ..coordinate.clone()
+            };
+            for wrong in [
+                wrong_branch,
+                wrong_row,
+                wrong_layer,
+                wrong_table,
+                malformed_branch,
+            ] {
                 assert!(
                     matches!(
                         core.validate_known_parent_coordinate(parent, &wrong)
