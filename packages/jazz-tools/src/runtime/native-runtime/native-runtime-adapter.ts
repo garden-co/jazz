@@ -1440,6 +1440,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      // Resolve the synchronous preimage before staging. A rejected merge
+      // (for example an indirect large value) must not leave a native patch
+      // that a caller can accidentally commit after catching the error.
+      const row = this.mergeRowState(table, rowId, values, tx, writeIdentity);
       this.db.updateInTransaction(tx.id, table, rowId, patch, {
         head: branchView?.head,
         base: branchView?.base,
@@ -1448,7 +1452,7 @@ export class NativeRuntimeAdapter implements Runtime {
       tx.writes.push({
         table,
         rowId,
-        row: this.mergeRowState(table, rowId, values, tx, writeIdentity),
+        row,
       });
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
@@ -1540,6 +1544,9 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      const row = existing
+        ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
+        : this.rowStateFromValues(table, rowId, values);
       this.db.upsertInTransaction(tx.id, table, rowId, cells, {
         head: branchView?.head,
         base: branchView?.base,
@@ -1548,9 +1555,7 @@ export class NativeRuntimeAdapter implements Runtime {
       tx.writes.push({
         table,
         rowId,
-        row: existing
-          ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
-          : this.rowStateFromValues(table, rowId, values),
+        row,
       });
       return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }

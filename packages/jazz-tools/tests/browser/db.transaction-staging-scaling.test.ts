@@ -8,6 +8,66 @@ const app = schema.defineApp({
 });
 
 describe("exact local transaction write merging", () => {
+  it("does not commit a rejected large-row patch after its error is caught", async () => {
+    const db = await createBrowserTestDb({
+      appId: "transaction-staging-large-rejection",
+      driver: { type: "memory" },
+    });
+    try {
+      const title = "large text ".repeat(20_000);
+      const large = db.insert(app.todos, { title, done: false });
+      await large.wait({ tier: "local" });
+      const small = db.insert(app.todos, { title: "small", done: false });
+      await small.wait({ tier: "local" });
+      const tx = db.beginTransaction();
+      expect(() => tx.update(app.todos, large.value.id, { done: true })).toThrow(
+        "synchronous WASM all/transaction reads cannot materialize a large value",
+      );
+      tx.update(app.todos, small.value.id, { done: true });
+      await tx.commit().wait({ tier: "local" });
+      expect(await db.all(app.todos)).toEqual(
+        expect.arrayContaining([
+          { id: large.value.id, title, done: false },
+          { id: small.value.id, title: "small", done: true },
+        ]),
+      );
+    } finally {
+      await db.shutdown();
+    }
+  }, 30_000);
+
+  it("retains the previous staged state when native staging rejects a later patch", async () => {
+    const db = await createBrowserTestDb({
+      appId: "transaction-staging-native-rejection",
+      driver: { type: "memory" },
+    });
+    try {
+      const inserted = db.insert(app.todos, { title: "original", done: false });
+      await inserted.wait({ tier: "local" });
+      const tx = db.beginTransaction();
+      tx.update(app.todos, inserted.value.id, { title: "first patch" });
+      const { WasmDb } = await loadWasmModule();
+      const nativeUpdate = vi.spyOn(WasmDb.prototype, "updateInTransaction");
+      nativeUpdate.mockImplementationOnce(() => {
+        throw new Error("synthetic staging failure");
+      });
+      try {
+        expect(() => tx.update(app.todos, inserted.value.id, { title: "rejected patch" })).toThrow(
+          "synthetic staging failure",
+        );
+      } finally {
+        nativeUpdate.mockRestore();
+      }
+      tx.update(app.todos, inserted.value.id, { done: true });
+      await tx.commit().wait({ tier: "local" });
+      expect(await db.all(app.todos)).toEqual([
+        { id: inserted.value.id, title: "first patch", done: true },
+      ]);
+    } finally {
+      await db.shutdown();
+    }
+  });
+
   for (const count of [150, 300, 1500]) {
     it(`stages 90% of ${count} rows without table reads`, async () => {
       const db = await createBrowserTestDb({

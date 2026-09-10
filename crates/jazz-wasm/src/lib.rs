@@ -1965,7 +1965,7 @@ impl WasmDb {
         let inner = self.open_inner()?;
         let row = with_wasm_db!(&inner, |db| block_on(db.local_current_row(&table, row_id)))
             .map_err(to_js_error)?;
-        encode_rows(&row.into_iter().collect::<Vec<_>>()).map_err(to_js_error)
+        encode_synchronous_rows(&row.into_iter().collect::<Vec<_>>())
     }
 
     #[wasm_bindgen(js_name = prepareQuery)]
