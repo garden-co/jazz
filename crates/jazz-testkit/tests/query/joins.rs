@@ -91,7 +91,7 @@ async fn subscribe_all_join_emits_when_matching_joined_row_is_inserted() {
         &Value::Text("Alice".to_string())
     );
     assert_eq!(field(&rows[0], "users.team_id"), &Value::Null);
-    assert_eq!(field(&rows[0], "posts.id"), &Value::Integer(100));
+    assert_eq!(field(&rows[0], "posts.post_number"), &Value::Integer(100));
     assert_eq!(
         field(&rows[0], "posts.title"),
         &Value::Text("Test Post".to_string())
@@ -133,7 +133,7 @@ async fn subscribe_all_join_returns_base_and_joined_table_values() {
         &Value::Text("Alice".to_string())
     );
     assert_eq!(field(&rows[0], "users.team_id"), &Value::Null);
-    assert_eq!(field(&rows[0], "posts.id"), &Value::Integer(100));
+    assert_eq!(field(&rows[0], "posts.post_number"), &Value::Integer(100));
     assert_eq!(
         field(&rows[0], "posts.title"),
         &Value::Text("Hello World".to_string())
