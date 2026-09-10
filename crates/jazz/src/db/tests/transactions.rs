@@ -3016,3 +3016,105 @@ fn deferred_queued_mergeable_commit_wakes_existing_subscription() {
         DurabilityTier::Local
     );
 }
+
+// Internal binding-contract coverage: controlled storage holds the persistence
+// continuation after a queued transaction has transferred publication ownership.
+#[test]
+fn deferred_queued_mergeable_visibility_does_not_claim_blocked_or_failed_durability() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    for fail_persistence in [false, true] {
+        let schema = doctest_support::schema();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let (storage, control) = TestStorage::controlled(&refs);
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x93; 16]),
+                author: AuthorSubject::for_test_bytes([0xa3; 16]),
+            },
+        )))
+        .unwrap();
+        db.set_deferred_local_persistence(true);
+        let mut subscription =
+            prepared_subscribe(&db, &Query::from("todos"), ReadOpts::default()).unwrap();
+        let _ = block_on(subscription.next_event()).unwrap();
+        let open = OpenTransactionId::new();
+        db.begin_mergeable(open).unwrap();
+        let inserted = db
+            .mergeable_tx_ref(open)
+            .insert(
+                "todos",
+                doctest_support::todo_cells("locally visible", false),
+                Default::default(),
+            )
+            .unwrap();
+        control.pause_on(TestStorageOperation::WriteMany);
+        let write = db.enqueue_commit_mergeable_handle(open).unwrap();
+        // Drive only the retained commit/refresh owner, never durability.
+        for _ in 0..128 {
+            db.drive_queued_mutation_once();
+            if matches!(
+                *write.queued_status.as_ref().unwrap().borrow(),
+                QueuedMutationStatus::Published
+            ) {
+                break;
+            }
+        }
+        assert!(matches!(
+            *write.queued_status.as_ref().unwrap().borrow(),
+            QueuedMutationStatus::Published
+        ));
+        let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+            panic!("local publication must refresh before persistence completes");
+        };
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].row_uuid(), inserted);
+        assert_eq!(
+            db.write_state(write.tx_id).unwrap().durability,
+            DurabilityTier::None
+        );
+        assert_eq!(
+            block_on(write.wait(DurabilityTier::Local))
+                .unwrap_err()
+                .code,
+            ErrorCode::NotObserved
+        );
+        let mut tick = Box::pin(db.tick());
+        assert!(matches!(
+            tick.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        assert!(control.poll_count(TestStorageOperation::WriteMany) > 0);
+        drop(tick); // Cancellation must retain the node-owned persistence future.
+        assert_eq!(
+            db.write_state(write.tx_id).unwrap().durability,
+            DurabilityTier::None
+        );
+        if fail_persistence {
+            control.fail_next(TestStorageOperation::WriteMany);
+        }
+        control.resume_operation(TestStorageOperation::WriteMany);
+        if fail_persistence {
+            assert!(
+                block_on(db.tick()).is_err(),
+                "persistence failure must surface"
+            );
+            assert!(
+                block_on(write.wait(DurabilityTier::Local)).is_err(),
+                "failed persistence must not issue a Local receipt"
+            );
+        } else {
+            block_on(db.tick()).unwrap();
+            assert_eq!(
+                block_on(write.wait(DurabilityTier::Local)).unwrap(),
+                write.tx_id
+            );
+            assert_eq!(
+                db.write_state(write.tx_id).unwrap().durability,
+                DurabilityTier::Local
+            );
+        }
+    }
+}
