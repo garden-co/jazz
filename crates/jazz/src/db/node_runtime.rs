@@ -3,9 +3,13 @@
 //! The node runtime owns shared connection state, scheduling, pending uploads,
 //! subscription refresh, write-state notification, and connection lifecycle.
 
+use super::mutation_errors::{
+    MutationErrorWait, mutation_error_event, queue_mutation_error, queued_mutation_error_event,
+    take_pending_mutation_error_delivery,
+};
 use super::peer_connection::{
     ConnectionLink, PeerConnection, SubscriberConnectionState, UpstreamConnectionState,
-    coverage_group_subscription_key, mutation_error_event, take_pending_mutation_error_delivery,
+    coverage_group_subscription_key,
 };
 use super::*;
 
@@ -339,6 +343,7 @@ where
             mutation_errors: Rc::new(RefCell::new(MutationErrorState {
                 callback: None,
                 pending: pending_mutation_errors,
+                application_waiters: BTreeMap::new(),
             })),
             browser_relay_recovered_tx_ids: Rc::new(RefCell::new(BTreeSet::new())),
             next_write_state_waiter_id: Cell::new(1),
@@ -427,7 +432,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: Some(tx_id),
+                transaction: Some((tx_id, TxKind::Mergeable)),
                 open_tx_id: None,
                 future,
                 status: Some(Rc::clone(&status)),
@@ -446,7 +451,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: None,
+                transaction: None,
                 open_tx_id: Some(open_tx_id),
                 future,
                 status: None,
@@ -492,7 +497,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: None,
+                transaction: None,
                 open_tx_id,
                 future: Box::pin(async move {
                     let result = read.await;
@@ -518,6 +523,7 @@ where
         &self,
         open_tx_id: OpenTransactionId,
         tx_id: TxId,
+        kind: TxKind,
         future: QueuedMutationFuture,
     ) -> Rc<RefCell<QueuedMutationStatus>> {
         let status = Rc::new(RefCell::new(QueuedMutationStatus::Pending));
@@ -525,7 +531,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: Some(tx_id),
+                transaction: Some((tx_id, kind)),
                 open_tx_id: Some(open_tx_id),
                 future,
                 status: Some(Rc::clone(&status)),
@@ -547,7 +553,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: None,
+                transaction: None,
                 open_tx_id: None,
                 future,
                 status: None,
@@ -615,7 +621,7 @@ where
         if let Some(completion) = operation.completion.take() {
             completion(result.clone());
         }
-        if let Some(tx_id) = operation.tx_id {
+        if let Some((tx_id, _)) = operation.transaction {
             self.reserved_mutations.borrow_mut().remove(&tx_id);
         }
         if let Err(error) = &result
@@ -626,12 +632,21 @@ where
                 .entry(open_tx_id)
                 .or_insert_with(|| error.clone());
         }
-        if let (Some(tx_id), Some(status)) = (operation.tx_id, operation.status) {
+        if let (Some((tx_id, kind)), Some(status)) = (operation.transaction, operation.status) {
             let terminal_failed = result.is_err();
             match result {
                 Ok(()) => *status.borrow_mut() = QueuedMutationStatus::Published,
                 Err(error) => {
                     *status.borrow_mut() = QueuedMutationStatus::Failed(error.clone());
+                    // Validation can fail before any durable transaction exists.
+                    // Retain a live fallback event as well as the wait result; do
+                    // not manufacture a persisted rejection for an unpublished write.
+                    queue_mutation_error(
+                        &self.mutation_errors,
+                        &self.scheduler,
+                        tx_id,
+                        queued_mutation_error_event(tx_id, kind, &error),
+                    );
                     self.queued_mutation_failures
                         .borrow_mut()
                         .insert(tx_id, error);
@@ -654,7 +669,7 @@ where
                 }));
             }
         }
-        if operation.tx_id.is_some()
+        if operation.transaction.is_some()
             && let Some(open_tx_id) = operation.open_tx_id
         {
             self.queued_open_transaction_failures
@@ -1440,14 +1455,13 @@ where
         }
     }
 
-    async fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
-        let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
+    fn consume_mutation_error(&self, tx_id: TxId) {
+        self.mutation_errors.borrow_mut().pending.remove(&tx_id);
         let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
         if retained {
             self.deferred_rejection_discards.borrow_mut().insert(tx_id);
             self.schedule_tick(TickUrgency::Immediate);
         }
-        Ok(pending.is_some() || retained)
     }
 
     #[cfg(test)]
@@ -1515,12 +1529,7 @@ where
         };
         let satisfied = transaction_satisfies_wait(&fate, global_time, durability, tier);
         match fate {
-            Fate::Rejected(reason) => {
-                if let Err(error) = self.consume_mutation_error(tx_id).await {
-                    tracing::warn!(?tx_id, %error, "failed to consume waited mutation error");
-                }
-                Some(Err(write_rejected(tx_id, reason)))
-            }
+            Fate::Rejected(reason) => Some(Err(write_rejected(tx_id, reason))),
             Fate::Pending | Fate::Accepted if satisfied => Some(Ok(tx_id)),
             Fate::Pending | Fate::Accepted => None,
         }
@@ -1572,16 +1581,19 @@ where
     }
 
     pub(super) fn take_queued_mutation_failure(&self, tx_id: TxId) -> Option<Error> {
-        self.queued_mutation_failures.borrow_mut().remove(&tx_id)
+        let error = self.queued_mutation_failures.borrow_mut().remove(&tx_id)?;
+        // A binding returning the failure synchronously has already reported it.
+        self.consume_mutation_error(tx_id);
+        Some(error)
     }
 
     pub(super) fn wait_for_transaction_with(
         self: &Rc<Self>,
         tx_id: TxId,
-        tier: DurabilityTier,
+        options: WriteWaitOptions,
         callback: Box<dyn FnOnce(Result<TxId, Error>)>,
     ) {
-        self.wait_for_write_with(tx_id, None, tier, callback);
+        self.wait_for_write_with(tx_id, None, options, callback);
     }
 
     /// Callback wait for a binding-owned write handle. A queued empty update
@@ -1593,7 +1605,7 @@ where
         self: &Rc<Self>,
         tx_id: TxId,
         alias: Option<QueuedMutationAlias>,
-        tier: DurabilityTier,
+        options: WriteWaitOptions,
         callback: Box<dyn FnOnce(Result<TxId, Error>)>,
     ) {
         if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing {
@@ -1604,22 +1616,46 @@ where
             return;
         }
         let node = Rc::clone(self);
+        let error_wait = self.register_mutation_error_wait(tx_id, options);
         self.transaction_wait_observers
             .borrow_mut()
             .push(Box::pin(async move {
-                callback(node.wait_for_write(tx_id, alias, tier).await);
+                callback(node.wait_for_write(tx_id, alias, options, error_wait).await);
             }));
         self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    fn register_mutation_error_wait(
+        &self,
+        tx_id: TxId,
+        options: WriteWaitOptions,
+    ) -> Option<MutationErrorWait> {
+        (!options.observe_only)
+            .then(|| MutationErrorWait::new(&self.mutation_errors, &self.scheduler, tx_id))
     }
 
     async fn wait_for_write(
         &self,
         tx_id: TxId,
         alias: Option<QueuedMutationAlias>,
+        options: WriteWaitOptions,
+        _error_wait: Option<MutationErrorWait>,
+    ) -> Result<TxId, Error> {
+        let outcome = self.observe_write(tx_id, alias, options.tier).await;
+        if outcome.is_err() && !options.observe_only {
+            self.consume_mutation_error(tx_id);
+        }
+        outcome
+    }
+
+    async fn observe_write(
+        &self,
+        tx_id: TxId,
+        alias: Option<QueuedMutationAlias>,
         tier: DurabilityTier,
     ) -> Result<TxId, Error> {
         let Some(alias) = alias else {
-            return self.wait_for_transaction(tx_id, tier).await;
+            return self.observe_transaction(tx_id, tier).await;
         };
         loop {
             let target_tx_id = { *alias.borrow() };
@@ -1683,8 +1719,13 @@ where
     pub(super) async fn wait_for_transaction(
         &self,
         tx_id: TxId,
-        tier: DurabilityTier,
+        options: WriteWaitOptions,
     ) -> Result<TxId, Error> {
+        let error_wait = self.register_mutation_error_wait(tx_id, options);
+        self.wait_for_write(tx_id, None, options, error_wait).await
+    }
+
+    async fn observe_transaction(&self, tx_id: TxId, tier: DurabilityTier) -> Result<TxId, Error> {
         loop {
             if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
                 return outcome;
@@ -1753,16 +1794,16 @@ where
         .await
     }
 
-    fn deliver_pending_mutation_errors(&self) {
+    /// Deliver only at the start of the outer Db turn, before queued mutations
+    /// can produce new failures. All origins get the same following-turn
+    /// opportunity for an application wait to claim the error.
+    pub(super) fn deliver_pending_mutation_errors(&self) {
         let Some((callback, events)) = take_pending_mutation_error_delivery(&self.mutation_errors)
         else {
             return;
         };
         for (tx_id, event) in events {
-            if let Err(error) = crate::db::block_on(self.node.borrow_mut().discard_rejection(tx_id))
-            {
-                tracing::warn!(?tx_id, %error, "failed to acknowledge delivered mutation error");
-            }
+            self.consume_mutation_error(tx_id);
             callback(&event);
         }
     }
@@ -3124,7 +3165,6 @@ where
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
         self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
-        self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();

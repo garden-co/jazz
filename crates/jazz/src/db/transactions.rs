@@ -753,6 +753,7 @@ where
         let status = self.node.enqueue_transaction_commit(
             open_tx_id,
             tx_id,
+            TxKind::Mergeable,
             Box::pin(async move {
                 let published = db
                     .lock_for_transaction_operation(open_tx_id)
@@ -1497,6 +1498,7 @@ where
         let status = self.node.enqueue_transaction_commit(
             open_tx_id,
             tx_id,
+            TxKind::Exclusive,
             Box::pin(async move {
                 let (published, unit) = db
                     .lock_for_transaction_operation(open_tx_id)

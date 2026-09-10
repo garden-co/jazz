@@ -39,7 +39,7 @@ declare module "jazz-wasm" {
     readonly payload: Uint8Array;
     readonly rowId: Uint8Array;
     writeState(): unknown;
-    wait(tier: string): Promise<void>;
+    wait(tier: string, observeOnly?: boolean): Promise<void>;
     close(): boolean;
   }
 

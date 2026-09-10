@@ -136,7 +136,7 @@ export type NativeForegroundCommand =
   | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
   | { type: "commitTransaction"; transaction: number }
   | { type: "rollbackTransaction"; transaction: number }
-  | { type: "waitForTransaction"; txId: Uint8Array; tier: string }
+  | { type: "waitForTransaction"; txId: Uint8Array; tier: string; observeOnly?: boolean }
   | { type: "waitForPendingWrites"; tier: string }
   | { type: "disconnectNativeUpstream" }
   | { type: "reconnectNativeUpstream" }
@@ -463,6 +463,7 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
       Uint8Array.of(17),
       encodeForegroundId(command.txId, "transaction id"),
       encodeForegroundString(command.tier),
+      Uint8Array.of(command.observeOnly ? 1 : 0),
     );
   }
   if (command.type === "stageMutation" || command.type === "directMutation") {

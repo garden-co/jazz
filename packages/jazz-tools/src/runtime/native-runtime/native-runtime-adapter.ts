@@ -397,7 +397,7 @@ type Write = {
   readonly txId: string;
   readonly payload: Uint8Array;
   readonly rowId: Uint8Array;
-  wait(tier: string): Promise<void>;
+  wait(tier: string, observeOnly?: boolean): Promise<void>;
   writeState(): unknown;
   close?(): boolean;
 };
@@ -1746,9 +1746,13 @@ export class NativeRuntimeAdapter implements Runtime {
     return txId;
   }
 
-  async waitForTransaction(txId: TxId | Promise<TxId>, tier: string): Promise<void> {
+  async waitForTransaction(
+    txId: TxId | Promise<TxId>,
+    tier: string,
+    observeOnly = false,
+  ): Promise<void> {
     if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.waitForTransaction(txId, tier);
+      return this.ownerRuntime.waitForTransaction(txId, tier, observeOnly);
     }
     txId = await txId;
     const write = this.writes.get(txId);
@@ -1760,7 +1764,7 @@ export class NativeRuntimeAdapter implements Runtime {
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
       void this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
-      const settlement = write.wait(tier);
+      const settlement = observeOnly ? write.wait(tier, true) : write.wait(tier);
       const transportError = this.waitForServerTransportError(tier);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
       try {
@@ -2273,7 +2277,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // The follower itself is non-durable. Its `local` receipt is the durable
     // worker's acknowledgement, emitted after inbound persistence but before
     // separately scheduled cold downstream view assembly.
-    settlement = this.waitForTransaction(txId, "local")
+    // This is runtime bookkeeping, not application error handling. Leave
+    // failures available for a real waiter or the mutation-error callback.
+    settlement = this.waitForTransaction(txId, "local", true)
       .catch(() => undefined)
       .finally(() => this.pendingLocalSettlements.delete(settlement));
     this.pendingLocalSettlements.add(settlement);

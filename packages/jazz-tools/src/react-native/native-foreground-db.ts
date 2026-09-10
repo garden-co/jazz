@@ -65,7 +65,7 @@ type ForegroundCommand =
   | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
   | { type: "commitTransaction"; transaction: number }
   | { type: "rollbackTransaction"; transaction: number }
-  | { type: "waitForTransaction"; txId: Uint8Array; tier: string }
+  | { type: "waitForTransaction"; txId: Uint8Array; tier: string; observeOnly?: boolean }
   | { type: "waitForPendingWrites"; tier: string }
   | {
       type: "stageMutation";
@@ -449,11 +449,11 @@ export class NativeForegroundDb {
     return response.rows;
   }
 
-  async waitForTransaction(txId: Uint8Array, tier: string): Promise<void> {
+  async waitForTransaction(txId: Uint8Array, tier: string, observeOnly = false): Promise<void> {
     if (!["local", "edge", "global"].includes(tier)) {
       throw new Error(`Unsupported write durability tier: ${tier}`);
     }
-    let response = this.execute({ type: "waitForTransaction", txId, tier });
+    let response = this.execute({ type: "waitForTransaction", txId, tier, observeOnly });
     while (response.type === "pending") {
       const operation = response.operation;
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -883,7 +883,7 @@ type NativeForegroundWrite = {
   readonly txId: string;
   readonly payload: Uint8Array;
   readonly rowId: Uint8Array;
-  wait(tier: string): Promise<void>;
+  wait(tier: string, observeOnly?: boolean): Promise<void>;
   writeState(): unknown;
   close(): boolean;
 };
@@ -899,9 +899,9 @@ function nativeWrite(
     txId: id,
     payload: new Uint8Array(),
     rowId: rowId.slice(),
-    async wait(tier: string): Promise<void> {
+    async wait(tier: string, observeOnly = false): Promise<void> {
       if (closed) throw new Error("write state is unavailable");
-      await db.waitForTransaction(txId, tier);
+      await db.waitForTransaction(txId, tier, observeOnly);
     },
     writeState: () => {
       if (closed) throw new Error("write state is unavailable");

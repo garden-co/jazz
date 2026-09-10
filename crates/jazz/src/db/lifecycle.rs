@@ -944,9 +944,9 @@ where
     pub async fn wait_for_transaction(
         &self,
         tx_id: TxId,
-        tier: DurabilityTier,
+        options: impl Into<WriteWaitOptions>,
     ) -> Result<TxId, Error> {
-        self.node.wait_for_transaction(tx_id, tier).await
+        self.node.wait_for_transaction(tx_id, options.into()).await
     }
 
     /// Callback form of [`Db::wait_for_transaction`] for bindings that cannot
@@ -954,11 +954,11 @@ where
     pub fn wait_for_transaction_with(
         &self,
         tx_id: TxId,
-        tier: DurabilityTier,
+        options: impl Into<WriteWaitOptions>,
         callback: impl FnOnce(Result<TxId, Error>) + 'static,
     ) {
         self.node
-            .wait_for_transaction_with(tx_id, tier, Box::new(callback));
+            .wait_for_transaction_with(tx_id, options.into(), Box::new(callback));
     }
 
     /// Binding-only callback wait that preserves a queued write handle's
@@ -968,13 +968,13 @@ where
     pub fn wait_for_write_with(
         &self,
         write: &WriteHandle<S>,
-        tier: DurabilityTier,
+        options: impl Into<WriteWaitOptions>,
         callback: impl FnOnce(Result<TxId, Error>) + 'static,
     ) {
         self.node.wait_for_write_with(
             write.tx_id,
             write.queued_alias.clone(),
-            tier,
+            options.into(),
             Box::new(callback),
         );
     }
@@ -1296,6 +1296,9 @@ where
     }
 
     async fn tick_inner(&self) -> Result<(), Error> {
+        if self.node.owner_is_available() {
+            self.node.deliver_pending_mutation_errors();
+        }
         // Advance both retained queues: a later cold mutation can own the
         // node lock needed to settle an earlier publication. Do not wait for
         // settlement before giving that lock owner its next poll.
@@ -1337,6 +1340,9 @@ where
     }
 
     async fn tick_stats_inner(&self) -> Result<DbTickStats, Error> {
+        if self.node.owner_is_available() {
+            self.node.deliver_pending_mutation_errors();
+        }
         // See `tick`: previously admitted resident publications must keep
         // progressing even when the next FIFO preparation is cold.
         if self.node.has_pending_local_publications() {

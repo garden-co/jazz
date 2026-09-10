@@ -19,6 +19,7 @@ type NativeForegroundCommand =
     }
   | { type: "poll"; operation: number }
   | { type: "cancel"; operation: number }
+  | { type: "waitForTransaction"; txId: Uint8Array; tier: string; observeOnly?: boolean }
   | { type: "beginTransaction"; kind: "mergeable" | "exclusive" }
   | {
       type: "insert";
@@ -79,6 +80,20 @@ function loadRelay(nativeRelay: FixtureNativeRelay | null) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   return require("../relay") as RelayExports;
 }
+
+it.each([false, true])("encodes transaction wait observation mode %s", (observeOnly) => {
+  const relay = loadRelay(null);
+  expect(
+    relay.encodeNativeForegroundCommand({
+      type: "waitForTransaction",
+      txId: new Uint8Array(16).fill(7),
+      tier: "local",
+      observeOnly,
+    }),
+  ).toEqual(
+    Uint8Array.of(17, ...new Uint8Array(16).fill(7), 5, 108, 111, 99, 97, 108, observeOnly ? 1 : 0),
+  );
+});
 
 afterEach(() => {
   delete (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal];

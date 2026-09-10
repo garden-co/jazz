@@ -1593,7 +1593,7 @@ enum MutationOwnerLifecycle {
 }
 
 struct QueuedMutationOperation {
-    tx_id: Option<TxId>,
+    transaction: Option<(TxId, TxKind)>,
     open_tx_id: Option<OpenTransactionId>,
     future: QueuedMutationFuture,
     status: Option<Rc<RefCell<QueuedMutationStatus>>>,
@@ -2109,6 +2109,25 @@ enum WriteStateWaiterNotify {
 struct MutationErrorState {
     callback: Option<MutationErrorCallback>,
     pending: BTreeMap<TxId, MutationErrorEvent>,
+    application_waiters: BTreeMap<TxId, usize>,
+}
+
+/// Options for a write completion observer. Ordinary application waits consume
+/// errors; internal durability observers must leave them available for reporting.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct WriteWaitOptions {
+    pub tier: DurabilityTier,
+    pub observe_only: bool,
+}
+
+impl From<DurabilityTier> for WriteWaitOptions {
+    fn from(tier: DurabilityTier) -> Self {
+        Self {
+            tier,
+            observe_only: false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2592,6 +2611,7 @@ impl Drop for PermissionAdviceFuture {
 
 mod catalogue;
 mod lifecycle;
+mod mutation_errors;
 mod mutations;
 pub use mutations::{
     JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice,

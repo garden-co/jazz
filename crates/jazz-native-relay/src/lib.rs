@@ -379,8 +379,8 @@ pub enum RelayCommandResponse {
 /// Query bytes use the canonical `Query` carrier already produced by the
 /// shared JS codec. This is intentionally *not* a second RN query AST.
 ///
-/// This is the settled V1 command vocabulary. Future incompatible changes
-/// require a new relay ABI, while a command's established payload is immutable.
+/// The greenfield JS/native command payloads are deployed together. Their
+/// postcard layouts are pinned by the matching Rust and TypeScript byte corpus.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum ForegroundDbCommandRequest {
     /// Verify that this attached foreground is still live and return the ABI.
@@ -471,6 +471,8 @@ pub enum ForegroundDbCommandRequest {
     WaitForTransaction {
         tx_id: [u8; 16],
         tier: String,
+        /// Postcard bool after tier: false claims errors, true only observes durability.
+        observe_only: bool,
     },
     /// Options use the established native JSON option vocabulary; author identity
     /// remains bound to the admitted foreground capability.
@@ -2828,7 +2830,11 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 },
             }
         }
-        ForegroundDbCommandRequest::WaitForTransaction { tx_id, tier } => {
+        ForegroundDbCommandRequest::WaitForTransaction {
+            tx_id,
+            tier,
+            observe_only,
+        } => {
             let client = match host.foreground_client(foreground) {
                 Ok(client) => client,
                 Err(status) => return status,
@@ -2839,7 +2845,10 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
                 "global" => CoreDurabilityTier::Global,
                 _ => return JazzNativeRelayStatus::InvalidArgument,
             };
-            match client.wait_for_foreground_transaction(tx_id, tier) {
+            match client.wait_for_foreground_transaction(
+                tx_id,
+                jazz::db::WriteWaitOptions { tier, observe_only },
+            ) {
                 Ok(poll) => foreground_operation_response(poll),
                 Err(error) => match foreground_command_error(error) {
                     Ok(response) => response,
@@ -3445,11 +3454,12 @@ impl NativeRelayClient {
     fn wait_for_foreground_transaction(
         &self,
         tx_id: [u8; 16],
-        tier: CoreDurabilityTier,
+        options: impl Into<jazz::db::WriteWaitOptions>,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         let id = self.id;
+        let options = options.into();
         self.relay
-            .run(move |worker| worker.wait_for_foreground_transaction(id, tx_id, tier))
+            .run(move |worker| worker.wait_for_foreground_transaction(id, tx_id, options))
     }
 
     fn drain_foreground_subscription(
@@ -6148,14 +6158,18 @@ impl RelayWorker {
         client: u64,
         public_tx_id: [u8; 16],
     ) -> Result<ForegroundOperationPoll, RelayError> {
-        self.wait_for_foreground_transaction(client, public_tx_id, CoreDurabilityTier::Global)
+        self.wait_for_foreground_transaction(
+            client,
+            public_tx_id,
+            CoreDurabilityTier::Global.into(),
+        )
     }
 
     fn wait_for_foreground_transaction(
         &mut self,
         client: u64,
         public_tx_id: [u8; 16],
-        tier: CoreDurabilityTier,
+        options: jazz::db::WriteWaitOptions,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         let retained = {
             let client = self.foreground_client(client)?;
@@ -6174,7 +6188,7 @@ impl RelayWorker {
             let future: ForegroundOperationFuture = Box::pin(async move {
                 // Register only after the bounded operation slot is admitted.
                 let (send, receive) = futures::channel::oneshot::channel();
-                db.wait_for_write_with(&write, tier, move |result| {
+                db.wait_for_write_with(&write, options, move |result| {
                     let _ = send.send(result);
                 });
                 let _retained_write = write;
@@ -6200,7 +6214,7 @@ impl RelayWorker {
             (Rc::clone(&client.db), public_tx_id, tx_id)
         };
         let future: ForegroundOperationFuture = Box::pin(async move {
-            db.wait_for_transaction(tx_id, tier)
+            db.wait_for_transaction(tx_id, options)
                 .await
                 .map_err(RelayError::Db)?;
             Ok(ForegroundOperationResult::TransactionSettled(public_tx_id))
@@ -7751,6 +7765,7 @@ mod tests {
             ForegroundDbCommandRequest::WaitForTransaction {
                 tx_id: inserted,
                 tier: "global".into(),
+                observe_only: false,
             },
         );
         for _ in 0..10000 {
@@ -7852,6 +7867,7 @@ mod tests {
             ForegroundDbCommandRequest::WaitForTransaction {
                 tx_id,
                 tier: "global".into(),
+                observe_only: false,
             },
         ) else {
             panic!("offline acceptance waits");
@@ -14311,8 +14327,17 @@ mod tests {
                 ForegroundDbCommandRequest::WaitForTransaction {
                     tx_id: [7; 16],
                     tier: "core".into(),
+                    observe_only: false,
                 },
-                [vec![17], vec![7; 16], vec![4, 99, 111, 114, 101]].concat(),
+                [vec![17], vec![7; 16], vec![4, 99, 111, 114, 101, 0]].concat(),
+            ),
+            (
+                ForegroundDbCommandRequest::WaitForTransaction {
+                    tx_id: [7; 16],
+                    tier: "local".into(),
+                    observe_only: true,
+                },
+                [vec![17], vec![7; 16], vec![5, 108, 111, 99, 97, 108, 1]].concat(),
             ),
             (
                 ForegroundDbCommandRequest::StageMutation {

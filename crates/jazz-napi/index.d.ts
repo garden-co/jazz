@@ -188,7 +188,7 @@ export declare class Write {
   get payload(): Uint8Array
   get rowId(): Uint8Array
   writeState(): any
-  wait(tier: string): Promise<undefined>
+  wait(tier: string, observeOnly?: boolean | undefined | null): Promise<undefined>
   close(): boolean
 }
 

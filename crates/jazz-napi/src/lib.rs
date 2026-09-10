@@ -1343,7 +1343,7 @@ impl Write {
     fn wait_promise(
         &self,
         env: Env,
-        tier: CoreDurabilityTier,
+        options: jazz::db::WriteWaitOptions,
     ) -> napi::Result<PromiseRaw<'static, ()>> {
         let Some(write) = &self.inner else {
             return Err(napi::Error::from_reason("write state is unavailable"));
@@ -1362,10 +1362,10 @@ impl Write {
         };
         match write {
             NapiWrite::Memory { db, write } => {
-                db.wait_for_write_with(write, tier, callback);
+                db.wait_for_write_with(write, options, callback);
             }
             NapiWrite::Persistent { db, write } => {
-                db.wait_for_write_with(write, tier, callback);
+                db.wait_for_write_with(write, options, callback);
             }
         }
         Ok(PromiseRaw::new(env, promise))
@@ -1403,8 +1403,19 @@ impl Write {
     }
 
     #[napi]
-    pub fn wait(&self, env: Env, tier: String) -> napi::Result<PromiseRaw<'static, ()>> {
-        self.wait_promise(env, core_durability_tier_from_str(&tier)?)
+    pub fn wait(
+        &self,
+        env: Env,
+        tier: String,
+        observe_only: Option<bool>,
+    ) -> napi::Result<PromiseRaw<'static, ()>> {
+        self.wait_promise(
+            env,
+            jazz::db::WriteWaitOptions {
+                tier: core_durability_tier_from_str(&tier)?,
+                observe_only: observe_only.unwrap_or(false),
+            },
+        )
     }
 
     #[napi]

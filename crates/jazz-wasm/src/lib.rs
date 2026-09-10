@@ -639,15 +639,23 @@ impl WasmWrite {
     }
 
     #[wasm_bindgen(js_name = wait)]
-    pub fn wait(&self, tier: String) -> Result<js_sys::Promise, JsValue> {
+    pub fn wait(
+        &self,
+        tier: String,
+        observe_only: Option<bool>,
+    ) -> Result<js_sys::Promise, JsValue> {
         let tier = durability_tier_from_str(&tier)?;
+        let options = jazz::db::WriteWaitOptions {
+            tier,
+            observe_only: observe_only.unwrap_or(false),
+        };
         match &self.inner {
             Some(WasmWriteInner::MemoryTx { db, write }) => {
-                Ok(wait_promise(db.as_ref(), write, tier))
+                Ok(wait_promise(db.as_ref(), write, options))
             }
             #[cfg(target_arch = "wasm32")]
             Some(WasmWriteInner::BrowserTx { db, write }) => {
-                Ok(wait_promise(db.as_ref(), write, tier))
+                Ok(wait_promise(db.as_ref(), write, options))
             }
             None => Err(JsValue::from_str("write state is unavailable")),
         }
@@ -3030,12 +3038,16 @@ where
     Ok(stats.subscription_events as u32)
 }
 
-fn wait_promise<S>(db: &Db<S>, write: &WriteHandle<S>, tier: DurabilityTier) -> js_sys::Promise
+fn wait_promise<S>(
+    db: &Db<S>,
+    write: &WriteHandle<S>,
+    options: jazz::db::WriteWaitOptions,
+) -> js_sys::Promise
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     js_sys::Promise::new(&mut |resolve, reject| {
-        db.wait_for_write_with(write, tier, move |result| match result {
+        db.wait_for_write_with(write, options, move |result| match result {
             Ok(_) => {
                 let _ = resolve.call0(&JsValue::UNDEFINED);
             }

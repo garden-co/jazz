@@ -1896,6 +1896,264 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
     assert_eq!(events[0].transaction.kind, TransactionKind::Mergeable);
 }
 
+#[test]
+fn internal_observer_does_not_consume_authority_rejection() {
+    let author = AuthorSubject::for_test_bytes([0xb5; 16]);
+    let client = open_db(0xb5, author, &schema());
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_transport));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+    let write = client
+        .insert(
+            "todos",
+            cells("rejected", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let observed = Rc::new(RefCell::new(None));
+    let observer = Rc::clone(&observed);
+    client.wait_for_write_with(
+        &write,
+        WriteWaitOptions {
+            tier: DurabilityTier::Edge,
+            observe_only: true,
+        },
+        move |outcome| *observer.borrow_mut() = Some(outcome),
+    );
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        observed.borrow_mut().take().unwrap().unwrap_err().code,
+        ErrorCode::WriteRejected
+    );
+    client.tick().unwrap();
+    assert_eq!(events.borrow().len(), 1);
+    assert_eq!(events.borrow()[0].code, "permission_denied");
+}
+
+fn enqueue_incomplete_upsert(
+    db: &Db<RocksDbStorage>,
+    kind: Option<TransactionKind>,
+) -> WriteHandle<RocksDbStorage> {
+    match kind {
+        None => db
+            .enqueue_upsert(
+                "todos".to_owned(),
+                row(0xb2),
+                RowCells::new(),
+                Default::default(),
+            )
+            .unwrap(),
+        Some(kind) => {
+            let id = OpenTransactionId::new();
+            match kind {
+                TransactionKind::Mergeable => db.enqueue_begin_mergeable(id, None, None).unwrap(),
+                TransactionKind::Exclusive => db.enqueue_begin_exclusive(id, None, None).unwrap(),
+            }
+            db.enqueue_transaction_upsert(
+                id,
+                "todos".to_owned(),
+                row(0xb2),
+                RowCells::new(),
+                Default::default(),
+            )
+            .unwrap();
+            match kind {
+                TransactionKind::Mergeable => db.enqueue_commit_mergeable_handle(id).unwrap(),
+                TransactionKind::Exclusive => db.enqueue_commit_exclusive_handle(id).unwrap(),
+            }
+        }
+    }
+}
+
+/// Exercise the binding admission API: unlike async upsert, it returns a
+/// handle before validation, so an ignored handle needs callback delivery.
+#[test]
+fn unobserved_queued_upsert_failures_are_reported_once() {
+    for kind in [
+        None,
+        Some(TransactionKind::Mergeable),
+        Some(TransactionKind::Exclusive),
+    ] {
+        let db = open_db(0xb1, AuthorSubject::for_test_bytes([0xb1; 16]), &schema());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let callback_events = Rc::clone(&events);
+        db.on_mutation_error(Rc::new(move |event| {
+            callback_events.borrow_mut().push(event.clone());
+        }));
+        let write = enqueue_incomplete_upsert(&db, kind);
+        // No application wait is registered while the queued write fails.
+        for _ in 0..100 {
+            db.tick().unwrap();
+            if !events.borrow().is_empty() {
+                break;
+            }
+        }
+        {
+            let events = events.borrow();
+            assert_eq!(events.len(), 1, "missing callback for {kind:?}");
+            assert_eq!(events[0].code, "write_rejected");
+            assert!(events[0].reason.contains("missing required field `title`"));
+            assert_eq!(
+                events[0].transaction.transaction_id,
+                TransactionId::from_committed_tx(write.mergeable_tx_id())
+            );
+            assert_eq!(
+                events[0].transaction.kind,
+                kind.unwrap_or(TransactionKind::Mergeable)
+            );
+        }
+        let error =
+            block_on(db.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Local))
+                .unwrap_err();
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+        assert!(error.message.contains("missing required field `title`"));
+        for _ in 0..3 {
+            db.tick().unwrap();
+        }
+        assert_eq!(
+            events.borrow().len(),
+            1,
+            "late wait must not cause duplicate delivery"
+        );
+        let query = db.prepare_query(&Query::from("todos")).unwrap();
+        assert!(db.read(&query).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn application_waits_claim_queued_errors_but_internal_observers_do_not() {
+    for kind in [
+        None,
+        Some(TransactionKind::Mergeable),
+        Some(TransactionKind::Exclusive),
+    ] {
+        for application_wait in [false, true] {
+            for already_failed in [false, true] {
+                let db = open_db(0xb3, AuthorSubject::for_test_bytes([0xb3; 16]), &schema());
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let callback_events = Rc::clone(&events);
+                db.on_mutation_error(Rc::new(move |event| {
+                    callback_events.borrow_mut().push(event.clone());
+                }));
+                let write = enqueue_incomplete_upsert(&db, kind);
+                if already_failed {
+                    for _ in 0..100 {
+                        db.drive_queued_mutation_once();
+                        if block_on(write.write_state()).is_err() {
+                            break;
+                        }
+                    }
+                    assert!(block_on(write.write_state()).is_err());
+                }
+                let observed = Rc::new(RefCell::new(None));
+                let observer = Rc::clone(&observed);
+                db.wait_for_write_with(
+                    &write,
+                    WriteWaitOptions {
+                        tier: DurabilityTier::Local,
+                        observe_only: true,
+                    },
+                    move |outcome| *observer.borrow_mut() = Some(outcome),
+                );
+                let waited = Rc::new(RefCell::new(None));
+                if application_wait {
+                    let waiter = Rc::clone(&waited);
+                    db.wait_for_write_with(&write, DurabilityTier::Local, move |outcome| {
+                        *waiter.borrow_mut() = Some(outcome);
+                    });
+                }
+                for _ in 0..100 {
+                    db.tick().unwrap();
+                }
+                assert_eq!(
+                    observed.borrow_mut().take().unwrap().unwrap_err().code,
+                    ErrorCode::WriteRejected
+                );
+                if application_wait {
+                    assert_eq!(
+                        waited.borrow_mut().take().unwrap().unwrap_err().code,
+                        ErrorCode::WriteRejected
+                    );
+                    assert!(
+                        events.borrow().is_empty(),
+                        "{kind:?}, already_failed={already_failed}"
+                    );
+                } else {
+                    assert_eq!(
+                        events.borrow().len(),
+                        1,
+                        "{kind:?}, already_failed={already_failed}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cancelling_application_wait_releases_queued_error_for_callback() {
+    let db = open_db(0xb4, AuthorSubject::for_test_bytes([0xb4; 16]), &schema());
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    db.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+    let write = enqueue_incomplete_upsert(&db, None);
+    let mut wait =
+        Box::pin(db.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Local));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(std::future::Future::poll(wait.as_mut(), &mut context).is_pending());
+    for _ in 0..100 {
+        db.tick().unwrap();
+    }
+    assert!(block_on(write.write_state()).is_err());
+    assert!(
+        events.borrow().is_empty(),
+        "live application wait owns the failure"
+    );
+    drop(wait);
+    db.tick().unwrap();
+    assert_eq!(events.borrow().len(), 1);
+}
+
+#[test]
+fn queued_validation_failure_waits_until_the_following_turn_for_fallback() {
+    let db = open_db(0xb6, AuthorSubject::for_test_bytes([0xb6; 16]), &schema());
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    db.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+    let write = enqueue_incomplete_upsert(&db, None);
+    // Match the binding's tick_stats entry point: producing a local failure
+    // must not also deliver its fallback before the host can register a wait.
+    for _ in 0..100 {
+        block_on(db.tick_stats()).unwrap();
+        if block_on(write.write_state()).is_err() {
+            break;
+        }
+    }
+    assert!(block_on(write.write_state()).is_err());
+    assert!(events.borrow().is_empty());
+    assert!(
+        block_on(db.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Local)).is_err()
+    );
+    block_on(db.tick_stats()).unwrap();
+    assert!(events.borrow().is_empty());
+}
+
 /// A queued empty root update validates its target asynchronously, but still
 /// exposes one stable reservation to the synchronous caller. Once validation
 /// completes, that reservation aliases the already-current row transaction;
