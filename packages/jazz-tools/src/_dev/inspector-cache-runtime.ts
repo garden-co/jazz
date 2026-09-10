@@ -1,4 +1,4 @@
-import type { OpenTransactionId, TxId } from "../runtime/client.js";
+import type { OpenTransactionId, TxId, RuntimeWriteWaitOptions } from "../runtime/client.js";
 import type { RuntimeSubscriptionDelta, Value, WasmSchema } from "../drivers/types.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import {
@@ -131,10 +131,14 @@ export function attachInspectorCacheRuntime(
           return txId;
         };
       if (property === "waitForTransaction")
-        return async (pending: TxId | Promise<TxId>, tier: string) => {
+        return async (
+          pending: TxId | Promise<TxId>,
+          tier: string,
+          options?: RuntimeWriteWaitOptions,
+        ) => {
           const txId = await pending;
-          if (!ownedWrites.has(txId)) return target.waitForTransaction(txId, tier);
-          await request({ type: "inspect-wait", txId, tier });
+          if (!ownedWrites.has(txId)) return target.waitForTransaction(txId, tier, options);
+          await Promise.all([options?.ready, request({ type: "inspect-wait", txId, tier })]);
         };
       if (property === "insert" || property === "update" || property === "delete")
         return (...args: unknown[]) => {

@@ -16,6 +16,18 @@ use super::*;
 type PeerOwnerGuards<'a, S> = BTreeMap<usize, futures::lock::MutexGuard<'a, PeerConnection<S>>>;
 use crate::time::TxTime;
 
+/// Wake observers after any transaction-state transition, whether produced by
+/// a queued mutation, local persistence, or an upstream acknowledgement.
+pub(super) fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) {
+    let Some(waiters) = waiters.borrow_mut().remove(&tx_id) else {
+        return;
+    };
+    for waiter in waiters {
+        let WriteStateWaiterNotify::Future(sender) = waiter.notify;
+        let _ = sender.send(());
+    }
+}
+
 /// Test-only rendezvous after refresh has detached a public stream's local
 /// maintained subscription. It makes the cancellation/finalization handoff
 /// deterministic without changing production scheduling.
@@ -652,12 +664,7 @@ where
                         .insert(tx_id, error);
                 }
             }
-            if let Some(waiters) = self.write_state_waiters.borrow_mut().remove(&tx_id) {
-                for waiter in waiters {
-                    let WriteStateWaiterNotify::Future(sender) = waiter.notify;
-                    let _ = sender.send(());
-                }
-            }
+            notify_write_state_waiters(&self.write_state_waiters, tx_id);
             if terminal_failed && let Some(open_tx_id) = operation.open_tx_id {
                 let node = Rc::clone(&self.node);
                 self.enqueue_transaction_cleanup(Box::pin(async move {
@@ -865,6 +872,10 @@ where
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(tx_id)) => {
                     debug_assert_eq!(pending.published.tx_id(), tx_id);
+                    // Persistence has now advanced durability from None to
+                    // Local. Wake waits registered before this receipt; merely
+                    // polling their futures cannot advance a pending state-change channel.
+                    notify_write_state_waiters(&self.write_state_waiters, tx_id);
                     self.queue_pending_upload(tx_id, pending.upload_unit);
                 }
             }

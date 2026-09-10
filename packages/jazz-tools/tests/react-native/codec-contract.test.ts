@@ -87,7 +87,12 @@ const cases: [string, unknown, unknown][] = [
   [
     "settlement",
     { type: "waitForTransaction", txId, tier: "core" },
-    { WaitForTransaction: { tx_id: [...txId], tier: "core" } },
+    { WaitForTransaction: { tx_id: [...txId], tier: "core", observe_only: false } },
+  ],
+  [
+    "observe-only settlement",
+    { type: "waitForTransaction", txId, tier: "core", observeOnly: true },
+    { WaitForTransaction: { tx_id: [...txId], tier: "core", observe_only: true } },
   ],
   [
     "restore",

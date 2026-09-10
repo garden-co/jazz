@@ -25,6 +25,7 @@ import {
   JazzClient,
   type MutationErrorEvent,
   WriteHandle,
+  setWriteWaitReadiness,
   type TransactionKind,
   type InsertOptions as InternalInsertOptions,
   type RestoreOptions as InternalRestoreOptions,
@@ -1840,12 +1841,7 @@ export class Db {
   }
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
-    const wait = handle.wait.bind(handle);
-    handle.wait = (async (options: { tier: DurabilityTier }) => {
-      await this.ensureReady(options.tier);
-      return wait(options);
-    }) as THandle["wait"];
-    return handle;
+    return setWriteWaitReadiness(handle, (tier) => this.ensureReady(tier));
   }
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {

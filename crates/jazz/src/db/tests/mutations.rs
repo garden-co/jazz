@@ -3997,6 +3997,72 @@ fn assert_internal_subscription_refresh_failure(subscription: &mut SubscriptionS
     );
 }
 
+/// Alice registers application and internal waits before deferred persistence.
+/// Publishing locally must wake both Local waits, but cannot satisfy Edge.
+/// The Db facade is used to control owner turns without a client's tick driver.
+#[test]
+fn local_persistence_wakes_existing_transaction_waits() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+    );
+    let storage = crate::groove::storage::MemoryStorage::new(
+        &schema
+            .column_families()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb6; 16]),
+            author: AuthorSubject::for_test_bytes([0xb6; 16]),
+        },
+    )))
+    .unwrap();
+    db.set_deferred_local_persistence(true);
+    // The binding-facing Db takes core cells, not row_input!'s public Value type.
+    let write = block_on(db.insert(
+        "todos",
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("persist alice's write".to_owned()),
+        )]),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    assert_eq!(
+        db.write_state(tx_id).unwrap().durability,
+        DurabilityTier::None
+    );
+    let mut local = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Local));
+    let mut observer = pin!(db.wait_for_transaction(
+        tx_id,
+        WriteWaitOptions {
+            tier: DurabilityTier::Local,
+            observe_only: true,
+        }
+    ));
+    let mut edge = pin!(db.wait_for_transaction(tx_id, DurabilityTier::Edge));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(local.as_mut().poll(&mut context).is_pending());
+    assert!(observer.as_mut().poll(&mut context).is_pending());
+    assert!(edge.as_mut().poll(&mut context).is_pending());
+
+    block_on(db.tick()).unwrap();
+    assert_eq!(
+        db.write_state(tx_id).unwrap().durability,
+        DurabilityTier::Local
+    );
+    assert!(matches!(local.as_mut().poll(&mut context), Poll::Ready(Ok(id)) if id == tx_id));
+    assert!(matches!(observer.as_mut().poll(&mut context), Poll::Ready(Ok(id)) if id == tx_id));
+    assert!(edge.as_mut().poll(&mut context).is_pending());
+}
+
 /// A deferred local writer transfers its publication to the node queue before
 /// its affected subscription refresh fails; a sibling stream still receives
 /// its delta, and the later runtime tick persists the queued write.

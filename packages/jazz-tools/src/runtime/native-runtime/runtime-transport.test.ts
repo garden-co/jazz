@@ -762,8 +762,11 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(isWireHello(decodeWebSocketFrameBatch(received[0]!)[0]!)).toBe(true);
   });
 
-  it("retries a pending edge wait when a websocket frame arrives without a native callback", async () => {
-    let settled = false;
+  it("settles an existing edge wait when a websocket frame arrives without a native callback", async () => {
+    let settle!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
     let transportTicks = 0;
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -775,14 +778,14 @@ describe("NativeRuntimeAdapter server transport", () => {
     const transport = new FakeTransport([]);
     transport.tick = () => {
       transportTicks += 1;
-      if (transportTicks >= 2) settled = true;
+      if (transportTicks >= 2) settle();
       return 0;
     };
     const write = {
       txId: "00000000000070008000000000000007",
       payload: new Uint8Array(),
       rowId: new Uint8Array(16),
-      wait: () => (settled ? Promise.resolve() : new Promise<void>(() => {})),
+      wait: vi.fn(() => settlement),
       writeState: () => ({}),
     };
     const runtime = new NativeRuntimeAdapter(
@@ -824,6 +827,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await wait;
 
     expect(transportTicks).toBeGreaterThanOrEqual(2);
+    expect(write.wait).toHaveBeenCalledExactlyOnceWith("edge");
   });
 
   it("rejects active Edge and Global waits and subscriptions for a relayed terminal error without inventing a rejection", async () => {
@@ -1013,8 +1017,11 @@ describe("NativeRuntimeAdapter server transport", () => {
     await expect(globalWait).rejects.toThrow("Protocol: terminal before reconnect");
   });
 
-  it("retries a pending edge wait when a websocket frame arrives without a native callback", async () => {
-    let settled = false;
+  it("settles an existing edge wait without a native write-state callback", async () => {
+    let settle!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
     let transportTicks = 0;
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -1026,14 +1033,14 @@ describe("NativeRuntimeAdapter server transport", () => {
     const transport = new FakeTransport([]);
     transport.tick = () => {
       transportTicks += 1;
-      if (transportTicks >= 2) settled = true;
+      if (transportTicks >= 2) settle();
       return 0;
     };
     const write = {
       txId: "00000000000070008000000000000007",
       payload: new Uint8Array(),
       rowId: new Uint8Array(16),
-      wait: () => (settled ? Promise.resolve() : new Promise<void>(() => {})),
+      wait: vi.fn(() => settlement),
       writeState: () => ({}),
       nextWriteStateChange: () => new Promise<void>(() => {}),
     };
@@ -1076,6 +1083,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await wait;
 
     expect(transportTicks).toBeGreaterThanOrEqual(2);
+    expect(write.wait).toHaveBeenCalledExactlyOnceWith("edge");
   });
 
   it("uses the binding scheduler to drive native db ticks outside server pumps", async () => {

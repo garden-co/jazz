@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   JazzClient,
   ExclusiveWriteHandle,
+  WriteResult,
+  setWriteWaitReadiness,
   ReadTier,
   resolveDefaultDurabilityTier,
   resolveEffectiveQueryExecutionOptions,
@@ -768,6 +770,50 @@ describe("JazzClient transaction query plumbing", () => {
 });
 
 describe("JazzClient runtime transaction waits", () => {
+  it.each([false, true])(
+    "registers a wait before readiness but gates completion (mapped=%s)",
+    async (mapped) => {
+      const runtime = makeFakeRuntime();
+      const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+      let becomeReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        becomeReady = resolve;
+      });
+      const original = setWriteWaitReadiness(
+        new WriteResult("result", "transaction-readiness" as TxId, client),
+        () => ready,
+      );
+      const handle = mapped ? original.mapValue((value) => value.toUpperCase()) : original;
+      const completed = vi.fn();
+      const waiting = handle.wait({ tier: "edge" }).then(completed);
+      expect(runtime.waitForTransaction).toHaveBeenCalledWith(handle.txId, "edge", { ready });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(completed).not.toHaveBeenCalled();
+      becomeReady();
+      await waiting;
+      expect(completed).toHaveBeenCalledWith(mapped ? "RESULT" : "result");
+    },
+  );
+
+  it("preserves readiness failures after registering the wait", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    let failReadiness!: (error: Error) => void;
+    const ready = new Promise<void>((_resolve, reject) => {
+      failReadiness = reject;
+    });
+    const handle = setWriteWaitReadiness(
+      new WriteResult("result", "transaction-readiness-failure" as TxId, client),
+      () => ready,
+    );
+    const waiting = handle.wait({ tier: "edge" });
+    expect(runtime.waitForTransaction).toHaveBeenCalledOnce();
+    const error = new Error("connection readiness failed");
+    failReadiness(error);
+    await expect(waiting).rejects.toBe(error);
+  });
+
   it("delegates unsettled waits to the runtime", async () => {
     const runtime = makeFakeRuntime();
     runtime.waitForTransaction = vi.fn(async () => undefined);

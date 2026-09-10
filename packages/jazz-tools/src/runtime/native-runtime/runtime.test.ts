@@ -6325,6 +6325,48 @@ async function captureNativeQuery(schema: WasmSchema, query: object): Promise<Ui
   }
 }
 
+it.each([false, true])(
+  "registers the native wait before host readiness (rejected=%s)",
+  async (rejected) => {
+    const error = new Error("queued mutation failed");
+    const wait = vi.fn(() => (rejected ? Promise.reject(error) : Promise.resolve()));
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        insert: () => ({ ...fakeWrite(), rowId: new Uint8Array(16), wait }),
+        tick: () => undefined,
+      }),
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const inserted = runtime.insert("todos", { title: { type: "Text", value: "pending" } }, null);
+      const txId = await committedTxId(inserted);
+      let becomeReady!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        becomeReady = resolve;
+      });
+      const completed = vi.fn();
+      const failed = vi.fn();
+      const waiting = runtime.waitForTransaction(txId, "local", { ready }).then(completed, failed);
+      expect(wait).toHaveBeenCalledExactlyOnceWith("local");
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(completed).not.toHaveBeenCalled();
+      expect(failed).not.toHaveBeenCalled();
+      becomeReady();
+      await waiting;
+      if (rejected) expect(failed).toHaveBeenCalledExactlyOnceWith(error);
+      else expect(completed).toHaveBeenCalledOnce();
+      expect(wait).toHaveBeenCalledOnce();
+    } finally {
+      await runtime.close();
+    }
+  },
+);
+
 function emptyNativeRuntime(): NativeRuntimeAdapter {
   return new NativeRuntimeAdapter(
     {

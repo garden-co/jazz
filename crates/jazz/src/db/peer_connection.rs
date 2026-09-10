@@ -8,7 +8,7 @@ use super::mutation_errors::{
     mutation_error_event, mutation_error_event_for, queue_mutation_error,
 };
 use super::node_runtime::{
-    refresh_subscriptions_in, retire_relay_upstream_subscription,
+    notify_write_state_waiters, refresh_subscriptions_in, retire_relay_upstream_subscription,
     route_upstream_subscription_rejection, take_relay_upstream_subscription_owner,
 };
 use super::*;
@@ -7465,19 +7465,6 @@ fn write_state_update_tx_id(message: &SyncMessage) -> Option<TxId> {
     match message {
         SyncMessage::FateUpdate { tx_id, .. } => Some(*tx_id),
         _ => None,
-    }
-}
-
-fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) {
-    let Some(waiters) = waiters.borrow_mut().remove(&tx_id) else {
-        return;
-    };
-    for waiter in waiters {
-        match waiter.notify {
-            WriteStateWaiterNotify::Future(sender) => {
-                let _ = sender.send(());
-            }
-        }
     }
 }
 

@@ -23,6 +23,7 @@ import type {
   OpenTransactionId,
   PermissionAdvice,
   Runtime,
+  RuntimeWriteWaitOptions,
   StreamingInsertResult,
   StreamingMutationKind,
   StreamingValueSource,
@@ -1749,22 +1750,28 @@ export class NativeRuntimeAdapter implements Runtime {
   async waitForTransaction(
     txId: TxId | Promise<TxId>,
     tier: string,
-    observeOnly = false,
+    options: RuntimeWriteWaitOptions = {},
   ): Promise<void> {
     if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.waitForTransaction(txId, tier, observeOnly);
+      return this.ownerRuntime.waitForTransaction(txId, tier, options);
     }
-    txId = await txId;
+    if (typeof txId !== "string") txId = await txId;
     const write = this.writes.get(txId);
     if (!write) {
       throw new Error(`Wait for transaction failed: unknown transaction ${txId}`);
     }
+    // Claim the error as soon as the transaction ID is available, before any
+    // readiness or transport awaits. Reuse this wait across transport wakes.
+    const settlement = options.observeOnly ? write.wait(tier, true) : write.wait(tier);
+    // Readiness can outlive a rejected settlement. Observe it now so the host
+    // never sees an unhandled Promise rejection while readiness is pending.
+    void settlement.catch(() => undefined);
+    if (options.ready) await options.ready;
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
       void this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
-      const settlement = observeOnly ? write.wait(tier, true) : write.wait(tier);
       const transportError = this.waitForServerTransportError(tier);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
       try {
@@ -2279,7 +2286,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // separately scheduled cold downstream view assembly.
     // This is runtime bookkeeping, not application error handling. Leave
     // failures available for a real waiter or the mutation-error callback.
-    settlement = this.waitForTransaction(txId, "local", true)
+    settlement = this.waitForTransaction(txId, "local", { observeOnly: true })
       .catch(() => undefined)
       .finally(() => this.pendingLocalSettlements.delete(settlement));
     this.pendingLocalSettlements.add(settlement);
