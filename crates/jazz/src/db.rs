@@ -901,8 +901,11 @@ impl PeerIoPump {
         &self,
         payload: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, String> {
-        let message = crate::wire::decode_sync_message(&payload)
-            .map_err(|error| format!("malformed auxiliary chunk payload: {error}"))?;
+        let message = match self.role {
+            PeerIoPumpRole::Upstream => crate::wire::decode_sync_message_trusted(&payload),
+            PeerIoPumpRole::Subscriber => crate::wire::decode_sync_message(&payload),
+        }
+        .map_err(|error| format!("malformed auxiliary chunk payload: {error}"))?;
         match self.route_incoming(message).await {
             Ok(()) => Ok(None),
             Err(_) => Ok(Some(payload)),
@@ -916,12 +919,13 @@ impl PeerIoPump {
         &self,
         frame: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, String> {
-        let decoded = crate::wire::decode_frame(&frame)
+        let context = self.wire_inbound_context()?;
+        let decoded = context
+            .decode_frame(&frame)
             .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
         let crate::wire::WireFrame::Message(envelope) = decoded else {
             return Ok(Some(frame));
         };
-        let context = self.wire_inbound_context()?;
         let mut decoder = crate::wire::WireStreamDecoder::new(context.negotiated_features())
             .map_err(|error| format!("invalid auxiliary wire context: {error}"))?;
         let message = crate::wire::admit_complete_envelope(context, &mut decoder, envelope)

@@ -3900,6 +3900,7 @@ pub struct NativeRelayWire {
     outbound: Arc<Mutex<BoundedMessageQueue>>,
     liveness: Option<Arc<RelayLiveness>>,
     connection_liveness: Option<Arc<RelayLiveness>>,
+    trusted_encoder: Arc<AtomicBool>,
 }
 
 impl Default for NativeRelayWire {
@@ -3909,6 +3910,7 @@ impl Default for NativeRelayWire {
             outbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
             liveness: None,
             connection_liveness: None,
+            trusted_encoder: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -4011,6 +4013,7 @@ impl NativeRelayWire {
             outbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
             liveness: Some(liveness),
             connection_liveness: Some(Arc::new(RelayLiveness::new())),
+            trusted_encoder: Arc::new(AtomicBool::new(false)),
         }
     }
     fn enter(&self) -> Result<WireLivenessGuards<'_>, RelayError> {
@@ -4080,7 +4083,12 @@ impl NativeRelayWire {
     /// framing and fragmentation remain the responsibility of its transport.
     pub fn push_inbound_encoded(&self, bytes: &[u8]) -> Result<(), RelayError> {
         validate_encoded_peer_message_len(bytes.len())?;
-        let message = decode_sync_message(bytes).map_err(RelayError::DecodePeerMessage)?;
+        let message = if self.trusted_encoder.load(Ordering::Acquire) {
+            jazz::wire::decode_sync_message_trusted(bytes)
+        } else {
+            decode_sync_message(bytes)
+        }
+        .map_err(RelayError::DecodePeerMessage)?;
         self.push_inbound(message)
     }
 
@@ -4597,6 +4605,9 @@ struct QueueTransport {
 }
 
 impl Transport for QueueTransport {
+    fn set_trusted_encoder(&mut self, trusted: bool) {
+        self.wire.trusted_encoder.store(trusted, Ordering::Release);
+    }
     fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
         self.session_context
     }
@@ -4622,6 +4633,9 @@ struct DuplexTransport {
 }
 
 impl Transport for DuplexTransport {
+    fn set_trusted_encoder(&mut self, trusted: bool) {
+        self.wire.trusted_encoder.store(trusted, Ordering::Release);
+    }
     fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
         Some(self.session_context)
     }
@@ -4669,6 +4683,7 @@ fn duplex(
         outbound: Arc::clone(&wire.inbound),
         liveness: wire.liveness.clone(),
         connection_liveness: wire.connection_liveness.clone(),
+        trusted_encoder: Arc::new(AtomicBool::new(false)),
     };
     (
         Box::new(DuplexTransport {
@@ -4771,6 +4786,7 @@ impl ConnectedClient {
                         outbound: Arc::clone(&self.wire.inbound),
                         liveness: self.wire.liveness.clone(),
                         connection_liveness: self.wire.connection_liveness.clone(),
+                        trusted_encoder: Arc::new(AtomicBool::new(false)),
                     },
                 ));
                 self._served = Some(served);

@@ -1910,9 +1910,10 @@ where
 
     async fn connect_upstream_inner(
         &self,
-        transport: Box<dyn Transport>,
+        mut transport: Box<dyn Transport>,
         strict_replay: bool,
     ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
+        transport.set_trusted_encoder(true);
         loop {
             // Connection installation mutates runtime metadata synchronously, but
             // first needs a coherent view of storage-owning node state. Evaluation
@@ -2535,7 +2536,7 @@ where
 
     fn accept_subscriber_with_peer_and_startup(
         &self,
-        transport: Box<dyn Transport>,
+        mut transport: Box<dyn Transport>,
         identity: AuthorSubject,
         trust: CommitUnitTrust,
         claims: BTreeMap<String, Value>,
@@ -2578,6 +2579,7 @@ where
             .connection_session_context()
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+        transport.set_trusted_encoder(ingest_context.trust.is_trusted());
         let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
@@ -5027,6 +5029,11 @@ pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
+
+    /// Assign encoder trust from the locally admitted connection role.
+    /// Semantic transports have no byte decoder to configure.
+    #[doc(hidden)]
+    fn set_trusted_encoder(&mut self, _trusted: bool) {}
 
     /// Return the immutable wire admission context paired with this transport.
     #[doc(hidden)]

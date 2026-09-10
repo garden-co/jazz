@@ -328,7 +328,11 @@ where
                         && tx.made_by == session_claim_binding.0
                 });
                 state
-                    .ingest_relay_commit_unit(tx.clone(), versions.clone())
+                    .ingest_relay_commit_unit_with_encoder_trust(
+                        tx.clone(),
+                        versions.clone(),
+                        ingest_context.trust.is_trusted(),
+                    )
                     .await?;
                 if same_scope_author {
                     state
@@ -3512,7 +3516,7 @@ where
                                             self.node
                                                 .lock()
                                                 .await
-                                                .ingest_relay_commit_unit(tx, versions)
+                                                .ingest_relay_commit_unit_with_encoder_trust(tx, versions, true)
                                                 .await?;
                                         }
                                         other => {

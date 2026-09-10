@@ -18,7 +18,7 @@ use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError,
     WireErrorCode, WireFeatures, WireFrame, WireInboundContext, WireMessageFragment, WireRetry,
     WireSession, WireStreamDecoder, WireStreamEncoder, WireTransport, admit_complete_envelope,
-    current_wire_features, decode_frame, encode_frame, encode_sync_message_for_features,
+    current_wire_features, encode_frame, encode_sync_message_for_features,
 };
 
 const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
@@ -388,7 +388,7 @@ where
             validate_wire_frame_len(bytes.len()).map_err(|message| {
                 WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
             })?;
-            let frame = decode_frame(&bytes).map_err(|error| {
+            let frame = self.inbound_context.decode_frame(&bytes).map_err(|error| {
                 WireError::new(
                     WireErrorCode::MalformedFrame,
                     WireRetry::Never,
@@ -554,7 +554,7 @@ where
                 ));
                 continue;
             }
-            let frame = match decode_frame(&bytes) {
+            let frame = match self.inbound_context.decode_frame(&bytes) {
                 Ok(frame) => frame,
                 Err(err) => {
                     self.send_wire_error(WireError::new(
@@ -613,6 +613,10 @@ where
             }
         }
         None
+    }
+
+    fn set_trusted_encoder(&mut self, trusted: bool) {
+        self.inbound_context.set_trusted_encoder(trusted);
     }
 
     fn wire_inbound_context(&self) -> Option<WireInboundContext> {

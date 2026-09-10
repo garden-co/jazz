@@ -451,19 +451,17 @@ fn zero_column_version_claiming_schema(
     .unwrap()
 }
 
-/// Deliberately bypasses `VersionRecord::encode` to model an untrusted
-/// ViewUpdate whose deferred record cannot satisfy even the fixed row receipt.
-/// This stays an internal test because public APIs cannot construct malformed
-/// protocol bytes; the receiver boundary must still turn them into a typed
-/// error rather than reaching infallible accessors.
-fn empty_wire_version_claiming_schema(
-    schema: &JazzSchema,
+/// Trusted bytes still need an available authored catalogue before apply.
+/// Use valid row bytes with an unavailable schema to test atomic semantic
+/// rejection; trusted paths no longer promise eager malformed-byte rejection.
+fn wire_version_with_unavailable_schema(
+    _schema: &JazzSchema,
     version: &crate::protocol::VersionRecord,
 ) -> crate::protocol::VersionRecord {
     crate::protocol::VersionRecord::new(
         version.table().to_owned(),
-        schema.version_id(),
-        OwnedRecord::new(Vec::new(), schema.tables[0].wire_record_descriptor()),
+        crate::ids::SchemaVersionId::from_bytes([0xee; 16]),
+        version.record().clone(),
     )
 }
 
@@ -588,11 +586,10 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
     assert!(reader.query_all_versions().unwrap().is_empty());
 }
 
-/// Direct internal view ingress bypasses `SyncMessage` decoding. It must still
-/// reject a deferred record that would panic in `VersionRecord::row_uuid()`;
-/// malformed protocol input is a typed error and cannot leave history behind.
+/// Direct trusted view ingress still rejects unavailable catalogue references
+/// before publishing any history.
 #[test]
-fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
+fn direct_view_update_rejects_unavailable_authored_schema_without_mutation() {
     let base = schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x77), base.clone());
     accept_global(
@@ -604,7 +601,7 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
         .unwrap();
     let mut bundles = version_bundles_for_update(&update);
     let version = bundles[0].versions[0].clone();
-    bundles[0].versions = vec![empty_wire_version_claiming_schema(&base, &version)];
+    bundles[0].versions = vec![wire_version_with_unavailable_schema(&base, &version)];
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
@@ -642,7 +639,7 @@ fn direct_view_update_rejects_malformed_deferred_record_without_panicking() {
     assert!(matches!(
         result.unwrap(),
         Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
-            if rejected == subscription && transition == "authority source-closure payload failed validation: malformed version receipt"
+            if rejected == subscription && transition == "authority source-closure payload failed validation: row version names an unknown authored schema"
     ));
     assert!(reader.query_all_versions().unwrap().is_empty());
 }
@@ -743,7 +740,7 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
 /// A receiver frame validates every bundle before the first valid one can
 /// mutate its clock, aliases, catalogue mappings, or durable history.
 #[test]
-fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() {
+fn batched_view_update_rejection_is_atomic_across_valid_and_unavailable_schemas() {
     let base = schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x74), base.clone());
     accept_global(
@@ -760,7 +757,7 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
     let mut bundles = version_bundles_for_update(&update);
     assert_eq!(bundles.len(), 2, "one complete bundle per accepted write");
     let malformed = bundles[1].versions[0].clone();
-    bundles[1].versions = vec![empty_wire_version_claiming_schema(&base, &malformed)];
+    bundles[1].versions = vec![wire_version_with_unavailable_schema(&base, &malformed)];
     let valid_tx_id = bundles[0].tx.tx_id;
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
@@ -803,7 +800,7 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
         }])
         .resolve(),
         Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
-            if rejected == subscription && transition == "authority source-closure payload failed validation: malformed version receipt"
+            if rejected == subscription && transition == "authority source-closure payload failed validation: row version names an unknown authored schema"
     ));
     assert_eq!(
         (

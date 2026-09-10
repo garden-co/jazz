@@ -871,23 +871,9 @@ where
         &self,
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
-        // `VersionRecord` deliberately keeps its physical record lazily
-        // decoded. Every view-shaped ingress path (ordinary view updates,
-        // authorization-scope views after envelope removal, and repair
-        // payloads) therefore has to establish receipt validity before any
-        // code below uses an infallible VersionRecord accessor. Keeping this
-        // at the shared semantic boundary also makes direct internal callers
-        // as safe and atomic as decoded SyncMessage ingress.
-        crate::protocol::validate_version_records(versions)
-            .map_err(|_| Error::MalformedViewUpdate("malformed version receipt"))?;
+        // View/repair bodies come from an admitted authority encoder. Check
+        // semantic catalogue compatibility below, not their byte representation.
         for version in versions {
-            if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
-                || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
-            {
-                return Err(Error::MalformedViewUpdate(
-                    "row version provenance exceeds packed HLC physical-millisecond range",
-                ));
-            }
             let schema = self
                 .catalogue
                 .catalogue_schemas
@@ -906,6 +892,13 @@ where
             if version.record().descriptor() != &table.wire_record_descriptor() {
                 return Err(Error::MalformedViewUpdate(
                     "row version does not carry the complete descriptor of its authored schema",
+                ));
+            }
+            if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
+                || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
+            {
+                return Err(Error::MalformedViewUpdate(
+                    "row version provenance exceeds packed HLC physical-millisecond range",
                 ));
             }
             if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some() {

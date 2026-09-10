@@ -112,7 +112,6 @@ where
             if unit.tx.kind != TxKind::Mergeable
                 || !commit_unit_write_count_matches(&unit.tx, unit.versions.len())
                 || commit_unit_limit_violation(&unit.versions).is_some()
-                || crate::protocol::validate_version_records(&unit.versions).is_err()
                 || self
                     .malformed_authored_version_reason(&unit.versions)
                     .is_some()

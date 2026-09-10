@@ -44,7 +44,8 @@ where
         } else {
             tx
         };
-        if crate::protocol::validate_version_records(&versions).is_err() {
+        if ingest_context.is_none_or(|context| !context.trust.is_trusted())
+            && crate::protocol::validate_version_records(&versions).is_err() {
             return self
                 .reject_malformed_commit(tx, "malformed version receipt".to_owned())
                 .await
@@ -280,13 +281,6 @@ where
         versions: Vec<VersionRecord>,
     ) -> Result<PublicationOutcome<Fate>, Error> {
         self.require_catalogue_ready()?;
-        if crate::protocol::validate_version_records(&versions).is_err() {
-            let fate = Fate::Rejected(RejectionReason::MalformedCommit(
-                "malformed version receipt".to_owned(),
-            ));
-            self.ingest_rejected_transaction(tx, fate.clone()).await?;
-            return Ok(PublicationOutcome::settled(fate));
-        }
         let tx_id = tx.tx_id;
         if tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit(
@@ -503,12 +497,23 @@ where
     where
         S: ReopenableStorage,
     {
+        self.ingest_relay_commit_unit_with_encoder_trust(tx, versions, false).await
+    }
+
+    pub(crate) async fn ingest_relay_commit_unit_with_encoder_trust(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        trusted_encoder: bool,
+    ) -> Result<(), Error>
+    where S: ReopenableStorage,
+    {
         self.require_catalogue_ready()?;
         let tx = Transaction {
             permission_subject: None,
             ..tx
         };
-        if crate::protocol::validate_version_records(&versions).is_err()
+        if (!trusted_encoder && crate::protocol::validate_version_records(&versions).is_err())
             || commit_unit_limit_violation(&versions).is_some()
             || !commit_unit_write_count_matches(&tx, versions.len())
         {
