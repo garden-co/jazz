@@ -530,6 +530,19 @@ where
         self.storage.column_family_names()
     }
 
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<crate::storage::ValueComparison, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.storage.compare_value(cf, key, expected)
+    }
+
     fn get(
         &self,
         cf: String,

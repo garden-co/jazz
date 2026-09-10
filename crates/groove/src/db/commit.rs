@@ -110,14 +110,14 @@ impl Database {
     /// persistence. The returned handle owns the pending persistence work and
     /// no longer borrows this database, so resident queries may continue while
     /// storage suspends.
-    pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
+    pub async fn apply_batch(&mut self, mut batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
         batch.check_exact_base(self)?;
         self.ensure_not_poisoned()?;
         let accepted_large_values = batch.accepted_large_values.clone();
         let defer_notifications_until_durable =
             batch.notification_timing == NotificationTiming::AfterPersistence;
         // Later ordinary writes must not invalidate an ensure_exact result.
-        let exact_keys = batch.exact_keys.clone();
+        let exact_keys = std::mem::take(&mut batch.exact_keys);
         let pending_writes = self.pending_writes_from_batch(batch)?;
         for write in &pending_writes {
             if let Some(expected) =

@@ -118,7 +118,8 @@ impl DatabaseBatch {
         let resident = database.resident_storage();
         let overlay = StagedWriteOverlay::new(&resident, &self.txn_operations);
         let coordinate = (table.clone(), pending.key().to_vec());
-        let comparison = overlay
+        let storage = MeteredStorage::new(&overlay, &database.storage_read_metrics);
+        let comparison = storage
             .compare_value(table, pending.key().to_vec(), expected.clone())
             .await?;
         if comparison != crate::storage::ValueComparison::Different {
