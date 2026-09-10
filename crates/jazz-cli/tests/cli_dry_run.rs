@@ -2,14 +2,14 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use futures_util::{FutureExt, StreamExt};
@@ -445,6 +445,8 @@ struct BackpressureGateState {
     receive_window_bytes: Option<usize>,
     large_frame_started: bool,
     large_frame_payload_bytes: Option<u64>,
+    large_frame_count: usize,
+    large_frame_total_payload_bytes: u64,
     released: bool,
 }
 
@@ -456,7 +458,12 @@ impl BackpressureGate {
     }
 
     fn arm(&self) {
-        self.lock_state().armed = true;
+        let mut state = self.lock_state();
+        state.armed = true;
+        state.large_frame_started = false;
+        state.large_frame_payload_bytes = None;
+        state.large_frame_count = 0;
+        state.large_frame_total_payload_bytes = 0;
     }
 
     fn set_receive_window(&self, bytes: usize) {
@@ -492,15 +499,20 @@ impl BackpressureGate {
             .expect("receive window became unavailable")
     }
 
-    fn should_gate(&self) -> bool {
-        self.lock_state().armed
-    }
-
-    fn mark_large_frame_started(&self, payload_bytes: u64) {
+    fn record_large_frame(&self, payload_bytes: u64) -> bool {
         let mut state = self.lock_state();
-        state.large_frame_started = true;
-        state.large_frame_payload_bytes = Some(payload_bytes);
+        if !state.armed {
+            return false;
+        }
+        state.large_frame_count += 1;
+        state.large_frame_total_payload_bytes += payload_bytes;
+        let first = !state.large_frame_started;
+        if first {
+            state.large_frame_started = true;
+            state.large_frame_payload_bytes = Some(payload_bytes);
+        }
         self.changed.notify_all();
+        first
     }
 
     fn wait_for_large_frame(&self, timeout: Duration) -> u64 {
@@ -525,6 +537,30 @@ impl BackpressureGate {
         state
             .large_frame_payload_bytes
             .expect("large frame payload became unavailable")
+    }
+    fn wait_for_large_frames(&self, minimum: usize, timeout: Duration) -> (usize, u64) {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock_state();
+        while state.large_frame_count < minimum {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "server response did not produce enough large WebSocket batches"
+            );
+            let (next, result) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+            assert!(
+                !result.timed_out(),
+                "server response did not produce enough large WebSocket batches"
+            );
+        }
+        (
+            state.large_frame_count,
+            state.large_frame_total_payload_bytes,
+        )
     }
 
     fn wait_until_released(&self) {
@@ -582,8 +618,8 @@ impl BackpressureProxy {
         let thread_gate = Arc::clone(&gate);
         let thread = thread::spawn(move || {
             let (mut client, _) = proxy_listener.accept().expect("accept A at proxy");
-            let mut upstream = TcpStream::connect(upstream_addr).expect("connect proxy upstream");
-            let receive_window_bytes = configure_upstream_receive_window(&upstream);
+            let (mut upstream, receive_window_bytes) =
+                connect_upstream_with_receive_window(upstream_addr);
             thread_gate.set_receive_window(receive_window_bytes);
             relay_http_upgrade(&mut client, &mut upstream);
             upstream
@@ -613,6 +649,10 @@ impl BackpressureProxy {
         self.gate.wait_for_large_frame(timeout)
     }
 
+    fn wait_for_large_frames(&self, minimum: usize, timeout: Duration) -> (usize, u64) {
+        self.gate.wait_for_large_frames(minimum, timeout)
+    }
+
     fn release(&self) {
         self.gate.release();
     }
@@ -631,9 +671,20 @@ impl BackpressureProxy {
 const BACKPRESSURE_RECEIVE_WINDOW_REQUEST_BYTES: libc::c_int = 4 * 1024;
 
 #[cfg(unix)]
-fn configure_upstream_receive_window(stream: &TcpStream) -> usize {
+const BACKPRESSURE_MIN_RESPONSE_BATCHES: usize = 2;
+
+#[cfg(unix)]
+const BACKPRESSURE_PRACTICAL_SENDER_QUEUE_BYTES: u64 =
+    jazz::protocol_limits::MAX_WIRE_FRAME_BYTES as u64;
+#[cfg(unix)]
+fn connect_upstream_with_receive_window(addr: SocketAddr) -> (TcpStream, usize) {
+    let SocketAddr::V4(addr) = addr else {
+        panic!("loopback upstream must resolve to an IPv4 address");
+    };
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+    assert!(fd >= 0, "create proxy upstream socket");
+
     let requested = BACKPRESSURE_RECEIVE_WINDOW_REQUEST_BYTES;
-    let fd = stream.as_raw_fd();
     let result = unsafe {
         libc::setsockopt(
             fd,
@@ -643,7 +694,13 @@ fn configure_upstream_receive_window(stream: &TcpStream) -> usize {
             std::mem::size_of_val(&requested) as libc::socklen_t,
         )
     };
-    assert_eq!(result, 0, "set proxy upstream receive window");
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+        }
+        panic!("set proxy upstream receive window: {error}");
+    }
 
     let mut effective = 0 as libc::c_int;
     let mut length = std::mem::size_of_val(&effective) as libc::socklen_t;
@@ -656,7 +713,13 @@ fn configure_upstream_receive_window(stream: &TcpStream) -> usize {
             &mut length,
         )
     };
-    assert_eq!(result, 0, "read proxy upstream receive window");
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+        }
+        panic!("read proxy upstream receive window: {error}");
+    }
     assert_eq!(
         length as usize,
         std::mem::size_of_val(&effective),
@@ -667,9 +730,32 @@ fn configure_upstream_receive_window(stream: &TcpStream) -> usize {
         effective <= requested as usize * 2,
         "proxy upstream receive window is not bounded: requested {requested}, effective {effective}"
     );
-    effective
-}
 
+    let sockaddr = libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: addr.port().to_be(),
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_ne_bytes(addr.ip().octets()),
+        },
+        sin_zero: [0; 8],
+    };
+    let result = unsafe {
+        libc::connect(
+            fd,
+            (&sockaddr as *const libc::sockaddr_in).cast(),
+            std::mem::size_of_val(&sockaddr) as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+        }
+        panic!("connect proxy upstream: {error}");
+    }
+
+    (unsafe { TcpStream::from_raw_fd(fd) }, effective)
+}
 
 fn relay_http_upgrade(client: &mut TcpStream, upstream: &mut TcpStream) {
     let request = read_http_headers(client).expect("read proxy WebSocket request");
@@ -751,8 +837,7 @@ fn relay_server_to_client(
                 .expect("forward proxy WebSocket header");
         }
 
-        if payload_len >= LARGE_FRAME_BYTES && gate.should_gate() {
-            gate.mark_large_frame_started(payload_len);
+        if payload_len >= LARGE_FRAME_BYTES && gate.record_large_frame(payload_len) {
             gate.wait_until_released();
         }
         upstream
@@ -794,7 +879,6 @@ fn read_proxy_byte(upstream: &mut TcpStream, gate: &BackpressureGate) -> Option<
         }
     }
 }
-
 
 fn wait_for_settled_reset(
     client: &mut ConnectedClient,
@@ -1805,10 +1889,11 @@ fn websocket_reconnect_preserves_local_structured_terminal_patches() {
     server.shutdown();
 }
 
-/// A's large subscription response is held after its WebSocket header reaches
-/// the client-facing proxy, whose upstream socket has a bounded receive window.
-/// Client B's independent reset must complete before that gate is released,
-/// and A's rows must arrive in their original order afterwards.
+/// A's response is held after its first oversized WebSocket batch header reaches
+/// the client-facing proxy. The proxy socket's receive window is bounded before
+/// connect, and A's response spans multiple near-capacity batches whose total
+/// exceeds practical finite sender buffering. Client B's independent reset must
+/// complete before that gate is released, and A's rows must arrive in order.
 #[cfg(unix)]
 #[test]
 fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_fifo() {
@@ -1868,8 +1953,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     assert!(sent_seed_update, "seed client must send its fixture rows");
 
     // Settle the fixture before opening A, so A's protocol handshake cannot
-    // contend with seed admission.
-    let settlement_deadline = Instant::now() + Duration::from_secs(3);
+    let settlement_deadline = Instant::now() + Duration::from_secs(15);
     let mut seed_settled = false;
     while Instant::now() < settlement_deadline {
         pump_websocket_once_allow_close(&mut seed.socket, &seed.db, &seed.wire);
@@ -1919,6 +2003,9 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         &stalled.wire
     ));
 
+    // Arm before announcing A's data subscription, so the first response
+    // batch cannot complete before the proxy begins withholding its payload.
+    proxy.arm();
     let data_query = stalled.db.prepare_query(&Query::from("users")).unwrap();
     let mut stalled_data_subscription = block_on(stalled.db.subscribe(
         &data_query,
@@ -1975,7 +2062,6 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         },
     ))
     .expect("stage A's unread response trigger");
-    proxy.arm();
     let mut sent_trigger = false;
     for _ in 0..8 {
         block_on(stalled.db.tick()).expect("queue A's unread response trigger");
@@ -1994,10 +2080,11 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     }
     assert!(sent_trigger, "A must send its response trigger");
 
-    // The proxy has now observed A's large response header and is withholding
-    // its payload. This is the concrete bounded-backpressure barrier: no fixed
-    // sleep decides when B is introduced.
-    let gated_payload_bytes = proxy.wait_for_large_frame(Duration::from_secs(3));
+    // The proxy has now observed A's first oversized response batch header and
+    // is withholding its payload. This is the concrete bounded-backpressure
+    // barrier: the pre-connect receive window is known, so no fixed sleep
+    // decides when B is introduced.
+    let gated_payload_bytes = proxy.wait_for_large_frame(Duration::from_secs(15));
     assert!(
         gated_payload_bytes > receive_window_bytes as u64,
         "gated WebSocket payload ({gated_payload_bytes} bytes) must exceed the proxy upstream receive window ({receive_window_bytes} bytes)"
@@ -2076,6 +2163,16 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     assert!(
         saw_server_frames,
         "A must receive server frames after reopening"
+    );
+    let (response_batch_count, response_payload_bytes) =
+        proxy.wait_for_large_frames(BACKPRESSURE_MIN_RESPONSE_BATCHES, Duration::from_secs(15));
+    assert!(
+        response_batch_count >= BACKPRESSURE_MIN_RESPONSE_BATCHES,
+        "A's response must span multiple oversized WebSocket batches, got {response_batch_count}"
+    );
+    assert!(
+        response_payload_bytes > BACKPRESSURE_PRACTICAL_SENDER_QUEUE_BYTES,
+        "A's response payload ({response_payload_bytes} bytes) must exceed practical finite sender buffering ({BACKPRESSURE_PRACTICAL_SENDER_QUEUE_BYTES} bytes)"
     );
 
     let observed_indices = observed_payloads
