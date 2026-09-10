@@ -1957,6 +1957,17 @@ impl WasmDb {
             .map_err(to_js_error)
     }
 
+    /// Exact local state for the write-merge bridge, matching NAPI. Write
+    /// authorization remains at the mutation boundary; this is not a query.
+    #[wasm_bindgen(js_name = localCurrentRow)]
+    pub fn local_current_row(&self, table: String, row_id: Vec<u8>) -> Result<Vec<u8>, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let inner = self.open_inner()?;
+        let row = with_wasm_db!(&inner, |db| block_on(db.local_current_row(&table, row_id)))
+            .map_err(to_js_error)?;
+        encode_synchronous_rows(&row.into_iter().collect::<Vec<_>>())
+    }
+
     #[wasm_bindgen(js_name = prepareQuery)]
     pub fn prepare_query(
         &self,
