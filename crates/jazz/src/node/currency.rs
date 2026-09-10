@@ -566,7 +566,12 @@ where
         }) {
             return Ok(None);
         }
-        let mut key = vec![Value::Bytes(coordinate.branch_key.canonical_bytes())];
+        let Ok(branch_bytes) = coordinate.branch_key.try_canonical_bytes() else {
+            // No stored witness can have a noncanonical key. Let the caller's
+            // existing missing-coordinate rules decide rejection/completeness.
+            return Ok(None);
+        };
+        let mut key = vec![Value::Bytes(branch_bytes)];
         let storage_table = match coordinate.layer {
             VersionLayer::Content => physical_history_table_name(coordinate.physical_table_id),
             VersionLayer::Deletion => {
