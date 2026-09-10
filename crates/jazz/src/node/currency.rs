@@ -10,6 +10,7 @@ use crate::schema::RuntimeSchema;
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static HISTORY_PAYLOAD_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static TRANSACTION_PAYLOAD_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -548,6 +549,50 @@ where
         Ok(versions)
     }
 
+    /// Probe one parent witness using the existing immutable history key.
+    /// This does not replace transaction-wide reads used to decide completeness
+    /// when the requested witness has not arrived.
+    pub(super) async fn query_exact_parent_version(
+        &mut self,
+        tx_id: TxId,
+        tx_node_alias: NodeAlias,
+        coordinate: &ParentCoordinate,
+    ) -> Result<Option<VersionRow>, Error> {
+        if !self.catalogue.physical_mappings.values().any(|mapping| {
+            mapping
+                .tables
+                .values()
+                .any(|table| table.table_id == coordinate.physical_table_id)
+        }) {
+            return Ok(None);
+        }
+        let mut key = vec![Value::Bytes(coordinate.branch_key.canonical_bytes())];
+        let storage_table = match coordinate.layer {
+            VersionLayer::Content => physical_history_table_name(coordinate.physical_table_id),
+            VersionLayer::Deletion => {
+                key.push(Value::U64(coordinate.physical_table_id.0));
+                SHARED_DELETION_HISTORY_TABLE.to_owned()
+            }
+        };
+        key.extend([
+            Value::Uuid(coordinate.row_uuid.0),
+            Value::U64(tx_id.time.0),
+            Value::U64(tx_node_alias.0),
+        ]);
+        let raw = self
+            .database
+            .primary_key_get_raw(&storage_table, &key)
+            .await?
+            .map(|raw| raw.owned_record());
+        let Some(record) = raw else {
+            return Ok(None);
+        };
+        // Physical history carries its authored schema, including old logical
+        // names after a rename. Resolve from that schema instead of today's name.
+        self.decode_history_owned_record("", &storage_table, record)
+            .map(Some)
+    }
+
     pub(super) async fn query_versions_for_tx_physical_coordinate(
         &mut self,
         tx_id: TxId,
@@ -740,6 +785,8 @@ where
         storage_table: &str,
         record: OwnedRecord,
     ) -> Result<VersionRow, Error> {
+        #[cfg(test)]
+        HISTORY_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
         if storage_table == SHARED_DELETION_HISTORY_TABLE {
             let shared = record.to_values()?;
             let Value::U64(table_id) = shared.get(1).ok_or(Error::InvalidStoredValue(
