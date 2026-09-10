@@ -9,7 +9,7 @@ const app = schema.defineApp({
 });
 
 describe("exact local transaction write merging", () => {
-  it("does not commit a rejected large-row patch after its error is caught", async () => {
+  it("preserves large content and does not commit a patch whose merge read failed", async () => {
     const db = await createBrowserTestDb({
       appId: "transaction-staging-large-rejection",
       driver: { type: "memory" },
@@ -25,15 +25,27 @@ describe("exact local transaction write merging", () => {
       await large.wait({ tier: "local" });
       const small = db.insert(app.todos, { title: "small", done: false });
       await small.wait({ tier: "local" });
+      const successful = db.beginTransaction();
+      successful.update(app.todos, large.value.id, { done: true });
+      await successful.commit().wait({ tier: "local" });
       const tx = db.beginTransaction();
-      expect(() => tx.update(app.todos, large.value.id, { done: true })).toThrow(
-        "synchronous WASM all/transaction reads cannot materialize a large value",
-      );
+      const { WasmDb } = await loadWasmModule();
+      const exact = vi.spyOn(WasmDb.prototype, "localCurrentRow");
+      exact.mockImplementationOnce(() => {
+        throw new Error("synthetic exact read failure");
+      });
+      try {
+        expect(() => tx.update(app.todos, large.value.id, { done: false })).toThrow(
+          "synthetic exact read failure",
+        );
+      } finally {
+        exact.mockRestore();
+      }
       tx.update(app.todos, small.value.id, { done: true });
       await tx.commit().wait({ tier: "local" });
       expect(await db.all(app.todos)).toEqual(
         expect.arrayContaining([
-          { id: large.value.id, title, done: false },
+          { id: large.value.id, title, done: true },
           { id: small.value.id, title: "small", done: true },
         ]),
       );
