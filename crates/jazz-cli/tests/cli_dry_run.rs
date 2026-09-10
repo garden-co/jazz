@@ -673,9 +673,39 @@ const BACKPRESSURE_RECEIVE_WINDOW_REQUEST_BYTES: libc::c_int = 4 * 1024;
 #[cfg(unix)]
 const BACKPRESSURE_MIN_RESPONSE_BATCHES: usize = 2;
 
-#[cfg(unix)]
-const BACKPRESSURE_PRACTICAL_SENDER_QUEUE_BYTES: u64 =
-    jazz::protocol_limits::MAX_WIRE_FRAME_BYTES as u64;
+#[cfg(target_os = "linux")]
+fn tcp_send_buffer_ceiling_bytes() -> u64 {
+    let contents = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_wmem")
+        .expect("read Linux TCP send-buffer limits from /proc");
+    let mut values = contents.split_whitespace().map(|value| {
+        value
+            .parse::<u64>()
+            .expect("Linux TCP send-buffer limits must be unsigned integers")
+    });
+    let minimum = values
+        .next()
+        .expect("Linux TCP send-buffer limits must contain three values");
+    let default = values
+        .next()
+        .expect("Linux TCP send-buffer limits must contain three values");
+    let maximum = values
+        .next()
+        .expect("Linux TCP send-buffer limits must contain three values");
+    assert!(
+        values.next().is_none(),
+        "Linux TCP send-buffer limits must contain exactly three values"
+    );
+    assert!(
+        minimum <= default && default <= maximum,
+        "Linux TCP send-buffer limits must be monotonic: {minimum} {default} {maximum}"
+    );
+    assert!(
+        maximum > 0,
+        "Linux TCP send-buffer autotuned maximum must be positive"
+    );
+    maximum
+}
+
 #[cfg(unix)]
 fn connect_upstream_with_receive_window(addr: SocketAddr) -> (TcpStream, usize) {
     let SocketAddr::V4(addr) = addr else {
@@ -1892,17 +1922,24 @@ fn websocket_reconnect_preserves_local_structured_terminal_patches() {
 /// A's response is held after its first oversized WebSocket batch header reaches
 /// the client-facing proxy. The proxy socket's receive window is bounded before
 /// connect, and A's response spans multiple near-capacity batches whose total
-/// exceeds practical finite sender buffering. Client B's independent reset must
-/// complete before that gate is released, and A's rows must arrive in order.
-#[cfg(unix)]
+/// exceeds the configured Linux TCP send-buffer ceiling. Client B's independent
+/// reset must complete before that gate is released, and A's rows must arrive in
+/// order.
+#[cfg(all(unix, target_os = "linux"))]
 #[test]
 fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_fifo() {
-    const ROW_COUNT: usize = 64;
     const PAYLOAD_BYTES: usize = 48 * 1024;
+    let tcp_send_buffer_ceiling_bytes = tcp_send_buffer_ceiling_bytes();
+    let row_count = 64.max(
+        usize::try_from(tcp_send_buffer_ceiling_bytes / PAYLOAD_BYTES as u64 + 1)
+            .expect("Linux TCP send-buffer ceiling fits in usize"),
+    );
+    let fixture_payload_bytes = row_count as u64 * PAYLOAD_BYTES as u64;
     let make_payload = |index: usize| {
-        let mut payload = format!("{index:03}:");
+        let prefix = format!("{index:03}:");
+        let mut payload = prefix.clone();
         let mut state = index as u64 + 0x9e37_79b9_7f4a_7c15;
-        for _ in 0..(PAYLOAD_BYTES - 4) {
+        for _ in 0..PAYLOAD_BYTES.saturating_sub(prefix.len()) {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
@@ -1921,8 +1958,8 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         "bug-196-stalled",
         identity_for_subject(0xa0, "bug-196-stalled"),
     );
-    let mut seeded_writes = Vec::with_capacity(ROW_COUNT);
-    for index in 0..ROW_COUNT {
+    let mut seeded_writes = Vec::with_capacity(row_count);
+    for index in 0..row_count {
         let payload = make_payload(index);
         let write = block_on(seed.db.insert(
             "users",
@@ -1939,14 +1976,14 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     for _ in 0..8 {
         block_on(seed.db.tick()).expect("queue backpressure fixture rows");
         let frames = seed.wire.drain_outbound();
-        if !frames.is_empty() {
+        for chunk in frames.chunks(32) {
             seed.socket
                 .send(Message::Binary(
-                    postcard::to_allocvec(&frames)
-                        .expect("encode backpressure fixture rows")
+                    postcard::to_allocvec(chunk)
+                        .expect("encode backpressure fixture row batch")
                         .into(),
                 ))
-                .expect("send backpressure fixture rows");
+                .expect("send backpressure fixture row batch");
             sent_seed_update = true;
         }
     }
@@ -2017,7 +2054,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     .unwrap();
     let auxiliary_query = stalled
         .db
-        .prepare_query(&Query::from("users").limit(ROW_COUNT + 1))
+        .prepare_query(&Query::from("users").limit(row_count + 1))
         .unwrap();
     let _auxiliary_subscription = block_on(stalled.db.subscribe(
         &auxiliary_query,
@@ -2090,6 +2127,11 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         "gated WebSocket payload ({gated_payload_bytes} bytes) must exceed the proxy upstream receive window ({receive_window_bytes} bytes)"
     );
 
+    assert!(
+        fixture_payload_bytes > tcp_send_buffer_ceiling_bytes,
+        "response fixture ({fixture_payload_bytes} bytes) must exceed Linux TCP send-buffer ceiling ({tcp_send_buffer_ceiling_bytes} bytes) before opening B"
+    );
+
     let mut independent = open_connected_client(
         schema.clone(),
         &server.ws_url,
@@ -2137,7 +2179,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     let mut saw_server_frames = false;
     let mut observed_payloads = Vec::new();
     let mut long_read_window = true;
-    while observed_payloads.len() < ROW_COUNT && Instant::now() < deadline {
+    while observed_payloads.len() < row_count && Instant::now() < deadline {
         let received = pump_websocket_once(&mut stalled.socket, &stalled.db, &stalled.wire);
         saw_server_frames |= received;
         if received && long_read_window {
@@ -2171,8 +2213,8 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         "A's response must span multiple oversized WebSocket batches, got {response_batch_count}"
     );
     assert!(
-        response_payload_bytes > BACKPRESSURE_PRACTICAL_SENDER_QUEUE_BYTES,
-        "A's response payload ({response_payload_bytes} bytes) must exceed practical finite sender buffering ({BACKPRESSURE_PRACTICAL_SENDER_QUEUE_BYTES} bytes)"
+        response_payload_bytes > tcp_send_buffer_ceiling_bytes,
+        "A's response payload ({response_payload_bytes} bytes) must exceed Linux TCP send-buffer ceiling ({tcp_send_buffer_ceiling_bytes} bytes)"
     );
 
     let observed_indices = observed_payloads
@@ -2183,7 +2225,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
                 .and_then(|prefix| prefix.parse::<usize>().ok())
         })
         .collect::<Option<Vec<_>>>();
-    let expected_indices = Some((0..ROW_COUNT).collect::<Vec<_>>());
+    let expected_indices = Some((0..row_count).collect::<Vec<_>>());
     assert_eq!(
         observed_indices, expected_indices,
         "client A's eventual subscription batches must stay FIFO"
