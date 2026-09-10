@@ -3522,3 +3522,129 @@ fn cold_browser_relay_restore_yields_to_storage() {
         cold_pending_restore_yields_and_recovers(true);
     }
 }
+
+#[test]
+fn local_acknowledgements_do_not_reprobe_retained_history() {
+    // Internal topology is necessary to count storage probes at the local
+    // acknowledgement boundary independently of unrelated query/persistence
+    // work. Writes and durability still use the ordinary Db API.
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xce; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xce; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xce))),
+    }))
+    .unwrap();
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let mut samples = Vec::new();
+    for i in 0..1500 {
+        let write = db
+            .insert(
+                "todos",
+                cells("retained local route", false, author),
+                Default::default(),
+            )
+            .unwrap();
+        db.tick().unwrap();
+        let tx_id = write.mergeable_tx_id();
+        register_local_fate_observer(&routes, tx_id, &queue);
+        if i == 149 || i == 1499 {
+            let before = control.point_read_count();
+            block_on(queue_local_acknowledgements(&routes, &db.node.node));
+            let reads = control.point_read_count() - before;
+            eprintln!("retained_routes={} status_storage_reads={reads}", i + 1);
+            samples.push(reads);
+        }
+    }
+    assert_eq!(
+        samples,
+        [0, 0],
+        "already acknowledged routes must not reread transaction history"
+    );
+    assert_eq!(
+        routes.borrow().len(),
+        1500,
+        "routes remain for terminal fates"
+    );
+    assert!(
+        queue.borrow().is_empty(),
+        "no duplicate local acknowledgements"
+    );
+    let tx_id = *routes.borrow().keys().next().unwrap();
+    let newcomer: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_fate_route(&routes, tx_id, &newcomer);
+    let before = control.point_read_count();
+    block_on(queue_local_acknowledgements(&routes, &db.node.node));
+    assert_eq!(
+        control.point_read_count() - before,
+        1,
+        "only the new queue needs a probe"
+    );
+    assert!(
+        matches!(newcomer.borrow().as_slice(), [SyncMessage::FateUpdate {
+        tx_id: received, fate: Fate::Pending, durability: Some(DurabilityTier::Local), ..
+    }] if *received == tx_id)
+    );
+    assert!(queue.borrow().is_empty());
+    let before = control.point_read_count();
+    block_on(queue_local_acknowledgements(&routes, &db.node.node));
+    assert_eq!(control.point_read_count(), before);
+    assert_eq!(newcomer.borrow().len(), 1, "acknowledge each queue once");
+
+    // A cancelled waiter must be pruned without reopening stored history.
+    let cancelled: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_fate_route(&routes, tx_id, &cancelled);
+    drop(cancelled);
+    block_on(queue_local_acknowledgements(&routes, &db.node.node));
+    assert_eq!(control.point_read_count(), before);
+    assert_eq!(routes.borrow()[&tx_id].len(), 2);
+
+    // Local acknowledgement must not consume either terminal fate route.
+    let global = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(1)),
+        durability: Some(DurabilityTier::Global),
+    };
+    route_local_fate(&routes, tx_id, &global);
+    assert!(matches!(
+        queue.borrow().last(),
+        Some(SyncMessage::FateUpdate {
+            durability: Some(DurabilityTier::Global),
+            ..
+        })
+    ));
+    assert!(matches!(
+        newcomer.borrow().last(),
+        Some(SyncMessage::FateUpdate {
+            durability: Some(DurabilityTier::Global),
+            ..
+        })
+    ));
+    assert!(!routes.borrow().contains_key(&tx_id));
+    let rejected_id = *routes.borrow().keys().next().unwrap();
+    let rejected = SyncMessage::FateUpdate {
+        tx_id: rejected_id,
+        fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+        global_time: None,
+        durability: Some(DurabilityTier::Edge),
+    };
+    route_local_fate(&routes, rejected_id, &rejected);
+    assert!(matches!(
+        queue.borrow().last(),
+        Some(SyncMessage::FateUpdate {
+            fate: Fate::Rejected(_),
+            ..
+        })
+    ));
+    assert!(!routes.borrow().contains_key(&rejected_id));
+}

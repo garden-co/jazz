@@ -1800,7 +1800,19 @@ async fn queue_local_acknowledgements<S>(routes: &LocalFateRoutes, node: &Shared
 where
     S: OrderedKvStorage,
 {
-    let tx_ids = routes.borrow().keys().copied().collect::<Vec<_>>();
+    // Acknowledged routes remain registered for later global/rejection fates,
+    // but no longer need a local durability probe. A new queue on the same
+    // transaction still gets its own acknowledgement; dead queues need none.
+    let tx_ids = routes
+        .borrow()
+        .iter()
+        .filter(|(_, pending)| {
+            pending
+                .iter()
+                .any(|route| !route.local_acknowledged && route.queue.strong_count() > 0)
+        })
+        .map(|(tx_id, _)| *tx_id)
+        .collect::<Vec<_>>();
     let mut durable = BTreeSet::new();
     let mut node = node.lock().await;
     for tx_id in tx_ids {
