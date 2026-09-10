@@ -636,6 +636,80 @@ describe("NativeRuntimeAdapter server transport", () => {
       }
     },
   );
+  it("consumes a newer replacement after superseding an active native admission", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const oldTransport = new FakeTransport([]);
+    const replacementTransport = new FakeTransport([]);
+    const supersededTransport = new FakeTransport([]);
+    const replacementAdmissionStarted = deferred<void>();
+    const admitted: FakeTransport[] = [];
+    let connectCalls = 0;
+    const replacementAdmission = deferred<Transport>();
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              connectCalls += 1;
+              if (connectCalls === 1) {
+                admitted.push(oldTransport);
+                return oldTransport;
+              }
+              if (connectCalls === 2) {
+                replacementAdmissionStarted.resolve();
+                return replacementAdmission.promise.then((transport) => {
+                  admitted.push(transport as FakeTransport);
+                  return transport;
+                });
+              }
+              if (connectCalls === 3) {
+                admitted.push(replacementTransport);
+                return replacementTransport;
+              }
+              throw new Error("unexpected extra upstream admission");
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+    await replacementAdmissionStarted.promise;
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-c/ws", "{}");
+    replacementAdmission.resolve(supersededTransport);
+
+    try {
+      await runtime.waitForUpstreamServerConnection();
+
+      expect(sockets.map((socket) => socket.url)).toEqual([
+        "ws://127.0.0.1:4200/apps/app-a/ws",
+        "ws://127.0.0.1:4200/apps/app-c/ws",
+      ]);
+      expect(connectCalls).toBe(3);
+      expect(admitted).toEqual([oldTransport, supersededTransport, replacementTransport]);
+      expect(supersededTransport.closed).toBe(true);
+      expect(replacementTransport.closed).toBe(false);
+    } finally {
+      await runtime.close();
+    }
+  });
 
   it("reports predecessor retirement failure once without admitting its successor", async () => {
     const sockets: FakeWebSocket[] = [];
