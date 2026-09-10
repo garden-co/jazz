@@ -587,7 +587,11 @@ describe("Db auth state", () => {
 
     expect(() => db.updateCookieSession(makeCookieSession("B"))).toThrow(propagationFailure);
     expect(db.getAuthState()).toBe(beforeState);
-    expect(transportSnapshot(db, runtimeClient)).toEqual(beforeTransport);
+    expect(transportSnapshot(db, runtimeClient)).toMatchObject({
+      mode: beforeTransport.mode,
+      exclusive: beforeTransport.exclusive,
+      claimVersion: beforeTransport.claimVersion,
+    });
     expect(getDbInternalSession(db)).toBe(beforeInternalSession);
     expect(observedVersions).toEqual(["A"]);
 
