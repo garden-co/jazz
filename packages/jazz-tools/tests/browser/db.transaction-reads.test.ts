@@ -513,7 +513,9 @@ describe("db mergeable transaction reads browser integration", () => {
       tx.upsert(app.todos, "00000000-0000-0000-0000-000000000225", { done: true }),
     ).not.toThrow();
 
-    await expect(async () => tx.commit().wait()).rejects.toThrow("missing required field `title`");
+    await expect(async () => tx.commit().wait({ tier: "local" })).rejects.toThrow(
+      "missing required field `title`",
+    );
     // Neither the missing-row upsert nor any earlier operation may publish.
     expect(await db.all(app.todos)).toEqual([existing]);
   });
