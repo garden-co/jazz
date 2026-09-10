@@ -2764,3 +2764,127 @@ fn branch_column_evolution_accepts_monotone_addition_with_default() {
     NodeState::<RocksDbStorage>::validate_migration_lens_between(&lens, &source, &target)
         .expect("a branch column can be added monotonically with an immutable default");
 }
+
+#[test]
+fn cold_parent_coordinate_lookup_decodes_one_witness_from_large_transactions() {
+    // Internal coverage is necessary to evict the transaction-version cache
+    // and count actual storage decodes around parent validation in isolation.
+    // Fixture creation still uses the ordinary public schema/commit builders.
+    for width in [1_u128, 1500] {
+        let schema = branch_view_schema();
+        let branch = branch_selector(0x71);
+        let branch_key = schema
+            .project_branch_view_selector(schema.tables.iter().find(|table| table.name == "todos").unwrap(), &branch)
+            .unwrap()
+            .0;
+        let (_dir, mut core) = open_history_complete_node_with_schema(
+            NodeUuid::from_bytes([0x72; 16]),
+            schema.clone(),
+        );
+        let owner = AuthorSubject::for_test_bytes([0x73; 16]);
+        let target = RowUuid(uuid::Uuid::from_u128(1));
+        let commits = (1..=width)
+            .map(|index| {
+                MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(index)), 10)
+                    .branch(branch.clone())
+                    .cells(BTreeMap::from([
+                        ("title".to_owned(), v("parent")),
+                        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+                    ]))
+            })
+            .collect();
+        let content_parent = core.commit_mergeable_many_settled(commits).unwrap();
+        let deletion_parent = core
+            .commit_mergeable_many_settled(
+                (1..=width)
+                    .map(|index| {
+                        MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(index)), 20)
+                            .branch(branch.clone())
+                            .deletion(DeletionEvent::Deleted)
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let physical_table_id = core
+            .physical_table_id_for_schema(schema.version_id(), "todos")
+            .unwrap();
+        for (parent, layer) in [
+            (content_parent, VersionLayer::Content),
+            (deletion_parent, VersionLayer::Deletion),
+        ] {
+            let coordinate = ParentCoordinate {
+                physical_table_id,
+                branch_key: branch_key.clone(),
+                row_uuid: target,
+                layer,
+            };
+            core.invalidate_tx_version_tables_cache(parent);
+            super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.set(0));
+            core.reset_storage_read_metrics();
+            assert_eq!(
+                core.validate_known_parent_coordinate(parent, &coordinate)
+                    .resolve()
+                    .unwrap(),
+                super::super::ingest::ParentCoordinateValidation::Exact
+            );
+            let reads = core.take_storage_read_metrics();
+            assert_eq!(
+                super::super::currency::HISTORY_PAYLOAD_DECODES.with(|count| count.get()),
+                1,
+                "one parent witness must decode one history row even for a {width}-row transaction"
+            );
+            assert_eq!(
+                reads.history_indexes.ranges, 0,
+                "exact parent lookup must not scan by_tx: {reads:?}"
+            );
+            assert!(
+                reads.total.reads <= 2,
+                "exact parent lookup should read transaction plus witness: {reads:?}"
+            );
+
+            let wrong_branch = ParentCoordinate {
+                branch_key: schema
+                    .project_branch_view_selector(schema.tables.iter().find(|table| table.name == "todos").unwrap(), &branch_selector(0x74))
+                    .unwrap()
+                    .0,
+                ..coordinate.clone()
+            };
+            let wrong_row = ParentCoordinate {
+                row_uuid: RowUuid(uuid::Uuid::from_u128(width + 1)),
+                ..coordinate.clone()
+            };
+            let wrong_layer = ParentCoordinate {
+                layer: match layer {
+                    VersionLayer::Content => VersionLayer::Deletion,
+                    VersionLayer::Deletion => VersionLayer::Content,
+                },
+                ..coordinate.clone()
+            };
+            let wrong_table = ParentCoordinate {
+                physical_table_id: core
+                    .physical_table_id_for_schema(schema.version_id(), "users")
+                    .unwrap(),
+                ..coordinate.clone()
+            };
+            for wrong in [wrong_branch, wrong_row, wrong_layer, wrong_table] {
+                assert!(
+                    matches!(
+                        core.validate_known_parent_coordinate(parent, &wrong)
+                            .resolve(),
+                        Err(Error::InvalidMergeableCommit(_))
+                    ),
+                    "a known complete parent cannot resolve outside its exact coordinate"
+                );
+            }
+            assert_eq!(
+                core.validate_known_parent_coordinate(
+                    TxId::new(TxTime::from(99), parent.node),
+                    &coordinate
+                )
+                .resolve()
+                .unwrap(),
+                super::super::ingest::ParentCoordinateValidation::Inconclusive
+            );
+        }
+    }
+}
