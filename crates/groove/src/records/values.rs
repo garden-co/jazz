@@ -2203,11 +2203,7 @@ pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
                     expected: value_type.clone(),
                 });
             }
-            let values = record.to_values()?;
-            if descriptor.create(&values)? != record.raw() {
-                return Err(Error::NonCanonicalRecord);
-            }
-            Ok(())
+            validate_embedded_record(record.borrowed())
         }
         (Value::Enum(enum_value), ValueType::Enum(schema)) => ensure_enum_value(enum_value, schema),
         _ => Err(Error::TypeMismatch {
@@ -2223,8 +2219,47 @@ fn ensure_enum_value(value: &EnumValue, schema: &EnumSchema) -> Result<(), Error
             expected: ValueType::Enum(Box::new(schema.clone())),
         });
     }
-    let values = value.record.to_values()?;
-    if case.payload.create(&values)? != value.record.raw() {
+    validate_embedded_record(value.record.borrowed())
+}
+
+// Tuple decoding and encoding have historically different constructibility
+// rules (including nullable member byte order). Preserve the exact round-trip
+// admission rule for those descriptors rather than broadening accepted bytes.
+fn contains_tuple(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Tuple(_) => true,
+        ValueType::Array(inner) | ValueType::Nullable(inner) => contains_tuple(inner),
+        ValueType::Record(descriptor) => descriptor
+            .fields()
+            .iter()
+            .any(|field| contains_tuple(&field.value_type)),
+        ValueType::Enum(schema) => schema.cases.iter().any(|case| {
+            case.payload
+                .fields()
+                .iter()
+                .any(|field| contains_tuple(&field.value_type))
+        }),
+        _ => false,
+    }
+}
+
+fn validate_embedded_record(record: super::BorrowedRecord<'_>) -> Result<(), Error> {
+    let descriptor = record.descriptor();
+    if !descriptor
+        .fields()
+        .iter()
+        .any(|field| contains_tuple(&field.value_type))
+        && record.validate_canonical().is_ok()
+    {
+        // Record spans cover the complete packed layout; scalar, offset,
+        // nullable and enum validators enforce canonical encodings.
+        return Ok(());
+    }
+    // The diagnostic error ordering of structural validation differs from
+    // decoding (for example malformed UTF-8 scalar payloads). Preserve legacy
+    // errors on invalid input as well as legacy tuple admission semantics.
+    let values = record.to_values()?;
+    if descriptor.create(&values)? != record.raw() {
         return Err(Error::NonCanonicalRecord);
     }
     Ok(())
