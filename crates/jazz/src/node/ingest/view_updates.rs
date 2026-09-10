@@ -743,7 +743,7 @@ where
         Ok(())
     }
 
-    async fn content_version_reaches_tx(
+    pub(super) async fn content_version_reaches_tx(
         &mut self,
         table_id: PhysicalTableId,
         branch_key: &BranchKey,
@@ -764,14 +764,36 @@ where
             if !seen.insert(tx_id) {
                 continue;
             }
-            for version in self.query_versions_for_tx(tx_id).await? {
-                if self.physical_table_id_for_version(&version)? == table_id
-                    && version.branch_key() == branch_key
-                    && version.row_uuid() == row_uuid
-                    && version.layer() == VersionLayer::Content
+            // Reachability is row-local. Preserve the transaction-presence and
+            // resident-cache semantics without materializing its sibling rows.
+            let Some(tx) = self.query_transaction(tx_id).await? else {
+                continue;
+            };
+            if self.query.tx_versions_cache.contains_key(&tx_id) {
+                for version in self
+                    .query_versions_for_tx_physical_coordinate(tx_id, table_id, row_uuid)
+                    .await?
                 {
-                    stack.extend(version.parents());
+                    if version.branch_key() == branch_key
+                        && version.layer() == VersionLayer::Content
+                    {
+                        stack.extend(version.parents());
+                    }
                 }
+            } else if let Some(version) = self
+                .query_exact_parent_version(
+                    tx_id,
+                    tx.node_alias,
+                    &ParentCoordinate {
+                        physical_table_id: table_id,
+                        branch_key: branch_key.clone(),
+                        row_uuid,
+                        layer: VersionLayer::Content,
+                    },
+                )
+                .await?
+            {
+                stack.extend(version.parents());
             }
         }
         Ok(false)
