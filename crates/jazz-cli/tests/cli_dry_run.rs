@@ -1670,6 +1670,8 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         ),
         "client B must complete while client A remains backpressured"
     );
+    drop(_auxiliary_subscription);
+
 
     // Reopen A's receive window only after B has completed. This releases the
     // blocked WebSocket frame so the strict FIFO assertion can consume it.
@@ -1688,8 +1690,18 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut saw_server_frames = false;
     let mut observed_payloads = Vec::new();
+    let mut long_read_window = true;
     while observed_payloads.len() < ROW_COUNT && Instant::now() < deadline {
-        saw_server_frames |= pump_websocket_once(&mut stalled.socket, &stalled.db, &stalled.wire);
+        let received = pump_websocket_once(&mut stalled.socket, &stalled.db, &stalled.wire);
+        saw_server_frames |= received;
+        if received && long_read_window {
+            if let MaybeTlsStream::Plain(stream) = stalled.socket.get_mut() {
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(20)))
+                    .expect("restore short A read timeout after first frame");
+            }
+            long_read_window = false;
+        }
         while let Some(event) = stalled_data_subscription.next().now_or_never().flatten() {
             let SubscriptionEvent::Delta { added, .. } = event else {
                 continue;
@@ -1720,6 +1732,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         observed_indices, expected_indices,
         "client A's eventual subscription batches must stay FIFO"
     );
+    drop(stalled_data_subscription);
     drop(stalled.socket);
     drop(independent.socket);
     drop(seed.socket);
