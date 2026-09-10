@@ -468,9 +468,18 @@ Tree writes are copy-on-write: the changed leaf and every changed ancestor get
 fresh page ids, then one IndexedDB transaction writes the new immutable closure
 and replaces `current` after checking the observed generation. A crash before
 publication leaves at most unreachable new pages; a published root never names
-a torn or missing child. Reclamation is a separate reachability operation and
-may delete only pages proven unreachable from the published root, never pages
-merely replaced by an in-flight write. Reopening observes either the old root
+a torn or missing child. Reclamation may delete only pages proven unreachable
+from the published root. Path-local retirement atomically deletes replaced leaves,
+ancestors, and the overflow chains owned by replaced/deleted values together with
+publication, only when the PageStore proves exclusive tree ownership. Generic and
+memory stores default to retaining durable pages so independent cold handles can
+finish reading their older complete closure and reach generation-conflict recovery.
+The browser capability consumes one live database Web Lock/worker epoch proof for
+one tree; tree clones share its root. It expires before release/close/invalidation,
+and deletion commits recheck it at publication. Unpublished superseded fresh pages
+are omitted from the commit regardless of ownership. A separate reachability
+collector is still required for historical garbage; this policy changes neither
+the durable page encoding nor the storage epoch. Reopening observes either the old root
 and complete closure or the new root and complete closure.
 Before persistence, one logical write—including every operation in a
 `write_many` call—is also locally atomic. If page construction or validation

@@ -1,3 +1,4 @@
+import { acquireBrowserPhysicalDatabaseEpoch } from "./browser-physical-database-epoch.js";
 import { IDBFactory, indexedDB as fakeIndexedDb } from "fake-indexeddb";
 import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -17,6 +18,17 @@ import {
   INDEXEDDB_REPLICA_NODE_KEY,
   IndexedDbPageStore,
 } from "./indexeddb-page-store.js";
+
+async function ownReclamation(store: IndexedDbPageStore) {
+  const epoch = await acquireBrowserPhysicalDatabaseEpoch(store.name, {
+    async request(_name, _options, callback) {
+      return await callback({});
+    },
+  });
+  await store.claimBrowserWorkerEpoch(epoch.id, epoch);
+  store.claimTreeOwnership();
+  return epoch;
+}
 
 const databaseNames: string[] = [];
 
@@ -151,6 +163,7 @@ describe("IndexedDbPageStore", () => {
   it("persists only supplied dirty pages and can delete retired pages", async () => {
     const name = databaseName();
     let store = await IndexedDbPageStore.open(name);
+    const epoch = await ownReclamation(store);
     await store.commit({
       expectedGeneration: 0,
       metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 3 },
@@ -172,6 +185,64 @@ describe("IndexedDbPageStore", () => {
     expect(await store.readPage(2)).toBeNull();
     expect((await store.metadata())?.generation).toBe(2);
     store.close();
+    await epoch.release();
+  });
+
+  it("requires live single-tree ownership and fences a queued retirement on release", async () => {
+    const store = await IndexedDbPageStore.open(databaseName());
+    await store.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 3 },
+      pages: new Map([
+        [1, new Uint8Array([1])],
+        [2, new Uint8Array([2])],
+      ]),
+    });
+    const retirement = {
+      expectedGeneration: 1,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 3 },
+      pages: new Map<number, Uint8Array>(),
+      deletedPageIds: [2],
+    };
+    expect(store.canReclaimObsoletePages).toBe(false);
+    await expect(store.commit(retirement)).rejects.toThrow("ownership is not active");
+    const epoch = await ownReclamation(store);
+    expect(store.canReclaimObsoletePages).toBe(true);
+    expect(() => store.claimTreeOwnership()).toThrow("already has a tree");
+    store.releaseTreeOwnership();
+    expect(store.canReclaimObsoletePages).toBe(false);
+    store.claimTreeOwnership();
+    const pending = store.commit(retirement);
+    const release = epoch.release();
+    expect(store.canReclaimObsoletePages).toBe(false);
+    await expect(pending).rejects.toThrow("ownership expired before publication");
+    await release;
+    expect(await store.readPage(2)).toEqual(new Uint8Array([2]));
+    expect((await store.metadata())?.generation).toBe(1);
+    store.close();
+  });
+
+  it("rejects forged, mismatched and multiply consumed reclamation proofs", async () => {
+    const name = databaseName();
+    const first = await IndexedDbPageStore.open(name);
+    const second = await IndexedDbPageStore.open(name);
+    const epoch = await ownReclamation(first);
+    await expect(second.claimBrowserWorkerEpoch(epoch.id, epoch)).rejects.toThrow("unclaimed live");
+    await expect(
+      second.claimBrowserWorkerEpoch(epoch.id, {
+        id: epoch.id,
+        release: async () => undefined,
+      }),
+    ).rejects.toThrow("unclaimed live");
+    const other = await IndexedDbPageStore.open(databaseName());
+    await expect(other.claimBrowserWorkerEpoch(epoch.id, epoch)).rejects.toThrow("unclaimed live");
+    const release = first.releaseBrowserWorkerEpoch(epoch.id);
+    expect(first.canReclaimObsoletePages).toBe(false);
+    await release;
+    first.close();
+    second.close();
+    other.close();
+    await epoch.release();
   });
 
   it("rejects a stale generation instead of overwriting a newer root", async () => {

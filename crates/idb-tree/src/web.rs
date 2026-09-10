@@ -3,13 +3,22 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::{BoxFuture, Commit, Metadata, PageStore};
+use crate::{BoxFuture, Commit, Metadata, PageStore, TreeOwnership};
 
 #[wasm_bindgen]
 extern "C" {
     #[derive(Clone)]
     #[wasm_bindgen(typescript_type = "IndexedDbPageStore")]
     type IndexedDbPageStoreHandle;
+
+    #[wasm_bindgen(method, catch, js_name = claimTreeOwnership)]
+    fn claim_tree_ownership_js(this: &IndexedDbPageStoreHandle) -> Result<(), JsValue>;
+
+    #[wasm_bindgen(method, js_name = releaseTreeOwnership)]
+    fn release_tree_ownership_js(this: &IndexedDbPageStoreHandle);
+
+    #[wasm_bindgen(method, getter, js_name = canReclaimObsoletePages)]
+    fn can_reclaim_obsolete_pages_js(this: &IndexedDbPageStoreHandle) -> bool;
 
     #[wasm_bindgen(method, js_name = metadata)]
     fn metadata_js(this: &IndexedDbPageStoreHandle) -> Promise;
@@ -46,6 +55,18 @@ impl IndexedDbPageStore {
 }
 
 impl PageStore for IndexedDbPageStore {
+    fn claim_tree_ownership(&self) -> Result<TreeOwnership, String> {
+        self.handle.claim_tree_ownership_js().map_err(js_error)?;
+        let handle = self.handle.clone();
+        Ok(TreeOwnership::new(move || {
+            handle.release_tree_ownership_js()
+        }))
+    }
+
+    fn can_reclaim_obsolete_pages(&self) -> bool {
+        self.handle.can_reclaim_obsolete_pages_js()
+    }
+
     fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
         Box::pin(async move {
             let value = JsFuture::from(self.handle.metadata_js())

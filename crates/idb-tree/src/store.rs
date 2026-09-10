@@ -34,7 +34,38 @@ pub struct Commit {
     pub deleted_page_ids: Vec<PageId>,
 }
 
+/// Keeps a store's single-tree admission alive until the last tree clone drops.
+#[derive(Default)]
+pub struct TreeOwnership(Option<Box<dyn FnOnce()>>);
+
+impl TreeOwnership {
+    pub fn new(release: impl FnOnce() + 'static) -> Self {
+        Self(Some(Box::new(release)))
+    }
+}
+
+impl Drop for TreeOwnership {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
+}
+
 pub trait PageStore {
+    /// Opt in only while this tree exclusively owns the store: no independent
+    /// handle may retain an older root. The store must also reject reclamation
+    /// commits after ownership expires, including already prepared commits.
+    /// Clones of one IdbTree share a root and are permitted. Independent trees
+    /// (including ones built from cloned stores) require this to remain false.
+    fn claim_tree_ownership(&self) -> Result<TreeOwnership, String> {
+        Ok(TreeOwnership::default())
+    }
+
+    fn can_reclaim_obsolete_pages(&self) -> bool {
+        false
+    }
+
     fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>>;
     fn read_page(&self, page_id: PageId) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>>;
     fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>>;

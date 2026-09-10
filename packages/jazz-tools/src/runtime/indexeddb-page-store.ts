@@ -1,3 +1,8 @@
+import {
+  claimBrowserReclamationOwnership,
+  type BrowserPhysicalDatabaseEpoch,
+} from "./browser-physical-database-epoch.js";
+
 /** Durable IndexedDB metadata/page-store format, independent of browser IDB's schema version. */
 export const INDEXEDDB_BTREE_FORMAT_VERSION = 1;
 export const INDEXEDDB_BTREE_FORMAT_MAGIC = "jazz-idb-tree";
@@ -160,6 +165,26 @@ export class IndexedDbStorageInvalidatedError extends Error {
  */
 export class IndexedDbPageStore {
   private invalidated = false;
+  private reclamationOwnership: (() => boolean) | null = null;
+  private treeClaims = 0;
+
+  /** One independently opened tree per exclusive owner; IdbTree clones share it. */
+  claimTreeOwnership(): void {
+    this.assertValid();
+    if (this.reclamationOwnership && this.treeClaims > 0) {
+      throw new Error("IndexedDB reclamation owner already has a tree");
+    }
+    this.treeClaims++;
+  }
+
+  releaseTreeOwnership(): void {
+    this.treeClaims--;
+  }
+
+  get canReclaimObsoletePages(): boolean {
+    return !this.invalidated && this.treeClaims === 1 && this.reclamationOwnership?.() === true;
+  }
+
   private replicaNodeBytes: Uint8Array | null = null;
   private readonly invalidationListeners = new Set<
     (error: IndexedDbStorageInvalidatedError) => void
@@ -338,9 +363,16 @@ export class IndexedDbPageStore {
    * origin-wide Web Lock. A successor may replace an epoch only after that
    * lock proves the preceding realm is no longer alive.
    */
-  async claimBrowserWorkerEpoch(epoch: string): Promise<void> {
+  async claimBrowserWorkerEpoch(
+    epoch: string,
+    ownership?: BrowserPhysicalDatabaseEpoch,
+  ): Promise<void> {
     if (!isBrowserWorkerEpoch(epoch)) throw new Error("Invalid browser worker epoch");
     this.assertValid();
+    if (ownership && (ownership.id !== epoch || this.treeClaims > 0)) {
+      throw new Error("IndexedDB reclamation ownership must precede tree construction");
+    }
+    const proof = ownership ? claimBrowserReclamationOwnership(ownership, this.name) : null;
     const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
     const done = transactionDone(tx);
     tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
@@ -348,10 +380,12 @@ export class IndexedDbPageStore {
       INDEXEDDB_BROWSER_WORKER_EPOCH_KEY,
     );
     await done;
+    this.reclamationOwnership = proof;
   }
 
   /** Delete only this realm's epoch; a stale realm must never clear its successor. */
   async releaseBrowserWorkerEpoch(epoch: string): Promise<void> {
+    this.reclamationOwnership = null;
     if (!isBrowserWorkerEpoch(epoch)) throw new Error("Invalid browser worker epoch");
     this.assertValid();
     const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
@@ -497,6 +531,10 @@ export class IndexedDbPageStore {
   async commit(commit: IndexedDbPageCommit): Promise<IndexedDbBtreeMetadata> {
     this.assertValid();
     assertCommit(commit);
+    const requiresOwnership = (commit.deletedPageIds?.length ?? 0) > 0;
+    if (requiresOwnership && !this.canReclaimObsoletePages) {
+      throw new Error("IndexedDB page reclamation ownership is not active");
+    }
     const tx = relaxedReadWriteTransaction(this.db, [
       INDEXEDDB_BTREE_PAGES_STORE,
       INDEXEDDB_BTREE_METADATA_STORE,
@@ -531,6 +569,9 @@ export class IndexedDbPageStore {
         (await requestResult(pages.get(metadata.rootPageId))) === undefined
       ) {
         throw new Error(`IndexedDB B-tree root page ${metadata.rootPageId} is missing`);
+      }
+      if (requiresOwnership && !this.canReclaimObsoletePages) {
+        throw new Error("IndexedDB page reclamation ownership expired before publication");
       }
       for (const [pageId, bytes] of commit.pages) {
         if (bytes.byteLength > metadata.pageSize) {
@@ -581,6 +622,7 @@ export class IndexedDbPageStore {
   }
 
   close(): void {
+    this.reclamationOwnership = null;
     this.removeInvalidationListeners();
     this.db.close();
   }
@@ -623,6 +665,7 @@ export class IndexedDbPageStore {
   private invalidate(): void {
     if (this.invalidated) return;
     this.invalidated = true;
+    this.reclamationOwnership = null;
     this.removeInvalidationListeners();
     const error = new IndexedDbStorageInvalidatedError(this.name);
     for (const listener of this.invalidationListeners) listener(error);

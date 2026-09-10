@@ -346,7 +346,7 @@ async function openPhysicalDatabaseOwner(
   let pageStore: IndexedDbPageStore | null = null;
   try {
     pageStore = await IndexedDbPageStore.open(dbName, { owner: storageOwner });
-    await pageStore.claimBrowserWorkerEpoch(epoch.id);
+    await pageStore.claimBrowserWorkerEpoch(epoch.id, epoch);
     const owner: PhysicalDatabaseOwner = {
       epoch,
       pageStore,
