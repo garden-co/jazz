@@ -437,19 +437,25 @@ where
         }
     }
 
-    /// Return the legacy transaction fate tuple.
+    /// Return the legacy transaction fate tuple by projecting stored status.
+    /// Payload author/contribution validation belongs to full transaction reads;
+    /// this read retains storage framing and status-field validation.
     pub async fn transaction_state(
         &mut self,
         tx_id: TxId,
     ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)> {
-        self.transaction_record(tx_id).await.map(|record| {
-            let durability = if self.pending_persistence.contains(&tx_id) {
-                DurabilityTier::None
-            } else {
-                record.durability
-            };
-            (record.fate, record.global_time, durability)
-        })
+        self.query_transaction_state(tx_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(fate, global_time, stored_durability)| {
+                let durability = if self.pending_persistence.contains(&tx_id) {
+                    DurabilityTier::None
+                } else {
+                    stored_durability
+                };
+                (fate, global_time, durability)
+            })
     }
 
     /// Return the durable audit record for a transaction, including rejected

@@ -8,6 +8,11 @@
 use super::*;
 use crate::schema::RuntimeSchema;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static TRANSACTION_PAYLOAD_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -883,8 +888,41 @@ where
         &mut self,
         tx_id: TxId,
     ) -> Result<Option<StoredTransaction>, Error> {
+        self.query_transaction_fields(tx_id, |state, alias, record| {
+            state.stored_transaction_from_record(tx_id, alias, record)
+        })
+        .await
+    }
+
+    pub(super) async fn query_transaction_state(
+        &mut self,
+        tx_id: TxId,
+    ) -> Result<Option<(Fate, Option<GlobalTime>, DurabilityTier)>, Error> {
+        // Status is a projection, not a payload audit. Full transaction readers
+        // continue validating author and contribution identities independently.
+        self.query_transaction_fields(tx_id, |_, _, record| {
+            Ok((
+                fate_from_encoded_fields(record)?,
+                record
+                    .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                    .map(GlobalTime),
+                durability_from_discriminant(
+                    record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
+                )?,
+            ))
+        })
+        .await
+    }
+
+    async fn query_transaction_fields<T>(
+        &mut self,
+        tx_id: TxId,
+        decode: impl Fn(&Self, NodeAlias, BorrowedRecord<'_>) -> Result<T, Error>,
+    ) -> Result<Option<T>, Error> {
         if let Some(alias) = self.node_aliases.get(&tx_id.node).copied()
-            && let Some(tx) = self.query_transaction_by_alias(tx_id, alias).await?
+            && let Some(tx) = self
+                .query_transaction_fields_by_alias(tx_id, alias, &decode)
+                .await?
         {
             return Ok(Some(tx));
         }
@@ -902,7 +940,7 @@ where
         }
         for expected_alias in aliases {
             if let Some(tx) = self
-                .query_transaction_by_alias(tx_id, expected_alias)
+                .query_transaction_fields_by_alias(tx_id, expected_alias, &decode)
                 .await?
             {
                 self.node_aliases.insert(tx_id.node, expected_alias);
@@ -984,6 +1022,18 @@ where
         tx_id: TxId,
         expected_alias: NodeAlias,
     ) -> Result<Option<StoredTransaction>, Error> {
+        self.query_transaction_fields_by_alias(tx_id, expected_alias, &|state, alias, record| {
+            state.stored_transaction_from_record(tx_id, alias, record)
+        })
+        .await
+    }
+
+    async fn query_transaction_fields_by_alias<T>(
+        &self,
+        tx_id: TxId,
+        expected_alias: NodeAlias,
+        decode: &impl Fn(&Self, NodeAlias, BorrowedRecord<'_>) -> Result<T, Error>,
+    ) -> Result<Option<T>, Error> {
         let Some(raw) = self
             .database
             .primary_key_get_raw(
@@ -1000,8 +1050,7 @@ where
         if node_alias != expected_alias || time != tx_id.time {
             return Ok(None);
         }
-        self.stored_transaction_from_record(tx_id, expected_alias, record)
-            .map(Some)
+        decode(self, expected_alias, record).map(Some)
     }
 
     fn stored_transaction_from_record(
@@ -1010,6 +1059,8 @@ where
         expected_alias: NodeAlias,
         record: BorrowedRecord<'_>,
     ) -> Result<StoredTransaction, Error> {
+        #[cfg(test)]
+        TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
         let tx = Transaction {
             tx_id,
             kind: tx_kind_from_discriminant(
