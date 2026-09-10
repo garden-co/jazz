@@ -1767,8 +1767,7 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
         "id",
     ));
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
-    assert!(opened.rows.is_empty());
+    assert!(subscription.try_next_event().is_none());
 
     server
         .insert_with_id(

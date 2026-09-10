@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { schema, type Db, type RowOf } from "../../src/index.js";
 import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
 import { deploy } from "../../src/dev/catalogue.js";
@@ -33,6 +33,62 @@ describe("db exclusive transaction initialization browser integration", () => {
     );
   });
 });
+
+describe.each(["direct", "mergeable", "exclusive"] as const)(
+  "%s upsert failure reporting",
+  (kind) => {
+    it("suppresses mutation-error callbacks when the application waits", async () => {
+      await db.all(app.todos);
+      const onError = vi.fn();
+      db.onMutationError(onError);
+      const id = "00000000-0000-0000-0000-000000000126";
+      const write = (() => {
+        if (kind === "direct") return db.upsert(app.todos, id, { done: true });
+        const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+        tx.insert(app.todos, { title: "Must not be committed", done: false });
+        tx.upsert(app.todos, id, { done: true });
+        return tx.commit();
+      })();
+      await expect(write.wait({ tier: "local" })).rejects.toThrow("missing required field `title`");
+      await expect(db.all(app.todos, { tier: "local" })).resolves.toEqual([]);
+      // Advance subsequent work too: handling the error must consume, not defer, its callback.
+      await db.insert(app.todos, { title: "valid", done: false }).wait({ tier: "local" });
+      await db.all(app.todos, { tier: "local" });
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it("reports missing required fields once without waiting for the write", async () => {
+      await db.all(app.todos);
+      const onError = vi.fn();
+      db.onMutationError(onError);
+      const id = "00000000-0000-0000-0000-000000000126";
+      const write = (() => {
+        if (kind === "direct") return db.upsert(app.todos, id, { done: true });
+        const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+        tx.insert(app.todos, { title: "Must not be committed", done: false });
+        tx.upsert(app.todos, id, { done: true });
+        return tx.commit();
+      })();
+      const transactionId = await write.txId;
+
+      await expect.poll(() => onError.mock.calls.length).toBe(1);
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "write_rejected",
+          reason: expect.stringContaining("missing required field `title`"),
+          transaction: expect.objectContaining({
+            transactionId,
+            kind: kind === "exclusive" ? "exclusive" : "mergeable",
+          }),
+        }),
+      );
+      // Fallback delivery must not erase the failure from the returned handle.
+      await expect(write.wait({ tier: "local" })).rejects.toThrow("missing required field `title`");
+      await expect(db.all(app.todos, { tier: "local" })).resolves.toEqual([]);
+      expect(onError).toHaveBeenCalledTimes(1);
+    });
+  },
+);
 
 describe("db exclusive transaction reads browser integration", () => {
   beforeEach(async () => {
@@ -210,10 +266,14 @@ describe("db exclusive transaction reads browser integration", () => {
 
   it("rejects partial upserts for missing rows inside transactions", async () => {
     const tx = db.beginExclusiveTransaction();
+    tx.insert(app.todos, { title: "Must not be committed", done: false });
+    tx.upsert(app.todos, "00000000-0000-0000-0000-000000000125", { done: true });
 
-    expect(() =>
-      tx.upsert(app.todos, "00000000-0000-0000-0000-000000000125", { done: true }),
-    ).toThrow("missing required field `title`");
+    // A partial upsert is valid for an existing row but not for a new one. Resolving existence
+    // may require async storage access, so validation failure is observed through commit().wait(),
+    // not synchronously through upsert().
+    await expect(tx.commit().wait()).rejects.toThrow("missing required field `title`");
+    await expect(db.all(app.todos, { tier: "local" })).resolves.toEqual([]);
   });
 
   describe("db.exclusiveTransaction(cb)", () => {
@@ -486,10 +546,16 @@ describe("db mergeable transaction reads browser integration", () => {
 
   it("rejects partial upserts for missing rows inside mergeable transactions", async () => {
     const tx = db.beginTransaction();
+    tx.insert(app.todos, { title: "Must not be committed", done: false });
+    tx.upsert(app.todos, "00000000-0000-0000-0000-000000000225", { done: true });
 
-    expect(() =>
-      tx.upsert(app.todos, "00000000-0000-0000-0000-000000000225", { done: true }),
-    ).toThrow("missing required field `title`");
+    // A partial upsert is valid for an existing row but not for a new one. Resolving existence
+    // may require async storage access, so validation failure is observed through commit().wait(),
+    // not synchronously through upsert().
+    await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow(
+      "missing required field `title`",
+    );
+    await expect(db.all(app.todos, { tier: "local" })).resolves.toEqual([]);
   });
 
   describe("db.transaction(cb)", () => {

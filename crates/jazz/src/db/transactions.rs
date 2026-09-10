@@ -382,6 +382,56 @@ where
         .await
     }
 
+    /// Resolve a staged upsert in Rust, optionally checking typed insert completeness.
+    pub(super) async fn stage_mergeable_upsert(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        options: UpsertOptions,
+        require_complete_insert: bool,
+    ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        match options.target {
+            WriteTarget::Root => {
+                let exists = self
+                    .mergeable_transaction_upsert_exists(tx_id, table, row)
+                    .await?;
+                if exists {
+                    self.stage_mergeable_update(tx_id, table, row, cells, options.updated_at_ms)
+                        .await
+                } else {
+                    if require_complete_insert {
+                        self.validate_complete_insert(table, &cells)?;
+                    }
+                    self.stage_mergeable_insert(
+                        tx_id,
+                        table,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                        false,
+                    )
+                    .await
+                }
+            }
+            WriteTarget::BranchView { head, base } => {
+                self.stage_mergeable_upsert_in_branch_view(
+                    tx_id,
+                    table,
+                    head,
+                    base,
+                    row,
+                    cells,
+                    options.updated_at_ms,
+                    require_complete_insert,
+                )
+                .await
+            }
+        }
+    }
+
     pub(super) async fn mergeable_transaction_upsert_exists(
         &self,
         tx_id: OpenTransactionId,
@@ -405,6 +455,7 @@ where
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
+        require_complete_insert: bool,
     ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
         self.ensure_branch_view_row_not_deleted(table, &head, base.as_ref(), row)
@@ -468,6 +519,9 @@ where
         };
         let mut inserted = inherited.unwrap_or_default();
         inserted.extend(cells);
+        if require_complete_insert {
+            self.validate_complete_insert(table, &inserted)?;
+        }
         self.stage_mergeable_insert_in_branch_with_verified_inherited_cells(
             tx_id,
             table,
@@ -699,6 +753,7 @@ where
         let status = self.node.enqueue_transaction_commit(
             open_tx_id,
             tx_id,
+            TxKind::Mergeable,
             Box::pin(async move {
                 let published = db
                     .lock_for_transaction_operation(open_tx_id)
@@ -931,12 +986,12 @@ where
             Box::pin(async move {
                 let exclusive = db.transaction_is_exclusive(id).await?;
                 if exclusive {
-                    db.exclusive_tx_ref(id)
-                        .upsert(&table, row, cells, options)
+                    ensure_transaction_identity(options.identity)?;
+                    ensure_exclusive_view_target(&options.target)?;
+                    db.stage_exclusive_upsert(id, &table, row, cells, options.updated_at_ms, true)
                         .await
                 } else {
-                    db.mergeable_tx_ref(id)
-                        .upsert(&table, row, cells, options)
+                    db.stage_mergeable_upsert(id, &table, row, cells, options, true)
                         .await
                 }
             }),
@@ -1277,12 +1332,16 @@ where
         row: RowUuid,
         patch: RowCells,
         updated_at_ms: Option<u64>,
+        require_complete_insert: bool,
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        let mut cells = self
+        let existing = self
             .exclusive_transaction_target_for_write(tx_id, table, row, "UPSERT", true)
-            .await?
-            .unwrap_or_default();
+            .await?;
+        if require_complete_insert && existing.is_none() {
+            self.validate_complete_insert(table, &patch)?;
+        }
+        let mut cells = existing.unwrap_or_default();
         cells.extend(patch);
         let cells = self.apply_insert_defaults(table, cells)?;
         self.lock_for_transaction_operation(tx_id)
@@ -1439,6 +1498,7 @@ where
         let status = self.node.enqueue_transaction_commit(
             open_tx_id,
             tx_id,
+            TxKind::Exclusive,
             Box::pin(async move {
                 let (published, unit) = db
                     .lock_for_transaction_operation(open_tx_id)

@@ -34,15 +34,15 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let opened = block_on(subscription.next_raw()).unwrap();
-    assert!(!event_settled(&opened));
-    assert!(opened_rows(opened).is_empty());
+    assert!(subscription.try_next_event().is_none());
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let settled = block_on(subscription.next_raw()).unwrap();
+    let settled = subscription
+        .try_next_event()
+        .expect("expected settled publication after driving authority");
     assert!(event_settled(&settled));
     let (added, updated, removed) = delta_rows(settled);
     assert!(added.is_empty());
@@ -64,19 +64,24 @@ fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
     let _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
+    assert!(!subscription._state.borrow().settled);
+    assert!(subscription.try_next_event().is_none());
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+    assert!(event_settled(
+        &subscription
+            .try_next_event()
+            .expect("expected settled publication after driving authority")
+    ));
 
     assert!(client.detach_connection(&first_upstream));
-    let disconnected = block_on(subscription.next_raw()).unwrap();
     assert!(
-        !event_settled(&disconnected),
+        !subscription._state.borrow().settled,
         "disconnect must immediately demote cached Edge/Global rows to unsettled"
     );
+    assert!(subscription.try_next_event().is_none());
     assert_eq!(
         prepared_read(&client, &query).len(),
         1,
@@ -92,7 +97,11 @@ fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(
-        event_settled(&block_on(subscription.next_raw()).unwrap()),
+        event_settled(
+            &subscription
+                .try_next_event()
+                .expect("expected settled publication after driving authority")
+        ),
         "only a fresh view from the current upstream epoch may re-settle the cache"
     );
 }
@@ -111,20 +120,29 @@ fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
     let _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let _ = block_on(subscription.next_raw()).unwrap();
+    assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+    assert!(event_settled(
+        &subscription
+            .try_next_event()
+            .expect("expected settled publication after driving authority")
+    ));
 
     let (new_client_transport, new_server_transport) = duplex();
     let new_upstream = crate::db::block_on(client.connect_upstream(new_client_transport));
     let _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
-    assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
+    assert!(!subscription._state.borrow().settled);
+    assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+    assert!(event_settled(
+        &subscription
+            .try_next_event()
+            .expect("expected settled publication after driving authority")
+    ));
 
     seed(
         &server,
@@ -134,13 +152,18 @@ fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
     server.tick().unwrap();
     old_upstream.borrow_mut().tick().unwrap();
     assert!(
-        !event_settled(&block_on(subscription.next_raw()).unwrap()),
+        !subscription._state.borrow().settled,
         "A's row-changing update must retire B's receipt before publication"
     );
+    assert!(subscription.try_next_event().is_none());
 
     new_upstream.borrow_mut().tick().unwrap();
     assert!(
-        event_settled(&block_on(subscription.next_raw()).unwrap()),
+        event_settled(
+            &subscription
+                .try_next_event()
+                .expect("expected settled publication after driving authority")
+        ),
         "B's own queued response may re-establish the selected receipt"
     );
 }
@@ -160,8 +183,8 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
         prepared_subscribe(&client, &all_query, global_subscribe_opts()).unwrap();
     let mut filtered_subscription =
         prepared_subscribe(&client, &filtered_query, global_subscribe_opts()).unwrap();
-    let _ = block_on(all_subscription.next_raw()).unwrap();
-    let _ = block_on(filtered_subscription.next_raw()).unwrap();
+    assert!(all_subscription.try_next_event().is_none());
+    assert!(filtered_subscription.try_next_event().is_none());
     client.tick().unwrap();
     let mut old_keys = BTreeMap::new();
     while old_keys.len() < 2 {
@@ -254,11 +277,16 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     let _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
+    assert!(!subscription._state.borrow().settled);
+    assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+    assert!(event_settled(
+        &subscription
+            .try_next_event()
+            .expect("expected settled publication after driving authority")
+    ));
 
     // Switching links immediately retires the old receipt, even while the old
     // transport remains alive long enough to race one more response.
@@ -266,9 +294,10 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     let new_upstream = crate::db::block_on(client.connect_upstream(new_client_transport));
     let _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
     assert!(
-        !event_settled(&block_on(subscription.next_raw()).unwrap()),
+        !subscription._state.borrow().settled,
         "edge switch must immediately demote the prior edge receipt"
     );
+    assert!(subscription.try_next_event().is_none());
 
     // Confirm B before forcing fallback, so the test proves that staging A's
     // old traffic cannot transiently publish under B's receipt during detach.
@@ -276,7 +305,11 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(
-        event_settled(&block_on(subscription.next_raw()).unwrap()),
+        event_settled(
+            &subscription
+                .try_next_event()
+                .expect("expected settled publication after driving authority")
+        ),
         "the selected B edge must have a real receipt before the fallback test"
     );
 
@@ -291,17 +324,13 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     // treating it as a new A receipt.
     assert!(client.detach_connection(&new_upstream));
     client.tick().unwrap();
-    let mut drained_events = 0;
-    while let Ok(event) = subscription.receiver.try_recv() {
-        drained_events += 1;
-        assert!(
-            !event_settled(&event),
-            "a ViewUpdate queued before fallback selection must not settle the subscription"
-        );
-    }
     assert!(
-        drained_events > 0,
-        "the row-changing staged A update must publish an explicitly unsettled event"
+        !subscription._state.borrow().settled,
+        "a ViewUpdate queued before fallback selection must not settle the subscription"
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the staged update must remain unpublished until a fresh selected receipt"
     );
 
     seed(
@@ -312,7 +341,11 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(
-        event_settled(&block_on(subscription.next_raw()).unwrap()),
+        event_settled(
+            &subscription
+                .try_next_event()
+                .expect("expected settled publication after driving authority")
+        ),
         "after the selected edge detaches, the surviving edge may settle only with its own fresh response"
     );
 
@@ -330,7 +363,7 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
     let (old_client_transport, mut old_authority) = duplex();
     let _old_upstream = crate::db::block_on(client.connect_upstream(old_client_transport));
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let _ = block_on(subscription.next_raw()).unwrap();
+    assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     let old_key = loop {
         if let SyncMessage::Subscribe(subscribe) = old_authority.try_recv().unwrap() {
@@ -379,7 +412,7 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     let (old_client_transport, mut old_authority_transport) = duplex();
     let old_upstream = crate::db::block_on(client.connect_upstream(old_client_transport));
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let _ = block_on(subscription.next_raw()).unwrap();
+    assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     let old_subscription = loop {
         match old_authority_transport.try_recv().unwrap() {
@@ -484,14 +517,15 @@ fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receip
     let query = Query::from("todos");
     let mut first_subscription =
         prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(!event_settled(
-        &block_on(first_subscription.next_raw()).unwrap()
-    ));
+    assert!(!first_subscription._state.borrow().settled);
+    assert!(first_subscription.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     assert!(event_settled(
-        &block_on(first_subscription.next_raw()).unwrap()
+        &first_subscription
+            .try_next_event()
+            .expect("expected settled publication after driving authority")
     ));
     drop(first_subscription);
     assert!(client.detach_connection(&first_upstream));
@@ -514,9 +548,10 @@ fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receip
     .unwrap();
     let mut subscription = prepared_subscribe(&reopened, &query, global_subscribe_opts()).unwrap();
     assert!(
-        !event_settled(&block_on(subscription.next_raw()).unwrap()),
-        "an offline Edge/Global subscription must expose durable cached rows as unsettled"
+        !subscription._state.borrow().settled,
+        "an offline Edge/Global subscription must retain unsettled coverage without publishing cached rows"
     );
+    assert!(subscription.try_next_event().is_none());
     let (reopened_client_transport, reopened_server_transport) = duplex();
     let _reopened_upstream =
         crate::db::block_on(reopened.connect_upstream(reopened_client_transport));
@@ -524,5 +559,9 @@ fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receip
     reopened.tick().unwrap();
     server.tick().unwrap();
     reopened.tick().unwrap();
-    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+    assert!(event_settled(
+        &subscription
+            .try_next_event()
+            .expect("expected settled publication after driving authority")
+    ));
 }

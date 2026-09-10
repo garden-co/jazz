@@ -238,6 +238,8 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
     let _ = core;
 }
 
+/// Alice's complete write reaches Global durability and Bob's maintained view.
+/// Bob subscribes → core settles opening → Alice uploads → core publishes to Bob.
 #[test]
 fn core_shell_client_upload_still_reports_global_immediately() {
     let schema = schema();
@@ -289,7 +291,10 @@ fn core_shell_client_upload_still_reports_global_immediately() {
 
     let write = block_on(alice.insert(
         "todos",
-        BTreeMap::from([("title".to_owned(), Value::String("core global".to_owned()))]),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("core global".to_owned())),
+            ("completed".to_owned(), Value::Bool(false)),
+        ]),
         Default::default(),
     ))
     .unwrap();
