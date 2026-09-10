@@ -2891,3 +2891,128 @@ fn mergeable_tx_emits_one_subscription_delta_for_many_writes() {
     assert!(removed.is_empty());
     assert!(subscription.try_next_event().is_none());
 }
+
+// Internal binding-contract coverage: the WASM memory owner defers persistence
+// and drives queued synchronous staging. A pending stream must receive its
+// wake without an unrelated peer, query, or write triggering a refresh.
+#[test]
+fn deferred_queued_mergeable_commit_wakes_existing_subscription() {
+    let schema = doctest_support::schema();
+    let empty = build_public_db_test_schema(PublicSchemaBuilder::new());
+    let families = empty.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        empty,
+        doctest_support::MemoryStorage::new(&refs).unwrap(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x91; 16]),
+            author: AuthorSubject::for_test_bytes([0xa1; 16]),
+        },
+    )))
+    .unwrap();
+    db.set_deferred_local_persistence(true);
+    let view = db.register_schema_view(schema.clone()).unwrap();
+    let seed = OpenTransactionId::new();
+    db.begin_mergeable(seed).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..20 {
+        ids.push(
+            view.mergeable_tx_ref(seed)
+                .insert(
+                    "todos",
+                    doctest_support::todo_cells(&format!("row {index}"), false),
+                    Default::default(),
+                )
+                .unwrap(),
+        );
+    }
+    db.commit_mergeable_handle(seed).unwrap();
+    for _ in 0..4 {
+        block_on(db.tick()).unwrap();
+    }
+    let query = Query::from("todos");
+    let mut setup_subscription = prepared_subscribe(&view, &query, ReadOpts::default()).unwrap();
+    assert!(
+        matches!(block_on(setup_subscription.next_event()).unwrap(), SubscriptionEvent::Delta { ref added, .. } if added.len() == 20)
+    );
+    drop(setup_subscription);
+    let mut subscription = prepared_subscribe(&view, &query, ReadOpts::default()).unwrap();
+    let initial = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(initial, SubscriptionEvent::Delta { ref added, .. } if added.len() == 20));
+    struct ReaderWake(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for ReaderWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let reader_wake = std::sync::Arc::new(ReaderWake(std::sync::atomic::AtomicUsize::new(0)));
+    let reader_waker = std::task::Waker::from(reader_wake.clone());
+    assert!(matches!(
+        futures::Stream::poll_next(
+            std::pin::Pin::new(&mut subscription),
+            &mut std::task::Context::from_waker(&reader_waker)
+        ),
+        std::task::Poll::Pending
+    ));
+    let update = OpenTransactionId::new();
+    db.enqueue_begin_mergeable(update, None, None).unwrap();
+    db.drive_queued_mutation_once();
+    for id in ids.iter().take(18) {
+        assert!(
+            block_on(view.local_current_row("todos", *id))
+                .unwrap()
+                .is_some()
+        );
+        view.enqueue_transaction_update(
+            update,
+            "todos".to_owned(),
+            *id,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+        db.drive_queued_mutation_once();
+    }
+    for _ in 0..4 {
+        block_on(db.tick()).unwrap();
+    }
+    let write = db.enqueue_commit_mergeable_handle(update).unwrap();
+    db.drive_queued_mutation_once();
+    for _ in 0..8 {
+        block_on(db.tick()).unwrap();
+    }
+    assert!(
+        reader_wake.0.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "live subscription reader must be woken by queued transaction publication"
+    );
+    let mut updated_rows = 0;
+    while let Some(mut event) = subscription.try_next_event() {
+        assert!(block_on(view.hydrate_subscription_event_for_binding_outcome(&mut event)).is_ok());
+
+        if let SubscriptionEvent::Delta { updated, added, .. } = event {
+            updated_rows += updated
+                .iter()
+                .chain(added.iter())
+                .filter(|row| row.cell(&schema.tables[0], "done") == Some(Value::Bool(true)))
+                .count();
+        }
+    }
+    assert_eq!(updated_rows, 18);
+    for _ in 0..8 {
+        block_on(db.tick()).unwrap();
+    }
+    let rows = prepared_all(&view, &query, ReadOpts::default());
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.cell(&schema.tables[0], "done") == Some(Value::Bool(true)))
+            .count(),
+        18
+    );
+    assert_eq!(
+        db.write_state(write.tx_id).unwrap().durability,
+        DurabilityTier::Local
+    );
+}

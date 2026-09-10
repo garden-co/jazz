@@ -707,7 +707,8 @@ where
                     .await?;
                 debug_assert_eq!(published.tx_id, tx_id);
                 if db.node.defer_local_persistence.get() {
-                    db.node.queue_local_publication(published, None);
+                    db.finish_deferred_local_publication(published, None)
+                        .await?;
                 } else {
                     db.finish_publication_outcome(PublicationOutcome::published((), published))
                         .await?;
