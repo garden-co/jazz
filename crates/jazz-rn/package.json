@@ -1,6 +1,6 @@
 {
   "name": "jazz-rn",
-  "version": "2.0.0-alpha.53",
+  "version": "2.0.0-alpha.54",
   "description": "React Native native-relay bridge for Jazz (development builds only)",
   "keywords": [
     "JazzNativeRelay.xcframework",
