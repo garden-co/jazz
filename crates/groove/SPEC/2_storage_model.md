@@ -479,7 +479,11 @@ handles may not coexist with an exclusive browser worker owner.
 The browser capability consumes one live database Web Lock/worker epoch proof for
 one live tree at a time; tree clones share its root, and the last clone dropping
 releases tree admission for a fresh open. It expires before release/close/invalidation,
-and deletion commits recheck it at publication. Unpublished superseded fresh pages
+and deletion commits recheck it at publication. An idle browser runtime is reused
+while foreground lease work retains its physical owner; once that work ends, the
+worker retires the page-store/epoch before a successor opens another tree. This
+boundary must not depend on garbage collection of closed WASM wrappers.
+Unpublished superseded fresh pages
 are omitted from the commit regardless of ownership. A separate reachability
 collector is still required for historical garbage; this policy changes neither
 the durable page encoding nor the storage epoch. Reopening observes either the old root

@@ -1972,7 +1972,12 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
 }
 
 async function releaseIdleContext(context: RuntimeContext): Promise<void> {
+  if (contexts.get(context.key) !== context) return;
   if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return;
+  // Foreground lease handoff can outlive the last runtime peer. Reuse this
+  // exact tree until the physical owner can retire; dropping only the wrapper
+  // would leave its storage alive through GC-retained WASM transport handles.
+  if (pendingBootstrapOperations !== 0 || hasForegroundLeaseWork(context.options.dbName)) return;
   if (!context.closing) {
     context.closing = (async () => {
       for (const peer of context.peers.values()) {
@@ -1993,6 +1998,16 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       context.disposeTelemetry = null;
       context.disposeAuxiliaryTrace?.();
       context.disposeAuxiliaryTrace = null;
+      // No lease work remains; remove its alias before a successor bootstrap
+      // can mistake the closing page store for a reusable lease owner.
+      foregroundLeaseOwners.delete(context.options.dbName);
+      // Start retirement before removing the context. A successor can create
+      // its context immediately, but ensurePhysicalDatabaseOwner waits for this
+      // exact release before opening a fresh page store. Close acknowledgement
+      // must not wait on a slow epoch transaction after the flush barrier.
+      void releasePhysicalDatabaseOwner(context.options.dbName)
+        .catch(() => undefined)
+        .then(maybeCloseWorker);
       if (contexts.get(context.key) === context) contexts.delete(context.key);
     })();
   }
@@ -2011,6 +2026,23 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
 }
 
 function maybeCloseWorker(): void {
+  // Final lease return/retirement must break the retained-context ownership
+  // cycle, even if another database or inspector keeps this realm alive.
+  if (pendingBootstrapOperations === 0) {
+    for (const context of contexts.values()) {
+      if (
+        context.peers.size === 0 &&
+        context.pendingAdmissionTasks === 0 &&
+        !context.closing &&
+        !context.idleReleaseTimer &&
+        !hasForegroundLeaseWork(context.options.dbName)
+      ) {
+        void releaseIdleContext(context)
+          .catch(() => undefined)
+          .then(maybeCloseWorker);
+      }
+    }
+  }
   if (!workerHasLiveWork()) {
     if (pendingWorkerClose) return;
     const closeToken = Symbol("worker-idle-close");
@@ -2066,12 +2098,13 @@ function workerHasLiveWork(): boolean {
   );
 }
 
-function hasForegroundLeaseWork(): boolean {
-  return [...foregroundLeaseOwners.values()].some(
-    (owner) =>
-      owner.activeLeaseIds.size > 0 ||
-      owner.pendingLeaseAllocations > 0 ||
-      owner.pendingLeaseFinalizations > 0,
+function hasForegroundLeaseWork(dbName?: string): boolean {
+  return [...foregroundLeaseOwners.entries()].some(
+    ([name, owner]) =>
+      (dbName === undefined || name === dbName) &&
+      (owner.activeLeaseIds.size > 0 ||
+        owner.pendingLeaseAllocations > 0 ||
+        owner.pendingLeaseFinalizations > 0),
   );
 }
 
