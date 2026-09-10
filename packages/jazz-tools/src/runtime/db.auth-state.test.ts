@@ -117,6 +117,57 @@ function transportSnapshot(db: TestDb, runtimeClient: AuthTestRuntimeClient) {
     },
   };
 }
+interface AuthPublicationSnapshot {
+  publicState: {
+    authMode: AuthState["authMode"];
+    version: unknown;
+  };
+  config: {
+    bearerVersion: unknown;
+    cookieVersion: unknown;
+  };
+  internal: {
+    authMode: Session["authMode"] | undefined;
+    userId: string | undefined;
+    version: unknown;
+  };
+  transport: {
+    bearerVersion: unknown;
+    cookieVersion: unknown;
+  };
+}
+
+function authPublicationSnapshot(
+  db: TestDb,
+  runtimeClient: AuthTestRuntimeClient,
+  state: AuthState,
+): AuthPublicationSnapshot {
+  const config = db.getConfig();
+  const internal = getDbInternalSession(db);
+  const lastBearer = runtimeClient.updateAuthToken.mock.calls.at(-1)?.[0] as string | undefined;
+  const lastCookie = runtimeClient.updateCookieSession.mock.calls.at(-1)?.[0] as
+    | Session
+    | undefined;
+  return {
+    publicState: {
+      authMode: state.authMode,
+      version: state.session?.claims.version,
+    },
+    config: {
+      bearerVersion: jwtClaimVersion(config.jwtToken),
+      cookieVersion: config.cookieSession?.claims.version,
+    },
+    internal: {
+      authMode: internal?.authMode,
+      userId: internal?.user_id,
+      version: internal?.claims.version,
+    },
+    transport: {
+      bearerVersion: jwtClaimVersion(lastBearer),
+      cookieVersion: lastCookie?.claims.version,
+    },
+  };
+}
 
 function makeDbWithCookieSession(cookieSession: Session) {
   const runtimeClient = {
@@ -536,6 +587,58 @@ describe("Db auth state", () => {
         forwarded: { bearer: 1, cookie: 2 },
       },
     ]);
+  });
+
+  it("notifies auth observers after committing one coherent mode-exclusive snapshot", () => {
+    const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
+    const snapshots: AuthPublicationSnapshot[] = [];
+    const stop = db.onAuthChanged((state) => {
+      snapshots.push(authPublicationSnapshot(db, runtimeClient, state));
+    });
+    snapshots.length = 0;
+    db.touchClient();
+
+    db.updateCookieSession(makeCookieSession("B"));
+    stop();
+
+    expect(snapshots).toEqual([
+      {
+        publicState: { authMode: "external", version: "B" },
+        config: { bearerVersion: undefined, cookieVersion: "B" },
+        internal: { authMode: "external", userId: "alice", version: "B" },
+        transport: { bearerVersion: undefined, cookieVersion: "B" },
+      },
+    ]);
+  });
+
+  it("keeps a committed snapshot when an auth observer throws", () => {
+    const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
+    db.touchClient();
+    const observedVersions: unknown[] = [];
+    const observerError = new Error("synthetic auth observer failure");
+    let throwForVersionB = false;
+    const stop = db.onAuthChanged((state) => {
+      const version = state.session?.claims.version;
+      observedVersions.push(version);
+      if (throwForVersionB && version === "B") throw observerError;
+    });
+    throwForVersionB = true;
+
+    expect(() => db.updateCookieSession(makeCookieSession("B"))).toThrow(observerError);
+    throwForVersionB = false;
+
+    expect(authPublicationSnapshot(db, runtimeClient, db.getAuthState())).toEqual({
+      publicState: { authMode: "external", version: "B" },
+      config: { bearerVersion: undefined, cookieVersion: "B" },
+      internal: { authMode: "external", userId: "alice", version: "B" },
+      transport: { bearerVersion: undefined, cookieVersion: "B" },
+    });
+
+    db.updateCookieSession(makeCookieSession("C"));
+    stop();
+
+    expect(observedVersions).toEqual(["A", "B", "C"]);
+    expect(db.getAuthState().session?.claims.version).toBe("C");
   });
 
   it("rejects stale principals and live clears without changing the accepted snapshot", () => {
