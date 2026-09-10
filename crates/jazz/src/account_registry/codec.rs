@@ -1,4 +1,4 @@
-//! Registry v2 uses the Groove record/enum algebra, with no private byte codec.
+//! Registry v1 uses the Groove record/enum algebra, with no private byte codec.
 use super::{AccountCommand, AccountId, Principal};
 use crate::groove::records::{
     EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, Value, ValueType,
@@ -16,7 +16,7 @@ fn principal_descriptor() -> RecordDescriptor {
 fn schema() -> EnumSchema {
     let principal = || ValueType::Record(Box::new(principal_descriptor()));
     EnumSchema::new(
-        "jazz.account-command.v2",
+        "jazz.account-command.v1",
         [
             EnumCase::new(
                 "Register",
@@ -199,7 +199,7 @@ mod tests {
     // The durable descriptor and bytes are not observable through admission APIs:
     // pin them internally so coupled encoder/decoder changes cannot hide drift.
     #[test]
-    fn v2_command_and_descriptor_corpus() {
+    fn v1_command_and_descriptor_corpus() {
         let a = Principal {
             issuer: "i".into(),
             subject: "s".into(),
@@ -253,7 +253,7 @@ mod tests {
         )
         .unwrap()));
         corpus.push('\n');
-        assert_eq!(corpus, include_str!("command-v2.corpus"));
+        assert_eq!(corpus, include_str!("command-v1.corpus"));
         assert!(decode(b"JACC\x01\x00").is_err());
         // A terminal Groove String consumes its record remainder. Valid UTF-8
         // suffixes change that field; they are not malformed framing.
