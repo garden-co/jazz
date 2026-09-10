@@ -34,18 +34,61 @@ pub struct Commit {
     pub deleted_page_ids: Vec<PageId>,
 }
 
+/// Opaque proof that a page store has exclusive ownership for path-local
+/// reclamation. Only adapters in this crate can construct it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageReclamationToken {
+    _private: (),
+}
+
+impl PageReclamationToken {
+    pub(crate) fn new() -> Self {
+        Self { _private: () }
+    }
+}
+
 pub trait PageStore {
     fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>>;
     fn read_page(&self, page_id: PageId) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>>;
     fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>>;
+
+    /// Capability proving that this store currently has exclusive ownership
+    /// of the page namespace. Generic stores are safe by default and retain
+    /// retired pages.
+    fn reclamation_token(&self) -> Option<PageReclamationToken> {
+        None
+    }
 }
 
 /// Deterministic store used by the engine contract tests. Async/failure
 /// injection belongs here rather than in IDBTree so the same tree exercises
 /// resident and genuinely pending I/O.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MemoryPageStore {
     inner: Rc<RefCell<MemoryPageStoreState>>,
+    reclamation_enabled: bool,
+}
+
+impl Default for MemoryPageStore {
+    fn default() -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(MemoryPageStoreState::default())),
+            reclamation_enabled: false,
+        }
+    }
+}
+
+impl MemoryPageStore {
+    /// Reclaiming is reserved for engine tests that provide an exclusive
+    /// ownership adapter; ordinary memory stores model a generic multi-handle
+    /// PageStore and therefore retain retired pages.
+    #[cfg(test)]
+    pub(crate) fn reclaiming() -> Self {
+        Self {
+            reclamation_enabled: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Default)]
@@ -87,5 +130,8 @@ impl PageStore for MemoryPageStore {
             state.metadata = Some(metadata.clone());
             Ok(metadata)
         })
+    }
+    fn reclamation_token(&self) -> Option<PageReclamationToken> {
+        self.reclamation_enabled.then(PageReclamationToken::new)
     }
 }

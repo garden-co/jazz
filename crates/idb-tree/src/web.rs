@@ -1,9 +1,9 @@
-use js_sys::{Array, Promise, Reflect, Uint8Array};
+use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::{BoxFuture, Commit, Metadata, PageStore};
+use crate::{BoxFuture, Commit, Metadata, PageReclamationToken, PageStore};
 
 #[wasm_bindgen]
 extern "C" {
@@ -69,6 +69,18 @@ impl PageStore for IndexedDbPageStore {
             Ok(Some(Uint8Array::new(&value).to_vec()))
         })
     }
+    fn reclamation_token(&self) -> Option<PageReclamationToken> {
+        let enabled = Reflect::get(
+            self.handle.as_ref(),
+            &JsValue::from_str("pageReclamationEnabled"),
+        )
+        .ok()
+        .and_then(|method| method.dyn_into::<Function>().ok())
+        .and_then(|method| method.call0(self.handle.as_ref()).ok())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+        enabled.then(PageReclamationToken::new)
+    }
 
     fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
         Box::pin(async move {
@@ -79,8 +91,10 @@ impl PageStore for IndexedDbPageStore {
                 page_bytes.push(&Uint8Array::from(bytes.as_slice()));
             }
             let deleted_page_ids = Array::new();
-            for page_id in &commit.deleted_page_ids {
-                deleted_page_ids.push(&JsValue::from_f64(page_id_to_f64(*page_id)?));
+            if self.reclamation_token().is_some() {
+                for page_id in &commit.deleted_page_ids {
+                    deleted_page_ids.push(&JsValue::from_f64(page_id_to_f64(*page_id)?));
+                }
             }
             let root_page_id = match commit.metadata.root_page_id {
                 Some(page_id) => page_id_to_f64(page_id)?,

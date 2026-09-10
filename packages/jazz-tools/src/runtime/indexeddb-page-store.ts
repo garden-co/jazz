@@ -160,6 +160,8 @@ export class IndexedDbStorageInvalidatedError extends Error {
  */
 export class IndexedDbPageStore {
   private invalidated = false;
+  private closed = false;
+  private claimedWorkerEpoch: string | null = null;
   private replicaNodeBytes: Uint8Array | null = null;
   private readonly invalidationListeners = new Set<
     (error: IndexedDbStorageInvalidatedError) => void
@@ -348,6 +350,17 @@ export class IndexedDbPageStore {
       INDEXEDDB_BROWSER_WORKER_EPOCH_KEY,
     );
     await done;
+    if (!this.closed && !this.invalidated) this.claimedWorkerEpoch = epoch;
+  }
+
+  /**
+   * Whether this handle still owns a successfully claimed worker epoch.
+   *
+   * The worker must release or close this exact handle before releasing its
+   * Web Lock, and must not commit tree pages after this becomes false.
+   */
+  pageReclamationEnabled(): boolean {
+    return !this.closed && !this.invalidated && this.claimedWorkerEpoch !== null;
   }
 
   /** Delete only this realm's epoch; a stale realm must never clear its successor. */
@@ -358,16 +371,17 @@ export class IndexedDbPageStore {
     const done = transactionDone(tx);
     const store = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
     const current = await requestResult(store.get(INDEXEDDB_BROWSER_WORKER_EPOCH_KEY));
-    if (
+    const matches =
       current &&
       typeof current === "object" &&
       (current as { format?: unknown; epoch?: unknown }).format ===
         INDEXEDDB_BROWSER_WORKER_EPOCH_FORMAT &&
-      (current as { epoch?: unknown }).epoch === epoch
-    ) {
+      (current as { epoch?: unknown }).epoch === epoch;
+    if (matches) {
       store.delete(INDEXEDDB_BROWSER_WORKER_EPOCH_KEY);
     }
     await done;
+    if (matches && this.claimedWorkerEpoch === epoch) this.claimedWorkerEpoch = null;
   }
 
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
@@ -581,6 +595,8 @@ export class IndexedDbPageStore {
   }
 
   close(): void {
+    this.closed = true;
+    this.claimedWorkerEpoch = null;
     this.removeInvalidationListeners();
     this.db.close();
   }
@@ -623,6 +639,8 @@ export class IndexedDbPageStore {
   private invalidate(): void {
     if (this.invalidated) return;
     this.invalidated = true;
+    this.closed = true;
+    this.claimedWorkerEpoch = null;
     this.removeInvalidationListeners();
     const error = new IndexedDbStorageInvalidatedError(this.name);
     for (const listener of this.invalidationListeners) listener(error);

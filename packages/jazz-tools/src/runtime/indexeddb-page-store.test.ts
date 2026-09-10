@@ -115,6 +115,27 @@ describe("IndexedDbPageStore", () => {
     first.close();
   });
 
+  it("enables page reclamation only during the claimed worker epoch", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name, { owner: "app:alice" });
+    expect(store.pageReclamationEnabled()).toBe(false);
+
+    const epoch = "33333333-3333-4333-8333-333333333333";
+    const successor = "44444444-4444-4444-8444-444444444444";
+    await store.claimBrowserWorkerEpoch(epoch);
+    expect(store.pageReclamationEnabled()).toBe(true);
+
+    await store.releaseBrowserWorkerEpoch(successor);
+    expect(store.pageReclamationEnabled()).toBe(true);
+    await store.releaseBrowserWorkerEpoch(epoch);
+    expect(store.pageReclamationEnabled()).toBe(false);
+
+    await store.claimBrowserWorkerEpoch(successor);
+    expect(store.pageReclamationEnabled()).toBe(true);
+    store.close();
+    expect(store.pageReclamationEnabled()).toBe(false);
+  });
+
   it("retains an exact long canonical owner marker rather than requiring a lossy digest", async () => {
     const name = databaseName();
     const owner = JSON.stringify({
