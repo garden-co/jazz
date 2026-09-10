@@ -2398,6 +2398,26 @@ fn embedded_record_admission_matches_legacy_roundtrip_corpus() {
         ),
     ];
     let mut cases = cases;
+    // Exercise recursive tuple detection through every containing type. Raw
+    // wrappers are intentional: public encoding rejects some legacy tuple
+    // representations before they can reach the embedding admission boundary.
+    for (inner, raw) in cases.clone() {
+        let record_type = ValueType::Record(Box::new(inner));
+        cases.push((descriptor([record_type.clone()]), raw.clone()));
+        cases.push((
+            descriptor([ValueType::Array(Box::new(record_type.clone()))]),
+            [1u32.to_le_bytes().as_slice(), raw.as_slice()].concat(),
+        ));
+        cases.push((
+            descriptor([ValueType::Nullable(Box::new(record_type))]),
+            [b"\x01".as_slice(), raw.as_slice()].concat(),
+        ));
+        let schema = EnumSchema::new("wrapper", [EnumCase::new("value", inner)]).unwrap();
+        cases.push((
+            descriptor([ValueType::Enum(Box::new(schema))]),
+            [b"\x00".as_slice(), raw.as_slice()].concat(),
+        ));
+    }
     for value_type in [
         ValueType::String,
         ValueType::Bytes,
