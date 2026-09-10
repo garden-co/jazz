@@ -11,9 +11,11 @@ malformed-input fixtures must identify their trust boundary rather than impose
 universal validation on every getter. Semantic authorization and schema checks
 remain distinct from representation checks.
 
-This is a normative target, not a claim that current getters or decoder failure
-handling implement it. In particular, existing generic nested-record decoding
-and receipt validation still perform redundant canonical round trips.
+Nested record getters and topology-trusted wire/receipt paths implement direct
+decoding without canonical round trips. Untrusted entry points retain explicit
+admission checks until bounded, connection-isolated decoder failure handling is
+established. This does not claim that the full untrusted failure-containment
+target is already implemented.
 
 This is the short map of the representations a query crosses. It answers two
 questions that are easy to blur together: which module owns a representation,
