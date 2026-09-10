@@ -1,6 +1,5 @@
 use js_sys::{Array, Promise, Reflect, Uint8Array};
 use std::cell::Cell;
-use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -53,14 +52,16 @@ extern "C" {
 #[derive(Clone)]
 pub struct IndexedDbPageStore {
     handle: IndexedDbPageStoreHandle,
-    tree_token: Rc<Cell<Option<f64>>>,
+    // Clones used by one TreeCore retain its token; a separate open only
+    // replaces the token in its own adapter, never in another live tree.
+    tree_token: Cell<Option<f64>>,
 }
 
 impl IndexedDbPageStore {
     pub fn from_js(handle: JsValue) -> Self {
         Self {
             handle: handle.unchecked_into(),
-            tree_token: Rc::new(Cell::new(None)),
+            tree_token: Cell::new(None),
         }
     }
 
@@ -90,15 +91,9 @@ impl PageStore for IndexedDbPageStore {
         self.tree_token.set(Some(token));
         let live_handle = self.handle.clone();
         let release_handle = self.handle.clone();
-        let current_token = self.tree_token.clone();
         Ok(TreeOwnership::revocable(
             move || live_handle.tree_ownership_active_js(token).unwrap_or(false),
-            move || {
-                release_handle.release_tree_ownership_js(token);
-                if current_token.get() == Some(token) {
-                    current_token.set(None);
-                }
-            },
+            move || release_handle.release_tree_ownership_js(token),
         ))
     }
 
