@@ -2323,30 +2323,18 @@ pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<Stor
 }
 
 pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8], Error> {
-    let schema = stored_scalar_schema(kind);
     let (tag, payload) =
         crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
     match tag {
         2 => {
-            let descriptor = schema.case(2).map_err(|_| Error::MalformedScalar)?.payload;
-            let values = descriptor
-                .bind(payload)
-                .to_values()
-                .map_err(|_| Error::MalformedScalar)?;
-            let mut fields = primitive_payload_schema(kind).decode_values(&values)?;
-            let value = take_durable_large_value_field(&mut fields, PRIMITIVE_VALUE_FIELD)?;
-            if primitive_bytes(kind, &value).is_err()
-                || descriptor
-                    .create(&values)
-                    .map_err(|_| Error::MalformedScalar)?
-                    != payload
-            {
-                return Err(Error::MalformedScalar);
-            }
-            let span = descriptor
-                .field_span(payload, usize::from(PRIMITIVE_VALUE_FIELD - 1))
-                .map_err(|_| Error::MalformedScalar)?;
-            Ok(&payload[span])
+            // Primitive has exactly one field, slot 1: raw bytes or raw string.
+            // A sole trailing raw field has no header, offsets, padding, or
+            // reserved slots: its canonical record is the payload itself.
+            // split_variant_record already validates the complete tag framing.
+            // Thus logical validation is precisely the old decode/recreate
+            // acceptance check, without allocating copies merely to borrow it.
+            validate_logical(kind, payload).map_err(|_| Error::MalformedScalar)?;
+            Ok(payload)
         }
         3 => {
             // Validate the complete descriptor before reporting that materialization is needed.
@@ -8098,6 +8086,108 @@ mod tests {
             0,
             "an already-inline current row must pass through without scalar re-encoding"
         );
+    }
+
+    fn reference_inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8], Error> {
+        let schema = stored_scalar_schema(kind);
+        let (tag, payload) =
+            crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
+        match tag {
+            2 => {
+                let descriptor = schema.case(2).map_err(|_| Error::MalformedScalar)?.payload;
+                let values = descriptor
+                    .bind(payload)
+                    .to_values()
+                    .map_err(|_| Error::MalformedScalar)?;
+                let mut fields = primitive_payload_schema(kind).decode_values(&values)?;
+                let value = take_durable_large_value_field(&mut fields, PRIMITIVE_VALUE_FIELD)?;
+                if primitive_bytes(kind, &value).is_err()
+                    || descriptor
+                        .create(&values)
+                        .map_err(|_| Error::MalformedScalar)?
+                        != payload
+                {
+                    return Err(Error::MalformedScalar);
+                }
+                let span = descriptor
+                    .field_span(payload, usize::from(PRIMITIVE_VALUE_FIELD - 1))
+                    .map_err(|_| Error::MalformedScalar)?;
+                Ok(&payload[span])
+            }
+            3 => {
+                // Validate the complete descriptor before reporting that materialization is needed.
+                let _ = decode_stored_scalar(kind, encoded)?;
+                Err(Error::RequiresEvaluation)
+            }
+            _ => Err(Error::MalformedScalar),
+        }
+    }
+
+    #[test]
+    fn borrowed_inline_scalar_matches_roundtrip_oracle() {
+        // Pin the premise of the borrowed path: slot 1 is the sole trailing
+        // raw field. There are no reserved slots, offsets, or padding to skip.
+        for kind in [
+            LargeValueKind::Bytes,
+            LargeValueKind::String,
+            LargeValueKind::Json,
+        ] {
+            let schema = primitive_payload_schema(kind);
+            assert_eq!(schema.slots, [DurableLargeValueRecordSlot::Known(1)]);
+            assert_eq!(schema.descriptor.fields().len(), 1);
+            assert_eq!(
+                schema.descriptor.fields()[0].value_type,
+                if kind == LargeValueKind::Bytes {
+                    ValueType::raw_bytes()
+                } else {
+                    ValueType::raw_string()
+                }
+            );
+            let check = |bytes: &[u8]| {
+                assert_eq!(
+                    inline_scalar_bytes(kind, bytes),
+                    reference_inline_scalar_bytes(kind, bytes),
+                    "kind={kind:?}, bytes={bytes:?}"
+                );
+            };
+            for payload in [
+                b"".as_slice(),
+                b"plain",
+                b"{}",
+                b"null",
+                b" {\"a\":1,\"a\":2} ",
+                b"{}x",
+                b"[1,",
+                b"\xff",
+                b"\0",
+                "text 🙂".as_bytes(),
+            ] {
+                let encoded = [b"\x02".as_slice(), payload].concat();
+                check(&encoded);
+                for end in 0..encoded.len() {
+                    check(&encoded[..end]);
+                }
+                for index in 0..encoded.len() {
+                    for replacement in 0..=255 {
+                        let mut changed = encoded.clone();
+                        changed[index] = replacement;
+                        check(&changed);
+                    }
+                }
+                for prefix in [
+                    vec![0],
+                    vec![1],
+                    vec![4],
+                    vec![0x82, 0],
+                    vec![0x82, 0x80, 0],
+                    vec![0xff; 12],
+                ] {
+                    check(&[prefix.as_slice(), payload].concat());
+                }
+            }
+            let large = vec![b' '; 65536];
+            check(&[b"\x02".as_slice(), &large].concat());
+        }
     }
 
     #[test]
