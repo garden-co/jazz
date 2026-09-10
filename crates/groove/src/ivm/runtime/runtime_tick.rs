@@ -1541,6 +1541,11 @@ impl<'a> EvaluationSession<'a> {
             if self.requests.has_pending() {
                 return Poll::Pending;
             }
+            if !self.work_queue.temporal_waiting.is_empty() {
+                // Earlier evaluations own the continuation until their shared
+                // nodes are installed and the temporal barriers are released.
+                return Poll::Pending;
+            }
             return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
         }
     }
