@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { commands } from "vitest/browser";
 import { schema } from "../../src/index.js";
 import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { createBrowserTestDb } from "./account-fixtures.js";
@@ -124,17 +125,14 @@ describe("exact local transaction write merging", () => {
           title: "Second patch",
           done: true,
         });
-        console.info(
-          "transaction-staging-receipt",
-          JSON.stringify({
-            count,
-            updated: updates.length,
-            seedMs,
-            readMs,
-            stageMs,
-            commitMs,
-          }),
-        );
+        await commands.writeRealisticBrowserReport(`transaction-staging-${count}`, {
+          count,
+          updated: updates.length,
+          seedMs,
+          readMs,
+          stageMs,
+          commitMs,
+        });
       } finally {
         await db.shutdown();
       }
