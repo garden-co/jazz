@@ -208,12 +208,25 @@ describe("db exclusive transaction reads browser integration", () => {
     );
   });
 
-  it("rejects partial upserts for missing rows inside transactions", async () => {
+  it("rejects queued partial upserts for missing rows atomically inside transactions", async () => {
+    const { value: existing } = db.insert(app.todos, { title: "Keep original", done: false });
+    expect(await db.all(app.todos)).toEqual([existing]);
     const tx = db.beginExclusiveTransaction();
 
+    // Patch shape is known immediately; row existence is resolved in the queue.
+    expect(() =>
+      // @ts-expect-error Exercise runtime validation of an invalid patch field.
+      tx.upsert(app.todos, existing.id, { done: "invalid boolean" }),
+    ).toThrow();
+    tx.update(app.todos, existing.id, { done: true });
+    tx.insert(app.todos, { title: "Must not publish", done: false });
     expect(() =>
       tx.upsert(app.todos, "00000000-0000-0000-0000-000000000125", { done: true }),
-    ).toThrow("missing required field `title`");
+    ).not.toThrow();
+
+    await expect(async () => tx.commit().wait()).rejects.toThrow("missing required field `title`");
+    // Neither the missing-row upsert nor any earlier operation may publish.
+    expect(await db.all(app.todos)).toEqual([existing]);
   });
 
   describe("db.exclusiveTransaction(cb)", () => {
@@ -484,12 +497,25 @@ describe("db mergeable transaction reads browser integration", () => {
     );
   });
 
-  it("rejects partial upserts for missing rows inside mergeable transactions", async () => {
+  it("rejects queued partial upserts for missing rows atomically inside mergeable transactions", async () => {
+    const { value: existing } = db.insert(app.todos, { title: "Keep original", done: false });
+    expect(await db.all(app.todos)).toEqual([existing]);
     const tx = db.beginTransaction();
 
+    // Patch shape is known immediately; row existence is resolved in the queue.
+    expect(() =>
+      // @ts-expect-error Exercise runtime validation of an invalid patch field.
+      tx.upsert(app.todos, existing.id, { done: "invalid boolean" }),
+    ).toThrow();
+    tx.update(app.todos, existing.id, { done: true });
+    tx.insert(app.todos, { title: "Must not publish", done: false });
     expect(() =>
       tx.upsert(app.todos, "00000000-0000-0000-0000-000000000225", { done: true }),
-    ).toThrow("missing required field `title`");
+    ).not.toThrow();
+
+    await expect(async () => tx.commit().wait()).rejects.toThrow("missing required field `title`");
+    // Neither the missing-row upsert nor any earlier operation may publish.
+    expect(await db.all(app.todos)).toEqual([existing]);
   });
 
   describe("db.transaction(cb)", () => {
