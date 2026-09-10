@@ -1667,7 +1667,7 @@ fn record_value_span_for_layout(
             } else {
                 u32_to_usize(read_u32_at(record, fixed_size + variable_idx * 4)?)?
             };
-            if end < start || end > record.len() {
+            if start < variable_start || end < start || end > record.len() {
                 return Err(Error::InvalidOffset);
             }
             Ok(Span { start, end })

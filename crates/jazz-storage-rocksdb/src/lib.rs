@@ -898,6 +898,15 @@ impl OrderedKvStorage for RocksDbStorage {
                         as StorageScan<'_>,
                 );
             }
+            if bounds.is_empty_range() {
+                if cf != "default" {
+                    self.cf_handle(&cf)?;
+                }
+                return Ok(
+                    Box::new(groove::storage::ReadyStorageCursor::new(Vec::new()))
+                        as StorageScan<'_>,
+                );
+            }
             let (start, upper_bound, prefix) = match bounds {
                 ScanBounds::Range { start, end } => (start, Some(end), None),
                 ScanBounds::Prefix(prefix) => {

@@ -298,6 +298,68 @@ async fn prepared_subscription_lowers_parameter_predicates_to_shape_subscription
         )]
     );
 }
+#[futures_test::test]
+async fn prepared_nullable_parameter_equality_preserves_sql_null_semantics() {
+    let storage =
+        MemoryStorage::new(&["left_rows", "right_rows"]).expect("valid memory storage families");
+    let mut database = Database::new(nullable_join_schema(), storage)
+        .await
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "left_rows",
+        vec![
+            Value::U64(1),
+            Value::Nullable(None),
+            Value::String("left-null".to_owned()),
+        ],
+    );
+    batch.insert(
+        "left_rows",
+        vec![
+            Value::U64(2),
+            Value::Nullable(Some(Box::new(Value::U64(7)))),
+            Value::String("left-seven".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    let query = select_query(
+        Select::new([
+            SelectItem::expr(Expr::column("id")),
+            SelectItem::expr(Expr::column("value")),
+        ])
+        .from([TableRef::named("left_rows")])
+        .where_(Expr::binary(
+            Expr::column("join_key"),
+            BinaryOp::Eq,
+            Expr::parameter("wanted"),
+        )),
+    );
+    let prepared = database.prepare_query(query).await.unwrap();
+
+    let null_binding = database
+        .bind(&prepared, &[("wanted", Value::Nullable(None))])
+        .await
+        .unwrap();
+    assert!(null_binding.recv().unwrap().is_empty());
+
+    let non_null_binding = database
+        .bind(
+            &prepared,
+            &[("wanted", Value::Nullable(Some(Box::new(Value::U64(7)))))],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&non_null_binding),
+        [(
+            vec![Value::U64(2), Value::String("left-seven".to_owned())],
+            1,
+        )]
+    );
+}
 
 #[futures_test::test]
 async fn prepared_subscription_filters_not_equal_parameter_predicates() {

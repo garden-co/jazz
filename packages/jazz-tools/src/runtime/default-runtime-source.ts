@@ -423,7 +423,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     return installWasmTelemetry({
       wasmModule: this.wasmModule,
       collectorUrl,
-      appId: config.appId,
       runtimeThread,
     });
   }

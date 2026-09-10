@@ -466,6 +466,36 @@ describe("TableDataGrid", () => {
     });
   });
 
+  it("preserves exact BigInt filter values through URL and query serialization", async () => {
+    mockWasmSchema.todos.columns = [
+      ...initialMockTodoColumns,
+      { name: "rank", column_type: { type: "BigInt" }, nullable: false },
+    ];
+    currentRows = currentRows.map((row) => ({ ...row, rank: 1n }));
+
+    renderGrid();
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "rank" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "in" } });
+    fireEvent.change(screen.getByLabelText("Value"), {
+      target: { value: "9007199254740993, -9007199254740993" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    await waitFor(() => {
+      const filteredQuery = getLastTodosQuery();
+      expect(JSON.parse(filteredQuery._build())).toMatchObject({
+        conditions: [
+          {
+            column: "rank",
+            op: "in",
+            value: ["9007199254740993", "-9007199254740993"],
+          },
+        ],
+      });
+    });
+  });
+
   it("edits text cells in place and saves from the banner", async () => {
     renderGrid();
 

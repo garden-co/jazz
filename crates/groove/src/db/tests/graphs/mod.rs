@@ -209,6 +209,124 @@ async fn query_subscriptions_support_multi_key_inner_joins() {
         [(vec!["Blue Train".into(), "Coltrane".into()], 1)]
     );
 }
+#[futures_test::test]
+async fn query_subscriptions_do_not_match_null_inner_join_keys() {
+    let storage =
+        MemoryStorage::new(&["left_rows", "right_rows"]).expect("valid memory storage families");
+    let mut database = Database::new(nullable_join_schema(), storage)
+        .await
+        .unwrap();
+
+    let query = select_query(
+        Select::new([
+            SelectItem::aliased(qcol("l", "value"), "left_value"),
+            SelectItem::aliased(qcol("r", "value"), "right_value"),
+        ])
+        .from([TableRef::Join {
+            left: Box::new(TableRef::named("left_rows").aliased("l")),
+            right: Box::new(TableRef::named("right_rows").aliased("r")),
+            kind: JoinKind::Inner,
+            constraint: JoinConstraint::On(Expr::binary(
+                qcol("l", "join_key"),
+                BinaryOp::Eq,
+                qcol("r", "join_key"),
+            )),
+        }]),
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "left_rows",
+        vec![
+            Value::U64(1),
+            Value::Nullable(None),
+            Value::String("left-null".to_owned()),
+        ],
+    );
+    batch.insert(
+        "right_rows",
+        vec![
+            Value::U64(1),
+            Value::Nullable(None),
+            Value::String("right-null".to_owned()),
+        ],
+    );
+    batch.insert(
+        "left_rows",
+        vec![
+            Value::U64(2),
+            Value::Nullable(Some(Box::new(Value::U64(7)))),
+            Value::String("left-seven".to_owned()),
+        ],
+    );
+    batch.insert(
+        "right_rows",
+        vec![
+            Value::U64(2),
+            Value::Nullable(Some(Box::new(Value::U64(7)))),
+            Value::String("right-seven".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database.subscribe_query(query.clone()).await.unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(
+            vec![
+                Value::String("left-seven".to_owned()),
+                Value::String("right-seven".to_owned()),
+            ],
+            1,
+        )]
+    );
+    assert_eq!(
+        database
+            .query(query.clone())
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(
+            vec![
+                Value::String("left-seven".to_owned()),
+                Value::String("right-seven".to_owned()),
+            ],
+            1,
+        )]
+    );
+
+    let mut batch = database.open_batch();
+    batch.update(
+        "left_rows",
+        vec![
+            Value::U64(2),
+            Value::Nullable(None),
+            Value::String("left-now-null".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(
+            vec![
+                Value::String("left-seven".to_owned()),
+                Value::String("right-seven".to_owned()),
+            ],
+            -1,
+        )]
+    );
+    assert!(
+        database
+            .query(query)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap()
+            .is_empty()
+    );
+}
 
 #[futures_test::test]
 async fn query_subscriptions_support_qualified_wildcards_after_join() {

@@ -2,6 +2,9 @@ declare module "jazz-wasm" {
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
   export function nativeArtifactFingerprint(): string;
+  export function setTraceEntryCollectionEnabled(enabled: boolean): void;
+  export function drainTraceEntries(): unknown[];
+  export function subscribeTraceEntries(callback: () => void): () => void;
   export function generateId(): string;
   export function currentTimestamp(): bigint;
   export function deriveUserId(seedB64: string): string;

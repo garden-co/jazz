@@ -56,6 +56,7 @@ export const JazzProvider = defineComponent({
         h(
           LegacyJazzProvider,
           {
+            ...attrs,
             config: props.config!,
             autoAttachDevTools: props.autoAttachDevTools,
           },

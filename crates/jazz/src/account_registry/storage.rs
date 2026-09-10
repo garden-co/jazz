@@ -6,7 +6,7 @@ use super::{
 use crate::groove::storage::{OrderedKvStorage, RecordStore, ScanBounds};
 
 const CF: &str = "default";
-const PREFIX: &[u8] = b"account-command:v2:";
+const PREFIX: &[u8] = b"account-command:v1:";
 
 /// A single authority owns this journal. Conditional append additionally fails
 /// closed if two owners accidentally attempt to advance the same revision.

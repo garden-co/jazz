@@ -84,27 +84,6 @@ describe("browser SharedWorker asset handoff", () => {
     expect(freshRealmIdentity).not.toBe(sourceIdentity);
   });
 
-  it("does not collapse distinct assets that collide under the retired 32-bit scope hash", () => {
-    const first = {
-      wasmUrl: "https://assets.test/jazz_wasm_bg.wasm",
-      brokerWorkerUrl: "https://assets.test/worker/jazz-broker-worker.js",
-      wasmVersion: "build-2826",
-    };
-    const second = {
-      wasmUrl: "https://assets.test/jazz_wasm_bg.wasm",
-      brokerWorkerUrl: "https://assets.test/worker/jazz-broker-worker.js",
-      wasmVersion: "build-290d",
-    };
-
-    // These full canonical identities have the same FNV-1a 32-bit hash. The
-    // worker scope retains the identity itself, so the collision cannot alias
-    // their process-global wasm-bindgen initialization.
-    expect(retiredScopeHash(createBrowserWorkerAssetScope(first))).toBe(
-      retiredScopeHash(createBrowserWorkerAssetScope(second)),
-    );
-    expect(createBrowserWorkerAssetScope(first)).not.toBe(createBrowserWorkerAssetScope(second));
-  });
-
   it("requires an immutable version when browser asset URLs are configured", () => {
     expect(() => resolveBrowserWorkerRuntimeSources({ wasmUrl: "/assets/jazz.wasm" })).toThrow(
       "runtimeSources.wasmVersion",
@@ -134,15 +113,6 @@ describe("browser SharedWorker asset handoff", () => {
     expect(new URL(workerUrl).searchParams.get("jazz-runtime-version")).toBe("deploy-42");
   });
 });
-
-function retiredScopeHash(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
 
 describe("account storage and principal runtime isolation", () => {
   it("reopens the same account root without sharing live authorization between linked identities", async () => {

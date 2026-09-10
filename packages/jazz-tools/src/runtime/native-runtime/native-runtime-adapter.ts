@@ -99,6 +99,8 @@ import {
 } from "../../magic-columns.js";
 
 export { encodeSchema } from "./schema-codec.js";
+const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
+const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
 const NETWORK_RETRY_LIMIT = 10;
@@ -1145,9 +1147,8 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed && !alreadyMarkedClosed) return false;
     this.closed = true;
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
-    for (const subscription of this.subscriptions.values()) {
-      subscription.openingAbort?.abort();
-      if (subscription.source) closeSubscriptionSource(subscription.source);
+    for (const [handle, subscription] of this.subscriptions) {
+      this.terminateSubscription(handle, subscription);
     }
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
@@ -1833,6 +1834,7 @@ export class NativeRuntimeAdapter implements Runtime {
     tier?: string | null,
     optionsJson?: string | null,
   ): Promise<unknown> {
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     assertSupportedReadOptions(tier, optionsJson);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
@@ -1850,7 +1852,7 @@ export class NativeRuntimeAdapter implements Runtime {
     await this.ensureClientSessionClaims(session);
     await this.waitForStrictRemoteQueryTransport(tier);
     await this.processPendingPeerActivityBeforeRead();
-    if (this.closed) return [];
+    if (this.closed || this.ownerRuntime.closed) return [];
     if (!pendingTx) {
       this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     }
@@ -1904,22 +1906,24 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle)!;
     const query = nativeQueryInput(queryJson, this.schema);
     const install = (native: ReadableStream<unknown> | Subscription) => {
-      subscription.source = subscriptionSource(native);
-      if (subscription.cancelled || this.closed) {
-        closeSubscriptionSourceState(subscription);
+      const source = subscriptionSource(native);
+      if (subscription.cancelled || this.closed || this.ownerRuntime.closed) {
+        closeSubscriptionSource(source);
         return;
       }
+      subscription.source = source;
       if (subscription.callback) this.startSubscriptionReader(handle, subscription);
     };
     const fail = (error: unknown) => {
-      if (!subscription.cancelled && !this.closed)
+      if (!subscription.cancelled)
         this.failSubscription(
           subscription,
           error instanceof Error ? error : new Error(String(error)),
         );
     };
     const open = () => {
-      if (subscription.cancelled || this.closed) throw new Error("native operation was cancelled");
+      if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+      if (subscription.cancelled) throw new Error("native operation was cancelled");
       const native = this.subscribeForContext(query, opts, readContext);
       return isPendingNativeOperation<ReadableStream<unknown> | Subscription>(native)
         ? this.awaitNativeOperation(native, subscription.openingAbort!.signal)
@@ -1956,10 +1960,7 @@ export class NativeRuntimeAdapter implements Runtime {
   unsubscribe(handle: number): void {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
-    subscription.cancelled = true;
-    subscription.openingAbort?.abort();
-    closeSubscriptionSourceState(subscription);
-    this.subscriptions.delete(handle);
+    this.terminateSubscription(handle, subscription);
   }
 
   connect(url: string, authJson: string): void {
@@ -2669,12 +2670,16 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private ensureClientSessionClaims(session: RuntimeSession | null): void | Promise<void> {
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     if (!session || session.backendAuthority || this.readAuthorizationHost === "trusted-serving")
       return;
     if (canonicalJson(session.claims) === this.clientSessionClaimsKey) return;
     // Installing correlation claims mutates native state; wait for any active
     // core operation without reintroducing query preparation in TypeScript.
-    const install = () => this.installClientSessionClaims(session.claims);
+    const install = () => {
+      if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+      return this.installClientSessionClaims(session.claims);
+    };
     return this.ownerRuntime.coreOperation ? this.runWhenCoreIdle(install) : install();
   }
   /**
@@ -2749,10 +2754,10 @@ export class NativeRuntimeAdapter implements Runtime {
 
     const refresh = async () => {
       await this.serverCarrierPromise;
-      if (this.closed) return;
+      if (this.closed || this.ownerRuntime.closed) return;
       const edgeOptionsJson = JSON.stringify({ propagation: "full" });
       await this.waitForStrictRemoteQueryTransport("edge");
-      if (this.closed) return;
+      if (this.closed || this.ownerRuntime.closed) return;
       await this.readRowsForContextAsync(
         query,
         readOptions("edge", false, edgeOptionsJson),
@@ -2761,7 +2766,7 @@ export class NativeRuntimeAdapter implements Runtime {
     };
 
     void refresh().catch((error: unknown) => {
-      if (this.closed) return;
+      if (this.closed || this.ownerRuntime.closed) return;
       if (error instanceof Error && error.message === "Timed out waiting for query coverage") {
         return;
       }
@@ -3069,6 +3074,7 @@ export class NativeRuntimeAdapter implements Runtime {
     };
     const consume = (next: SubscriptionSourceRead): boolean => {
       if (next.type === "closed" || !isActive()) {
+        if (next.type === "closed") this.terminateSubscription(handle, subscription);
         finish();
         return false;
       }
@@ -3085,7 +3091,7 @@ export class NativeRuntimeAdapter implements Runtime {
           return false;
         }
         try {
-          this.applySubscriptionChunk(subscription, event);
+          this.applySubscriptionChunk(handle, subscription, event);
         } catch (error) {
           this.failSubscription(
             subscription,
@@ -3120,11 +3126,14 @@ export class NativeRuntimeAdapter implements Runtime {
     advance();
   }
 
-  private applySubscriptionChunk(subscription: SubscriptionState, value: unknown): void {
+  private applySubscriptionChunk(
+    handle: number,
+    subscription: SubscriptionState,
+    value: unknown,
+  ): void {
     const chunk = normalizeSubscriptionChunk(value);
     if (chunk.type === "closed") {
-      closeSubscriptionSourceState(subscription);
-      subscription.cancelled = true;
+      this.terminateSubscription(handle, subscription);
       return;
     }
     if (chunk.type === "rejected") {
@@ -3505,21 +3514,34 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  private terminateSubscription(handle: number, subscription: SubscriptionState): void {
+    if (this.subscriptions.get(handle) === subscription) this.subscriptions.delete(handle);
+    this.retireSubscriptionResources(subscription);
+  }
+
   private failSubscription(subscription: SubscriptionState, error: Error): void {
+    if (subscription.cancelled) return;
+    subscription.terminalError = error;
+    this.retireSubscriptionResources(subscription);
+    // Keep the terminal state addressable until unsubscribe: an asynchronous
+    // opener may fail before executeSubscription installs the callback.
+    this.deliverSubscriptionFailure(subscription);
+  }
+
+  private retireSubscriptionResources(subscription: SubscriptionState): void {
     if (subscription.cancelled) return;
     subscription.cancelled = true;
     subscription.openingAbort?.abort();
-    subscription.terminalError = error;
-    if (subscription.source) {
+    const source = subscription.source;
+    subscription.source = undefined;
+    if (source) {
       try {
-        closeSubscriptionSource(subscription.source);
+        closeSubscriptionSource(source);
       } catch (cleanupError) {
-        // Resource retirement must not replace the causal subscription error
-        // or prevent its once-only delivery to the application.
+        // Cleanup must not replace the causal error or prevent its delivery.
         console.error("Jazz subscription source cleanup failed", cleanupError);
       }
     }
-    this.deliverSubscriptionFailure(subscription);
   }
 
   private deliverSubscriptionFailure(subscription: SubscriptionState): void {
@@ -3629,10 +3651,6 @@ export class NativeRuntimeAdapter implements Runtime {
       if (waiter.active) waiter.resolve();
     }
   }
-}
-
-function closeSubscriptionSourceState(subscription: SubscriptionState): void {
-  if (subscription.source) closeSubscriptionSource(subscription.source);
 }
 
 function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
@@ -4003,6 +4021,21 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return "null";
 }
 
 function sessionClaims(
@@ -5175,12 +5208,24 @@ function readLiteral(value: unknown): QueryLiteral | null {
   ) {
     return { type: "Integer", value: record.value };
   }
-  if (
-    record.type === "BigInt" &&
-    (typeof record.value === "bigint" ||
-      (typeof record.value === "number" && Number.isSafeInteger(record.value)))
-  ) {
-    return { type: "BigInt", value: BigInt(record.value) };
+  if (record.type === "BigInt") {
+    if (
+      typeof record.value === "string" &&
+      record.value.length <= MAX_CANONICAL_SIGNED_I64_LENGTH &&
+      CANONICAL_SIGNED_I64_DECIMAL.test(record.value)
+    ) {
+      try {
+        return { type: "BigInt", value: exactSignedI64(BigInt(record.value), "BigInt value") };
+      } catch {
+        return null;
+      }
+    }
+    if (
+      typeof record.value === "bigint" ||
+      (typeof record.value === "number" && Number.isSafeInteger(record.value))
+    ) {
+      return { type: "BigInt", value: BigInt(record.value) };
+    }
   }
   if (
     record.type === "Timestamp" &&
@@ -6123,22 +6168,6 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
     (bytes[offset + 2]! << 16) |
     (bytes[offset + 3]! << 24)
   );
-}
-
-/** Deterministic cache-key encoding for JSON-derived session claims. */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (isRecord(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
-      .join(",")}}`;
-  }
-  return "null";
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {

@@ -389,8 +389,9 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
 
     fn on_enter(&self, id: &tracing::Id, ctx: Context<'_, S>) {
         if let Some(span_ref) = ctx.span(id) {
-            if span_ref.extensions().get::<SpanTiming>().is_none() {
-                span_ref.extensions_mut().insert(SpanTiming {
+            let mut extensions = span_ref.extensions_mut();
+            if extensions.get_mut::<SpanTiming>().is_none() {
+                extensions.insert(SpanTiming {
                     start_unix_nano: unix_nano_now(),
                 });
             }
@@ -427,26 +428,28 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
         }
     }
 
-    fn on_exit(&self, id: &tracing::Id, ctx: Context<'_, S>) {
-        let should_collect_entry = trace_entry_collection_enabled();
-
-        if let Some(span_ref) = ctx.span(id) {
-            let meta = span_ref.metadata();
-            let extensions = span_ref.extensions();
-            let debug_record = extensions.get::<StringRecorder>();
-            let timing = extensions.get::<SpanTiming>();
-
-            if should_collect_entry {
-                record_span_trace_entry(meta, debug_record, timing);
-            }
+    fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
+        if !trace_entry_collection_enabled() {
+            return;
         }
+
+        let Some(span_ref) = ctx.span(&id) else {
+            return;
+        };
+        let meta = span_ref.metadata();
+        let extensions = span_ref.extensions();
+        let Some(timing) = extensions.get::<SpanTiming>() else {
+            return;
+        };
+        let debug_record = extensions.get::<StringRecorder>();
+        record_span_trace_entry(meta, debug_record, timing);
     }
 }
 
 fn record_span_trace_entry(
     meta: &tracing::Metadata<'_>,
     recorder: Option<&StringRecorder>,
-    timing: Option<&SpanTiming>,
+    timing: &SpanTiming,
 ) {
     if !trace_entry_collection_enabled() {
         return;
@@ -458,9 +461,7 @@ fn record_span_trace_entry(
         name: meta.name().to_string(),
         target: meta.target().to_string(),
         level: meta.level().to_string(),
-        start_unix_nano: timing
-            .map(|value| value.start_unix_nano)
-            .unwrap_or(end_unix_nano),
+        start_unix_nano: timing.start_unix_nano,
         end_unix_nano,
         fields: recorder
             .map(|value| value.fields.clone())
@@ -560,13 +561,34 @@ impl LevelExt for Level {
 #[cfg(test)]
 mod trace_entry_tests {
     use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Mutex;
+    use std::task::{Context as TaskContext, Poll, Waker};
     use std::time::Duration;
 
     use super::*;
+    use tracing::Instrument;
     use tracing_subscriber::prelude::*;
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct TwoPollFuture {
+        polls: usize,
+    }
+
+    impl Future for TwoPollFuture {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
+            self.polls += 1;
+            if self.polls == 1 {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }
+    }
 
     fn span_entry(sequence: u64) -> TraceEntry {
         TraceEntry::Span {
@@ -701,6 +723,62 @@ mod trace_entry_tests {
             Some("RowBatchCreated"),
         );
         assert_eq!(fields.get("tier").map(String::as_str), Some("edge"));
+    }
+
+    #[test]
+    fn emits_one_span_only_when_retained_handle_closes() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        clear_trace_entries_for_test();
+        set_trace_entry_collection_enabled(true);
+
+        let layer = WasmLayer::new(WasmLayerConfig::new().with_max_level(Level::DEBUG));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let never_entered = tracing::debug_span!("never_entered");
+            drop(never_entered);
+
+            let span = tracing::debug_span!("multi_poll", state = "initial");
+            let retained = span.clone();
+            let mut future = Box::pin(TwoPollFuture { polls: 0 }.instrument(span));
+            let mut cx = TaskContext::from_waker(Waker::noop());
+
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert!(
+                drain_trace_entries_for_test().is_empty(),
+                "a pending poll must not emit a completed span"
+            );
+
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(())));
+            assert!(
+                drain_trace_entries_for_test().is_empty(),
+                "an intermediate poll exit must not emit a completed span"
+            );
+
+            drop(future);
+            assert!(
+                drain_trace_entries_for_test().is_empty(),
+                "dropping the instrumented future must not close the retained span"
+            );
+
+            retained.record("state", "final");
+            drop(retained);
+        });
+
+        let drained = drain_trace_entries_for_test();
+        assert_eq!(drained.len(), 1);
+        assert!(matches!(
+            &drained[0],
+            TraceEntry::Span {
+                sequence: 0,
+                name,
+                fields,
+                ..
+            } if name == "multi_poll"
+                && fields.get("state") == Some(&"final".to_string())
+        ));
+        assert!(!drained.iter().any(
+            |entry| matches!(entry, TraceEntry::Span { name, .. } if name == "never_entered")
+        ));
     }
 
     #[test]

@@ -631,6 +631,22 @@ fn filtered_root_prepared_query_still_reads_without_preinstalled_plan() {
         vec![row(1)]
     );
 }
+#[test]
+fn profiled_read_matches_ordinary_read_for_unselected_query() {
+    let schema = issue_schema();
+    let author = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let db = open_db(0xa6, author, &schema);
+    seed_issue_project(&db, author);
+
+    let prepared = db.prepare_query(&joined_issue_query()).unwrap();
+    let ordinary = db.read(&prepared).unwrap();
+    let (profiled, _profile) = db.read_profiled(&prepared).unwrap();
+
+    assert_eq!(
+        profiled, ordinary,
+        "profiled reads must preserve ordinary public rows and descriptors",
+    );
+}
 
 #[test]
 fn authoritative_global_bound_read_uses_the_declared_index() {
@@ -1663,6 +1679,209 @@ fn teams_gather_relation_query() -> RelationQuery {
         },
     }
 }
+#[derive(Clone, Copy, Debug)]
+enum RelationWindowCase {
+    OffsetOutsideLimit,
+    LimitOutsideOffset,
+    NestedLimits,
+    NestedOffsets,
+}
+
+fn projected_users_relation_expr() -> RelationExpr {
+    RelationExpr::Project {
+        input: Box::new(RelationExpr::TableScan {
+            table: "users".to_owned(),
+            alias: None,
+        }),
+        columns: vec![
+            crate::query::RelationProjectColumn {
+                alias: "id".to_owned(),
+                expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+            },
+            crate::query::RelationProjectColumn {
+                alias: "name".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            },
+        ],
+    }
+}
+
+fn ordered_relation_expr(input: RelationExpr, scope: &str) -> RelationExpr {
+    RelationExpr::OrderBy {
+        input: Box::new(input),
+        terms: vec![RelationOrderBy {
+            column: RelationColumnRef {
+                scope: Some(scope.to_owned()),
+                column: "name".to_owned(),
+            },
+            direction: OrderDirection::Asc,
+        }],
+    }
+}
+
+fn windowed_relation_expr(input: RelationExpr, case: RelationWindowCase) -> RelationExpr {
+    match case {
+        RelationWindowCase::OffsetOutsideLimit => RelationExpr::Offset {
+            input: Box::new(RelationExpr::Limit {
+                input: Box::new(input),
+                limit: 5,
+            }),
+            offset: 3,
+        },
+        RelationWindowCase::LimitOutsideOffset => RelationExpr::Limit {
+            input: Box::new(RelationExpr::Offset {
+                input: Box::new(input),
+                offset: 3,
+            }),
+            limit: 5,
+        },
+        RelationWindowCase::NestedLimits => RelationExpr::Limit {
+            input: Box::new(RelationExpr::Limit {
+                input: Box::new(input),
+                limit: 5,
+            }),
+            limit: 3,
+        },
+        RelationWindowCase::NestedOffsets => RelationExpr::Offset {
+            input: Box::new(RelationExpr::Offset {
+                input: Box::new(input),
+                offset: 3,
+            }),
+            offset: 2,
+        },
+    }
+}
+
+fn relation_window_cases() -> [(RelationWindowCase, Vec<RowUuid>); 4] {
+    [
+        (RelationWindowCase::OffsetOutsideLimit, vec![row(4), row(5)]),
+        (
+            RelationWindowCase::LimitOutsideOffset,
+            vec![row(4), row(5), row(6), row(7), row(8)],
+        ),
+        (
+            RelationWindowCase::NestedLimits,
+            vec![row(1), row(2), row(3)],
+        ),
+        (
+            RelationWindowCase::NestedOffsets,
+            vec![row(6), row(7), row(8)],
+        ),
+    ]
+}
+
+#[test]
+fn relation_query_pagination_composes_windows_for_reads_and_subscriptions() {
+    let schema = relation_schema();
+    let db = open_db(0xe1, AuthorSubject::for_test_bytes([0xe1; 16]), &schema);
+    for (id, name) in [
+        (1, "a"),
+        (2, "b"),
+        (3, "c"),
+        (4, "d"),
+        (5, "e"),
+        (6, "f"),
+        (7, "g"),
+        (8, "h"),
+    ] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    for (case, expected) in relation_window_cases() {
+        let query = RelationQuery {
+            rel: windowed_relation_expr(
+                ordered_relation_expr(projected_users_relation_expr(), "users"),
+                case,
+            ),
+        };
+        let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+        assert_eq!(row_ids(&snapshot.rows), expected, "{case:?}");
+    }
+
+    let query = RelationQuery {
+        rel: windowed_relation_expr(
+            ordered_relation_expr(projected_users_relation_expr(), "users"),
+            RelationWindowCase::OffsetOutsideLimit,
+        ),
+    };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(subscription.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), row_ids(&snapshot.rows));
+}
+
+#[test]
+fn relation_query_gather_pagination_composes_windows_for_reads_and_subscriptions() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("teams")
+                .column("name", PublicColumnType::Text)
+                .nullable_fk_column("parent_id", "teams"),
+        ),
+    );
+    let db = open_db(0xe2, AuthorSubject::for_test_bytes([0xe2; 16]), &schema);
+    for (id, name, parent) in [
+        (1, "a", None),
+        (2, "b", Some(1)),
+        (3, "c", Some(2)),
+        (4, "d", Some(3)),
+        (5, "e", Some(4)),
+        (6, "f", Some(5)),
+        (7, "g", Some(6)),
+        (8, "leaf", Some(7)),
+    ] {
+        let mut values = BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]);
+        if let Some(parent) = parent {
+            values.insert(
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(parent).0)))),
+            );
+        }
+        db.insert(
+            "teams",
+            values,
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let query = RelationQuery {
+        rel: windowed_relation_expr(
+            ordered_relation_expr(teams_gather_relation_query().rel, "teams"),
+            RelationWindowCase::OffsetOutsideLimit,
+        ),
+    };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(subscription.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), row_ids(&snapshot.rows));
+
+    for (case, expected) in relation_window_cases() {
+        let query = RelationQuery {
+            rel: windowed_relation_expr(
+                ordered_relation_expr(teams_gather_relation_query().rel, "teams"),
+                case,
+            ),
+        };
+        let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+        assert_eq!(row_ids(&snapshot.rows), expected, "{case:?}");
+    }
+}
 
 #[test]
 fn relation_snapshot_reverse_array_skips_deleted_children() {
@@ -1978,6 +2197,75 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
     assert_eq!(
         terminal_nested_values(&snapshot, row(0xa1), "todosViaOwner", "row_uuid"),
         vec![Value::Uuid(row(0x22).0)]
+    );
+}
+
+/// Alice reads a projected reverse include whose parent has an unrelated JSON cell.
+/// The binding hydration boundary must expose the parent and child without physical types.
+#[test]
+fn relation_snapshot_json_parent_binding_hydration() {
+    assert_relation_snapshot_json_binding_hydration(false);
+}
+
+/// Alice includes a child with JSON, so collector anchor and child arms must
+/// agree on the physical JSON descriptor before binding hydration.
+#[test]
+fn relation_snapshot_json_child_binding_hydration() {
+    assert_relation_snapshot_json_binding_hydration(true);
+}
+
+fn assert_relation_snapshot_json_binding_hydration(child_json: bool) {
+    let mut children = PublicTableSchemaBuilder::new("children").fk_column("parentId", "parents");
+    if child_json {
+        children = children.column("metadata", PublicColumnType::Json { schema: None });
+    }
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("parents")
+                    .column("name", PublicColumnType::Text)
+                    .column("metadata", PublicColumnType::Json { schema: None }),
+            )
+            .table(children),
+    );
+    let db = open_db(0xc2, AuthorSubject::for_test_bytes([0xc2; 16]), &schema);
+    // Db's binding-facing API accepts core cells; row_input! is for JazzClient's
+    // public Value algebra and cannot represent this lower-level input type.
+    let parent = db
+        .insert(
+            "parents",
+            BTreeMap::from([
+                ("name".into(), Value::String("alice".into())),
+                ("metadata".into(), Value::String("{}".into())),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let mut child_cells = BTreeMap::from([("parentId".into(), Value::Uuid(parent.0))]);
+    if child_json {
+        child_cells.insert("metadata".into(), Value::String("{}".into()));
+    }
+    let child = db
+        .insert("children", child_cells, Default::default())
+        .unwrap()
+        .row_uuid();
+    let children = ArraySubquery::new("childrenViaParent", "children", "parentId", "id");
+    let children = if child_json {
+        children
+    } else {
+        children.select(["id"])
+    };
+    let query = Query::from("parents")
+        .select(["id"])
+        .array_subquery(children);
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![parent]);
+    assert_eq!(
+        terminal_nested_values(&snapshot, parent, "childrenViaParent", "row_uuid"),
+        vec![Value::Uuid(child.0)]
     );
 }
 

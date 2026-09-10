@@ -524,6 +524,9 @@ pub struct NodeState<S> {
     storage_type: std::marker::PhantomData<fn() -> S>,
     /// Process-local identity for runtime-local Groove handles such as prepared shape ids.
     groove_runtime_token: u64,
+    /// Next nonzero process-local identity for an authoritative reset acknowledgement.
+    /// This counter is runtime state only; it never enters protocol or durable data.
+    next_authoritative_reset_generation: u64,
     /// Whether this node has complete settled history for historical reads.
     history_complete: bool,
     /// Host-declared completeness for eager scalar-exit authorization probes.
@@ -1092,7 +1095,7 @@ pub(crate) struct AuthorityResultState {
     known_state_declared: bool,
     initial_hydration: bool,
     deferred_publication: bool,
-    pending_authoritative_reset: bool,
+    pending_authoritative_reset: Option<u64>,
     pending_opening: bool,
 }
 
@@ -2116,6 +2119,18 @@ impl CurrentRow {
             && provenance_matches
     }
 
+    /// Compare an aggregate row's stable identity and canonical public payload.
+    ///
+    /// Authority predicate validation must ignore source-row provenance: a
+    /// concurrent source update can preserve an aggregate's public payload
+    /// while changing the provenance carried by the materialized row.
+    pub(crate) fn aggregate_payload_equivalent(&self, other: &Self) -> bool {
+        self.table == other.table
+            && self.row_uuid() == other.row_uuid()
+            && self.deleted == other.deleted
+            && self.subscription_cells_equivalent(other)
+    }
+
     fn subscription_cells_equivalent(&self, other: &Self) -> bool {
         // Decode each cell exactly once. Descriptor order differs between a
         // physical current row and its public projection, so canonicalize the
@@ -2134,9 +2149,9 @@ impl CurrentRow {
             .subscription_cells()
             .map(|(name, value)| Some((name, postcard::to_allocvec(&value).ok()?)))
             .collect::<Option<Vec<_>>>()?;
-        // Logical names may legally collide (for example a group column and
-        // an aggregate alias). The canonical Value bytes preserve multiset
-        // semantics without making equality depend on descriptor order.
+        // Canonical Value bytes preserve multiset semantics for internal role
+        // layouts without making equality depend on descriptor order. Public
+        // aggregate output names are checked separately during query validation.
         cells.sort_unstable();
         Some(cells)
     }

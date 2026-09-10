@@ -43,6 +43,21 @@ test("signup → add todo → reload → todo persists", async ({ page }) => {
   await waitForTodoApp(page);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });
+test("production server serves the SPA shell for root and deep links", async ({ request }) => {
+  test.skip(process.env.JAZZ_E2E_PROD !== "1", "production-only smoke test");
+
+  for (const pathname of ["/", "/dashboard"]) {
+    const response = await request.get(`http://127.0.0.1:3001${pathname}`, {
+      headers: { Accept: "text/html" },
+    });
+    expect(response.status(), pathname).toBe(200);
+    expect(await response.text()).toContain('<div id="root">');
+  }
+  const headResponse = await request.head("http://127.0.0.1:3001/dashboard", {
+    headers: { Accept: "text/html" },
+  });
+  expect(headResponse.status(), "HEAD /dashboard").toBe(404);
+});
 
 test("signin with existing account shows todos", async ({ page }) => {
   const runId = Date.now();

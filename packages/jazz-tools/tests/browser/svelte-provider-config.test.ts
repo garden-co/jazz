@@ -68,7 +68,9 @@ describe("JazzSvelteProvider config handover", () => {
       "the initial opaque-account client to become ready",
     );
 
-    (component as { useReplacementConfig(): void }).useReplacementConfig();
+    // The fixture exports this method from its public component instance.
+    const harness = component as { useReplacementConfig(): void };
+    harness.useReplacementConfig();
     flushSync();
     expect(target.querySelector('[data-provider-state="loading"]')).not.toBeNull();
 
@@ -78,6 +80,89 @@ describe("JazzSvelteProvider config handover", () => {
       10_000,
       "the replacement opaque-account client to become ready",
     );
+  });
+
+  it("hands over when storage configuration changes in place", async () => {
+    const appId = `svelte-provider-${crypto.randomUUID()}`;
+    const initialDbName = crypto.randomUUID();
+    const replacementDbName = crypto.randomUUID();
+    const accounts = await createTestAccountManager(appId);
+    const account = accounts.createLocalFirst();
+    target = document.createElement("div");
+    document.body.appendChild(target);
+
+    component = mount(SvelteProviderConfigHarness, {
+      target,
+      props: {
+        initialConfig: {
+          appId,
+          driver: { type: "persistent", dbName: initialDbName },
+          account,
+        },
+        replacementConfig: {
+          appId,
+          driver: { type: "persistent", dbName: replacementDbName },
+          account,
+        },
+      },
+    });
+
+    await waitForCondition(
+      async () => target?.querySelector("[data-provider-account]")?.textContent === account.id,
+      10_000,
+      "the initial account client to become ready",
+    );
+
+    const harness = component as { useReplacementConfig(): void };
+    harness.useReplacementConfig();
+    flushSync();
+    expect(target.querySelector('[data-provider-state="loading"]')).not.toBeNull();
+
+    await waitForCondition(
+      async () => target?.querySelector("[data-provider-account]")?.textContent === account.id,
+      10_000,
+      "the replacement account client to become ready",
+    );
+  });
+  it("keeps the client for a semantically equivalent replacement config", async () => {
+    const appId = `svelte-provider-${crypto.randomUUID()}`;
+    const dbName = crypto.randomUUID();
+    const accounts = await createTestAccountManager(appId);
+    const account = accounts.createLocalFirst();
+    const initialDate = new Date("2026-01-01T00:00:00.000Z");
+    const equivalentDate = new Date("2026-01-01T00:00:00.000Z");
+    target = document.createElement("div");
+    document.body.appendChild(target);
+
+    component = mount(SvelteProviderConfigHarness, {
+      target,
+      props: {
+        initialConfig: {
+          appId,
+          driver: { type: "persistent", dbName },
+          account,
+          date: initialDate,
+        },
+        replacementConfig: {
+          appId,
+          driver: { type: "persistent", dbName },
+          account,
+          date: equivalentDate,
+        },
+      },
+    });
+
+    await waitForCondition(
+      async () => target?.querySelector("[data-provider-account]")?.textContent === account.id,
+      10_000,
+      "the account client to become ready",
+    );
+
+    const harness = component as { useReplacementConfig(): void };
+    harness.useReplacementConfig();
+    flushSync();
+    expect(target.querySelector('[data-provider-state="loading"]')).toBeNull();
+    expect(target.querySelector("[data-provider-account]")?.textContent).toBe(account.id);
   });
 });
 

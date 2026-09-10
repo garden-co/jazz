@@ -1,3 +1,4 @@
+export { CoState, AccountCoState, InviteListener, SyncConnectionStatus } from "../classic-api.js";
 export { default as JazzSvelteProvider } from "./JazzSvelteProvider.svelte";
 export { default as JazzSvelteClientProvider } from "./JazzSvelteClientProvider.svelte";
 export { createJazzClient, type JazzClient } from "./create-jazz-client.js";

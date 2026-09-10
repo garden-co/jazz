@@ -47,7 +47,7 @@ impl AccountRegistryOwner {
                             .and_then(|profile| {
                                 // Versions this isolated root's journal keys and closed
                                 // descriptor; values use ordinary Groove records.
-                                profile.with_additional_codecs(["jazz.account-journal.v2"])
+                                profile.with_additional_codecs(["jazz.account-journal.v1"])
                             });
                         profile
                             .map_err(|error| error.to_string())

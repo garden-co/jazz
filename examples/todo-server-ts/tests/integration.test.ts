@@ -5,7 +5,7 @@
  * exercise the full HTTP API, and clean up afterwards.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { createAccountManager } from "jazz-tools";
 import {
   deploy,
@@ -73,6 +73,22 @@ function authenticatedFetch(
   headers.set("Authorization", `Bearer ${identity.token}`);
   return fetch(input, { ...init, headers });
 }
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    // This integration test deliberately bounds platform shutdown with a real timer.
+    const timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 describe("Todo Server Integration", () => {
   let server: RunningServer;
@@ -94,8 +110,14 @@ describe("Todo Server Integration", () => {
       permissions,
     });
     primaryIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-integration");
-    // Create server with Fjall-backed storage (temp directory)
-    const todoServer = await createServer(undefined, jazzOptions());
+    // Create an isolated persistent server for the CRUD suite.
+    const todoServer = await createServer(
+      {
+        type: "persistent",
+        dataPath: join(mkdtempSync(join(tmpdir(), "jazz-integration-")), "jazz.db"),
+      },
+      jazzOptions(),
+    );
 
     // Start on random available port
     server = await startServer(todoServer, 0);
@@ -207,7 +229,7 @@ describe("Todo Server Integration", () => {
       const address = occupied.address();
       if (!address || typeof address === "string") throw new Error("expected TCP listener");
 
-      const candidate = await createServer(undefined, jazzOptions());
+      const candidate = await createServer({ type: "memory" }, jazzOptions());
       try {
         await expect(startServer(candidate, address.port)).rejects.toMatchObject({
           code: "EADDRINUSE",
@@ -304,7 +326,10 @@ describe("Todo Server Integration", () => {
       const dbPath = join(dataDir, "jazz.db");
 
       // --- First boot: create some todos ---
-      const server1 = await startServer(await createServer(dbPath, jazzOptions()), 0);
+      const server1 = await startServer(
+        await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
+        0,
+      );
 
       const createRes1 = await authenticatedFetch(`${server1.baseUrl}/todos`, {
         method: "POST",
@@ -327,7 +352,10 @@ describe("Todo Server Integration", () => {
       await stopServer(server1);
 
       // --- Second boot: same data path, fresh server ---
-      const server2 = await startServer(await createServer(dbPath, jazzOptions()), 0);
+      const server2 = await startServer(
+        await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
+        0,
+      );
 
       // The server's public authenticated route must be able to serve the
       // persisted current state immediately after reopening, rather than only
@@ -358,7 +386,10 @@ describe("Todo Server Integration", () => {
     it("returns the current value after dense update history and a restart", async () => {
       const dataDir = mkdtempSync(join(tmpdir(), "jazz-dense-history-"));
       const dbPath = join(dataDir, "jazz.db");
-      const server1 = await startServer(await createServer(dbPath, jazzOptions()), 0);
+      const server1 = await startServer(
+        await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
+        0,
+      );
 
       let todoId: string | undefined;
       try {
@@ -383,7 +414,10 @@ describe("Todo Server Integration", () => {
         await stopServer(server1);
       }
 
-      const server2 = await startServer(await createServer(dbPath, jazzOptions()), 0);
+      const server2 = await startServer(
+        await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
+        0,
+      );
       try {
         const response = await authenticatedFetch(`${server2.baseUrl}/todos/${todoId}`);
         expect(response.status).toBe(200);
@@ -400,7 +434,16 @@ describe("Todo Server Integration", () => {
   describe("SSE Live Endpoint", () => {
     it("streams only the authenticated caller's todos and updates on changes", async () => {
       // Use an isolated server instance so this test has an independent persistence context.
-      const sseServer = await startServer(await createServer(undefined, jazzOptions()), 0);
+      const sseServer = await startServer(
+        await createServer(
+          {
+            type: "persistent",
+            dataPath: join(mkdtempSync(join(tmpdir(), "jazz-sse-")), "jazz.db"),
+          },
+          jazzOptions(),
+        ),
+        0,
+      );
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
@@ -509,6 +552,83 @@ describe("Todo Server Integration", () => {
           await reader.cancel().catch(() => undefined);
         }
         await stopServer(sseServer);
+      }
+    });
+    it("rejects todo requests admitted after draining begins", async () => {
+      const drainingServer = await startServer(
+        await createServer({ type: "memory" }, jazzOptions()),
+        0,
+      );
+      const originalClose = drainingServer.server.close.bind(drainingServer.server);
+      let closeCallback: ((error?: Error) => void) | undefined;
+      drainingServer.server.close = vi.fn((callback?: (error?: Error) => void) => {
+        closeCallback = callback;
+        return drainingServer.server;
+      }) as typeof drainingServer.server.close;
+      const shutdown = stopServer(drainingServer);
+      try {
+        const createResponse = await fetch(`${drainingServer.baseUrl}/todos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "Too late" }),
+        });
+        expect(createResponse.status).toBe(503);
+
+        const streamResponse = await fetch(`${drainingServer.baseUrl}/todos/live`);
+        expect(streamResponse.status).toBe(503);
+        await expect(
+          drainingServer.db.all(app.todos.where({ title: "Too late" })),
+        ).resolves.toEqual([]);
+      } finally {
+        drainingServer.server.close = originalClose as typeof drainingServer.server.close;
+        await new Promise<void>((resolve, reject) => {
+          originalClose((error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+        closeCallback?.();
+        await shutdown;
+      }
+    });
+
+    it("gracefully closes active SSE connections during shutdown", async () => {
+      const sseServer = await startServer(await createServer({ type: "memory" }, jazzOptions()), 0);
+      const sseBaseUrl = sseServer.baseUrl;
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let shutdown: Promise<void> | undefined;
+      let succeeded = false;
+      try {
+        const res = await authenticatedFetch(`${sseBaseUrl}/todos/live`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toBe("text/event-stream");
+
+        const sseReader = res.body!.getReader();
+        reader = sseReader;
+        let initialEvent = "";
+        const decoder = new TextDecoder();
+        while (!initialEvent.includes("\n\n")) {
+          const { value, done } = await sseReader.read();
+          expect(done).toBe(false);
+          initialEvent += decoder.decode(value, { stream: true });
+        }
+        const dataLine = initialEvent
+          .slice(0, initialEvent.indexOf("\n\n"))
+          .split("\n")
+          .find((line) => line.startsWith("data: "));
+        expect(dataLine).toBeDefined();
+
+        const stop = stopServer(sseServer);
+        shutdown = stop;
+        const eof = await withTimeout(sseReader.read(), 10_000);
+        expect(eof.done).toBe(true);
+        await stop;
+        succeeded = true;
+      } finally {
+        if (!succeeded) {
+          await reader?.cancel().catch(() => undefined);
+          await (shutdown ?? stopServer(sseServer)).catch(() => undefined);
+        }
       }
     });
   });

@@ -26,6 +26,18 @@ const app = s.defineApp({
     }),
   }),
 });
+const scalarApp = s.defineApp({
+  filters: s.table({
+    timestamp: s.timestamp(),
+    bytes: s.bytes(),
+    metadata: s.json(),
+    tags: s.array(s.string()),
+  }),
+});
+
+function translatedConditions(query: { _build(): string }) {
+  return JSON.parse(translateQuery(query._build(), scalarApp.wasmSchema)).conditions;
+}
 
 describe("translateQuery", () => {
   it("uses total structured author equality in both flat and relation predicates", () => {
@@ -525,5 +537,110 @@ describe("translateQuery", () => {
     expect(translated.array_subqueries).toMatchObject([{ requirement: "AtLeastOne" }]);
     expect(translated).not.toHaveProperty("__jazz_client_limit");
     expect(translated).not.toHaveProperty("__jazz_client_offset");
+  });
+
+  it("lowers direct Date values as one equality", () => {
+    const timestamp = new Date("2026-01-02T03:04:05.678Z");
+    expect(translatedConditions(scalarApp.filters.where({ timestamp }))).toEqual([
+      {
+        Cmp: {
+          left: { column: "timestamp" },
+          op: "Eq",
+          right: { Literal: { type: "Timestamp", value: timestamp.getTime() } },
+        },
+      },
+    ]);
+  });
+
+  it("lowers direct Uint8Array values as one equality", () => {
+    expect(
+      translatedConditions(scalarApp.filters.where({ bytes: new Uint8Array([1, 2, 3]) })),
+    ).toEqual([
+      {
+        Cmp: {
+          left: { column: "bytes" },
+          op: "Eq",
+          right: { Literal: { type: "Bytea", value: [1, 2, 3] } },
+        },
+      },
+    ]);
+  });
+
+  it("lowers direct JSON objects as one equality", () => {
+    const metadata = { nested: { answer: 42 } };
+    expect(translatedConditions(scalarApp.filters.where({ metadata }))).toEqual([
+      {
+        Cmp: {
+          left: { column: "metadata" },
+          op: "Eq",
+          right: { Literal: { type: "Text", value: JSON.stringify(metadata) } },
+        },
+      },
+    ]);
+  });
+
+  it("lowers direct arrays as one equality", () => {
+    expect(translatedConditions(scalarApp.filters.where({ tags: ["urgent"] }))).toEqual([
+      {
+        Cmp: {
+          left: { column: "tags" },
+          op: "Eq",
+          right: {
+            Literal: {
+              type: "Array",
+              value: [{ type: "Text", value: "urgent" }],
+            },
+          },
+        },
+      },
+    ]);
+  });
+
+  it("treats typo-only JSON objects as direct equality literals", () => {
+    const metadata = { misspelled: true };
+    expect(translatedConditions(scalarApp.filters.where({ metadata }))).toEqual([
+      {
+        Cmp: {
+          left: { column: "metadata" },
+          op: "Eq",
+          right: { Literal: { type: "Text", value: JSON.stringify(metadata) } },
+        },
+      },
+    ]);
+  });
+
+  it("treats empty JSON objects as direct equality literals", () => {
+    const metadata = {};
+    expect(translatedConditions(scalarApp.filters.where({ metadata }))).toEqual([
+      {
+        Cmp: {
+          left: { column: "metadata" },
+          op: "Eq",
+          right: { Literal: { type: "Text", value: JSON.stringify(metadata) } },
+        },
+      },
+    ]);
+  });
+
+  it("lowers provenance Date fields as direct equality", () => {
+    const createdAt = new Date("2026-02-03T04:05:06.789Z");
+    expect(translatedConditions(scalarApp.filters.where({ $createdAt: createdAt }))).toEqual([
+      {
+        Cmp: {
+          left: { column: "$createdAt" },
+          op: "Eq",
+          right: { Literal: { type: "Timestamp", value: createdAt.getTime() } },
+        },
+      },
+    ]);
+  });
+
+  it("keeps recognized JSON operator maps on the existing validation path", () => {
+    expect(() =>
+      translateQuery(
+        scalarApp.filters.where({ metadata: { gt: 1 } } as never)._build(),
+        scalarApp.wasmSchema,
+      ),
+    ).toThrow('JSON column "metadata" only supports eq/ne/in/isNull operators.');
   });
 });

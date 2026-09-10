@@ -1,16 +1,19 @@
 import type { ColumnDescriptor, ColumnType } from "./drivers/types.js";
 
-export type WhereOperator =
-  | "eq"
-  | "ne"
-  | "gt"
-  | "gte"
-  | "lt"
-  | "lte"
-  | "contains"
-  | "in"
-  | "notIn"
-  | "isNull";
+export const WHERE_OPERATORS = [
+  "eq",
+  "ne",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "contains",
+  "in",
+  "notIn",
+  "isNull",
+] as const;
+
+export type WhereOperator = (typeof WHERE_OPERATORS)[number];
 
 export interface WhereOperatorColumn {
   name: string;

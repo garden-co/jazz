@@ -54,11 +54,70 @@ static TALC: talc::wasm::WasmDynamicTalc = talc::wasm::new_wasm_dynamic_allocato
 
 /// Initialize the WASM module.
 ///
-/// Sets up panic hook for better error messages in the browser console.
+/// Sets up the panic hook for better error messages in the browser console.
+/// Tracing is initialized by the first owning database open, after callers
+/// have selected `globalThis.__JAZZ_WASM_LOG_LEVEL`.
 #[wasm_bindgen(start)]
 pub fn init() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
+}
+
+static WASM_TRACING_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+fn initialize_wasm_tracing() {
+    if WASM_TRACING_INITIALIZED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let max_level = configured_wasm_log_level();
+    let config = wasm_tracing::WasmLayerConfig::new()
+        .with_max_level(max_level)
+        .with_console_group_spans();
+    let _ = wasm_tracing::set_as_global_default_with_config(config);
+}
+
+fn configured_wasm_log_level() -> tracing::Level {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let value = js_sys::Reflect::get(
+            &js_sys::global(),
+            &JsValue::from_str("__JAZZ_WASM_LOG_LEVEL"),
+        )
+        .ok()
+        .and_then(|value| value.as_string());
+        return match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            Some("error") => tracing::Level::ERROR,
+            Some("info") => tracing::Level::INFO,
+            Some("debug") => tracing::Level::DEBUG,
+            Some("trace") => tracing::Level::TRACE,
+            _ => tracing::Level::WARN,
+        };
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tracing::Level::WARN
+    }
+}
+
+/// Enable or disable buffering of tracing entries for JavaScript drains.
+#[wasm_bindgen(js_name = setTraceEntryCollectionEnabled)]
+pub fn set_trace_entry_collection_enabled(enabled: bool) {
+    wasm_tracing::set_trace_entry_collection_enabled(enabled);
+}
+
+/// Drain buffered tracing entries as a JavaScript array.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = drainTraceEntries)]
+pub fn drain_trace_entries() -> JsValue {
+    wasm_tracing::drain_trace_entries()
+}
+
+/// Register a callback invoked when buffered tracing entries are ready.
+/// Returns an unsubscribe function.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = subscribeTraceEntries)]
+pub fn subscribe_trace_entries(callback: js_sys::Function) -> js_sys::Function {
+    wasm_tracing::subscribe_trace_entries(callback)
 }
 
 /// Exact build/ABI fingerprint for this generated WASM artifact.
@@ -1475,6 +1534,7 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = openMemory)]
     pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
         validate_untrusted_open_author(&config)?;
@@ -1499,7 +1559,9 @@ impl WasmDb {
     /// `openMemory`: the public raw-open configuration can never select the
     /// privileged system author.
     #[wasm_bindgen(js_name = openMemoryAsBackend)]
+
     pub fn open_memory_as_backend(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
         let identity = backend_open_identity(&config)?;
@@ -1532,6 +1594,7 @@ impl WasmDb {
         app_id: String,
         claimed_author: String,
     ) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
         console_error_panic_hook::set_once();
         let (schema, mut config) = decode_open_args(&schema, &config)?;
         config.identity.author =
@@ -1561,6 +1624,7 @@ impl WasmDb {
         config: Vec<u8>,
         storage_owner: String,
     ) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
         validate_untrusted_open_author(&config)?;
@@ -1594,6 +1658,7 @@ impl WasmDb {
         claimed_author: String,
         storage_owner: String,
     ) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
         console_error_panic_hook::set_once();
         let (schema, mut config) = decode_open_args(&schema, &config)?;
         config.identity.author =

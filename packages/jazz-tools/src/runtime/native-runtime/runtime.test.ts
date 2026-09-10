@@ -2854,6 +2854,146 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("decodes canonical BigInt query strings into exact native i64 literals", async () => {
+    const preparedBytes = await captureNativeQuery(bigintQuerySchema, {
+      table: "metrics",
+      conditions: [
+        {
+          Cmp: {
+            left: { column: "largeCount" },
+            op: "Ge",
+            right: {
+              Literal: { type: "BigInt", value: "-9223372036854775808" },
+            },
+          },
+        },
+        {
+          Cmp: {
+            left: { column: "largeCount" },
+            op: "Eq",
+            right: {
+              Literal: { type: "BigInt", value: "-9007199254740993" },
+            },
+          },
+        },
+        {
+          Cmp: {
+            left: { column: "largeCount" },
+            op: "Le",
+            right: {
+              Literal: { type: "BigInt", value: "9223372036854775807" },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(readPreparedComparisonLiterals(preparedBytes)).toEqual([
+      {
+        predicateTag: 7,
+        column: "largeCount",
+        literal: { tag: 14, value: -9223372036854775808n },
+      },
+      {
+        predicateTag: 3,
+        column: "largeCount",
+        literal: { tag: 14, value: -9007199254740993n },
+      },
+      {
+        predicateTag: 9,
+        column: "largeCount",
+        literal: { tag: 14, value: 9223372036854775807n },
+      },
+    ]);
+  });
+
+  it("decodes canonical BigInt strings recursively inside array literals", async () => {
+    const preparedBytes = await captureNativeQuery(bigintQuerySchema, {
+      table: "metrics",
+      conditions: [
+        {
+          Cmp: {
+            left: { column: "largeCounts" },
+            op: "Eq",
+            right: {
+              Literal: {
+                type: "Array",
+                value: [
+                  { type: "BigInt", value: "9223372036854775807" },
+                  { type: "BigInt", value: "-9007199254740993" },
+                ],
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(readPreparedArrayComparison(preparedBytes)).toEqual({
+      predicateTag: 3,
+      column: "largeCounts",
+      literalTag: 12,
+      values: [
+        { tag: 14, value: 9223372036854775807n },
+        { tag: 14, value: -9007199254740993n },
+      ],
+    });
+  });
+
+  it("rejects malformed, noncanonical, oversized, and out-of-range BigInt strings", async () => {
+    const invalidValues = [
+      "",
+      " 1",
+      "-0",
+      "01",
+      "+1",
+      "1e3",
+      "0x10",
+      "9".repeat(21),
+      "9223372036854775808",
+      "-9223372036854775809",
+    ];
+
+    const all = vi.fn(() => encodeRows([]));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ all, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      bigintQuerySchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    try {
+      for (const value of invalidValues) {
+        await expect(
+          runtime.query(
+            JSON.stringify({
+              table: "metrics",
+              conditions: [
+                {
+                  Cmp: {
+                    left: { column: "largeCount" },
+                    op: "Eq",
+                    right: { Literal: { type: "BigInt", value } },
+                  },
+                },
+              ],
+            }),
+          ),
+        ).rejects.toThrow();
+        expect(all).not.toHaveBeenCalled();
+      }
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("preserves signed policy literals for Rust lowering", () => {
     const encoded = encodeSchema({
       metrics: {
@@ -5327,6 +5467,150 @@ describe("NativeRuntimeAdapter server transport", () => {
     expectPreparedRelationEnvelope(preparedBytes!, "todos");
   });
 });
+describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
+  const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+  const query = app.todos.where({ title: "lifecycle" })._build();
+  const openRuntime = (overrides: Partial<NativeDbForTest>) =>
+    new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb({ tick: () => undefined, ...overrides }) },
+      app.todos._schema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+  it.each(["native-close", "stream-eof"] as const)(
+    "retires a subscription on %s without closing it twice",
+    async (kind) => {
+      const close = vi.fn(() => true);
+      const stream = new ReadableStream({ start: (controller) => controller.close() });
+      const runtime = openRuntime({
+        subscribe: () =>
+          kind === "native-close" ? { readAll: () => [{ type: "closed" }], close } : stream,
+      });
+      const callback = vi.fn();
+      try {
+        const handle = runtime.createSubscription(query);
+        runtime.executeSubscription(handle, callback);
+        // A retired handle is no longer activatable (and does not throw the
+        // duplicate-activation error of a still-registered subscription).
+        await vi.waitFor(() =>
+          expect(() => runtime.executeSubscription(handle, callback)).not.toThrow(),
+        );
+        runtime.unsubscribe(handle);
+        await runtime.close();
+        expect(callback).not.toHaveBeenCalled();
+        if (kind === "native-close") expect(close).toHaveBeenCalledOnce();
+      } finally {
+        await runtime.close();
+      }
+    },
+  );
+
+  it.each(["unsubscribe", "close"] as const)(
+    "does not open a source after %s while claims installation is pending",
+    async (action) => {
+      let release!: () => void;
+      const claims = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const subscribe = vi.fn(() => ({ readAll: () => [], close: () => true }));
+      const installed = vi.fn(() => claims);
+      const runtime = openRuntime({ subscribe, setSessionClaims: installed });
+      const session = JSON.stringify({
+        issuer: "https://issuer.example",
+        user_id: "lifecycle-reader",
+        authMode: "external",
+        claims: {},
+      });
+      try {
+        const handle = runtime.createSubscription(query, session);
+        expect(installed).toHaveBeenCalledOnce();
+        if (action === "unsubscribe") runtime.unsubscribe(handle);
+        else await runtime.close();
+        release();
+        await claims;
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(subscribe).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await runtime.close();
+      }
+    },
+  );
+
+  it("rejects reads and reports subscription errors after owner shutdown", async () => {
+    const all = vi.fn(() => encodeRows([]));
+    const subscribe = vi.fn(() => ({ readAll: () => [], close: () => true }));
+    const native = fakeDb({ all, subscribe, tick: () => undefined });
+    native.registerSchema = () => native;
+    const runtime = openRuntime(native);
+    const view = runtime.registerSchemaView(app.todos._schema);
+    try {
+      await runtime.close();
+      await expect(view.query(query)).rejects.toThrow("Native runtime is closed");
+      const handle = view.createSubscription(query);
+      const callback = vi.fn();
+      view.executeSubscription(handle, callback);
+      expect(callback).toHaveBeenCalledExactlyOnceWith(expect.any(Error));
+      expect(callback.mock.calls[0]?.[0].message).toBe("Native runtime is closed");
+      view.unsubscribe(handle);
+      expect(all).not.toHaveBeenCalled();
+      expect(subscribe).not.toHaveBeenCalled();
+    } finally {
+      await view.close();
+      await runtime.close();
+    }
+  });
+
+  it("reports a foreground read failure without poisoning subsequent reads", async () => {
+    const failure = new Error("coverage failure");
+    const all = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw failure;
+      })
+      .mockImplementation(() => encodeRows([]));
+    const runtime = openRuntime({ all, connectUpstream: () => new FakeTransport([]) });
+    try {
+      await runtime.connectUpstreamPeer();
+      await expect(runtime.query(query, null, "edge")).rejects.toBe(failure);
+      await expect(runtime.query(query, null, "local")).resolves.toEqual([]);
+      expect(all).toHaveBeenCalledTimes(2);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("reports a background coverage failure while keeping local-only reads usable", async () => {
+    const failure = new Error("background coverage failure");
+    const runtime = openRuntime({
+      all: (_query, options) => {
+        if ((options as { tier?: string }).tier === "edge") throw failure;
+        return encodeRows([]);
+      },
+    });
+    const failed = new Promise<Error>((resolve) => runtime.onServerTransportError(resolve));
+    Object.assign(runtime, {
+      serverTransport: new FakeTransport([]),
+      serverCarrier: { close() {} },
+      serverCarrierPromise: Promise.resolve(),
+    });
+    try {
+      await expect(
+        runtime.query(query, null, "local", JSON.stringify({ propagation: "full" })),
+      ).resolves.toEqual([]);
+      await expect(failed).resolves.toBe(failure);
+      await expect(
+        runtime.query(query, null, "local", JSON.stringify({ propagation: "local-only" })),
+      ).resolves.toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+});
 
 describe("NativeRuntimeAdapter streaming inserts", () => {
   it("infers the physical kind and applies backpressure to async chunks", async () => {
@@ -6001,6 +6285,46 @@ const testSchema = {
   },
 } satisfies WasmSchema;
 
+const bigintQuerySchema = s.defineApp({
+  metrics: s.table({
+    largeCount: s.bigint(),
+    largeCounts: s.array(s.bigint()),
+  }),
+}).wasmSchema;
+
+// Capture native bytes for valid queries through the serialized adapter interface.
+async function captureNativeQuery(schema: WasmSchema, query: object): Promise<Uint8Array> {
+  let queryBytes: Uint8Array | undefined;
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          subscribe: (encoded: Uint8Array) => {
+            queryBytes = encoded;
+            return { readAll: () => [], close: () => true };
+          },
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    schema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  try {
+    runtime.createSubscription(JSON.stringify(query));
+    if (queryBytes === undefined)
+      throw new Error("native query bytes were not passed to subscribe");
+    return queryBytes;
+  } finally {
+    await runtime.close();
+  }
+}
+
 function emptyNativeRuntime(): NativeRuntimeAdapter {
   return new NativeRuntimeAdapter(
     {
@@ -6230,6 +6554,27 @@ function readPreparedComparisonLiterals(query: Uint8Array): Array<{
     expect(predicateReader.u64()).toBe(3);
     return { predicateTag, column, literal: readPreparedNumericLiteral(predicateReader) };
   });
+}
+
+function readPreparedArrayComparison(query: Uint8Array): {
+  predicateTag: number;
+  column: string;
+  literalTag: number;
+  values: Array<{ tag: number; value: number | bigint }>;
+} {
+  const reader = new PostcardReader(query);
+  reader.string();
+  const predicateCount = reader.u64();
+  expect(predicateCount).toBe(1);
+  const predicateTag = reader.u64();
+  expect(predicateTag).toBe(3);
+  expect(reader.u64()).toBe(0);
+  const column = reader.string();
+  expect(reader.u64()).toBe(3);
+  const literalTag = reader.u64();
+  expect(literalTag).toBe(12);
+  const values = reader.readVec((valueReader) => readPreparedNumericLiteral(valueReader));
+  return { predicateTag, column, literalTag, values };
 }
 
 function readPreparedNumericLiteral(reader: PostcardReader): {
@@ -7505,6 +7850,11 @@ it("isolates throwing callbacks when replaying a deferred subscription failure",
 });
 
 it("passes different claims independently on same-query reads", async () => {
+  const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+  const rows = [
+    { table: "todos", rowId: new Uint8Array(16), title: "Draft proposal", team: "team-a" },
+    { table: "todos", rowId: new Uint8Array(16), title: "Review budget", team: "team-b" },
+  ];
   const admitted: unknown[] = [];
   const setClaims = vi.fn();
   const runtime = new NativeRuntimeAdapter(
@@ -7523,16 +7873,16 @@ it("passes different claims independently on same-query reads", async () => {
               claims: structuredClone(claims),
             };
             admitted.push(admission);
-            return encodeRows([]);
+            return encodeRows(rows.filter((row) => row.team === (claims as { team: string }).team));
           },
           setIdentityClaims: setClaims,
           tick: () => undefined,
-        } as never),
+        }),
       openBrowser: async () => {
         throw new Error("unused");
       },
     } as never,
-    testSchema,
+    app.todos._schema,
     new Uint8Array(16),
     TEST_RUNTIME_AUTHOR,
     1,
@@ -7545,14 +7895,26 @@ it("passes different claims independently on same-query reads", async () => {
     claims: { team: "team-a" },
     authMode: "external",
   };
-  await runtime.query(JSON.stringify({ table: "todos" }), JSON.stringify(session));
-  await runtime.query(
-    JSON.stringify({ table: "todos" }),
-    JSON.stringify({ ...session, claims: { team: "team-b" } }),
-  );
-  expect(admitted).toHaveLength(2);
-  expect((admitted[0] as { claims: unknown }).claims).toMatchObject({ team: "team-a" });
-  expect((admitted[1] as { claims: unknown }).claims).toMatchObject({ team: "team-b" });
-  expect(setClaims).not.toHaveBeenCalled();
-  await runtime.close();
+  try {
+    for (const [team, title] of [
+      ["team-a", "Draft proposal"],
+      ["team-b", "Review budget"],
+      ["team-a", "Draft proposal"],
+    ]) {
+      await expect(
+        runtime.query(
+          app.todos._build(),
+          JSON.stringify({ ...session, claims: { team } }),
+          "local",
+        ),
+      ).resolves.toMatchObject([{ values: [{ type: "Text", value: title }] }]);
+    }
+    expect(admitted).toHaveLength(3);
+    expect((admitted[0] as { claims: unknown }).claims).toMatchObject({ team: "team-a" });
+    expect((admitted[1] as { claims: unknown }).claims).toMatchObject({ team: "team-b" });
+    expect((admitted[2] as { claims: unknown }).claims).toMatchObject({ team: "team-a" });
+    expect(setClaims).not.toHaveBeenCalled();
+  } finally {
+    await runtime.close();
+  }
 });

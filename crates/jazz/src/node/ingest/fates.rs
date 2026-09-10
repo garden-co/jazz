@@ -359,11 +359,46 @@ where
         if binding.binding_id() != predicate.binding_id {
             return Ok(true);
         }
+        if shape.query().aggregate.is_some() {
+            let at_base = self
+                .query_rows_at_snapshot(&shape, &binding, snapshot)
+                .await?;
+            let at_now = self
+                .query_rows(&shape, &binding, DurabilityTier::Global)
+                .await?;
+            return Ok(!Self::aggregate_query_outputs_equivalent(
+                &at_base, &at_now,
+            ));
+        }
         let at_base = self
             .shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)
             .await?;
         let at_now = self.shape_output_tx_set_now(&shape, &binding).await?;
         Ok(at_base != at_now)
+    }
+
+    fn aggregate_query_outputs_equivalent(
+        left: &[CurrentRow],
+        right: &[CurrentRow],
+    ) -> bool {
+        if left.len() != right.len() {
+            return false;
+        }
+        let mut right_by_id = BTreeMap::new();
+        for row in right {
+            if right_by_id.insert(row.row_uuid(), row).is_some() {
+                return false;
+            }
+        }
+        for row in left {
+            let Some(other) = right_by_id.remove(&row.row_uuid()) else {
+                return false;
+            };
+            if !row.aggregate_payload_equivalent(other) {
+                return false;
+            }
+        }
+        true
     }
 
     async fn shape_output_tx_set_now(

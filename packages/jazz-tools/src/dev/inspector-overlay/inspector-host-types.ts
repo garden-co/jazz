@@ -1,5 +1,9 @@
 import type { WasmSchema } from "../../drivers/types.js";
 import type { ActiveQuerySubscriptionTrace, DbConfig } from "../../runtime/db.js";
+import {
+  deserializeBrowserRelayError,
+  type BrowserRelayError,
+} from "../../runtime/native-runtime/browser-worker-protocol.js";
 
 /** Resolved bearer plus non-secret scope; never a signing root or admin credential. */
 export type InspectorHostConfig = Pick<
@@ -26,7 +30,7 @@ export interface JazzInspectorHost {
    */
   getConnectionConfig(contextKey?: string): InspectorHostConfig;
   /** Open a session-scoped channel for discovering and attaching to worker contexts. */
-  openControlPort(): Promise<MessagePort>;
+  openControlPort(signal?: AbortSignal): Promise<MessagePort>;
   /** The host's runtime schema (plain serializable data — safe across realms). */
   getWasmSchema(): WasmSchema;
   /** Current active subscriptions, without JS stacks. */
@@ -41,6 +45,10 @@ export const INSPECTOR_SUBSCRIPTIONS_MESSAGE = "jazz-inspector:subscriptions" as
 export interface InspectorSubscriptionsMessage {
   type: typeof INSPECTOR_SUBSCRIPTIONS_MESSAGE;
   list: InspectorSubscription[];
+}
+
+export function deserializeInspectorControlError(error: unknown): Error {
+  return deserializeBrowserRelayError(error as BrowserRelayError);
 }
 
 export function serializeActiveSubscriptions(

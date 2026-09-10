@@ -661,6 +661,7 @@ where
             content_runtime_provider,
             storage_type: std::marker::PhantomData,
             groove_runtime_token: next_groove_runtime_token(),
+            next_authoritative_reset_generation: 1,
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             authoritative_scalar_exit_refresh: false,
@@ -1455,6 +1456,26 @@ where
 
         Box::pin(async move {
             match value_type {
+                // JSON remains string-shaped to callers, but query collectors
+                // retain its distinct storage codec through the binding boundary.
+                ValueType::Internal(_)
+                    if *value_type == groove::large_values::physical_storage_value_type(
+                        groove::large_values::LargeValueKind::Json,
+                    ) =>
+                {
+                    match value {
+                        Value::String(_) => Ok(()),
+                        Value::Large(value_ref)
+                            if value_ref.kind == groove::large_values::LargeValueKind::Json =>
+                        {
+                            *value = self.materialize_large_value(value_ref).await?;
+                            Ok(())
+                        }
+                        _ => Err(Error::InvalidStoredValue(
+                            "binding JSON value does not match its descriptor",
+                        )),
+                    }
+                }
                 ValueType::String => match value {
                     Value::String(_) => Ok(()),
                     Value::Large(value_ref)

@@ -22,8 +22,10 @@ they are not stored output caches.
 - `terminal_root_layout` hashes the new `jazz terminal root publication v1`
   domain. Public names and source/result/provenance roles affect the hash;
   compiler allocations and node-local physical-column aliases do not.
-- Group and aggregate aliases can both be `count`: independent role ordinals
-  retain both values. A reader with different compiler slots or local column
+- Internal codec fixtures give both group and aggregate roles the name `count`:
+  independent role ordinals retain both values. Public query validation rejects
+  such duplicate output names; the fixtures defend role identity, not public
+  query acceptance. A reader with different compiler slots or local column
   IDs rebinds only after canonical schema equality. Schema evolution that changes
   a logical name or value type requires the matching compiled schema; it cannot
   reinterpret a previous payload merely because its row width is unchanged.
@@ -256,8 +258,11 @@ that expanded reproduction is tracked separately from the ordering repair.
 
 The exact main baseline passes all eleven `jazz-testkit` tests that failed or
 stalled on typed checkpoint `1c687468f7`. The repaired compiler preserves distinct
-source and result identities when a grouped column and aggregate alias both spell
-`sum_score`. Final projection selects their explicit publication roles.
+source and result identities even when internal group and aggregate roles both
+spell `sum_score`. Final projection selects their explicit publication roles.
+Public query validation now rejects a group output and aggregate alias with
+that same name; callers must choose distinct public aliases. The internal
+carrier and codec collision guarantees remain unchanged.
 
 Joined projections derive nullability from the transformed graph, including keys
 unwrapped for equality. They remove only excess presence wrappers and restore

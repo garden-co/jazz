@@ -2436,17 +2436,10 @@ function sessionPathFilterToExprs(path: string, raw: unknown): PolicyExpr[] {
         }
         break;
       case "gt":
-        exprs.push(sessionCmpExpr(sessionPath, "Gt", value, path));
-        break;
       case "gte":
-        exprs.push(sessionCmpExpr(sessionPath, "Ge", value, path));
-        break;
       case "lt":
-        exprs.push(sessionCmpExpr(sessionPath, "Lt", value, path));
-        break;
       case "lte":
-        exprs.push(sessionCmpExpr(sessionPath, "Le", value, path));
-        break;
+        throw new Error(`Unsupported session.where operator "${op}" in permissions DSL.`);
       case "isNull":
         if (typeof value !== "boolean") {
           throw new Error(`session.where("${path}.isNull") expects a boolean value.`);

@@ -721,6 +721,315 @@ fn aggregate_count_over_empty_query_returns_identity_row() {
         );
     }
 }
+#[test]
+fn aggregate_read_frontiers_and_exclusive_validation() {
+    let metric_schema = signed_metric_schema();
+    let (_empty_dir, mut empty_node) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xa1; 16]), metric_schema.clone());
+    let shape = Query::from("metrics")
+        .count()
+        .validate(&metric_schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let empty_tx = OpenTransactionId::new();
+    empty_node.open_exclusive(empty_tx).unwrap();
+    let empty_snapshot = empty_node.open_transaction_snapshot(empty_tx).unwrap();
+    let empty_snapshot_rows = empty_node
+        .query_rows_at_snapshot(&shape, &binding, &empty_snapshot)
+        .unwrap();
+    let empty_tx_rows = empty_node.tx_query(empty_tx, &shape, &binding).unwrap();
+    assert_eq!(empty_snapshot_rows.len(), 1);
+    assert_eq!(empty_tx_rows.len(), 1);
+    assert_eq!(
+        empty_snapshot_rows[0].test_cells_by_descriptor()["count"],
+        Value::U64(0)
+    );
+    assert_eq!(
+        empty_tx_rows[0].test_cells_by_descriptor()["count"],
+        Value::U64(0)
+    );
+    empty_node
+        .commit_exclusive_settled(empty_tx, AuthorSubject::SYSTEM, 1)
+        .unwrap();
+
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), metric_schema);
+    commit_global_cells(
+        &mut node,
+        "metrics",
+        row(1),
+        BTreeMap::from([
+            ("bucket".to_owned(), Value::String("all".to_owned())),
+            ("score".to_owned(), Value::I64(1)),
+        ]),
+        1_000,
+        1,
+    );
+    let current_rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap();
+    let historical_rows = node.query_rows_at(&shape, &binding, GlobalTime(1)).unwrap();
+    let tx = OpenTransactionId::new();
+    node.open_exclusive(tx).unwrap();
+    let snapshot = node.open_transaction_snapshot(tx).unwrap();
+    let snapshot_rows = node
+        .query_rows_at_snapshot(&shape, &binding, &snapshot)
+        .unwrap();
+    let tx_rows = node.tx_query(tx, &shape, &binding).unwrap();
+    assert_eq!(current_rows.len(), 1);
+    assert_eq!(historical_rows.len(), 1);
+    assert_eq!(snapshot_rows.len(), 1);
+    assert_eq!(tx_rows.len(), 1);
+    let expected_uuid = current_rows[0].row_uuid();
+    let expected_cells = current_rows[0].test_cells_by_descriptor();
+    for rows in [&historical_rows, &snapshot_rows, &tx_rows] {
+        assert_eq!(rows[0].row_uuid(), expected_uuid);
+        assert_eq!(rows[0].test_cells_by_descriptor(), expected_cells);
+    }
+    node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 2)
+        .unwrap();
+
+    let conflicting_tx = OpenTransactionId::new();
+    node.open_exclusive(conflicting_tx).unwrap();
+    let _ = node.tx_query(conflicting_tx, &shape, &binding).unwrap();
+    commit_global_cells(
+        &mut node,
+        "metrics",
+        row(2),
+        BTreeMap::from([
+            ("bucket".to_owned(), Value::String("all".to_owned())),
+            ("score".to_owned(), Value::I64(2)),
+        ]),
+        1_001,
+        2,
+    );
+    assert!(matches!(
+        node.commit_exclusive_settled(conflicting_tx, AuthorSubject::SYSTEM, 3),
+        Err(Error::TransactionConflict)
+    ));
+}
+
+/// The direct snapshot assertion is needed because aggregate snapshot
+/// materialization is an internal frontier used by exclusive validation.
+#[test]
+fn grouped_aggregate_frontiers_preserve_identity_and_validate_payloads() {
+    let schema = signed_metric_schema();
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa3; 16]), schema.clone());
+    for (idx, bucket, score, global_time) in [(1, "a", 1, 1), (2, "a", 2, 2), (3, "b", 10, 3)] {
+        commit_global_cells(
+            &mut node,
+            "metrics",
+            row(idx),
+            BTreeMap::from([
+                ("bucket".to_owned(), Value::String(bucket.to_owned())),
+                ("score".to_owned(), Value::I64(score)),
+            ]),
+            1_000 + idx as u64,
+            global_time,
+        );
+    }
+    let shape = Query::from("metrics")
+        .aggregate([Aggregate::count(), Aggregate::sum("score")])
+        .group_by("bucket")
+        .order_by("bucket", OrderDirection::Asc)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let current_rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap();
+    let historical_rows = node.query_rows_at(&shape, &binding, GlobalTime(3)).unwrap();
+    let tx = OpenTransactionId::new();
+    node.open_exclusive(tx).unwrap();
+    let snapshot = node.open_transaction_snapshot(tx).unwrap();
+    let snapshot_rows = node
+        .query_rows_at_snapshot(&shape, &binding, &snapshot)
+        .unwrap();
+    let tx_rows = node.tx_query(tx, &shape, &binding).unwrap();
+
+    assert_eq!(current_rows.len(), 2);
+    let current_cells = current_rows
+        .iter()
+        .map(|row| row.test_cells_by_descriptor())
+        .collect::<Vec<_>>();
+    assert_eq!(current_cells[0]["bucket"], Value::String("a".to_owned()));
+    assert_eq!(current_cells[0]["count"], Value::U64(2));
+    assert_eq!(current_cells[0]["sum_score"], Value::I64(3));
+    assert_eq!(current_cells[1]["bucket"], Value::String("b".to_owned()));
+    assert_eq!(current_cells[1]["count"], Value::U64(1));
+    assert_eq!(current_cells[1]["sum_score"], Value::I64(10));
+
+    let signature = |rows: &[crate::node::CurrentRow]| {
+        rows.iter()
+            .map(|row| (row.row_uuid(), row.test_cells_by_descriptor()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let expected_signature = signature(&current_rows);
+    assert_eq!(signature(&historical_rows), expected_signature);
+    assert_eq!(signature(&snapshot_rows), expected_signature);
+    assert_eq!(signature(&tx_rows), expected_signature);
+
+    node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 5)
+        .unwrap();
+
+    let locally_interfered_tx = OpenTransactionId::new();
+    node.open_exclusive(locally_interfered_tx).unwrap();
+    assert_eq!(
+        node.tx_query(locally_interfered_tx, &shape, &binding)
+            .unwrap()
+            .len(),
+        2
+    );
+    commit_global_cells(
+        &mut node,
+        "metrics",
+        row(1),
+        BTreeMap::from([
+            ("bucket".to_owned(), Value::String("a".to_owned())),
+            ("score".to_owned(), Value::I64(1)),
+        ]),
+        1_004,
+        4,
+    );
+    let unchanged_rows = node
+        .query_rows(&shape, &binding, DurabilityTier::Global)
+        .unwrap();
+    assert_eq!(signature(&unchanged_rows), expected_signature);
+    assert!(matches!(
+        node.commit_exclusive_settled(locally_interfered_tx, AuthorSubject::SYSTEM, 5),
+        Err(Error::TransactionConflict)
+    ));
+    node.abandon_tx(locally_interfered_tx).unwrap();
+}
+
+fn commit_metric_global_to_authority(
+    writer: &mut NodeState<RocksDbStorage>,
+    authority: &mut NodeState<RocksDbStorage>,
+    row_uuid: RowUuid,
+    bucket: &str,
+    score: i64,
+    now_ms: u64,
+) {
+    let (_tx_id, unit) = writer
+        .commit_mergeable_unit_settled(MergeableCommit::new("metrics", row_uuid, now_ms).cells(
+            BTreeMap::from([
+                ("bucket".to_owned(), Value::String(bucket.to_owned())),
+                ("score".to_owned(), Value::I64(score)),
+            ]),
+        ))
+        .unwrap();
+    let [fate] = authority
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        &fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+    writer.apply_sync_message_settled(fate).unwrap();
+}
+
+#[test]
+fn grouped_aggregate_authority_validation_compares_public_payloads() {
+    let schema = signed_metric_schema();
+    let (_writer_dir, mut writer) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xa4; 16]), schema.clone());
+    let (_other_dir, mut other) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xa5; 16]), schema.clone());
+    let (_authority_dir, mut authority) =
+        open_node_with_uuid(NodeUuid::from_bytes([0xa6; 16]), schema.clone());
+    for (idx, bucket, score) in [(1, "a", 1), (2, "a", 2), (3, "b", 10)] {
+        commit_metric_global_to_authority(
+            &mut writer,
+            &mut authority,
+            row(idx),
+            bucket,
+            score,
+            1_000 + idx as u64,
+        );
+    }
+    let shape = Query::from("metrics")
+        .aggregate([Aggregate::count(), Aggregate::sum("score")])
+        .group_by("bucket")
+        .order_by("bucket", OrderDirection::Asc)
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let signature = |rows: &[crate::node::CurrentRow]| {
+        rows.iter()
+            .map(|row| (row.row_uuid(), row.test_cells_by_descriptor()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let expected_signature = signature(
+        &writer
+            .query_rows(&shape, &binding, DurabilityTier::Global)
+            .unwrap(),
+    );
+    assert_eq!(expected_signature.len(), 2);
+
+    let unchanged_tx = OpenTransactionId::new();
+    writer.open_exclusive(unchanged_tx).unwrap();
+    assert_eq!(
+        writer
+            .tx_query(unchanged_tx, &shape, &binding)
+            .unwrap()
+            .len(),
+        2
+    );
+    commit_metric_global_to_authority(&mut other, &mut authority, row(1), "a", 1, 1_004);
+    assert_eq!(
+        signature(
+            &authority
+                .query_rows(&shape, &binding, DurabilityTier::Global)
+                .unwrap(),
+        ),
+        expected_signature
+    );
+    let (_tx_id, unchanged_unit) = writer
+        .commit_exclusive_settled(unchanged_tx, AuthorSubject::SYSTEM, 1_005)
+        .unwrap();
+    let [unchanged_fate] = authority
+        .apply_sync_message_settled(unchanged_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(
+        matches!(
+            unchanged_fate,
+            SyncMessage::FateUpdate {
+                fate: Fate::Accepted,
+                ..
+            }
+        ),
+        "unexpected unchanged authority fate: {unchanged_fate:?}"
+    );
+
+    let changed_tx = OpenTransactionId::new();
+    writer.open_exclusive(changed_tx).unwrap();
+    assert_eq!(
+        writer.tx_query(changed_tx, &shape, &binding).unwrap().len(),
+        2
+    );
+    commit_metric_global_to_authority(&mut other, &mut authority, row(2), "a", 20, 1_006);
+    let (_tx_id, changed_unit) = writer
+        .commit_exclusive_settled(changed_tx, AuthorSubject::SYSTEM, 1_007)
+        .unwrap();
+    let [changed_fate] = authority
+        .apply_sync_message_settled(changed_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        changed_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+            ..
+        }
+    ));
+}
 
 #[test]
 fn aggregate_sum_min_max_over_filtered_query() {

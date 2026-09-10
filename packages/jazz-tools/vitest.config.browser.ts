@@ -1,4 +1,5 @@
 import { testWasmDelivery } from "../../dev/gates/test-wasm-delivery.mjs";
+import { createWorkerFaultBundleFixture } from "./tests/browser/worker-fault-bundle-node.js";
 import { recoverPendingIndexedDbWrites } from "./tests/browser/indexeddb-pending-recovery-node.js";
 import {
   liveEdgeBackendOpen,
@@ -60,6 +61,9 @@ const jazzWasmTestEntry = sealedWasmPackage
   : correctnessSnapshot
     ? resolve(correctnessSnapshot.wasmPackage, "jazz_wasm.js")
     : resolve(__dirname, "../../crates/jazz-wasm");
+const workerFaultBundle = createWorkerFaultBundleFixture(
+  sealedWasmPackage ?? correctnessSnapshot?.wasmPackage,
+);
 
 export default defineConfig({
   define: {
@@ -70,6 +74,7 @@ export default defineConfig({
     __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: JSON.stringify(realisticBrowserLimitOverrides),
   },
   plugins: [
+    workerFaultBundle.plugin,
     ...(sealedWasmPackage || correctnessSnapshot
       ? [
           testWasmDelivery(
@@ -124,6 +129,7 @@ export default defineConfig({
         },
       ],
       commands: {
+        workerFaultBundleUrl: async () => workerFaultBundle.url(),
         recoverPendingIndexedDbWrites: async ({ context, page }, config) =>
           recoverPendingIndexedDbWrites(context, page, config),
         writeBrowserStorageCorpus: async (_context, records: Record<string, string>) => {

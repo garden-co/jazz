@@ -31,6 +31,14 @@ export interface ForegroundNodeLease {
   retire(): Promise<void>;
 }
 
+/** Browser-only terminal cleanup; the durable retirement outcome remains unknown. */
+export interface BrowserForegroundNodeLease extends ForegroundNodeLease {
+  /** The caller must first disable the foreground lifetime that can mint this node's TxIds. */
+  abandonAfterWorkerFailure(error: Error): void;
+  /** Locally releases an erased epoch after its worker-authored reset receipt; never writes a handoff. */
+  releaseAfterStorageReset(reason: Error): void;
+}
+
 export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   collectorUrl: string;
@@ -48,7 +56,7 @@ export interface BrowserWorkerConnection {
   deleteStorage(): Promise<void>;
   flushLocal(): Promise<void>;
   waitForPendingWrites(): Promise<void>;
-  openInspectorControlPort(): Promise<MessagePort>;
+  openInspectorControlPort(signal?: AbortSignal): Promise<MessagePort>;
   shutdown(): Promise<void>;
   /** Present only after an authenticated Inspector control-port attachment. */
   getAuthenticatedInspectorAttachmentPhysicalDbName?(): string | null;
@@ -73,7 +81,7 @@ export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig =
   /** The worker namespace's explicit offline state changed. */
   onExplicitOfflineChange?: (offline: boolean) => void;
   onFailure: (error: unknown) => void;
-  onStorageReset?: () => void;
+  onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
 }
 
@@ -86,7 +94,7 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
   /** The worker namespace's explicit offline state changed. */
   onExplicitOfflineChange?: (offline: boolean) => void;
   onFailure: (error: unknown) => void;
-  onStorageReset?: () => void;
+  onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
 }
 
@@ -162,7 +170,7 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     return undefined;
   }
 
-  acquireBrowserForegroundNodeLease(_config: RuntimeConfig): Promise<ForegroundNodeLease> {
+  acquireBrowserForegroundNodeLease(_config: RuntimeConfig): Promise<BrowserForegroundNodeLease> {
     return Promise.reject(
       new Error("Db runtime source does not support browser foreground leases"),
     );

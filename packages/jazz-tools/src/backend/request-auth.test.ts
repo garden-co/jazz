@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -75,10 +75,10 @@ class JwksServer {
     this.secret = secret;
   }
 
-  static async start(secret = JWT_SECRET): Promise<JwksServer> {
+  static async start(secret = JWT_SECRET, path = "/jwks"): Promise<JwksServer> {
     let instance: JwksServer;
     const server = createHttpServer((request, response) => {
-      if (request.url !== "/jwks") {
+      if (request.url !== path) {
         response.statusCode = 404;
         response.end("not found");
         return;
@@ -114,7 +114,7 @@ class JwksServer {
       });
     });
 
-    instance = new JwksServer(server, `http://127.0.0.1:${port}/jwks`, secret);
+    instance = new JwksServer(server, `http://127.0.0.1:${port}${path}`, secret);
     return instance;
   }
 
@@ -351,6 +351,7 @@ describe("backend request auth", () => {
   });
 
   it("accepts local-first JWTs without jwksUrl and uses the shared session mapping", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch");
     const appId = "local-first-backend-app";
     const userId = "11111111-1111-1111-1111-111111111111";
     const token = makeUnsignedJwt({
@@ -379,6 +380,7 @@ describe("backend request auth", () => {
       claims: { auth_mode: "local-first" },
       authMode: "local-first",
     });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("rejects local-first JWTs when allowLocalFirstAuth is disabled", async () => {
@@ -431,6 +433,206 @@ describe("backend request auth", () => {
       claims: { role: "editor" },
       authMode: "external",
     });
+  });
+
+  it("rejects remote plaintext JWKS before fetching valid signing keys", async () => {
+    const secret = randomUUID();
+    const path = `/jwks/${randomUUID()}`;
+    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "transport-user" }, secret);
+    const request = { headers: { authorization: `Bearer ${token}` } };
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        JSON.stringify({
+          keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(secret) }],
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    try {
+      await expect(
+        resolveRequestSession(request, {
+          appId: "app-with-secure-jwks",
+          jwksUrl: `https://keys.example${path}`,
+        }),
+      ).resolves.toMatchObject({
+        issuer: "https://issuer.example",
+        user_id: "transport-user",
+        authMode: "external",
+      });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      fetcher.mockClear();
+
+      const [attempt] = await Promise.allSettled([
+        resolveRequestSession(request, {
+          appId: "app-with-plaintext-jwks",
+          jwksUrl: `http://keys.example${path}`,
+        }),
+      ]);
+
+      expect({
+        status: attempt!.status,
+        fetches: fetcher.mock.calls.length,
+      }).toEqual({ status: "rejected", fetches: 0 });
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+
+  it("rejects redirected JWKS without contacting the valid-key destination", async () => {
+    const secret = randomUUID();
+    const destination = await JwksServer.start(secret, `/jwks/${randomUUID()}`);
+    const redirectPath = `/redirect/${randomUUID()}`;
+    let redirectRequests = 0;
+    const redirectServer = createHttpServer((request, response) => {
+      if (request.url !== redirectPath) {
+        response.writeHead(404).end();
+        return;
+      }
+      redirectRequests += 1;
+      response.writeHead(302, { Location: destination.url }).end();
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        redirectServer.once("error", reject);
+        redirectServer.listen(0, "127.0.0.1", () => resolve());
+      });
+      const address = redirectServer.address();
+      if (!address || typeof address === "string") {
+        throw new Error("failed to allocate redirect test port");
+      }
+      const token = signHs256Jwt(
+        { iss: "https://issuer.example", sub: "redirect-key-user" },
+        secret,
+      );
+      const request = { headers: { authorization: `Bearer ${token}` } };
+
+      await expect(
+        resolveRequestSession(request, {
+          appId: "app-with-direct-jwks",
+          jwksUrl: destination.url,
+        }),
+      ).resolves.toMatchObject({
+        issuer: "https://issuer.example",
+        user_id: "redirect-key-user",
+        authMode: "external",
+      });
+      expect(destination.requests).toBe(1);
+      // Count only destination traffic caused by the redirected authentication attempt.
+      destination.requests = 0;
+
+      const [attempt] = await Promise.allSettled([
+        resolveRequestSession(request, {
+          appId: "app-with-redirected-jwks",
+          jwksUrl: `http://127.0.0.1:${address.port}${redirectPath}`,
+        }),
+      ]);
+
+      expect(redirectRequests).toBe(1);
+      expect({
+        status: attempt!.status,
+        destinationRequests: destination.requests,
+      }).toEqual({ status: "rejected", destinationRequests: 0 });
+    } finally {
+      await Promise.all([
+        destination.stop(),
+        new Promise<void>((resolve) => redirectServer.close(() => resolve())),
+      ]);
+    }
+  });
+
+  it.each([
+    "http://localhost.",
+    "http://localhost.example",
+    "http://dev.localhost",
+    "http://127.attacker.example",
+    "http://126.255.255.255",
+    "http://128.0.0.1",
+    "http://0.0.0.0",
+    "http://192.168.1.1",
+    "http://[::ffff:127.0.0.1]",
+    "http://[::2]",
+    "ftp://localhost",
+    "file://localhost",
+    "data:application/json,",
+  ])("rejects JWKS at %s before fetching signing keys", async (origin) => {
+    const secret = randomUUID();
+    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "url-policy-user" }, secret);
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(
+        JSON.stringify({
+          keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(secret) }],
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const [attempt] = await Promise.allSettled([
+      resolveRequestSession(
+        { headers: { authorization: `Bearer ${token}` } },
+        { appId: "app-with-url-policy", jwksUrl: `${origin}/jwks/${randomUUID()}` },
+      ),
+    ]);
+
+    expect({
+      status: attempt!.status,
+      fetches: fetcher.mock.calls.length,
+    }).toEqual({ status: "rejected", fetches: 0 });
+  });
+
+  it.each([
+    // Bind both loopback families: localhost resolution differs across hosts.
+    ["LOCALHOST", "::"],
+    ["[0:0:0:0:0:0:0:1]", "::1"],
+    ["127.1", "127.0.0.1"],
+    ["2130706433", "127.0.0.1"],
+    ["127.255.255.254", "127.255.255.254"],
+  ])("verifies signing keys over HTTP at canonical loopback %s", async (hostname, listenHost) => {
+    const secret = randomUUID();
+    const path = `/jwks/${randomUUID()}`;
+    let requests = 0;
+    const server = createHttpServer((request, response) => {
+      if (request.url !== path) {
+        response.writeHead(404).end();
+        return;
+      }
+      requests += 1;
+      response.writeHead(200, { "Content-Type": "application/json" }).end(
+        JSON.stringify({
+          keys: [{ kty: "oct", kid: JWT_KID, k: base64Url(secret) }],
+        }),
+      );
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, listenHost, () => resolve());
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("failed to allocate loopback test port");
+      }
+      const token = signHs256Jwt({ iss: "https://issuer.example", sub: "loopback-user" }, secret);
+
+      await expect(
+        resolveRequestSession(
+          { headers: { authorization: `Bearer ${token}` } },
+          {
+            appId: "app-with-loopback-jwks",
+            jwksUrl: `http://${hostname}:${address.port}${path}`,
+          },
+        ),
+      ).resolves.toMatchObject({
+        issuer: "https://issuer.example",
+        user_id: "loopback-user",
+        authMode: "external",
+      });
+      expect(requests).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("shares one cold JWKS fetch and rejects invalid JWTs without an immediate refresh", async () => {
@@ -681,6 +883,7 @@ describe("backend request auth", () => {
   });
 
   it("verifies external JWTs via a static JWK and uses JWT sub as the session user", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch");
     const token = signHs256Jwt({
       sub: "user-subject",
       iss: "https://issuer.example",
@@ -710,6 +913,7 @@ describe("backend request auth", () => {
       claims: { role: "editor" },
       authMode: "external",
     });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("rejects a signed external JWT from a different configured issuer", async () => {

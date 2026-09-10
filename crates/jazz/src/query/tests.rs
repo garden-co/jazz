@@ -719,6 +719,140 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_count_and_sum_reject_duplicate_output_alias() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("metrics")
+                    .column("score", PublicColumnType::Integer),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("aggregate public schema compiles");
+
+        let result = Query::from("metrics")
+            .aggregate([
+                Aggregate::count().alias("metric"),
+                Aggregate::sum("score").alias("metric"),
+            ])
+            .validate(&schema);
+
+        let error = result
+            .expect_err("count and sum must not publish the same aggregate output name");
+        assert_eq!(
+            error,
+            QueryError::AggregateOutputNameCollision("metric".to_owned())
+        );
+    }
+
+    #[test]
+    fn aggregate_alias_rejects_group_output_name() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("metrics")
+                    .column("count", PublicColumnType::Text),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).unwrap();
+
+        let error = Query::from("metrics")
+            .count()
+            .group_by("count")
+            .validate(&schema)
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            QueryError::AggregateOutputNameCollision("count".to_owned())
+        );
+    }
+
+    #[test]
+    fn aggregate_output_names_allow_source_aliases_and_distinct_case() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("metrics")
+                    .column("bucket", PublicColumnType::Text)
+                    .column("score", PublicColumnType::Integer),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).unwrap();
+
+        let validated = Query::from("metrics")
+            .aggregate([
+                Aggregate::sum("score").alias("score"),
+                Aggregate::count().alias("Score"),
+                Aggregate::count().alias("Bucket"),
+            ])
+            .group_by("bucket")
+            .order_by("score", OrderDirection::Desc)
+            .order_by("Score", OrderDirection::Asc)
+            .order_by("Bucket", OrderDirection::Asc)
+            .validate(&schema)
+            .expect("only exact names in the output reserve aliases");
+        let reordered = Query::from("metrics")
+            .aggregate([
+                Aggregate::count().alias("Bucket"),
+                Aggregate::count().alias("Score"),
+                Aggregate::sum("score").alias("score"),
+            ])
+            .group_by("bucket")
+            .order_by("score", OrderDirection::Desc)
+            .order_by("Score", OrderDirection::Asc)
+            .order_by("Bucket", OrderDirection::Asc)
+            .validate(&schema)
+            .unwrap();
+        assert_eq!(validated.shape_id(), reordered.shape_id());
+    }
+
+    #[test]
+    fn aggregate_output_name_collision_preserves_existing_error_precedence() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("metrics")
+                    .column("score", PublicColumnType::Integer)
+                    .column("label", PublicColumnType::Text),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).unwrap();
+        let colliding = [
+            Aggregate::count().alias("metric"),
+            Aggregate::sum("score").alias("metric"),
+        ];
+        assert_eq!(
+            Query::from("metrics")
+                .aggregate(colliding.clone())
+                .group_by("missing")
+                .validate(&schema)
+                .unwrap_err(),
+            QueryError::UnknownColumn {
+                table: "metrics".to_owned(),
+                column: "missing".to_owned(),
+            }
+        );
+
+        for (invalid, expected) in [
+            (
+                Aggregate::sum("missing"),
+                QueryError::UnknownColumn {
+                    table: "metrics".to_owned(),
+                    column: "missing".to_owned(),
+                },
+            ),
+            (
+                Aggregate::sum("label"),
+                QueryError::OperandTypeMismatch,
+            ),
+            (
+                Aggregate::count().alias("__jazz_aggregate_reserved"),
+                QueryError::ReservedAggregateAlias("__jazz_aggregate_reserved".to_owned()),
+            ),
+        ] {
+            let query = Query::from("metrics")
+                .aggregate(colliding.clone().into_iter().chain([invalid]));
+            assert_eq!(query.validate(&schema).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
     fn validates_aggregate_columns_types_grouping_and_ordering() {
         let validated = Query::from("issues")
             .aggregate([

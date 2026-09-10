@@ -480,7 +480,7 @@ pub(crate) struct AggregateResultSchema {
     pub(crate) group_names: Vec<String>,
     /// Ordered aggregate value fields.
     pub(crate) value_fields: Vec<groove::records::DescriptorField>,
-    /// Declared aggregate aliases, including aliases colliding with group names.
+    /// Declared aggregate aliases; public validation rejects group-name collisions.
     pub(crate) value_names: Vec<String>,
     /// Retained binding/routing parameter fields.
     pub(crate) routing_param_fields: BTreeSet<String>,

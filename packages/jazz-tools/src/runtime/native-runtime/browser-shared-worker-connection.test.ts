@@ -5,6 +5,7 @@ import {
   SharedBrowserForegroundNodeLease,
   SharedBrowserWorkerConnection,
 } from "./browser-shared-worker-connection.js";
+import { BrowserWorkerUnresponsiveError } from "./browser-worker-protocol.js";
 
 type LeaseMessage =
   | { type: "probe-foreground-node-lease-worker"; attemptId: string }
@@ -117,7 +118,9 @@ class ScriptedRuntimePort {
   private readonly listeners = new Map<string, Set<(event: MessageEvent) => void>>();
   closed = false;
 
-  constructor(private readonly onPost: (message: { type?: string; id?: number }) => void) {}
+  constructor(
+    private readonly onPost: (message: { type?: string; id?: number; attemptId?: string }) => void,
+  ) {}
 
   start(): void {}
 
@@ -135,7 +138,7 @@ class ScriptedRuntimePort {
     this.listeners.get(type)?.delete(listener);
   }
 
-  postMessage(message: { type?: string; id?: number }): void {
+  postMessage(message: { type?: string; id?: number; attemptId?: string }): void {
     this.onPost(message);
   }
 
@@ -143,6 +146,58 @@ class ScriptedRuntimePort {
     for (const listener of this.listeners.get("message") ?? [])
       listener({ data: message } as MessageEvent);
   }
+
+  emitMessageError(): void {
+    for (const listener of this.listeners.get("messageerror") ?? [])
+      listener(new MessageEvent("messageerror"));
+  }
+}
+
+function runtimeBootstrapFixture() {
+  const sent: Array<{ type?: string; id?: number }> = [];
+  const port = new ScriptedRuntimePort((message) => {
+    sent.push(message);
+    if (message.type === "connect-runtime") port.emit({ type: "worker-alive" });
+    if (message.type === "init") port.emit({ type: "result", id: message.id });
+  });
+  vi.stubGlobal(
+    "SharedWorker",
+    class {
+      readonly port = port;
+    },
+  );
+  const connection = new SharedBrowserWorkerConnection(
+    {
+      connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
+      onPeerTransportWork: () => () => undefined,
+      progressPeerTransport: async () => undefined,
+      retirePeerTransport: async () => undefined,
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+      flushLocalSettlements: async () => undefined,
+    } as never,
+    {
+      schema: {},
+      dbName: "runtime-budget-controls",
+      author: new Uint8Array(16),
+      initialSyncFlushEvery: 1,
+      appId: "app",
+      storageOwner: "owner",
+      authSessionKey: "scope",
+      authJson: "{}",
+      sessionClaims: {},
+    },
+    "runtime-fingerprint",
+    {
+      onAuthFailure: vi.fn(),
+      onAuthRestored: vi.fn(),
+      onExplicitOfflineChange: vi.fn(),
+      onFailure: vi.fn(),
+      onStorageReset: vi.fn(),
+      onStorageInvalidated: vi.fn(),
+    },
+  );
+  return { connection, port, sent };
 }
 
 class InspectorPort {
@@ -160,6 +215,140 @@ class InspectorPort {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("browser foreground lease terminal abandonment", () => {
+  async function acquireLease(retirePostError?: Error) {
+    const sent: string[] = [];
+    const port = new ScriptedRuntimePort((message) => {
+      sent.push(message.type!);
+      if (message.type === "probe-foreground-node-lease-worker") {
+        port.emit({ type: "foreground-node-lease-worker-alive", attemptId: message.attemptId });
+      } else if (message.type === "acquire-foreground-node-lease") {
+        port.emit({
+          type: "foreground-node-lease-ready",
+          leaseId: "00000000-0000-4000-8000-000000000003",
+          node: new Uint8Array(16),
+          confirmedTxTime: "0",
+        });
+      } else if (message.type === "retire-foreground-node-lease" && retirePostError) {
+        throw retirePostError;
+      }
+    });
+    const close = vi.spyOn(port, "close");
+    const lease = await SharedBrowserForegroundNodeLease.acquireFromPort(
+      port as unknown as MessagePort,
+      { dbName: "abandoned-foreground-root", storageOwner: "owner" },
+    );
+    return { lease, port, sent, close };
+  }
+
+  it.each(["before finish", "during retirement"] as const)(
+    "rejects local finish %s without awaiting a retirement receipt",
+    async (phase) => {
+      const { lease, port, sent, close } = await acquireLease();
+      const error = new BrowserWorkerUnresponsiveError("worker realm stopped responding");
+      const pending = phase === "before finish" ? undefined : lease.retire();
+      const rejected = pending && expect(pending).rejects.toBe(error);
+      lease.abandonAfterWorkerFailure(error);
+      lease.abandonAfterWorkerFailure(new Error("duplicate must not replace the cause"));
+      await rejected;
+      await expect(lease.returnWithHighWater(99n)).rejects.toBe(error);
+      await expect(lease.retire()).rejects.toBe(error);
+      expect(sent.filter((type) => type === "retire-foreground-node-lease")).toHaveLength(1);
+      expect(sent).not.toContain("return-foreground-node-lease");
+      expect(close).not.toHaveBeenCalled();
+      port.emit({ type: "unrelated-result" });
+      expect(close).not.toHaveBeenCalled();
+      port.emit({ type: "foreground-node-lease-result" });
+      expect(close).toHaveBeenCalledOnce();
+      port.emit({ type: "foreground-node-lease-result" });
+      lease.abandonAfterWorkerFailure(new Error("late failure"));
+      await expect(lease.returnWithHighWater(0n)).rejects.toBe(error);
+      expect(close).toHaveBeenCalledOnce();
+      expect(sent.filter((type) => type === "retire-foreground-node-lease")).toHaveLength(1);
+    },
+  );
+
+  it("retains only the already-posted return when abandonment rejects its local caller", async () => {
+    const { lease, port, sent, close } = await acquireLease();
+    const post = vi.spyOn(port, "postMessage");
+    const error = new BrowserWorkerUnresponsiveError("worker realm stopped responding");
+    let outcome: unknown = "pending";
+    const returned = lease.returnWithHighWater(42n).then(
+      () => {
+        outcome = "fulfilled";
+      },
+      (failure) => {
+        outcome = failure;
+      },
+    );
+    vi.useFakeTimers();
+    try {
+      expect(post).toHaveBeenCalledExactlyOnceWith({
+        type: "return-foreground-node-lease",
+        confirmedTxTime: "42",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBe("pending");
+      lease.abandonAfterWorkerFailure(error);
+      lease.abandonAfterWorkerFailure(new Error("duplicate must not replace the cause"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toBe(error);
+      expect(sent.filter((type) => type.endsWith("-foreground-node-lease"))).toEqual([
+        "acquire-foreground-node-lease",
+        "return-foreground-node-lease",
+      ]);
+      expect(close).not.toHaveBeenCalled();
+      port.emit({ type: "unrelated-result" });
+      expect(close).not.toHaveBeenCalled();
+
+      // The original result releases the port, not the caller's unknown outcome.
+      port.emit({ type: "foreground-node-lease-result" });
+      await returned;
+      expect(close).toHaveBeenCalledOnce();
+      expect(outcome).toBe(error);
+      await expect(lease.returnWithHighWater(99n)).rejects.toBe(error);
+      await expect(lease.retire()).rejects.toBe(error);
+      port.emit({ type: "foreground-node-lease-result" });
+      expect(close).toHaveBeenCalledOnce();
+      expect(post).toHaveBeenCalledOnce();
+    } finally {
+      // Release this actual adapter's controlled port after the observations,
+      // including on the baseline's contradictory second-request assertion.
+      port.emit({ type: "foreground-node-lease-result" });
+      await returned;
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["result error", "messageerror"] as const)(
+    "releases retained cleanup on a late %s without changing the causal failure",
+    async (event) => {
+      const { lease, port, close } = await acquireLease();
+      const error = new BrowserWorkerUnresponsiveError("original worker failure");
+      lease.abandonAfterWorkerFailure(error);
+      if (event === "messageerror") port.emitMessageError();
+      else
+        port.emit({
+          type: "foreground-node-lease-result",
+          error: { name: "Error", message: "late durable retirement failure" },
+        });
+      expect(close).toHaveBeenCalledOnce();
+      await expect(lease.retire()).rejects.toBe(error);
+    },
+  );
+
+  it("keeps the causal failure when best-effort retirement cannot be posted", async () => {
+    const { lease, sent, close } = await acquireLease(new Error("port is gone"));
+    const error = new BrowserWorkerUnresponsiveError("original worker failure");
+    lease.abandonAfterWorkerFailure(error);
+    lease.abandonAfterWorkerFailure(error);
+    await expect(lease.returnWithHighWater(0n)).rejects.toBe(error);
+    await expect(lease.retire()).rejects.toBe(error);
+    expect(sent.filter((type) => type === "retire-foreground-node-lease")).toHaveLength(1);
+    expect(close).toHaveBeenCalledOnce();
+  });
 });
 
 describe("browser SharedWorker realm identity", () => {
@@ -390,6 +579,148 @@ describe("browser SharedWorker realm identity", () => {
     await retired;
   });
 
+  it("rejects readiness when an alive runtime never finishes its five-minute startup grace", async () => {
+    vi.useFakeTimers();
+    const port = new ScriptedRuntimePort((message) => {
+      if (message.type === "connect-runtime") port.emit({ type: "worker-alive" });
+    });
+    vi.stubGlobal(
+      "SharedWorker",
+      class {
+        readonly port = port;
+      },
+    );
+    const runtime = {
+      connectUpstreamPeer: () => ({ recvWireFrames: () => [] }),
+      onPeerTransportWork: () => () => undefined,
+      progressPeerTransport: async () => undefined,
+      retirePeerTransport: async () => undefined,
+      reportRemoteServerTransportError: vi.fn(),
+      reportRemoteMutationError: vi.fn(),
+      flushLocalSettlements: async () => undefined,
+    };
+    const callbacks = {
+      onAuthFailure: vi.fn(),
+      onAuthRestored: vi.fn(),
+      onExplicitOfflineChange: vi.fn(),
+      onFailure: vi.fn(),
+      onStorageReset: vi.fn(),
+      onStorageInvalidated: vi.fn(),
+    };
+    const connection = new SharedBrowserWorkerConnection(
+      runtime as never,
+      {
+        schema: {},
+        dbName: "runtime-startup-grace-root",
+        author: new Uint8Array(16),
+        initialSyncFlushEvery: 1,
+        appId: "app",
+        storageOwner: "owner",
+        authSessionKey: "scope-a",
+        authJson: "{}",
+        sessionClaims: {},
+      },
+      "runtime-fingerprint",
+      callbacks,
+    );
+    let outcome = "pending";
+    void connection.ready().then(
+      () => {
+        outcome = "resolved";
+      },
+      () => {
+        outcome = "rejected";
+      },
+    );
+
+    try {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1_000);
+      expect(outcome).toBe("rejected");
+      await expect(connection.ready()).rejects.toBeInstanceOf(BrowserWorkerUnresponsiveError);
+    } finally {
+      // Release the stalled baseline only after observing public readiness.
+      // This terminal reply also completes retained timeout cleanup.
+      port.emit({
+        type: "runtime-error",
+        error: { name: "Error", message: "Runtime fixture finished" },
+      });
+      await connection.shutdown();
+    }
+  });
+
+  it("admits a healthy runtime that initializes beyond the old one-second probe", async () => {
+    vi.useFakeTimers();
+    const { connection, port, sent } = runtimeBootstrapFixture();
+    await vi.advanceTimersByTimeAsync(1_100);
+    port.emit({ type: "runtime-ready" });
+    await expect(connection.ready()).resolves.toBeUndefined();
+    const shutdown = connection.shutdown();
+    await vi.advanceTimersByTimeAsync(0);
+    // The follower has finished admission and owns normal close acknowledgement.
+    port.emit({ type: "result", id: sent.find((message) => message.type === "close")?.id });
+    await shutdown;
+    expect(port.closed).toBe(true);
+  });
+
+  it("does not let duplicate alive messages extend runtime startup", async () => {
+    vi.useFakeTimers();
+    const { connection, port, sent } = runtimeBootstrapFixture();
+    const rejected = expect(connection.ready()).rejects.toThrow("five minutes");
+    await vi.advanceTimersByTimeAsync(299_000);
+    port.emit({ type: "worker-alive" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await rejected;
+    expect(sent.filter((message) => message.type === "cancel-runtime-bootstrap")).toHaveLength(1);
+    await connection.shutdown();
+    expect(port.closed).toBe(false);
+    port.emit({ type: "runtime-bootstrap-cancelled" });
+    expect(port.closed).toBe(true);
+  });
+
+  it("settles shutdown without a cancellation ack and releases a late attached peer", async () => {
+    vi.useFakeTimers();
+    const { connection, port, sent } = runtimeBootstrapFixture();
+    const rejected = expect(connection.ready()).rejects.toThrow("closed");
+    await connection.shutdown();
+    await rejected;
+    await connection.shutdown();
+    expect(sent.filter((message) => message.type === "cancel-runtime-bootstrap")).toHaveLength(1);
+    expect(port.closed).toBe(false);
+    port.emit({ type: "runtime-ready" });
+    expect(sent).toContainEqual({ type: "close", id: 0, releaseContext: true });
+    expect(port.closed).toBe(false);
+    port.emit({ type: "result", id: 0 });
+    expect(port.closed).toBe(true);
+    const settledCount = sent.length;
+    port.emit({ type: "runtime-ready" });
+    expect(sent).toHaveLength(settledCount);
+  });
+
+  it("gives a suspended page fresh startup grace before expiring a delayed timer", async () => {
+    vi.useFakeTimers();
+    const { connection, port } = runtimeBootstrapFixture();
+    let outcome = "pending";
+    void connection.ready().then(
+      () => {
+        outcome = "ready";
+      },
+      () => {
+        outcome = "failed";
+      },
+    );
+    // Advance wall time without running scheduled tasks: the first resumed
+    // task must not treat time spent asleep as evidence of worker failure.
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(299_000);
+    expect(outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(outcome).toBe("failed");
+    port.emit({ type: "runtime-bootstrap-cancelled" });
+    await connection.shutdown();
+  });
+
   it("moves a runtime bootstrap out of an inspector-terminating realm", async () => {
     const dbName = "runtime-closing-root";
     const workers: Array<{ name: string; port: ScriptedRuntimePort }> = [];
@@ -609,5 +940,6 @@ describe("browser SharedWorker realm identity", () => {
     );
 
     expect(current).not.toBe(next);
+    expect(current).toContain('"protocolVersion":"jazz-shared-runtime-v2"');
   });
 });
