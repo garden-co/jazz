@@ -215,9 +215,9 @@ describe("db exclusive transaction reads browser integration", () => {
 
     // Patch shape is known immediately; row existence is resolved in the queue.
     expect(() =>
-      // @ts-expect-error Exercise runtime validation of an invalid patch field.
-      tx.upsert(app.todos, existing.id, { done: "invalid boolean" }),
-    ).toThrow();
+      // @ts-expect-error Exercise runtime validation of null for a required field.
+      tx.upsert(app.todos, existing.id, { done: null }),
+    ).toThrow("Cannot set required field 'done' to null");
     tx.update(app.todos, existing.id, { done: true });
     tx.insert(app.todos, { title: "Must not publish", done: false });
     expect(() =>
@@ -504,9 +504,9 @@ describe("db mergeable transaction reads browser integration", () => {
 
     // Patch shape is known immediately; row existence is resolved in the queue.
     expect(() =>
-      // @ts-expect-error Exercise runtime validation of an invalid patch field.
-      tx.upsert(app.todos, existing.id, { done: "invalid boolean" }),
-    ).toThrow();
+      // @ts-expect-error Exercise runtime validation of null for a required field.
+      tx.upsert(app.todos, existing.id, { done: null }),
+    ).toThrow("Cannot set required field 'done' to null");
     tx.update(app.todos, existing.id, { done: true });
     tx.insert(app.todos, { title: "Must not publish", done: false });
     expect(() =>
