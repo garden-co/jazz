@@ -69,18 +69,6 @@ fn maintained_view_tx_versions_contain_winner(
     })
 }
 
-fn maintained_view_find_content_witness<'a>(
-    tx_versions: &'a [VersionRow],
-    entry_table: &str,
-    row_uuid: RowUuid,
-) -> Option<&'a VersionRow> {
-    tx_versions.iter().find(|version| {
-        version.table() == entry_table
-            && version.row_uuid() == row_uuid
-            && version.deletion().is_none()
-    })
-}
-
 fn merge_receiver_version_bundle_ref(
     bundles: &mut BTreeMap<TxId, VersionBundle>,
     bundle: VersionBundleRef<'_>,
@@ -1123,22 +1111,35 @@ where
             let tx_versions = tx_versions_cache
                 .entry(*tx_id)
                 .or_insert_with(|| maintained_facts.versions_by_tx(*tx_id));
+            // These checks only need content-witness presence, not a selected
+            // version. Index once rather than decoding row identities while
+            // scanning the transaction twice for every requested row. Keep
+            // the original version vector intact (including ordering and
+            // multiple versions/layers for a coordinate).
+            let mut content_coordinates = tx_versions
+                .iter()
+                .filter(|version| version.deletion().is_none())
+                .map(|version| (version.table().to_owned(), version.row_uuid()))
+                .collect::<BTreeSet<_>>();
             let mut needs_storage_fallback = false;
             for (entry_table, row_uuid) in wanted_rows {
-                if maintained_view_find_content_witness(tx_versions, entry_table, *row_uuid)
-                    .is_none()
-                {
-                    let (content_winner, _) =
-                        maintained_facts.replacement_for(entry_table, *row_uuid);
-                    if let Some(content_winner) = content_winner {
-                        if self.version_tx_id(&content_winner)? == *tx_id {
-                            tx_versions.push(content_winner);
+                let coordinate = (entry_table.clone(), *row_uuid);
+                if content_coordinates.contains(&coordinate) {
+                    continue;
+                }
+                let (content_winner, _) = maintained_facts.replacement_for(entry_table, *row_uuid);
+                if let Some(content_winner) = content_winner {
+                    if self.version_tx_id(&content_winner)? == *tx_id {
+                        if content_winner.deletion().is_none() {
+                            content_coordinates.insert((
+                                content_winner.table().to_owned(),
+                                content_winner.row_uuid(),
+                            ));
                         }
+                        tx_versions.push(content_winner);
                     }
                 }
-                if maintained_view_find_content_witness(tx_versions, entry_table, *row_uuid)
-                    .is_none()
-                {
+                if !content_coordinates.contains(&coordinate) {
                     needs_storage_fallback = true;
                 }
             }
