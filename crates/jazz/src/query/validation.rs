@@ -1450,12 +1450,14 @@ fn array_correlation_types_compatible(parent: &ColumnType, child: &ColumnType) -
     if in_operand_types_compatible(parent, child) {
         return true;
     }
-    // Array-subquery correlation expands the parent array into child lookup
-    // keys; it is distinct from whole-value `Predicate::In` membership.
-    match non_null_column_type(parent) {
+    // Array-subquery correlation expands array lookup keys on either side:
+    // forward references use a parent array, reverse references a child array.
+    // This is distinct from whole-value `Predicate::In` membership.
+    let forward = match non_null_column_type(parent) {
         ColumnType::Array(member) => column_types_comparable(&member, child),
         _ => false,
-    }
+    };
+    forward || array_element_type_compatible(child, parent)
 }
 
 fn in_literal_value_coercible(left: &ColumnType, value: &Operand) -> bool {

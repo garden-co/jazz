@@ -1117,7 +1117,6 @@ local_tokio_test! {
 ///
 /// alice -> insert parts A/B and file [A, B, B] -> server -> bob sees both
 /// alice -> update file to [B] -> server -> bob sees only B linked to file
-#[ignore = "#1765: reverse UUID-array correlation fails query validation with operand type mismatch"]
 async fn array_subquery_reverse_uuid_array_membership_updates_when_array_changes() {
     let clients = Clients::start().await;
 
