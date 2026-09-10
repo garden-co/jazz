@@ -1703,19 +1703,14 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
-  private publishAuthStateWithInternalSession<T>(
+  private publishAuthStateWithInternalSession(
     nextSession: Session | null,
-    publish: () => T,
-  ): { value: T; rollback: () => void } {
-    const previousSession = getDbInternalSession(this);
+    publish: () => void,
+  ): void {
+    // Commit every snapshot before notifying observers. Observer failures are
+    // reported to the caller without rolling back into a split snapshot.
     setDbInternalSession(this, nextSession);
-    const rollback = () => setDbInternalSession(this, previousSession);
-    try {
-      return { value: publish(), rollback };
-    } catch (error) {
-      rollback();
-      throw error;
-    }
+    publish();
   }
 
   protected applyAuthUpdate(
@@ -1750,13 +1745,12 @@ export class Db {
     }
 
     const nextInternalSession = resolveClientInternalSessionSync(nextConfig);
-    this.publishAuthStateWithInternalSession(nextInternalSession, () =>
-      this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession),
-    );
-
     this.config.jwtToken = jwtToken;
     this.config.cookieSession = undefined;
     setTrustedReservedSession(this.config, trustedReservedSession);
+    this.publishAuthStateWithInternalSession(nextInternalSession, () => {
+      this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
+    });
     return true;
   }
 
@@ -1780,13 +1774,12 @@ export class Db {
       cookieSession,
     } as DbConfig;
     const nextInternalSession = resolveClientInternalSessionSync(nextConfig);
-    this.publishAuthStateWithInternalSession(nextInternalSession, () =>
-      this.authStateStore.applyCookieSession(cookieSession),
-    );
-
     this.config.jwtToken = undefined;
     this.config.cookieSession = cookieSession;
     setTrustedReservedSession(this.config, undefined);
+    this.publishAuthStateWithInternalSession(nextInternalSession, () => {
+      this.authStateStore.applyCookieSession(cookieSession);
+    });
     return true;
   }
 
