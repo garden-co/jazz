@@ -52,10 +52,25 @@ impl IndexedDbPageStore {
             handle: handle.unchecked_into(),
         }
     }
+
+    // Existing/custom JS stores implement only metadata/readPage/commitPages.
+    // They remain non-reclaiming unless they explicitly implement the complete
+    // single-tree ownership contract as well.
+    fn supports_tree_ownership(&self) -> bool {
+        ["claimTreeOwnership", "releaseTreeOwnership"]
+            .into_iter()
+            .all(|name| {
+                Reflect::get(&self.handle, &JsValue::from_str(name))
+                    .is_ok_and(|value| value.is_function())
+            })
+    }
 }
 
 impl PageStore for IndexedDbPageStore {
     fn claim_tree_ownership(&self) -> Result<TreeOwnership, String> {
+        if !self.supports_tree_ownership() {
+            return Ok(TreeOwnership::default());
+        }
         self.handle.claim_tree_ownership_js().map_err(js_error)?;
         let handle = self.handle.clone();
         Ok(TreeOwnership::new(move || {
@@ -64,7 +79,7 @@ impl PageStore for IndexedDbPageStore {
     }
 
     fn can_reclaim_obsolete_pages(&self) -> bool {
-        self.handle.can_reclaim_obsolete_pages_js()
+        self.supports_tree_ownership() && self.handle.can_reclaim_obsolete_pages_js()
     }
 
     fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
