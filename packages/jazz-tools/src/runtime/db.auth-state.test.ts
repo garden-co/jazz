@@ -64,9 +64,9 @@ function makeJwt(payload: Record<string, unknown>): string {
 function makeDbWithJwt(jwtToken: string) {
   const runtimeClient = {
     updateAuthToken: vi.fn(),
+    updateCookieSession: vi.fn(),
     onMutationError: vi.fn(),
   };
-
   const db = new TestDb(
     {
       appId: "test-app",
@@ -78,13 +78,52 @@ function makeDbWithJwt(jwtToken: string) {
   return { db, runtimeClient };
 }
 
+function makeCookieSession(version: string, user_id = "alice"): Session {
+  return {
+    user_id,
+    claims: {
+      version,
+      auth_mode: "external",
+      subject: user_id,
+      issuer: "https://issuer.example",
+    },
+    issuer: "https://issuer.example",
+    authMode: "external",
+  };
+}
+
+function jwtClaimVersion(jwtToken: string | undefined): unknown {
+  if (!jwtToken) return undefined;
+  const payload = jwtToken.split(".")[1];
+  return JSON.parse(Buffer.from(payload!, "base64url").toString("utf8")).version;
+}
+
+interface AuthTestRuntimeClient {
+  updateAuthToken: { mock: { calls: unknown[][] } };
+  updateCookieSession: { mock: { calls: unknown[][] } };
+}
+
+function transportSnapshot(db: TestDb, runtimeClient: AuthTestRuntimeClient) {
+  const config = db.getConfig();
+  const hasJwt = config.jwtToken !== undefined;
+  const hasCookie = config.cookieSession !== undefined;
+  return {
+    mode: hasJwt ? "bearer" : "cookie",
+    exclusive: { hasJwt, hasCookie },
+    claimVersion: hasJwt ? jwtClaimVersion(config.jwtToken) : config.cookieSession?.claims.version,
+    forwarded: {
+      bearer: runtimeClient.updateAuthToken.mock.calls.length,
+      cookie: runtimeClient.updateCookieSession.mock.calls.length,
+    },
+  };
+}
+
 function makeDbWithCookieSession(cookieSession: Session) {
   const runtimeClient = {
     updateAuthToken: vi.fn(),
     updateCookieSession: vi.fn(),
     onMutationError: vi.fn(),
   };
-
   const db = new TestDb(
     {
       appId: "cookie-auth-app",
@@ -438,5 +477,130 @@ describe("Db auth state", () => {
     ).toThrow("Changing auth principal on a live client is not supported. Recreate the Db.");
     expect(getDbInternalSession(db)).toBe(accepted);
     expect(runtimeClient.updateCookieSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps bearer and cookie transitions mode-exclusive across public state and transport", () => {
+    const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
+    const observedStates: Array<{
+      authMode: AuthState["authMode"];
+      subject: string | undefined;
+      version: unknown;
+    }> = [];
+    const stop = db.onAuthChanged((state) => {
+      observedStates.push({
+        authMode: state.authMode,
+        subject: state.session?.user.identity.subject,
+        version: state.session?.claims.version,
+      });
+    });
+    db.touchClient();
+
+    const snapshots = [transportSnapshot(db, runtimeClient)];
+    db.updateCookieSession(makeCookieSession("B"));
+    snapshots.push(transportSnapshot(db, runtimeClient));
+    db.updateAuthToken(makeJwt({ sub: "alice", version: "C" }));
+    snapshots.push(transportSnapshot(db, runtimeClient));
+    db.updateCookieSession(makeCookieSession("D"));
+    snapshots.push(transportSnapshot(db, runtimeClient));
+    stop();
+
+    expect(observedStates).toEqual([
+      { authMode: "external", subject: "alice", version: "A" },
+      { authMode: "external", subject: "alice", version: "B" },
+      { authMode: "external", subject: "alice", version: "C" },
+      { authMode: "external", subject: "alice", version: "D" },
+    ]);
+    expect(snapshots).toEqual([
+      {
+        mode: "bearer",
+        exclusive: { hasJwt: true, hasCookie: false },
+        claimVersion: "A",
+        forwarded: { bearer: 0, cookie: 0 },
+      },
+      {
+        mode: "cookie",
+        exclusive: { hasJwt: false, hasCookie: true },
+        claimVersion: "B",
+        forwarded: { bearer: 0, cookie: 1 },
+      },
+      {
+        mode: "bearer",
+        exclusive: { hasJwt: true, hasCookie: false },
+        claimVersion: "C",
+        forwarded: { bearer: 1, cookie: 1 },
+      },
+      {
+        mode: "cookie",
+        exclusive: { hasJwt: false, hasCookie: true },
+        claimVersion: "D",
+        forwarded: { bearer: 1, cookie: 2 },
+      },
+    ]);
+  });
+
+  it("rejects stale principals and live clears without changing the accepted snapshot", () => {
+    const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
+    db.touchClient();
+    db.updateCookieSession(makeCookieSession("B"));
+
+    const acceptedState = db.getAuthState();
+    const acceptedTransport = transportSnapshot(db, runtimeClient);
+    const acceptedInternalSession = getDbInternalSession(db);
+    const observedStates: AuthState[] = [];
+    const stop = db.onAuthChanged((state) => observedStates.push(state));
+    const bearerUpdates = runtimeClient.updateAuthToken.mock.calls.length;
+    const cookieUpdates = runtimeClient.updateCookieSession.mock.calls.length;
+
+    const rejection = "Changing auth principal on a live client is not supported. Recreate the Db.";
+    expect(() => db.updateCookieSession(makeCookieSession("stale-cookie", "bob"))).toThrow(
+      rejection,
+    );
+    expect(() => db.updateAuthToken(makeJwt({ sub: "bob", version: "stale-bearer" }))).toThrow(
+      rejection,
+    );
+    expect(() => db.updateCookieSession(null)).toThrow(rejection);
+    expect(() => db.updateAuthToken(null)).toThrow(rejection);
+    stop();
+
+    expect(db.getAuthState()).toBe(acceptedState);
+    expect(transportSnapshot(db, runtimeClient)).toEqual(acceptedTransport);
+    expect(getDbInternalSession(db)).toBe(acceptedInternalSession);
+    expect(runtimeClient.updateAuthToken.mock.calls).toHaveLength(bearerUpdates);
+    expect(runtimeClient.updateCookieSession.mock.calls).toHaveLength(cookieUpdates);
+    expect(observedStates).toHaveLength(1);
+  });
+
+  it("rolls back a synchronous transport propagation failure before accepting a later update", () => {
+    const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
+    db.touchClient();
+    const beforeState = db.getAuthState();
+    const beforeTransport = transportSnapshot(db, runtimeClient);
+    const beforeInternalSession = getDbInternalSession(db);
+    const observedVersions: unknown[] = [];
+    const stop = db.onAuthChanged((state) => {
+      observedVersions.push(state.session?.claims.version);
+    });
+    const propagationFailure = new Error("synthetic transport propagation failure");
+    runtimeClient.updateCookieSession.mockImplementationOnce(() => {
+      throw propagationFailure;
+    });
+
+    expect(() => db.updateCookieSession(makeCookieSession("B"))).toThrow(propagationFailure);
+    expect(db.getAuthState()).toBe(beforeState);
+    expect(transportSnapshot(db, runtimeClient)).toEqual(beforeTransport);
+    expect(getDbInternalSession(db)).toBe(beforeInternalSession);
+    expect(observedVersions).toEqual(["A"]);
+
+    db.updateCookieSession(makeCookieSession("C"));
+    stop();
+
+    expect(db.getAuthState().session?.claims.version).toBe("C");
+    expect(transportSnapshot(db, runtimeClient)).toEqual({
+      mode: "cookie",
+      exclusive: { hasJwt: false, hasCookie: true },
+      claimVersion: "C",
+      forwarded: { bearer: 0, cookie: 2 },
+    });
+    expect(observedVersions).toEqual(["A", "C"]);
   });
 });
