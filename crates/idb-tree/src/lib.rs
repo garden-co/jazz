@@ -30,9 +30,9 @@ type LeafEntry = (Vec<u8>, ValueCell);
 /// operation, rather than merely to the structural descent: an overflow chain
 /// must not alias a structural page, and a caller which goes on to inspect a
 /// value must continue using this same ownership set.
-type Descent = (
+type Descent<'a> = (
     PageId,
-    Vec<LeafEntry>,
+    &'a [LeafEntry],
     Vec<(PageId, usize)>,
     HashSet<PageId>,
 );
@@ -456,14 +456,15 @@ impl<S: PageStore> TreeCore<S> {
         let value = entries
             .binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
             .ok()
-            .map(|index| entries[index].1.clone());
+            .map(|index| &entries[index].1);
         match value {
-            Some(value) => self
-                .read_value_resident(&value, &mut visited)
-                .map(|attempt| match attempt {
-                    Attempt::Ready(value) => Attempt::Ready(Some(value)),
-                    Attempt::Missing(page_id) => Attempt::Missing(page_id),
-                }),
+            Some(value) => {
+                self.read_value_resident(value, &mut visited)
+                    .map(|attempt| match attempt {
+                        Attempt::Ready(value) => Attempt::Ready(Some(value)),
+                        Attempt::Missing(page_id) => Attempt::Missing(page_id),
+                    })
+            }
             None => Ok(Attempt::Ready(None)),
         }
     }
@@ -476,10 +477,10 @@ impl<S: PageStore> TreeCore<S> {
         // every retained value edge under the same ownership set before doing
         // so; otherwise a point update could silently perpetuate a malformed
         // sibling overflow graph.
-        if let Attempt::Missing(page_id) = self.leaf_values_resident(&entries, &mut visited)? {
+        if let Attempt::Missing(page_id) = self.leaf_values_resident(entries, &mut visited)? {
             return Ok(Attempt::Missing(page_id));
         }
-        let mut entries = entries;
+        let mut entries = entries.to_vec();
         let new_value = self.build_value(value.to_vec())?;
         match entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key)) {
             Ok(index) => {
@@ -501,10 +502,10 @@ impl<S: PageStore> TreeCore<S> {
             return Ok(Attempt::Ready(false));
         };
         // Deletion also republishes all surviving cells in this leaf.
-        if let Attempt::Missing(page_id) = self.leaf_values_resident(&entries, &mut visited)? {
+        if let Attempt::Missing(page_id) = self.leaf_values_resident(entries, &mut visited)? {
             return Ok(Attempt::Missing(page_id));
         }
-        let mut entries = entries;
+        let mut entries = entries.to_vec();
         self.retire_value(&entries[index].1);
         entries.remove(index);
         self.finish_leaf_write(page_id, entries, path)?;
@@ -515,7 +516,7 @@ impl<S: PageStore> TreeCore<S> {
         let Some((_, entries, _, mut visited)) = self.resident_descent(key)? else {
             return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
         };
-        self.leaf_values_resident(&entries, &mut visited)
+        self.leaf_values_resident(entries, &mut visited)
     }
 
     fn try_range(
@@ -676,7 +677,7 @@ impl<S: PageStore> TreeCore<S> {
             .expect("open always installs a root page")
     }
 
-    fn resident_descent(&self, key: &[u8]) -> Result<Option<Descent>, Error> {
+    fn resident_descent(&self, key: &[u8]) -> Result<Option<Descent<'_>>, Error> {
         let mut page_id = self.root_page_id();
         let mut path = Vec::new();
         let mut visited = HashSet::new();
@@ -691,7 +692,7 @@ impl<S: PageStore> TreeCore<S> {
             };
             match page {
                 Page::Leaf { entries } => {
-                    return Ok(Some((page_id, entries.clone(), path, visited)));
+                    return Ok(Some((page_id, entries, path, visited)));
                 }
                 Page::Internal { keys, children } => {
                     let child_index = keys.partition_point(|separator| separator.as_slice() <= key);
