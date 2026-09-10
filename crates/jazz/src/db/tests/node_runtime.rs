@@ -3377,3 +3377,148 @@ fn cold_runtime_replacement_defers_empty_facade_until_local_snapshot_arrives() {
         "a subscription opened after the replacement must not inherit the retained facade"
     );
 }
+
+// These tests must reach the internal recovery boundary after evicting its
+// storage cache. Public open also hydrates unrelated metadata, which can hide
+// this particular cold scan. A child watchdog contains the historical busy
+// loop so a regression fails one test instead of hanging the suite.
+fn pending_restore_child(test_name: &str) -> bool {
+    const CHILD: &str = "JAZZ_PENDING_RESTORE_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        return true;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD, test_name)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                status.success(),
+                "recovery child failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return false;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "recovery did not yield to asynchronous storage within 20s: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn cold_pending_restore_yields_and_recovers(relay: bool) {
+    use std::future::Future;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::task::{Context, Poll};
+    struct WakeCount(AtomicUsize);
+    impl futures::task::ArcWake for WakeCount {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let schema = schema();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xdb; 16]),
+        author: AuthorSubject::for_test_bytes([0xdc; 16]),
+    };
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, _) = TestStorage::controlled(&refs);
+    let saved = storage.clone();
+    let db = block_on(Db::open(DbConfig::new(schema.clone(), storage, identity))).unwrap();
+    let tx_id = db
+        .insert(
+            "todos",
+            cells("pending recovery", false, identity.author),
+            Default::default(),
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    block_on(db.close()).unwrap();
+    drop(db);
+    let storage = block_on(saved.reopen(families)).unwrap();
+    let control = storage.control();
+    let eviction = storage.clone();
+    let owner_node = if relay {
+        NodeUuid::from_bytes([0xdd; 16])
+    } else {
+        identity.node
+    };
+    let node = Node::new(block_on(NodeState::new(owner_node, schema, storage)).unwrap());
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let before = control.poll_count(TestStorageOperation::ScanOpen);
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = futures::task::waker(wakes.clone());
+    let mut cx = Context::from_waker(&waker);
+    let mut restore = Box::pin(async {
+        if relay {
+            node.restore_browser_relay_pending_uploads(identity.author)
+                .await
+        } else {
+            node.restore_pending_uploads(identity).await
+        }
+    });
+    assert!(matches!(restore.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(
+        control.poll_count(TestStorageOperation::ScanOpen),
+        before + 1
+    );
+    // The first storage poll deliberately self-wakes; the second parks on the
+    // externally controlled read. Recovery must preserve that real waker.
+    assert!(matches!(restore.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(node.outbox.borrow().iter().next().is_none());
+    wakes.0.store(0, Ordering::SeqCst);
+    control.resume();
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    block_on(restore).unwrap();
+    assert_eq!(
+        node.outbox
+            .borrow()
+            .iter()
+            .map(|entry| entry.tx_id)
+            .collect::<Vec<_>>(),
+        vec![tx_id]
+    );
+    if relay {
+        assert!(
+            node.browser_relay_recovered_tx_ids
+                .borrow()
+                .contains(&tx_id)
+        );
+    }
+}
+
+#[test]
+fn cold_pending_upload_restore_yields_to_storage() {
+    if pending_restore_child(
+        "db::tests::node_runtime::cold_pending_upload_restore_yields_to_storage",
+    ) {
+        cold_pending_restore_yields_and_recovers(false);
+    }
+}
+
+#[test]
+fn cold_browser_relay_restore_yields_to_storage() {
+    if pending_restore_child(
+        "db::tests::node_runtime::cold_browser_relay_restore_yields_to_storage",
+    ) {
+        cold_pending_restore_yields_and_recovers(true);
+    }
+}

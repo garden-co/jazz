@@ -1831,6 +1831,7 @@ impl WasmDb {
             .await
             .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
+            .await
             .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
@@ -1866,6 +1867,7 @@ impl WasmDb {
             .await
             .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
+            .await
             .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
