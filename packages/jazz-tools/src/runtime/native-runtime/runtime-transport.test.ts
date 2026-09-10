@@ -469,6 +469,263 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  it("holds replacement admission until predecessor raw retirement closes", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const oldTick = deferred<number>();
+    let oldTickStarted = false;
+    let oldRawClosed = false;
+    const oldTransport = new FakeTransport([]);
+    oldTransport.tick = (() => {
+      oldTickStarted = true;
+      return oldTick.promise;
+    }) as never;
+    oldTransport.close = () => {
+      oldRawClosed = true;
+      oldTransport.closed = true;
+      return true;
+    };
+    const nextTransport = new FakeTransport([]);
+    const admitted: FakeTransport[] = [];
+    const transports = [oldTransport, nextTransport];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = transports.shift();
+              if (!transport) throw new Error("unexpected extra upstream admission");
+              admitted.push(transport);
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    const progress = runtime.progressPeerTransport();
+    try {
+      await vi.waitFor(() => expect(oldTickStarted).toBe(true));
+
+      runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+      await waitForFakeWebSocketNegotiation();
+
+      expect(oldRawClosed).toBe(false);
+      expect(sockets).toHaveLength(1);
+      expect(admitted).toHaveLength(1);
+
+      oldTick.resolve(0);
+      await progress;
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      await runtime.waitForUpstreamServerConnection();
+
+      expect(oldRawClosed).toBe(true);
+      expect(sockets[1]!.url).toBe("ws://127.0.0.1:4200/apps/app-b/ws");
+      expect(admitted).toHaveLength(2);
+      expect(admitted[1]).toBe(nextTransport);
+    } finally {
+      oldTick.resolve(0);
+      await progress.catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it.each(["latest replacement", "disconnect"] as const)(
+    "supersedes a successor intent before predecessor retirement (%s)",
+    async (action) => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const oldTick = deferred<number>();
+      let oldTickStarted = false;
+      let oldRawClosed = false;
+      const oldTransport = new FakeTransport([]);
+      oldTransport.tick = (() => {
+        oldTickStarted = true;
+        return oldTick.promise;
+      }) as never;
+      oldTransport.close = () => {
+        oldRawClosed = true;
+        oldTransport.closed = true;
+        return true;
+      };
+      const replacementTransport = new FakeTransport([]);
+      const admitted: FakeTransport[] = [];
+      const transports = [oldTransport, replacementTransport];
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              connectUpstream: () => {
+                const transport = transports.shift();
+                if (!transport) throw new Error("unexpected extra upstream admission");
+                admitted.push(transport);
+                return transport;
+              },
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const progress = runtime.progressPeerTransport();
+      let disconnect: Promise<void> | undefined;
+      try {
+        await vi.waitFor(() => expect(oldTickStarted).toBe(true));
+
+        runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+        if (action === "latest replacement") {
+          runtime.connect("ws://127.0.0.1:4200/apps/app-c/ws", "{}");
+        } else {
+          disconnect = runtime.disconnect();
+        }
+        await waitForFakeWebSocketNegotiation();
+
+        expect(oldRawClosed).toBe(false);
+        expect(sockets).toHaveLength(1);
+        expect(admitted).toHaveLength(1);
+
+        oldTick.resolve(0);
+        await progress;
+        await disconnect;
+
+        expect(oldRawClosed).toBe(true);
+        if (action === "latest replacement") {
+          await vi.waitFor(() => expect(sockets).toHaveLength(2));
+          await runtime.waitForUpstreamServerConnection();
+          expect(sockets[1]!.url).toBe("ws://127.0.0.1:4200/apps/app-c/ws");
+          expect(admitted).toHaveLength(2);
+          expect(admitted[1]).toBe(replacementTransport);
+        } else {
+          expect(sockets).toHaveLength(1);
+          expect(admitted).toHaveLength(1);
+        }
+      } finally {
+        oldTick.resolve(0);
+        await progress.catch(() => undefined);
+        await disconnect?.catch(() => undefined);
+        await runtime.close();
+      }
+    },
+  );
+
+  it("reports predecessor retirement failure once without admitting its successor", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const oldTick = deferred<number>();
+    let oldTickStarted = false;
+    const retirementError = new Error("old transport retirement failed");
+    let closeCalls = 0;
+    const oldTransport = new FakeTransport([]);
+    oldTransport.tick = (() => {
+      oldTickStarted = true;
+      return oldTick.promise;
+    }) as never;
+    oldTransport.close = () => {
+      closeCalls += 1;
+      throw retirementError;
+    };
+    const nextTransport = new FakeTransport([]);
+    const admitted: FakeTransport[] = [];
+    const transports = [oldTransport, nextTransport];
+    const remoteSettlement = deferred<void>();
+    const write = {
+      ...fakeWrite(),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : remoteSettlement.promise),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            connectUpstream: () => {
+              const transport = transports.shift();
+              if (!transport) throw new Error("unexpected extra upstream admission");
+              admitted.push(transport);
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const transportErrors: Error[] = [];
+    runtime.onServerTransportError((error) => transportErrors.push(error));
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    const txId = await committedTxId(
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "remote wait during retirement" } },
+        null,
+        "00000000-0000-0000-0000-000000000013",
+      ),
+    );
+    const remoteWait = runtime.waitForTransaction(txId, "edge");
+    const progress = runtime.progressPeerTransport();
+    try {
+      await vi.waitFor(() => expect(oldTickStarted).toBe(true));
+
+      runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+      oldTick.resolve(0);
+      await progress;
+
+      expect(closeCalls).toBe(1);
+      expect(transportErrors).toHaveLength(1);
+      expect(transportErrors[0]?.message).toContain("old transport retirement failed");
+      await expect(remoteWait).rejects.toThrow("old transport retirement failed");
+      await expect(runtime.waitForTransaction(txId, "local")).resolves.toBeUndefined();
+      expect(sockets).toHaveLength(1);
+      expect(admitted).toHaveLength(1);
+    } finally {
+      oldTick.resolve(0);
+      await progress.catch(() => undefined);
+      remoteSettlement.resolve();
+      await runtime.close();
+    }
+  });
+
   it.each([
     "none",
     "auth-refresh",
