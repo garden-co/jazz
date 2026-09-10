@@ -2374,6 +2374,14 @@ fn embedded_record_admission_matches_legacy_roundtrip_corpus() {
             epoch_1_scalar_record_descriptor(),
             EPOCH_1_SCALAR_RECORD_FIXTURE.to_vec(),
         ),
+        (
+            descriptor([ValueType::F64]),
+            f64::NAN.to_le_bytes().to_vec(),
+        ),
+        (
+            descriptor([ValueType::Nullable(Box::new(ValueType::F64))]),
+            [b"\x01".as_slice(), f64::NAN.to_le_bytes().as_slice()].concat(),
+        ),
         (descriptor([ValueType::raw_bytes()]), vec![]),
         (descriptor([ValueType::raw_string()]), b"text".to_vec()),
         (
