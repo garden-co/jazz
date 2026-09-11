@@ -83,16 +83,24 @@ describe("App", () => {
     cleanup();
   });
 
-  it("loads the standalone inspector when permissions fetch fails", async () => {
+  it("migrates a v2 connection without retaining its secret and connects manually when permissions fetch fails", async () => {
+    const adminSecret = "admin-secret";
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        serverUrl: "http://localhost:1625",
-        appId: "00000000-0000-0000-0000-000000000099",
-        adminSecret: "admin-secret",
-        env: "dev",
-        branch: "main",
-        schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        version: 2,
+        activeConnectionId: "local",
+        connections: [
+          {
+            id: "local",
+            name: "Local dev",
+            serverUrl: "http://localhost:1625",
+            appId: "00000000-0000-0000-0000-000000000099",
+            adminSecret,
+            env: "dev",
+            schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          },
+        ],
       }),
     );
 
@@ -114,6 +122,45 @@ describe("App", () => {
 
     render(<App />);
 
+    expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "http://localhost:1625");
+    expect(screen.getByLabelText("App ID")).toHaveProperty(
+      "value",
+      "00000000-0000-0000-0000-000000000099",
+    );
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    expect(createJazzClientMock).not.toHaveBeenCalled();
+    expect(fetchSchemaHashesMock).not.toHaveBeenCalled();
+    expect(fetchStoredWasmSchemaMock).not.toHaveBeenCalled();
+    expect(fetchStoredPermissionsMock).not.toHaveBeenCalled();
+
+    const migrated = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as {
+      version?: number;
+      connections?: Array<Record<string, unknown>>;
+    };
+    expect(migrated.version).toBe(2);
+    expect(migrated.connections?.[0]).toEqual(
+      expect.objectContaining({
+        id: "local",
+        name: "Local dev",
+        serverUrl: "http://localhost:1625",
+        appId: "00000000-0000-0000-0000-000000000099",
+        env: "dev",
+        schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }),
+    );
+    expect(migrated.connections?.[0]).not.toHaveProperty("adminSecret");
+    expect(localStorage.getItem(STORAGE_KEY)).not.toContain(adminSecret);
+
+    fireEvent.change(screen.getByLabelText("Admin secret"), {
+      target: { value: adminSecret },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByRole("heading", { name: "Select schema" })).not.toBeNull();
+    fireEvent.change(screen.getByLabelText("Schema hash"), {
+      target: { value: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Use schema" }));
+
     expect(await screen.findByText("Inspector ready")).not.toBeNull();
     expect(screen.queryByRole("heading", { name: "Connection error" })).toBeNull();
     await waitFor(() => {
@@ -125,7 +172,6 @@ describe("App", () => {
       );
     });
   });
-
   it("lets you manage and switch between named stored connections", async () => {
     localStorage.setItem(
       STORAGE_KEY,
@@ -138,9 +184,7 @@ describe("App", () => {
             name: "Local dev",
             serverUrl: "http://localhost:19879",
             appId: "local-app-id",
-            adminSecret: "local-admin-secret",
             env: "dev",
-            branch: "main",
             schemaHash: "hash-a",
           },
           {
@@ -148,9 +192,7 @@ describe("App", () => {
             name: "Staging",
             serverUrl: "https://staging.example.com",
             appId: "staging-app-id",
-            adminSecret: "staging-admin-secret",
             env: "dev",
-            branch: "main",
             schemaHash: "hash-b",
           },
         ],
@@ -159,18 +201,12 @@ describe("App", () => {
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(createJazzClientMock).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          appId: "local-app-id",
-          serverUrl: "http://localhost:19879",
-          adminSecret: "local-admin-secret",
-        }),
-      );
-      expect(screen.getByRole("button", { name: "Open connections" })).not.toBeNull();
-    });
+    expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "http://localhost:19879");
+    expect(screen.getByLabelText("App ID")).toHaveProperty("value", "local-app-id");
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    expect(createJazzClientMock).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open connections" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
     expect(screen.getByText("Local dev")).not.toBeNull();
@@ -178,8 +214,23 @@ describe("App", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByRole("button", { name: "Back to inspector" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Using Local dev" })).toBeNull();
-
     fireEvent.click(screen.getByRole("button", { name: "Open Staging" }));
+
+    expect(screen.getByLabelText("Server URL")).toHaveProperty(
+      "value",
+      "https://staging.example.com",
+    );
+    expect(screen.getByLabelText("App ID")).toHaveProperty("value", "staging-app-id");
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    expect(createJazzClientMock).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("Admin secret"), {
+      target: { value: "staging-admin-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByRole("heading", { name: "Select schema" })).not.toBeNull();
+    fireEvent.change(screen.getByLabelText("Schema hash"), { target: { value: "hash-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Use schema" }));
 
     await waitFor(() => {
       expect(createJazzClientMock).toHaveBeenLastCalledWith(
@@ -193,8 +244,20 @@ describe("App", () => {
 
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as {
       activeConnectionId?: string;
+      connections?: Array<Record<string, unknown>>;
     };
     expect(stored.activeConnectionId).toBe("staging");
+    const staging = stored.connections?.find((connection) => connection["name"] === "Staging");
+    expect(staging).toEqual(
+      expect.objectContaining({
+        name: "Staging",
+        serverUrl: "https://staging.example.com",
+        appId: "staging-app-id",
+        env: "dev",
+        schemaHash: "hash-b",
+      }),
+    );
+    expect(staging).not.toHaveProperty("adminSecret");
     expect(await screen.findByText("Inspector ready")).not.toBeNull();
   });
 
@@ -210,9 +273,7 @@ describe("App", () => {
             name: "Local dev",
             serverUrl: "http://localhost:19879",
             appId: "local-app-id",
-            adminSecret: "local-admin-secret",
             env: "dev",
-            branch: "main",
             schemaHash: "hash-a",
           },
         ],
@@ -221,12 +282,14 @@ describe("App", () => {
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open connections" })).not.toBeNull();
-    });
+    expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "http://localhost:19879");
+    expect(screen.getByLabelText("App ID")).toHaveProperty("value", "local-app-id");
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    expect(createJazzClientMock).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open connections" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Add connection" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add connection" }));
 
     expect(await screen.findByRole("heading", { name: "Add connection" })).not.toBeNull();
     expect(screen.getByLabelText("Server URL")).toHaveProperty(
@@ -259,12 +322,22 @@ describe("App", () => {
 
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as {
       activeConnectionId?: string;
-      connections?: Array<{ id: string; name: string }>;
+      connections?: Array<Record<string, unknown>>;
     };
     expect(stored.connections).toHaveLength(2);
-    const preview = stored.connections?.find((connection) => connection.name === "Preview");
-    expect(preview).toBeDefined();
-    expect(stored.activeConnectionId).toBe(preview?.id);
+    const preview = stored.connections?.find((connection) => connection["name"] === "Preview");
+    expect(preview).toEqual(
+      expect.objectContaining({
+        name: "Preview",
+        serverUrl: "https://preview.example.com",
+        appId: "preview-app-id",
+        env: "dev",
+        schemaHash: "hash-b",
+      }),
+    );
+    expect(preview).not.toHaveProperty("adminSecret");
+    expect(localStorage.getItem(STORAGE_KEY)).not.toContain("preview-admin-secret");
+    expect(stored.activeConnectionId).toBe(preview?.["id"]);
   });
 
   it("keeps connections open when an edit submission is cancelled while schema hashes load", async () => {
@@ -279,9 +352,7 @@ describe("App", () => {
             name: "Local dev",
             serverUrl: "http://localhost:19879",
             appId: "local-app-id",
-            adminSecret: "local-admin-secret",
             env: "dev",
-            branch: "main",
             schemaHash: "hash-a",
           },
         ],
@@ -290,13 +361,17 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("Inspector ready")).not.toBeNull();
+    expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "http://localhost:19879");
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
     const storedBeforeEdit = localStorage.getItem(STORAGE_KEY);
 
-    fireEvent.click(screen.getByRole("button", { name: "Open connections" }));
-    expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Edit Local dev" }));
     expect(await screen.findByRole("heading", { name: "Edit connection" })).not.toBeNull();
+    expect(screen.getByLabelText("Server URL")).toHaveProperty("value", "http://localhost:19879");
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    expect(createJazzClientMock).not.toHaveBeenCalled();
 
     let resolveSchemaHashes!: (result: { hashes: string[] }) => void;
     const pendingSchemaHashes = new Promise<{ hashes: string[] }>((resolve) => {
@@ -304,6 +379,9 @@ describe("App", () => {
     });
     fetchSchemaHashesMock.mockImplementationOnce(() => pendingSchemaHashes);
 
+    fireEvent.change(screen.getByLabelText("Admin secret"), {
+      target: { value: "edit-admin-secret" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
@@ -314,18 +392,16 @@ describe("App", () => {
     });
 
     expect(screen.getByRole("heading", { name: "Connections" })).not.toBeNull();
-    expect(screen.queryByRole("heading", { name: "Select schema" })).toBeNull();
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(localStorage.getItem(STORAGE_KEY)).toBe(storedBeforeEdit);
   });
 
-  it("prefills the connection form from partial hash params", async () => {
+  it("prefills the connection form from partial hash params and scrubs legacy storage", async () => {
+    const adminSecret = "stored-admin-secret";
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
         serverUrl: "http://localhost:19879",
         appId: "stored-app-id",
-        adminSecret: "stored-admin-secret",
+        adminSecret,
         env: "dev",
         branch: "main",
         schemaHash: "hash-b",
@@ -346,5 +422,39 @@ describe("App", () => {
       "019d9bc9-646b-7560-b26d-b775a7d061d3",
     );
     expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+
+    const migrated = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as {
+      version?: number;
+      connections?: Array<Record<string, unknown>>;
+    };
+    expect(migrated.version).toBe(2);
+    expect(migrated.connections?.[0]).toEqual(
+      expect.objectContaining({
+        serverUrl: "http://localhost:19879",
+        appId: "stored-app-id",
+        env: "dev",
+        schemaHash: "hash-b",
+      }),
+    );
+    expect(migrated.connections?.[0]).not.toHaveProperty("adminSecret");
+    expect(localStorage.getItem(STORAGE_KEY)).not.toContain(adminSecret);
+  });
+
+  it("scrubs a legacy admin secret from the visible URL hash", async () => {
+    const adminSecret = "legacy-fragment-admin-secret";
+    window.location.hash = `#serverUrl=https%3A%2F%2Fstaging.v2.aws.cloud.jazz.tools&appId=preview-app-id&adminSecret=${encodeURIComponent(adminSecret)}`;
+
+    render(<App />);
+
+    expect(window.location.hash).toBe("");
+    expect(window.location.href).not.toContain(adminSecret);
+    expect(await screen.findByRole("heading", { name: "Connect to Jazz server" })).not.toBeNull();
+    expect(screen.getByLabelText("Server URL")).toHaveProperty(
+      "value",
+      "https://staging.v2.aws.cloud.jazz.tools",
+    );
+    expect(screen.getByLabelText("App ID")).toHaveProperty("value", "preview-app-id");
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    expect(createJazzClientMock).not.toHaveBeenCalled();
   });
 });
