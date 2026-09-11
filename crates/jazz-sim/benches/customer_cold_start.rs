@@ -97,6 +97,7 @@ mod alloc_metrics {
     struct StackSample {
         frames: [usize; MAX_FRAMES],
         len: usize,
+        requested_bytes: usize,
     }
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -116,7 +117,7 @@ mod alloc_metrics {
                 if alloc_index.is_multiple_of(sample_rate)
                     && !IN_SAMPLE.swap(true, Ordering::Relaxed)
                 {
-                    sample_stack();
+                    sample_stack(layout.size());
                     IN_SAMPLE.store(false, Ordering::Relaxed);
                 }
             }
@@ -172,11 +173,12 @@ mod alloc_metrics {
         snapshot
     }
 
-    fn sample_stack() {
+    fn sample_stack(requested_bytes: usize) {
         let max_samples = MAX_SAMPLES.load(Ordering::Relaxed) as usize;
         let mut sample = StackSample {
             frames: [0; MAX_FRAMES],
             len: 0,
+            requested_bytes,
         };
         unsafe {
             backtrace::trace_unsynchronized(|frame| {
@@ -201,44 +203,56 @@ mod alloc_metrics {
             .lock()
             .expect("allocation samples lock poisoned")
             .clone();
-        let mut counts: HashMap<Vec<usize>, u64> = HashMap::new();
+        let mut counts: HashMap<Vec<usize>, (u64, u64)> = HashMap::new();
         for sample in samples {
-            *counts
+            let totals = counts
                 .entry(sample.frames[..sample.len].to_vec())
-                .or_default() += 1;
+                .or_default();
+            totals.0 += 1;
+            totals.1 += sample.requested_bytes as u64;
         }
         let mut ranked: Vec<_> = counts.into_iter().collect();
-        ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         eprintln!(
             "ALLOC_SITE_SUMMARY sample_rate={} sampled_stacks={} total_allocs={} total_bytes={}",
             sample_rate,
-            ranked.iter().map(|(_, count)| *count).sum::<u64>(),
+            ranked.iter().map(|(_, (count, _))| *count).sum::<u64>(),
             ALLOCS.load(Ordering::Relaxed),
             BYTES.load(Ordering::Relaxed)
         );
-        for (rank, (frames, samples)) in ranked.into_iter().take(25).enumerate() {
-            eprintln!(
-                "ALLOC_SITE rank={} samples={} estimated_allocs={}",
-                rank + 1,
-                samples,
-                samples * sample_rate
-            );
-            for (index, ip) in frames.iter().copied().enumerate().take(16) {
-                let mut printed = false;
-                backtrace::resolve(ip as *mut _, |symbol| {
-                    let name = symbol
-                        .name()
-                        .map(|name| name.to_string())
-                        .unwrap_or_else(|| "<unknown>".to_owned());
-                    if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
-                        eprintln!("  #{index:<2} {name} {}:{line}", file.display());
-                    } else {
-                        eprintln!("  #{index:<2} {name}");
+        for metric in ["count", "bytes"] {
+            ranked.sort_by_key(|(_, totals)| {
+                std::cmp::Reverse(if metric == "count" {
+                    totals.0
+                } else {
+                    totals.1
+                })
+            });
+            for (rank, (frames, (samples, sampled_bytes))) in ranked.iter().take(25).enumerate() {
+                eprintln!(
+                    "ALLOC_SITE metric={} rank={} samples={} estimated_allocs={} estimated_bytes={}",
+                    metric,
+                    rank + 1,
+                    samples,
+                    samples * sample_rate,
+                    sampled_bytes * sample_rate
+                );
+                for (index, ip) in frames.iter().copied().enumerate().take(16) {
+                    let mut printed = false;
+                    backtrace::resolve(ip as *mut _, |symbol| {
+                        let name = symbol
+                            .name()
+                            .map(|name| name.to_string())
+                            .unwrap_or_else(|| "<unknown>".to_owned());
+                        if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
+                            eprintln!("  #{index:<2} {name} {}:{line}", file.display());
+                        } else {
+                            eprintln!("  #{index:<2} {name}");
+                        }
+                        printed = true;
+                    });
+                    if !printed {
+                        eprintln!("  #{index:<2} 0x{ip:x}");
                     }
-                    printed = true;
-                });
-                if !printed {
-                    eprintln!("  #{index:<2} 0x{ip:x}");
                 }
             }
         }
@@ -1581,6 +1595,9 @@ fn run_connect_and_subscribe(
         ticks += 1;
     }
     let settle_ms = settle_start.elapsed().as_millis();
+    // Match the readiness boundary: later one-shot verification and storage
+    // sizing are diagnostics, not work needed to make subscriptions usable.
+    let alloc_snapshot = alloc_metrics::stop();
     #[cfg(feature = "cold-settle-attribution")]
     {
         attribution.phase_timing = jazz_sim::phase_attribution::snapshot();
@@ -1689,7 +1706,6 @@ fn run_connect_and_subscribe(
     let encoded_storage_bytes =
         core_encoded_storage_bytes + relay_encoded_storage_bytes + client_encoded_storage_bytes;
     let peak_rss_bytes = peak_rss_bytes();
-    let alloc_snapshot = alloc_metrics::stop();
     let memory_amplification = if encoded_storage_bytes == 0 {
         0.0
     } else {
@@ -2340,6 +2356,10 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     fields.insert(
         "core_hydration_memo_entries".to_owned(),
         json!(summary.core_hydration_memo_entries),
+    );
+    fields.insert(
+        "allocation_scope".to_owned(),
+        json!("connect_subscribe_settle"),
     );
     fields.insert("peak_rss_bytes".to_owned(), json!(summary.peak_rss_bytes));
     fields.insert(
