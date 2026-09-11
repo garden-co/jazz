@@ -461,22 +461,20 @@ impl MaintainedSubscriptionView {
             !deltas.is_empty() && kind.requires_authoritative_membership_reconcile();
         let mut decode_plan_cache = VersionDecodePlanCache::new();
         let mut payload_plans = std::collections::HashMap::new();
-        let decoded = deltas
-            .iter()
-            .map(|(record, weight)| {
-                decode_typed_terminal_record(
-                    record,
-                    kind,
-                    tables,
-                    node_aliases,
-                    &mut decode_plan_cache,
-                    &mut payload_plans,
-                    self.read_view,
-                )
-                .map(|event| (event, weight))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut transitions = self.apply_decoded_deltas(decoded, node_aliases)?;
+        let read_view = self.read_view;
+        let decoded = deltas.iter().map(|(record, weight)| {
+            decode_typed_terminal_record(
+                record,
+                kind,
+                tables,
+                node_aliases,
+                &mut decode_plan_cache,
+                &mut payload_plans,
+                read_view,
+            )
+            .map(|event| (event, weight))
+        });
+        let mut transitions = self.apply_decoded_delta_results(decoded, node_aliases)?;
         if observed_result_delta_batch {
             transitions.observed_result_delta_batches += 1;
         }
@@ -684,13 +682,25 @@ impl MaintainedSubscriptionView {
         transitions.result_payload_removes.extend(payload_removes);
     }
 
-    pub(crate) fn apply_decoded_deltas(
+    #[cfg(test)]
+    fn apply_decoded_deltas(
         &mut self,
         rows: impl IntoIterator<Item = (DecodedMaintainedEvent, i64)>,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
+        self.apply_decoded_delta_results(rows.into_iter().map(Ok), node_aliases)
+    }
+
+    fn apply_decoded_delta_results(
+        &mut self,
+        rows: impl IntoIterator<Item = Result<(DecodedMaintainedEvent, i64), super::Error>>,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        // Decode into the net-change accumulator directly. No retained state
+        // changes until the complete input has decoded successfully.
         let mut net = BTreeMap::<EventIdentity, (NetEvent, i64)>::new();
-        for (event, weight) in rows {
+        for row in rows {
+            let (event, weight) = row?;
             let net_event = match event {
                 DecodedMaintainedEvent::ResultCurrent { member, payload } => {
                     NetEvent::Result(member, payload)
@@ -4662,6 +4672,47 @@ mod tests {
         assert_eq!(removal.removes, vec![member.clone()]);
         assert!(removal.result_payload_adds.is_empty());
         assert_eq!(removal.result_payload_removes, vec![member]);
+    }
+
+    // Internal because malformed typed terminal events are below the public
+    // query API. A late decode failure must not publish the earlier rows.
+    #[test]
+    fn late_decoded_event_error_leaves_retained_rows_unchanged() {
+        let descriptor = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
+        let event = || {
+            (
+                DecodedMaintainedEvent::StructuredAppRow {
+                    root: row(1),
+                    record: OwnedRecord::new(
+                        descriptor.create(&[Value::Uuid(row(1).0)]).unwrap(),
+                        descriptor,
+                    ),
+                },
+                1,
+            )
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+        let result = maintained.apply_decoded_delta_results(
+            [
+                Ok(event()),
+                Err(super::super::Error::InvalidStoredValue(
+                    "late terminal decode",
+                )),
+            ],
+            &aliases(),
+        );
+        assert!(matches!(
+            result,
+            Err(super::super::Error::InvalidStoredValue(
+                "late terminal decode"
+            ))
+        ));
+        assert!(maintained.structured_app_rows().is_empty());
+        // Positive control: the valid prefix would be observable if applied.
+        maintained
+            .apply_decoded_deltas([event()], &aliases())
+            .unwrap();
+        assert_eq!(maintained.structured_app_rows().len(), 1);
     }
 
     #[test]
