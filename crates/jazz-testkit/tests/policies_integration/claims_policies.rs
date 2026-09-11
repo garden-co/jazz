@@ -443,7 +443,6 @@ async fn admin_role_claims_reject_member_mutations_inner() {
 /// observer ────────────────────────────► sees only the allowed update persist
 /// ```
 #[tokio::test]
-#[ignore = "#1760: an allowed update using id IN session.claims.editable_doc_ids is not persisted by the server"]
 async fn claim_array_id_policy_gates_updates_by_primary_key() {
     tokio::task::LocalSet::new()
         .run_until(claim_array_id_policy_gates_updates_by_primary_key_inner())
@@ -538,13 +537,24 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
         .await
         .expect("subscribe observer");
     let mut observer_log = Vec::new();
+    wait_for_subscription_update(
+        &mut observer_stream,
+        &mut observer_log,
+        QUERY_TIMEOUT,
+        "observer receives both initial rows before mutation",
+        |log| has_added_id(log, allowed_doc) && has_added_id(log, blocked_doc),
+    )
+    .await;
+    observer_log.clear();
 
-    alice
+    let allowed_tx = alice
         .update(
             allowed_doc,
             vec![("title".to_string(), "allowed updated".into())],
         )
-        .expect("optimistic local allowed update");
+        .expect("claim-authorized update succeeds")
+        .expect("allowed update has a transaction");
+    jazz_testkit::wait_for_edge_txs(&alice, &[allowed_tx]).await;
 
     wait_for_query(
         &observer,
@@ -571,12 +581,25 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     )
     .await;
 
-    alice
+    let blocked_tx = alice
         .update(
             blocked_doc,
             vec![("title".to_string(), "blocked updated".into())],
         )
-        .expect("optimistic local blocked update");
+        .expect("submit optimistic blocked update")
+        .expect("blocked update has a transaction");
+    let blocked_error = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        alice.wait_for_transaction(blocked_tx, DurabilityTier::EdgeServer),
+    )
+    .await
+    .expect("blocked update settles within timeout")
+    .expect_err("update outside the claim array is rejected by the server");
+    assert!(
+        matches!(blocked_error, jazz::tools::JazzError::Sync(ref message)
+            if message.ends_with("authorization_denied")),
+        "{blocked_error}"
+    );
 
     let rows_after_rejected_update = observer
         .query(query.clone(), Some(DurabilityTier::EdgeServer))
