@@ -2248,20 +2248,24 @@ impl TickEvaluator<'_> {
                 .push(delta.clone());
         }
 
+        let mut root_projection = (collect_by.mode == CollectByMode::Root).then(|| {
+            RootProjection::new(
+                input_desc,
+                output_desc,
+                collect_by,
+                input.deltas.iter().map(|delta| delta.record.len()).sum(),
+            )
+        });
         let mut output = Vec::new();
         for (group_prefix, group_deltas) in touched_groups {
             let after_records = arrangement.value().records_for_key(&group_prefix);
             let before_records = records_before_deltas(after_records.clone(), &group_deltas);
             match collect_by.mode {
                 CollectByMode::Collect | CollectByMode::Root => {
-                    let render = |records: &[(Bytes, i64)]| {
-                        if collect_by.mode == CollectByMode::Root {
-                            collect_by_root_from_records(
-                                input_desc,
-                                output_desc,
-                                collect_by,
-                                records,
-                            )
+                    let mut render = |records: &[(Bytes, i64)]| {
+                        if let Some(projection) = root_projection.as_mut() {
+                            projection
+                                .render(records.iter().map(|(record, weight)| (record, *weight)))
                         } else if collect_by.slots.is_empty() {
                             collect_by_parent_from_records(
                                 input_desc,

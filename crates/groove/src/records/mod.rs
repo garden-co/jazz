@@ -729,6 +729,11 @@ pub(crate) enum RawProjectionField {
     WrapNullable {
         source_idx: usize,
     },
+    UnwrapNullable {
+        source_idx: usize,
+        inner: ValueType,
+        null_bytes: Result<Vec<u8>, Error>,
+    },
     Nested {
         path: Vec<(RecordDescriptor, usize)>,
     },
@@ -1143,6 +1148,17 @@ fn append_projected_field<E: From<Error>>(
         RawProjectionField::WrapNullable { source_idx } => {
             output.extend_from_slice(&[1]);
             output.extend_from_slice(&record[source.field_span(record, *source_idx)?]);
+        }
+        RawProjectionField::UnwrapNullable {
+            source_idx,
+            inner,
+            null_bytes,
+        } => {
+            let span = source.field_span(record, *source_idx)?;
+            match nullable_present_payload(record, span, inner)? {
+                Some(payload) => output.extend_from_slice(&record[payload]),
+                None => output.extend_from_slice(null_bytes.as_ref().map_err(Clone::clone)?),
+            }
         }
         RawProjectionField::Nested { path } => {
             let mut bytes = record;

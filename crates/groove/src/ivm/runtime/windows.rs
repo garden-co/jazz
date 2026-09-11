@@ -571,6 +571,16 @@ fn update_collect_by_root_terminal_state(
         state.emitted_root_order.clear();
         state.emitted_root_keys.clear();
     }
+    let mut projection = RootProjection::new(
+        input_desc,
+        output_desc,
+        collect_by,
+        if emit {
+            deltas.iter().map(|delta| delta.record.len()).sum()
+        } else {
+            0
+        },
+    );
     let mut before = BTreeMap::<Vec<u8>, Option<Bytes>>::new();
     let mut before_order = BTreeMap::<Vec<u8>, Option<CollectByOrderKey>>::new();
     for delta in deltas {
@@ -578,11 +588,7 @@ fn update_collect_by_root_terminal_state(
             encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
         if emit && !before.contains_key(&group_key) {
             let rendered = state.groups.get(&group_key).map_or(Ok(None), |group| {
-                let records = group
-                    .iter()
-                    .map(|((_, record), weight)| (record.clone(), *weight))
-                    .collect::<Vec<_>>();
-                collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
+                projection.render(group.iter().map(|((_, record), weight)| (record, *weight)))
             })?;
             before.insert(group_key.clone(), rendered);
         }
@@ -751,11 +757,7 @@ fn update_collect_by_root_terminal_state(
             .groups
             .get(root_key)
             .map(|group| {
-                let records = group
-                    .iter()
-                    .map(|((_, record), weight)| (record.clone(), *weight))
-                    .collect::<Vec<_>>();
-                collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
+                projection.render(group.iter().map(|((_, record), weight)| (record, *weight)))
             })
             .transpose()?
             .flatten()
@@ -802,11 +804,7 @@ fn update_collect_by_root_terminal_state(
             continue;
         }
         let after_record = state.groups.get(&root_key).map_or(Ok(None), |group| {
-            let records = group
-                .iter()
-                .map(|((_, record), weight)| (record.clone(), *weight))
-                .collect::<Vec<_>>();
-            collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
+            projection.render(group.iter().map(|((_, record), weight)| (record, *weight)))
         })?;
         // Removed roots were retracted before inserts/moves above.
         let Some(after_record) = after_record else {
@@ -836,30 +834,105 @@ fn collect_by_root_order_key(group: &CollectByGroup) -> Option<CollectByOrderKey
         .map(|(order_key, _)| order_key.clone())
 }
 
-pub(super) fn collect_by_root_from_records(
-    input_desc: RecordDescriptor,
-    output_desc: RecordDescriptor,
-    collect_by: &CollectByOp,
-    records: &[(Bytes, i64)],
-) -> Result<Option<Bytes>, IvmRuntimeError> {
-    let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
-        return Ok(None);
-    };
-    let parent_input = BorrowedRecord::new(parent_record, &input_desc);
-    let values = collect_by
-        .parent_fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| {
-            let value = collect_by_projected_value(&parent_input, field)?;
-            let output_type = &output_desc.fields()[index].value_type;
-            Ok::<Value, IvmRuntimeError>(collect_by_output_value(output_type, value))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let record = output_desc.create(&values).map_err(|error| {
-        IvmRuntimeError::InvalidCollectBy(format!("root record render failed: {error}"))
-    })?;
-    Ok(Some(record.into()))
+/// One batch's prepared field mapping and shared output arena. Only fields
+/// requiring semantic conversion fall back to materializing a Value.
+pub(super) struct RootProjection<'a> {
+    input: RecordDescriptor,
+    output: RecordDescriptor,
+    collect: &'a CollectByOp,
+    plan: PreparedProjection,
+    bytes: BytesMut,
+}
+
+impl<'a> RootProjection<'a> {
+    pub(super) fn new(
+        input: RecordDescriptor,
+        output: RecordDescriptor,
+        collect: &'a CollectByOp,
+        capacity: usize,
+    ) -> Self {
+        let fields = collect
+            .parent_fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let source_idx = field.field_idx;
+                let Some(source) = input.fields().get(source_idx) else {
+                    return RawProjectionField::Evaluate;
+                };
+                let target = &output.fields()[index].value_type;
+                let source = &source.value_type;
+                if field.unwrap_nullable
+                    && let ValueType::Nullable(inner) = source
+                {
+                    if inner.as_ref() == target {
+                        return RawProjectionField::UnwrapNullable {
+                            source_idx,
+                            inner: inner.as_ref().clone(),
+                            null_bytes: records::encode_single_field_value(
+                                &Value::Nullable(None),
+                                target,
+                            ),
+                        };
+                    }
+                    // Unwrap then saturating-wrap is identity for a scalar
+                    // nullable field; nested nullable layers are distinct.
+                    if source == target && !matches!(inner.as_ref(), ValueType::Nullable(_)) {
+                        return RawProjectionField::Copy { source_idx };
+                    }
+                    return RawProjectionField::Evaluate;
+                }
+                if source == target {
+                    RawProjectionField::Copy { source_idx }
+                } else if !matches!(source, ValueType::Nullable(_))
+                    && matches!(target, ValueType::Nullable(inner) if inner.as_ref() == source)
+                {
+                    RawProjectionField::WrapNullable { source_idx }
+                } else {
+                    RawProjectionField::Evaluate
+                }
+            })
+            .collect();
+        let plan = PreparedProjection::new(input, output, fields);
+        let bytes = BytesMut::with_capacity(if plan.reuses_input { 0 } else { capacity });
+        Self {
+            input,
+            output,
+            collect,
+            plan,
+            bytes,
+        }
+    }
+
+    pub(super) fn render<'r>(
+        &mut self,
+        records: impl IntoIterator<Item = (&'r Bytes, i64)>,
+    ) -> Result<Option<Bytes>, IvmRuntimeError> {
+        let Some((record, _)) = records.into_iter().find(|(_, weight)| *weight > 0) else {
+            return Ok(None);
+        };
+        if self.plan.reuses_input {
+            return Ok(Some(record.clone()));
+        }
+        let borrowed = BorrowedRecord::new(record, &self.input);
+        let span = self.output.project_raw_fields_into(
+            &self.input,
+            record,
+            &self.plan.fields,
+            &mut self.bytes,
+            |index, output| {
+                let value =
+                    collect_by_projected_value(&borrowed, &self.collect.parent_fields[index])?;
+                let value = collect_by_output_value(&self.output.fields()[index].value_type, value);
+                output.extend_from_slice(&records::encode_single_field_value(
+                    &value,
+                    &self.output.fields()[index].value_type,
+                )?);
+                Ok::<_, IvmRuntimeError>(())
+            },
+        )?;
+        Ok(Some(self.bytes.split_to(span.end).freeze()))
+    }
 }
 
 pub(super) fn collect_by_parent_from_records(
@@ -1510,6 +1583,115 @@ mod root_terminal_tests {
         }
     }
 
+    // Internal projection guard: compare bytes with the ordinary value encoder,
+    // while proving the collector itself does not reconstruct an entire record.
+    #[test]
+    fn root_projection_copies_fields_and_unwraps_nested_nulls_without_reencoding() {
+        let nullable_text = ValueType::Nullable(Box::new(ValueType::String));
+        let input = RecordDescriptor::new([
+            ("id", ValueType::U64),
+            ("text", ValueType::Nullable(Box::new(nullable_text.clone()))),
+            ("unused", ValueType::Bytes),
+        ]);
+        let output = RecordDescriptor::new([("text", nullable_text), ("id", ValueType::U64)]);
+        let mut collect = collector();
+        collect.parent_fields = vec![
+            CollectByProjection {
+                field: "text".into(),
+                field_idx: 1,
+                output_name: "text".into(),
+                unwrap_nullable: true,
+            },
+            CollectByProjection {
+                field: "id".into(),
+                field_idx: 0,
+                output_name: "id".into(),
+                unwrap_nullable: false,
+            },
+        ];
+        for (source, expected) in [
+            (Value::Nullable(None), Value::Nullable(None)),
+            (
+                Value::Nullable(Some(Box::new(Value::Nullable(None)))),
+                Value::Nullable(None),
+            ),
+            (
+                Value::Nullable(Some(Box::new(Value::Nullable(Some(Box::new(
+                    Value::String("kept".into()),
+                )))))),
+                Value::Nullable(Some(Box::new(Value::String("kept".into())))),
+            ),
+        ] {
+            let raw: Bytes = input
+                .create(&[Value::U64(7), source, Value::Bytes(vec![9; 1000])])
+                .unwrap()
+                .into();
+            let expected = output.create(&[expected, Value::U64(7)]).unwrap();
+            let records = [(raw, 1)];
+            crate::records::RECORD_ENCODE_COUNT.with(|count| count.set(0));
+            let result = RootProjection::new(input, output, &collect, 2048)
+                .render(records.iter().map(|(record, weight)| (record, *weight)))
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.as_ref(), expected);
+            assert_eq!(
+                crate::records::RECORD_ENCODE_COUNT.with(|count| count.get()),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn root_projection_keeps_prior_arena_outputs_and_nullable_errors() {
+        let input = RecordDescriptor::new([("id", ValueType::Nullable(Box::new(ValueType::U64)))]);
+        let output = RecordDescriptor::new([("id", ValueType::U64)]);
+        let mut collect = collector();
+        collect.parent_fields = vec![CollectByProjection {
+            field: "id".into(),
+            field_idx: 0,
+            output_name: "id".into(),
+            unwrap_nullable: true,
+        }];
+        let null: Bytes = input.create(&[Value::Nullable(None)]).unwrap().into();
+        let mut projection = RootProjection::new(input, output, &collect, 8);
+        assert!(projection.render([(&null, -1)]).unwrap().is_none());
+        assert!(projection.render([(&null, 1)]).is_err());
+        let mut projection = RootProjection::new(input, output, &collect, 8);
+        let mut retained = Vec::new();
+        for id in 0..100 {
+            let raw: Bytes = input
+                .create(&[Value::Nullable(Some(Box::new(Value::U64(id))))])
+                .unwrap()
+                .into();
+            retained.push(projection.render([(&raw, 1)]).unwrap().unwrap());
+        }
+        drop(projection);
+        for (id, raw) in retained.iter().enumerate() {
+            assert_eq!(output.bind(raw).get_idx(0).unwrap(), Value::U64(id as u64));
+        }
+    }
+
+    #[test]
+    fn root_projection_does_not_add_a_second_nullable_layer() {
+        let nullable = ValueType::Nullable(Box::new(ValueType::U64));
+        let input = RecordDescriptor::new([("id", nullable.clone())]);
+        let output = RecordDescriptor::new([("id", ValueType::Nullable(Box::new(nullable)))]);
+        let mut collect = collector();
+        collect.parent_fields = vec![CollectByProjection {
+            field: "id".into(),
+            field_idx: 0,
+            output_name: "id".into(),
+            unwrap_nullable: false,
+        }];
+        let raw: Bytes = input.create(&[Value::Nullable(None)]).unwrap().into();
+        let expected = output.create(&[Value::Nullable(None)]).unwrap();
+        let mut projection = RootProjection::new(input, output, &collect, 16);
+        assert_eq!(
+            projection.render([(&raw, 1)]).unwrap().unwrap().as_ref(),
+            expected
+        );
+    }
+
     // Internal work bound: the public Insert/Update stream cannot reveal a
     // discarded second rendering of every newly inserted root.
     #[test]
@@ -1531,10 +1713,7 @@ mod root_terminal_tests {
             true,
         )
         .unwrap();
-        assert_eq!(
-            crate::records::RECORD_ENCODE_COUNT.with(|count| count.get()),
-            100
-        );
+        assert!(crate::records::RECORD_ENCODE_COUNT.with(|count| count.get()) <= 100);
         assert_eq!(operations.len(), 100);
         assert!(
             operations
