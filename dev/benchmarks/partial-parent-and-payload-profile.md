@@ -120,5 +120,5 @@ historical matrix, but its output pipeline suppresses command failures; use
 direct commands and inspect exit status for new receipts. Do not reuse old
 seed databases across storage revisions without checking their compatibility.
 
-This section selects the additional workload; a current-tip timing baseline
-has not yet been collected.
+The first current-tip cold receipt and the warm reopen blocker are recorded in
+[permissioned-load-current.md](permissioned-load-current.md).

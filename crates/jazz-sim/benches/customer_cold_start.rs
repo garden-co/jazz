@@ -284,7 +284,7 @@ const CHILD_TABLES: usize = 6;
 const DOMINANT_CHILD_TABLE: &str = "res_l_child_3";
 const DOMINANT_CHILD_VISIBLE_PARENTS: usize = 36;
 const DOMINANT_CHILD_TOTAL_PARENTS: usize = 65;
-const SEED_CACHE_VERSION: &str = "customer-cold-start-seed-v5";
+const SEED_CACHE_VERSION: &str = "customer-cold-start-seed-v7";
 const SEED_CACHE_READY: &str = ".jazz_customer_seed_ready";
 
 const RESOURCE_SPECS: [ResourceSpec; 14] = [
@@ -963,7 +963,7 @@ fn resource_policy(access_table: &str) -> PolicyExpr {
         &[("administrator", PublicValue::Boolean(false))],
         GROUP_ACCESS,
         "user_id",
-        &["user"],
+        &["user", "account"],
         "group_id",
     )
 }
@@ -1871,13 +1871,16 @@ fn subscription_tables() -> Vec<String> {
 fn seed_db(core: &Node<RocksDbStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
     let node = core.node();
     let mut node = block_on(node.lock());
-    jazz_sim::fixture::commit_mergeable_unit_settled(
+    let (tx_id, _) = jazz_sim::fixture::commit_mergeable_unit_settled(
         &mut node,
         MergeableCommit::new(table, row, next_seed_time())
             .made_by(AuthorSubject::SYSTEM)
             .cells(cells),
     )
     .unwrap();
+    // Core seed rows must be accepted, not merely persisted local writes.
+    let outcome = block_on(node.finalize_local_mergeable_commit(tx_id)).unwrap();
+    jazz_sim::fixture::settle_outcome(&mut node, outcome).unwrap();
 }
 
 fn open_db_node(
@@ -1968,7 +1971,15 @@ fn group_cells(org: RowUuid, i: usize) -> BTreeMap<String, Value> {
 fn group_access_cells(group: RowUuid, user: RowUuid, i: usize) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("group_id".to_owned(), Value::Uuid(group.0)),
-        ("user_id".to_owned(), Value::Uuid(user.0)),
+        (
+            "user_id".to_owned(),
+            Value::Uuid(
+                AuthorSubject::for_test_uuid(user.0)
+                    .account_id()
+                    .expect("fixture identity has an account")
+                    .0,
+            ),
+        ),
         ("role".to_owned(), Value::EnumTag((i % 3) as u8)),
     ])
 }

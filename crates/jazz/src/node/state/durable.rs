@@ -1219,19 +1219,10 @@ where
     /// logical table-prefix scan.
     pub async fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
         let mut total = 0_u64;
-        for class_cf in [
-            "__groove_class_history",
-            "__groove_class_register",
-            "__groove_class_global_current",
-            "__groove_class_ahead_current",
-            "__groove_class_changes",
-            "__groove_class_indices",
-            "__groove_class_content",
-            "__groove_class_meta",
-        ] {
+        for class_cf in self.try_current_schema()?.physical_column_families() {
             total += self
                 .database
-                .approximate_class_bytes(class_cf)
+                .approximate_class_bytes(&class_cf)
                 .await
                 .map_err(Error::Groove)?
                 .unwrap_or_default();
