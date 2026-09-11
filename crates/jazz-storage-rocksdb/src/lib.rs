@@ -160,7 +160,8 @@ impl StorageCursor for RocksDbCursor<'_> {
                 return Ok(None);
             }
             let batch_limit = self.remaining.unwrap_or(256).min(256);
-            let mut batch = Vec::with_capacity(batch_limit);
+            // Short and empty scans should not reserve a full page.
+            let mut batch = Vec::new();
             while batch.len() < batch_limit {
                 let Some(item) = self.iterator.next() else {
                     self.done = true;

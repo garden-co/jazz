@@ -1885,7 +1885,8 @@ impl StorageCursor for OverlayScanCursor<'_> {
                 return Ok(None);
             };
 
-            let mut values = Vec::with_capacity(batch_len);
+            // Short and empty scans should not reserve a full page.
+            let mut values = Vec::new();
             while values.len() < batch_len {
                 let Some(entry) = self.next_entry().await? else {
                     break;
