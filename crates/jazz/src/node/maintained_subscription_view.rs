@@ -504,22 +504,22 @@ impl MaintainedSubscriptionView {
         // whole active closure here would turn every incremental tick into a
         // snapshot-sized operation.
         let mut peer_source_fact_changes = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
-        for (sink, terminal) in &deltas.terminal_sinks {
+        for (sink, terminal) in deltas.terminal_sinks {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
                 && !terminal.operations.is_empty()
             {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_operations sink={sink} kind={:?} operations={}",
-                    schemas.get(sink)?,
+                    schemas.get(&sink)?,
                     terminal.operations.len(),
                 );
             }
             if let MaintainedTerminalKind::RootCollectorAppRows { layout, .. } =
-                schemas.get(sink)?
+                schemas.get(&sink)?
             {
                 let operations = terminal
                     .operations
-                    .iter()
+                    .into_iter()
                     .map(|operation| rebind_terminal_operation_to_layout(operation, layout))
                     .collect::<Result<Vec<_>, _>>()?;
                 // A root removal can share its batch with descendants which
@@ -527,9 +527,11 @@ impl MaintainedSubscriptionView {
                 // skip only those now-unreachable descendants. This mirrors
                 // the facade reducer and keeps malformed descendants for an
                 // otherwise retained root fail-closed.
-                let inserted_roots = operations
+                let (root_operations, nested_operations): (Vec<_>, Vec<_>) = operations
+                    .into_iter()
+                    .partition(|operation| operation.path.is_empty());
+                let inserted_roots = root_operations
                     .iter()
-                    .filter(|operation| operation.path.is_empty())
                     .filter_map(|operation| match operation.edit {
                         TerminalEdit::Insert { .. } => Some((operation.root_key.clone(), true)),
                         TerminalEdit::Remove { .. } => Some((operation.root_key.clone(), false)),
@@ -539,9 +541,8 @@ impl MaintainedSubscriptionView {
                     .into_iter()
                     .filter_map(|(key, present)| present.then_some(key))
                     .collect::<BTreeSet<_>>();
-                let removed_roots = operations
+                let removed_roots = root_operations
                     .iter()
-                    .filter(|operation| operation.path.is_empty())
                     .filter_map(|operation| {
                         matches!(operation.edit, TerminalEdit::Remove { .. })
                             .then_some(operation.root_key.clone())
@@ -557,15 +558,7 @@ impl MaintainedSubscriptionView {
                             .map(|record| (key.clone(), record))
                     })
                     .collect::<BTreeMap<_, _>>();
-                for operation in operations
-                    .iter()
-                    .filter(|operation| operation.path.is_empty())
-                    .chain(
-                        operations
-                            .iter()
-                            .filter(|operation| !operation.path.is_empty()),
-                    )
-                {
+                for operation in root_operations.into_iter().chain(nested_operations) {
                     if !operation.path.is_empty()
                         && removed_roots.contains(operation.root_key.as_slice())
                         && !inserted_roots.contains(operation.root_key.as_slice())
@@ -591,7 +584,7 @@ impl MaintainedSubscriptionView {
                         self.structured_terminal_records
                             .insert(operation.root_key.clone(), record);
                     }
-                    transitions.terminal_operations.push(operation.clone());
+                    transitions.terminal_operations.push(operation);
                 }
             }
         }
@@ -1552,11 +1545,11 @@ fn covered_input_for_version(
     tracing::instrument(skip_all, name = "cold.phase.rebind_terminal_output")
 )]
 fn rebind_terminal_operation_to_layout(
-    operation: &TerminalOperation,
+    mut operation: TerminalOperation,
     layout: &TerminalRootLayout,
 ) -> Result<TerminalOperation, super::Error> {
     if operation.root_descriptor == layout.root_descriptor {
-        return Ok(operation.clone());
+        return Ok(operation);
     }
     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
         eprintln!(
@@ -1567,15 +1560,14 @@ fn rebind_terminal_operation_to_layout(
     if !terminal_descriptor_can_rebind_to_layout(
         &operation.root_descriptor,
         &layout.root_descriptor,
-    ) || !terminal_nested_collection_layout_agrees(operation, &layout.root_descriptor)
+    ) || !terminal_nested_collection_layout_agrees(&operation, &layout.root_descriptor)
     {
         return Err(super::Error::InvalidStoredValue(
             "structured terminal operation descriptor disagrees with prepared root layout",
         ));
     }
 
-    let mut rebound = operation.clone();
-    match &mut rebound.edit {
+    match &mut operation.edit {
         TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. }
             if operation.path.is_empty() =>
         {
@@ -1587,8 +1579,8 @@ fn rebind_terminal_operation_to_layout(
         }
         _ => {}
     }
-    rebound.root_descriptor = layout.root_descriptor;
-    Ok(rebound)
+    operation.root_descriptor = layout.root_descriptor;
+    Ok(operation)
 }
 
 fn terminal_nested_collection_layout_agrees(
@@ -3854,7 +3846,8 @@ mod tests {
             },
         };
 
-        let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+        let rebound =
+            rebind_terminal_operation_to_layout(operation.clone(), &layout(target)).unwrap();
         assert_eq!(rebound.root_descriptor, target);
         let TerminalEdit::Update { value, .. } = rebound.edit else {
             panic!("operation remains an update");
@@ -3914,7 +3907,8 @@ mod tests {
             },
         };
 
-        let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+        let rebound =
+            rebind_terminal_operation_to_layout(operation.clone(), &layout(target)).unwrap();
         let TerminalEdit::Update { value, .. } = rebound.edit else {
             panic!("operation remains an update");
         };
@@ -3947,7 +3941,7 @@ mod tests {
         };
 
         assert!(matches!(
-            rebind_terminal_operation_to_layout(&operation, &layout(target)),
+            rebind_terminal_operation_to_layout(operation.clone(), &layout(target)),
             Err(Error::InvalidStoredValue(
                 "structured terminal operation descriptor disagrees with prepared root layout"
             ))
@@ -4002,7 +3996,8 @@ mod tests {
                 path: vec![TerminalPathSegment::Collection("members".to_owned())],
                 edit,
             };
-            let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+            let rebound =
+                rebind_terminal_operation_to_layout(operation.clone(), &layout(target)).unwrap();
             assert_eq!(rebound.root_descriptor, target);
             assert_eq!(rebound.root_key, operation.root_key);
             assert_eq!(rebound.path, operation.path);
@@ -4042,7 +4037,9 @@ mod tests {
                 path,
                 edit: TerminalEdit::Remove { key: vec![1] },
             };
-            assert!(rebind_terminal_operation_to_layout(&operation, &layout(target)).is_err());
+            assert!(
+                rebind_terminal_operation_to_layout(operation.clone(), &layout(target)).is_err()
+            );
         }
         let other_child =
             RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("name", ValueType::String)]);
@@ -4060,7 +4057,10 @@ mod tests {
             path: vec![TerminalPathSegment::Collection("members".to_owned())],
             edit: TerminalEdit::Remove { key: vec![1] },
         };
-        assert!(rebind_terminal_operation_to_layout(&operation, &layout(changed_target)).is_err());
+        assert!(
+            rebind_terminal_operation_to_layout(operation.clone(), &layout(changed_target))
+                .is_err()
+        );
     }
 
     fn witness_schema() -> VersionWitnessSchema {
