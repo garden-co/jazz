@@ -32,6 +32,20 @@ after materialization. These are therefore harness timings, not a clean
 production end-to-end latency estimate. Allocation/RSS metrics emitted as zero
 in this build are unavailable and must not be interpreted as zero memory use.
 
+## Iteration targets
+
+The working target is approximately **5 seconds** to correct cold subscription
+readiness; the stretch target is **under 1 second**. Against this 51.9-second
+baseline, those require approximately 10x and 52x improvements respectively.
+Track the final one-shot materialization and diagnostic overhead separately.
+The historical harness's `target_ms=1000` remains the stretch-target marker;
+its existing `under_target` field uses total harness wall time, not readiness.
+Use the readiness metric above for this iteration's product target.
+
+Profile core, relay and client work separately, including recursive permission
+and inherited-child evaluation, publication, ingestion and local materialization.
+Measure codec probes separately before attributing their work to the runtime.
+
 ## Warm failure
 
 Warm priming passes its row-count checks, but reopening the newly created relay
