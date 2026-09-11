@@ -776,7 +776,7 @@ fn descriptor_codec_take<'a>(
     nodes: &'a [DescriptorCodecNode],
     cursor: &mut usize,
 ) -> Result<&'a DescriptorCodecNode, Error> {
-    let node = nodes.get(*cursor).ok_or(Error::UnexpectedEof)?;
+    let node = nodes.get(*cursor).ok_or_else(|| Error::UnexpectedEof)?;
     *cursor += 1;
     Ok(node)
 }
@@ -1916,7 +1916,7 @@ fn validate_nullable(
     inner_type: &ValueType,
     require_constructible: bool,
 ) -> Result<(), Error> {
-    let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
+    let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
     match flag {
         0 if inner_type.fixed_size().is_some() && payload.iter().any(|byte| *byte != 0) => {
             Err(Error::InvalidOffset)
@@ -1984,7 +1984,7 @@ fn validate_tuple(
             })?;
         let end = checked_add(offset, width)?;
         validate_value_inner(
-            bytes.get(offset..end).ok_or(Error::UnexpectedEof)?,
+            bytes.get(offset..end).ok_or_else(|| Error::UnexpectedEof)?,
             member,
             require_constructible,
         )?;
@@ -2040,7 +2040,7 @@ pub(super) fn visit_encoded_indirect_values(
             }
         }
         ValueType::Nullable(inner) => {
-            let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
+            let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
             match flag {
                 0 => Ok(false),
                 1 => visit_encoded_indirect_values(payload, inner, visitor),
@@ -2064,7 +2064,7 @@ pub(super) fn visit_encoded_indirect_values(
                 count
                     .saturating_sub(1)
                     .checked_mul(4)
-                    .ok_or(Error::InvalidOffset)?,
+                    .ok_or_else(|| Error::InvalidOffset)?,
             )?;
             if start > bytes.len() {
                 return Err(Error::UnexpectedEof);
@@ -2075,7 +2075,7 @@ pub(super) fn visit_encoded_indirect_values(
                 } else {
                     u32_to_usize(read_u32_at(bytes, 4 + index * 4)?)?
                 };
-                let item = bytes.get(start..end).ok_or(Error::InvalidOffset)?;
+                let item = bytes.get(start..end).ok_or_else(|| Error::InvalidOffset)?;
                 if visit_encoded_indirect_values(item, inner, visitor)? {
                     return Ok(true);
                 }
@@ -2090,7 +2090,7 @@ pub(super) fn visit_encoded_indirect_values(
 }
 
 fn decode_nullable(bytes: &[u8], inner_type: &ValueType) -> Result<Value, Error> {
-    let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
+    let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
     match flag {
         0 => {
             if inner_type.fixed_size().is_some() {
@@ -2430,7 +2430,7 @@ fn decode_tuple(bytes: &[u8], members: &[ValueType]) -> Result<Value, Error> {
                 member_type: member_type.clone(),
             })?;
         let end = checked_add(offset, width)?;
-        let member = bytes.get(offset..end).ok_or(Error::UnexpectedEof)?;
+        let member = bytes.get(offset..end).ok_or_else(|| Error::UnexpectedEof)?;
         values.push(decode_tuple_member(member, member_type)?);
         offset = end;
     }
@@ -2526,7 +2526,7 @@ pub(super) fn write_u32(bytes: &mut Vec<u8>, value: u32) {
 }
 
 pub(super) fn checked_add(left: usize, right: usize) -> Result<usize, Error> {
-    left.checked_add(right).ok_or(Error::LengthOverflow)
+    left.checked_add(right).ok_or_else(|| Error::LengthOverflow)
 }
 
 pub(super) fn usize_to_u32(value: usize) -> Result<u32, Error> {

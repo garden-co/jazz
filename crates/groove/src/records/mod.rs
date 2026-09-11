@@ -1,3 +1,10 @@
+// Even unit variants have Error's nontrivial drop glue. Optimized field_span
+// emitted destructor calls on successful reads for eager ok_or errors.
+#![allow(
+    clippy::unnecessary_lazy_evaluations,
+    reason = "construct record errors only on failure; eager errors emit drop calls on hot successful reads"
+)]
+
 //! Compact binary record descriptors, layout, and encoded row access.
 //!
 //! A [`RecordDescriptor`] is a named, declaration-ordered set of value types.
@@ -262,13 +269,12 @@ impl RecordDescriptor {
                     len: source_descriptors.len(),
                 },
             )?;
-            let source_record =
-                source_records
-                    .get(source_descriptor_idx)
-                    .ok_or(Error::FieldIndexOutOfBounds {
-                        index: source_descriptor_idx,
-                        len: source_records.len(),
-                    })?;
+            let source_record = source_records.get(source_descriptor_idx).ok_or_else(|| {
+                Error::FieldIndexOutOfBounds {
+                    index: source_descriptor_idx,
+                    len: source_records.len(),
+                }
+            })?;
             let source_field = source_descriptor.fields.get(source_field_idx).ok_or(
                 Error::FieldIndexOutOfBounds {
                     index: source_field_idx,
@@ -346,13 +352,12 @@ impl RecordDescriptor {
                     len: source_descriptors.len(),
                 },
             )?;
-            let source_record =
-                source_records
-                    .get(source_descriptor_idx)
-                    .ok_or(Error::FieldIndexOutOfBounds {
-                        index: source_descriptor_idx,
-                        len: source_records.len(),
-                    })?;
+            let source_record = source_records.get(source_descriptor_idx).ok_or_else(|| {
+                Error::FieldIndexOutOfBounds {
+                    index: source_descriptor_idx,
+                    len: source_records.len(),
+                }
+            })?;
             let source_field = source_descriptor.fields.get(source_field_idx).ok_or(
                 Error::FieldIndexOutOfBounds {
                     index: source_field_idx,
@@ -416,7 +421,7 @@ impl RecordDescriptor {
         let field = self
             .fields
             .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
+            .ok_or_else(|| Error::FieldIndexOutOfBounds {
                 index: field_idx,
                 len: self.fields.len(),
             })?;
@@ -463,10 +468,13 @@ impl RecordDescriptor {
         visitor: &mut impl FnMut(&[u8], &ValueType) -> Result<bool, Error>,
     ) -> Result<bool, Error> {
         for index in indices {
-            let field = self.fields.get(index).ok_or(Error::FieldIndexOutOfBounds {
-                index,
-                len: self.fields.len(),
-            })?;
+            let field = self
+                .fields
+                .get(index)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index,
+                    len: self.fields.len(),
+                })?;
             if field.value_type.may_contain_stored_scalar() {
                 let span = self.field_span(record, index)?;
                 if values::visit_encoded_indirect_values(&record[span], &field.value_type, visitor)?
@@ -518,10 +526,13 @@ impl RecordDescriptor {
         value: &Value,
         output: &mut Vec<u8>,
     ) -> Result<(), Error> {
-        let field = self.fields.get(index).ok_or(Error::FieldIndexOutOfBounds {
-            index,
-            len: self.fields.len(),
-        })?;
+        let field = self
+            .fields
+            .get(index)
+            .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                index,
+                len: self.fields.len(),
+            })?;
         ensure_value_type(value, &field.value_type)?;
         if field.value_type.is_fixed_size() {
             encode_fixed_value(output, value, &field.value_type)
@@ -540,7 +551,7 @@ impl RecordDescriptor {
         let field = self
             .fields
             .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
+            .ok_or_else(|| Error::FieldIndexOutOfBounds {
                 index: field_idx,
                 len: self.fields.len(),
             })?;
@@ -810,7 +821,7 @@ impl RecordProjector {
                 source
                     .fields
                     .get(source_idx)
-                    .ok_or(Error::FieldIndexOutOfBounds {
+                    .ok_or_else(|| Error::FieldIndexOutOfBounds {
                         index: source_idx,
                         len: source.fields.len(),
                     })?;
@@ -818,7 +829,7 @@ impl RecordProjector {
                 target
                     .fields
                     .get(target_idx)
-                    .ok_or(Error::FieldIndexOutOfBounds {
+                    .ok_or_else(|| Error::FieldIndexOutOfBounds {
                         index: target_idx,
                         len: target.fields.len(),
                     })?;
@@ -845,7 +856,7 @@ impl RecordProjector {
             .into_iter()
             .enumerate()
             .map(|(target_idx, source_idx)| {
-                source_idx.ok_or(Error::ProjectMissingTarget { target_idx })
+                source_idx.ok_or_else(|| Error::ProjectMissingTarget { target_idx })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -973,20 +984,21 @@ impl RecordDescriptor {
                 actual: source.fields.len(),
             });
         }
-        let source_field = source
-            .fields
-            .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: field_idx,
-                len: source.fields.len(),
-            })?;
-        let target_field = self
-            .fields
-            .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: field_idx,
-                len: self.fields.len(),
-            })?;
+        let source_field =
+            source
+                .fields
+                .get(field_idx)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: source.fields.len(),
+                })?;
+        let target_field =
+            self.fields
+                .get(field_idx)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: self.fields.len(),
+                })?;
         let unwrap_inner = match &source_field.value_type {
             ValueType::Nullable(inner) => {
                 if inner.as_ref() != &target_field.value_type {
@@ -1015,61 +1027,59 @@ impl RecordDescriptor {
         output.reserve(fixed_size + offset_table_size);
 
         for target_idx in &self.layout.logical_by_physical {
-            let bytes = if *target_idx == field_idx {
-                match unwrap_inner {
-                    Some(inner) => {
-                        let span = source.field_span(source_record, field_idx)?;
-                        match nullable_present_payload(source_record, span, inner)? {
-                            Some(payload) => RawProjectedBytes::Source(payload),
-                            None => {
-                                if matches!(target_field.value_type, ValueType::Nullable(_)) {
-                                    let encoded = encode_value(
-                                        &Value::Nullable(None),
-                                        &target_field.value_type,
-                                    )?;
-                                    let generated_start = scratch.generated.len();
-                                    scratch.generated.extend_from_slice(&encoded);
-                                    RawProjectedBytes::Generated(
-                                        generated_start..scratch.generated.len(),
-                                    )
-                                } else {
-                                    output.truncate(start);
-                                    scratch.variable_fields.clear();
-                                    scratch.generated.clear();
-                                    return Ok(None);
+            let bytes =
+                if *target_idx == field_idx {
+                    match unwrap_inner {
+                        Some(inner) => {
+                            let span = source.field_span(source_record, field_idx)?;
+                            match nullable_present_payload(source_record, span, inner)? {
+                                Some(payload) => RawProjectedBytes::Source(payload),
+                                None => {
+                                    if matches!(target_field.value_type, ValueType::Nullable(_)) {
+                                        let encoded = encode_value(
+                                            &Value::Nullable(None),
+                                            &target_field.value_type,
+                                        )?;
+                                        let generated_start = scratch.generated.len();
+                                        scratch.generated.extend_from_slice(&encoded);
+                                        RawProjectedBytes::Generated(
+                                            generated_start..scratch.generated.len(),
+                                        )
+                                    } else {
+                                        output.truncate(start);
+                                        scratch.variable_fields.clear();
+                                        scratch.generated.clear();
+                                        return Ok(None);
+                                    }
                                 }
                             }
                         }
+                        None => source
+                            .field_span(source_record, field_idx)
+                            .map(RawProjectedBytes::Source)?,
                     }
-                    None => source
-                        .field_span(source_record, field_idx)
-                        .map(RawProjectedBytes::Source)?,
-                }
-            } else {
-                let source_field =
-                    source
-                        .fields
-                        .get(*target_idx)
-                        .ok_or(Error::FieldIndexOutOfBounds {
+                } else {
+                    let source_field = source.fields.get(*target_idx).ok_or_else(|| {
+                        Error::FieldIndexOutOfBounds {
                             index: *target_idx,
                             len: source.fields.len(),
-                        })?;
-                let target_field =
-                    self.fields
-                        .get(*target_idx)
-                        .ok_or(Error::FieldIndexOutOfBounds {
+                        }
+                    })?;
+                    let target_field = self.fields.get(*target_idx).ok_or_else(|| {
+                        Error::FieldIndexOutOfBounds {
                             index: *target_idx,
                             len: self.fields.len(),
-                        })?;
-                if source_field.value_type != target_field.value_type {
-                    return Err(Error::TypeMismatch {
-                        expected: target_field.value_type.clone(),
-                    });
-                }
-                source
-                    .field_span(source_record, *target_idx)
-                    .map(RawProjectedBytes::Source)?
-            };
+                        }
+                    })?;
+                    if source_field.value_type != target_field.value_type {
+                        return Err(Error::TypeMismatch {
+                            expected: target_field.value_type.clone(),
+                        });
+                    }
+                    source
+                        .field_span(source_record, *target_idx)
+                        .map(RawProjectedBytes::Source)?
+                };
 
             if matches!(
                 self.layout.fields[*target_idx],
@@ -1206,14 +1216,12 @@ impl<'a> BorrowedRecord<'a> {
 
     /// Borrow a nested record directly from its encoded field.
     pub fn get_record(&self, field_idx: usize) -> Result<BorrowedRecord<'a>, Error> {
-        let field =
-            self.descriptor
-                .fields()
-                .get(field_idx)
-                .ok_or(Error::FieldIndexOutOfBounds {
-                    index: field_idx,
-                    len: self.descriptor.fields().len(),
-                })?;
+        let field = self.descriptor.fields().get(field_idx).ok_or_else(|| {
+            Error::FieldIndexOutOfBounds {
+                index: field_idx,
+                len: self.descriptor.fields().len(),
+            }
+        })?;
         let ValueType::Record(descriptor) = &field.value_type else {
             return Err(Error::TypeMismatch {
                 expected: field.value_type.clone(),
@@ -1294,12 +1302,12 @@ impl<'a> BorrowedRecord<'a> {
 
     pub fn get_u8(&self, field_idx: usize) -> Result<u8, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U8)?;
-        bytes.first().copied().ok_or(Error::UnexpectedEof)
+        bytes.first().copied().ok_or_else(|| Error::UnexpectedEof)
     }
 
     pub fn get_bool(&self, field_idx: usize) -> Result<bool, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::Bool)?;
-        match bytes.first().copied().ok_or(Error::UnexpectedEof)? {
+        match bytes.first().copied().ok_or_else(|| Error::UnexpectedEof)? {
             0 => Ok(false),
             1 => Ok(true),
             value => Err(Error::InvalidBool(value)),
@@ -1307,14 +1315,14 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     pub fn get_enum(&self, field_idx: usize) -> Result<u8, Error> {
-        let field = self
-            .descriptor
-            .fields
-            .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: field_idx,
-                len: self.descriptor.fields.len(),
-            })?;
+        let field =
+            self.descriptor
+                .fields
+                .get(field_idx)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: self.descriptor.fields.len(),
+                })?;
         if !matches!(field.value_type, ValueType::EnumTag(_)) {
             return Err(Error::TypeMismatch {
                 expected: ValueType::U8,
@@ -1325,14 +1333,14 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     pub fn get_enum_name(&self, field_idx: usize) -> Result<&str, Error> {
-        let field = self
-            .descriptor
-            .fields
-            .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: field_idx,
-                len: self.descriptor.fields.len(),
-            })?;
+        let field =
+            self.descriptor
+                .fields
+                .get(field_idx)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: self.descriptor.fields.len(),
+                })?;
         let ValueType::EnumTag(schema) = &field.value_type else {
             return Err(Error::TypeMismatch {
                 expected: ValueType::U8,
@@ -1392,14 +1400,14 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     pub fn get_nullable_enum(&self, field_idx: usize) -> Result<Option<u8>, Error> {
-        let field = self
-            .descriptor
-            .fields
-            .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: field_idx,
-                len: self.descriptor.fields.len(),
-            })?;
+        let field =
+            self.descriptor
+                .fields
+                .get(field_idx)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: self.descriptor.fields.len(),
+                })?;
         let ValueType::Nullable(inner) = &field.value_type else {
             return Err(Error::TypeMismatch {
                 expected: ValueType::Nullable(Box::new(ValueType::U8)),
@@ -1412,7 +1420,7 @@ impl<'a> BorrowedRecord<'a> {
         }
         let span = self.descriptor.field_span(self.raw, field_idx)?;
         let bytes = &self.raw[span];
-        let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
+        let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
         match flag {
             0 => {
                 if payload.iter().any(|byte| *byte != 0) {
@@ -1451,14 +1459,14 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     pub fn get_array_element(&self, field_idx: usize, element_idx: usize) -> Result<Value, Error> {
-        let field = self
-            .descriptor
-            .fields
-            .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: field_idx,
-                len: self.descriptor.fields.len(),
-            })?;
+        let field =
+            self.descriptor
+                .fields
+                .get(field_idx)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: self.descriptor.fields.len(),
+                })?;
         let ValueType::Array(element_type) = &field.value_type else {
             return Err(Error::TypeMismatch {
                 expected: ValueType::Array(Box::new(ValueType::Bytes)),
@@ -1483,9 +1491,9 @@ impl<'a> BorrowedRecord<'a> {
         }
         let start = element_idx
             .checked_mul(element_size)
-            .ok_or(Error::LengthOverflow)?;
+            .ok_or_else(|| Error::LengthOverflow)?;
         let end = checked_add(start, element_size)?;
-        let element = array.get(start..end).ok_or(Error::UnexpectedEof)?;
+        let element = array.get(start..end).ok_or_else(|| Error::UnexpectedEof)?;
         decode_value(element, element_type)
     }
 
@@ -1493,7 +1501,7 @@ impl<'a> BorrowedRecord<'a> {
         self.descriptor
             .fields
             .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
+            .ok_or_else(|| Error::FieldIndexOutOfBounds {
                 index: field_idx,
                 len: self.descriptor.fields.len(),
             })
@@ -1506,14 +1514,14 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     fn field_bytes(&self, field_idx: usize, expected: &ValueType) -> Result<&'a [u8], Error> {
-        let field = self
-            .descriptor
-            .fields
-            .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: field_idx,
-                len: self.descriptor.fields.len(),
-            })?;
+        let field =
+            self.descriptor
+                .fields
+                .get(field_idx)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: self.descriptor.fields.len(),
+                })?;
         if &field.value_type != expected {
             return Err(Error::TypeMismatch {
                 expected: expected.clone(),
@@ -1530,7 +1538,7 @@ impl<'a> BorrowedRecord<'a> {
         decode: impl FnOnce(&'a [u8]) -> Result<T, Error>,
     ) -> Result<Option<T>, Error> {
         let bytes = self.nullable_field_bytes(field_idx, inner)?;
-        let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
+        let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
         match flag {
             0 => {
                 if matches!(
@@ -1551,14 +1559,14 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     fn nullable_field_bytes(&self, field_idx: usize, inner: &ValueType) -> Result<&'a [u8], Error> {
-        let field = self
-            .descriptor
-            .fields
-            .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: field_idx,
-                len: self.descriptor.fields.len(),
-            })?;
+        let field =
+            self.descriptor
+                .fields
+                .get(field_idx)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: self.descriptor.fields.len(),
+                })?;
         match &field.value_type {
             ValueType::Nullable(actual) if actual.as_ref() == inner => {}
             _ => {
@@ -1590,17 +1598,18 @@ fn project_fields_and_values(
         let descriptor =
             source_descriptors
                 .get(descriptor_idx)
-                .ok_or(Error::FieldIndexOutOfBounds {
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
                     index: descriptor_idx,
                     len: source_descriptors.len(),
                 })?;
-        let field = descriptor
-            .fields
-            .get(field_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: field_idx,
-                len: descriptor.fields.len(),
-            })?;
+        let field =
+            descriptor
+                .fields
+                .get(field_idx)
+                .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: descriptor.fields.len(),
+                })?;
 
         selected.push((
             field.clone(),
@@ -1640,14 +1649,15 @@ fn record_value_span(
     descriptor: &RecordDescriptor,
     field_idx: usize,
 ) -> Result<std::ops::Range<usize>, Error> {
-    let layout = descriptor
-        .layout
-        .fields
-        .get(field_idx)
-        .ok_or(Error::FieldIndexOutOfBounds {
-            index: field_idx,
-            len: descriptor.fields.len(),
-        })?;
+    let layout =
+        descriptor
+            .layout
+            .fields
+            .get(field_idx)
+            .ok_or_else(|| Error::FieldIndexOutOfBounds {
+                index: field_idx,
+                len: descriptor.fields.len(),
+            })?;
 
     validate_record_header(record, descriptor)?;
     let span = record_value_span_for_layout(record, descriptor, *layout)?;
@@ -1717,7 +1727,7 @@ fn read_exact_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
 
 fn read_u32_at(bytes: &[u8], offset: usize) -> Result<u32, Error> {
     let end = checked_add(offset, 4)?;
-    let slice = bytes.get(offset..end).ok_or(Error::UnexpectedEof)?;
+    let slice = bytes.get(offset..end).ok_or_else(|| Error::UnexpectedEof)?;
     read_exact_array::<4>(slice).map(u32::from_le_bytes)
 }
 
@@ -1943,7 +1953,9 @@ fn put_canonical_u32_varint(out: &mut Vec<u8>, mut value: u32) {
 fn read_canonical_u32_varint(input: &[u8]) -> Result<(u32, usize), Error> {
     let mut value = 0_u32;
     for index in 0..MAX_VARIANT_TAG_LEN {
-        let byte = *input.get(index).ok_or(Error::InvalidSchemaVersionHeader)?;
+        let byte = *input
+            .get(index)
+            .ok_or_else(|| Error::InvalidSchemaVersionHeader)?;
         let payload = u32::from(byte & 0x7f);
         if index == MAX_VARIANT_TAG_LEN - 1 && payload > 0x0f {
             return Err(Error::InvalidSchemaVersionHeader);
