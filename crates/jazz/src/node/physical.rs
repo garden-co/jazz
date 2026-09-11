@@ -20,10 +20,25 @@ pub(super) enum PhysicalWriteTarget {
 pub(super) struct PreparedPhysicalWritePlan {
     pub(super) storage_table: String,
     pub(super) source_table: Arc<TableSchema>,
+    #[cfg(test)]
     pub(super) source_mapping: Arc<TablePhysicalMapping>,
+    #[cfg(test)]
     pub(super) physical_table: Arc<GrooveTableSchema>,
     pub(super) logical_descriptor: records::RecordDescriptor,
     pub(super) physical_descriptor: records::RecordDescriptor,
+    history_descriptor: records::RecordDescriptor,
+    write_fields: Vec<PhysicalWriteField>,
+    enum_remaps: Vec<EnumOccurrenceRemaps>,
+}
+
+#[derive(Debug)]
+enum PhysicalWriteField {
+    Copy(usize),
+    Decode(usize),
+    Enum { source: usize, column: usize },
+    CreatedAtMillis,
+    UpdatedAtMillis,
+    GlobalTime,
 }
 
 include!("physical/catalogue.rs");

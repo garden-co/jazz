@@ -1283,30 +1283,14 @@ where
                     version.table(),
                     PhysicalWriteTarget::GlobalCurrent,
                 )?;
-                let mut values = self.public_current_values(
-                    &plan.source_table,
-                    version,
-                    Some(global_time),
-                )?;
-                self.remap_authored_enum_cells_for_physical(
-                    &mut values,
-                    &plan.source_table,
-                    &plan.source_mapping,
-                    &plan.physical_table,
-                    GlobalCurrentRowRecord::USER_CELLS,
-                )?;
-                let physical = OwnedRecord::new(
-                    plan.physical_descriptor.create(&values)?,
-                    plan.physical_descriptor,
-                );
+                // Validate node-local authored column aliases before deriving
+                // the current carrier; encoding itself retains trusted bytes.
+                let _ = self.authored_columns_for_version(version)?;
+                let physical = self.encode_physical_version_record(&plan, version, Some(global_time))?;
                 batch.update_raw(
                     plan.storage_table.clone(),
                     global_current_primary_key(version.branch_key(), version.row_uuid()),
-                    groove::records::VariantRecord::new(
-                        u32::try_from(version.schema_version_alias().0)
-                            .expect("schema aliases are allocated in Groove's variant-tag space"),
-                        physical,
-                    ),
+                    physical,
                 );
             }
             VersionLayer::Deletion => batch.update_raw(
@@ -1370,27 +1354,12 @@ where
                     version.table(),
                     PhysicalWriteTarget::AheadCurrent,
                 )?;
-                let mut values =
-                    self.public_current_values(&plan.source_table, version, None)?;
-                self.remap_authored_enum_cells_for_physical(
-                    &mut values,
-                    &plan.source_table,
-                    &plan.source_mapping,
-                    &plan.physical_table,
-                    GlobalCurrentRowRecord::USER_CELLS,
-                )?;
-                let physical = OwnedRecord::new(
-                    plan.physical_descriptor.create(&values)?,
-                    plan.physical_descriptor,
-                );
+                let _ = self.authored_columns_for_version(version)?;
+                let physical = self.encode_physical_version_record(&plan, version, None)?;
                 batch.insert_raw(
                     plan.storage_table.clone(),
                     history_primary_key(version),
-                    groove::records::VariantRecord::new(
-                        u32::try_from(version.schema_version_alias().0)
-                            .expect("schema aliases are allocated in Groove's variant-tag space"),
-                        physical,
-                    ),
+                    physical,
                 );
             }
             VersionLayer::Deletion => batch.insert_raw(
@@ -1421,6 +1390,7 @@ where
     }
 
     /// Build the physical current-source carrier consumed by Groove terminals.
+    #[cfg(test)]
     fn public_current_values(
         &mut self,
         table: &TableSchema,

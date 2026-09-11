@@ -4385,6 +4385,7 @@ fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Erro
     ])
 }
 
+#[cfg(test)]
 pub(super) fn global_current_values(
     table: &TableSchema,
     version: &VersionRow,

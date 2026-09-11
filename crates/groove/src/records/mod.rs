@@ -1908,6 +1908,24 @@ impl VariantRecord {
 }
 
 impl ValidatedVariantRecord {
+    /// Assemble a variant with a trusted field encoder. As with
+    /// [`RecordDescriptor::create_with_encoded_fields`], the callback must emit
+    /// exactly the target field encoding. The descriptor owns offset assembly;
+    /// commit need not decode the newly produced bytes to validate them again.
+    /// This is an encoder API, not admission of arbitrary network bytes.
+    pub fn create_with_encoded_fields<E: From<Error>>(
+        variant_tag: u32,
+        descriptor: RecordDescriptor,
+        capacity: usize,
+        append: impl FnMut(usize, &mut Vec<u8>) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let raw = descriptor.create_with_encoded_fields(capacity, append)?;
+        Ok(Self(VariantRecord::new(
+            variant_tag,
+            OwnedRecord::new(raw, descriptor),
+        )))
+    }
+
     pub fn create(
         variant_tag: u32,
         descriptor: RecordDescriptor,
