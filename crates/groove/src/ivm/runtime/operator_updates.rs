@@ -594,6 +594,11 @@ impl NodeState {
                     }
                 )
             });
+        let input_bytes = input
+            .deltas
+            .iter()
+            .map(|delta| delta.record.len())
+            .sum::<usize>();
         let mut output = BytesMut::new();
         let mut spans = Vec::with_capacity(input.deltas.len());
         for (index, delta) in input.deltas.iter().enumerate() {
@@ -650,7 +655,10 @@ impl NodeState {
             if index == 0 {
                 // Estimate from output width: a projection can discard most
                 // of the input fields. Later outliers grow the buffer normally.
-                output.reserve(span.len().saturating_mul(input.deltas.len() - 1));
+                // One unusually wide first row must not amplify the reserve
+                // beyond the old input-sized bound.
+                let estimate = span.len().saturating_mul(input.deltas.len() - 1);
+                output.reserve(estimate.min(input_bytes.saturating_sub(output.len())));
             }
             spans.push((span, delta.weight));
         }
