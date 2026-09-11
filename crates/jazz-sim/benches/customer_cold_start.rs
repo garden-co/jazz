@@ -90,6 +90,7 @@ mod alloc_metrics {
     const MAX_FRAMES: usize = 24;
     const DEFAULT_SAMPLE_RATE: u64 = 4096;
     const DEFAULT_MAX_SAMPLES: usize = 50_000;
+    const BYTE_SAMPLE_INTERVAL: u64 = 16 * 1024 * 1024;
 
     pub struct SiteAllocator;
 
@@ -97,7 +98,8 @@ mod alloc_metrics {
     struct StackSample {
         frames: [usize; MAX_FRAMES],
         len: usize,
-        requested_bytes: usize,
+        count_sample: bool,
+        byte_weight: u64,
     }
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -112,12 +114,21 @@ mod alloc_metrics {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             if ACTIVE.load(Ordering::Relaxed) {
                 let alloc_index = ALLOCS.fetch_add(1, Ordering::Relaxed) + 1;
-                BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+                let size = layout.size() as u64;
+                let before_bytes = BYTES.fetch_add(size, Ordering::Relaxed);
+                let byte_sample = before_bytes / BYTE_SAMPLE_INTERVAL
+                    != (before_bytes + size) / BYTE_SAMPLE_INTERVAL;
                 let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed).max(1);
-                if alloc_index.is_multiple_of(sample_rate)
-                    && !IN_SAMPLE.swap(true, Ordering::Relaxed)
-                {
-                    sample_stack(layout.size());
+                let count_sample = alloc_index.is_multiple_of(sample_rate);
+                if (count_sample || byte_sample) && !IN_SAMPLE.swap(true, Ordering::Relaxed) {
+                    sample_stack(
+                        count_sample,
+                        if byte_sample {
+                            size.max(BYTE_SAMPLE_INTERVAL)
+                        } else {
+                            0
+                        },
+                    );
                     IN_SAMPLE.store(false, Ordering::Relaxed);
                 }
             }
@@ -173,12 +184,13 @@ mod alloc_metrics {
         snapshot
     }
 
-    fn sample_stack(requested_bytes: usize) {
+    fn sample_stack(count_sample: bool, byte_weight: u64) {
         let max_samples = MAX_SAMPLES.load(Ordering::Relaxed) as usize;
         let mut sample = StackSample {
             frames: [0; MAX_FRAMES],
             len: 0,
-            requested_bytes,
+            count_sample,
+            byte_weight,
         };
         unsafe {
             backtrace::trace_unsynchronized(|frame| {
@@ -203,19 +215,21 @@ mod alloc_metrics {
             .lock()
             .expect("allocation samples lock poisoned")
             .clone();
+        let sampled_stacks = samples.len();
         let mut counts: HashMap<Vec<usize>, (u64, u64)> = HashMap::new();
         for sample in samples {
             let totals = counts
                 .entry(sample.frames[..sample.len].to_vec())
                 .or_default();
-            totals.0 += 1;
-            totals.1 += sample.requested_bytes as u64;
+            totals.0 += u64::from(sample.count_sample);
+            totals.1 += sample.byte_weight;
         }
         let mut ranked: Vec<_> = counts.into_iter().collect();
         eprintln!(
-            "ALLOC_SITE_SUMMARY sample_rate={} sampled_stacks={} total_allocs={} total_bytes={}",
+            "ALLOC_SITE_SUMMARY sample_rate={} sampled_stacks={} byte_sample_interval={} total_allocs={} total_bytes={}",
             sample_rate,
-            ranked.iter().map(|(_, (count, _))| *count).sum::<u64>(),
+            sampled_stacks,
+            BYTE_SAMPLE_INTERVAL,
             ALLOCS.load(Ordering::Relaxed),
             BYTES.load(Ordering::Relaxed)
         );
@@ -234,7 +248,7 @@ mod alloc_metrics {
                     rank + 1,
                     samples,
                     samples * sample_rate,
-                    sampled_bytes * sample_rate
+                    sampled_bytes
                 );
                 for (index, ip) in frames.iter().copied().enumerate().take(16) {
                     let mut printed = false;
