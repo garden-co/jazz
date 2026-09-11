@@ -1905,29 +1905,74 @@ impl VersionRecord {
         schema_version: SchemaVersionId,
         authored_columns: Option<BTreeSet<String>>,
     ) -> Result<Self, Error> {
-        // Wire records remain the replicated immutable projection. Content and
-        // register rows now live in different storage tables, so projection at
-        // this API boundary is assembled from typed row accessors.
-        let cells = table
-            .columns
-            .iter()
-            .map(|column| stored.cell(table, &column.name))
-            .collect::<Result<Vec<_>, _>>()?;
-        VersionRecord::encode(
-            table,
+        let descriptor = version_record_descriptors(table).1;
+        let input = stored.record.borrowed();
+        let register = stored.is_register_record();
+        let raw = descriptor.create_with_encoded_fields::<Error>(
+            input.raw().len(),
+            |index, output| {
+                // Both stored layouts share the provenance prefix. Timestamps
+                // are packed HLC values in storage and milliseconds on wire.
+                let source = match index {
+                    0 => Some(HistoryRowRecord::FIELD_ROW_UUID_IDX),
+                    1 => Some(HistoryRowRecord::FIELD_PARENTS_IDX),
+                    2 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
+                    4 => Some(HistoryRowRecord::FIELD_UPDATED_BY_IDX),
+                    i if i >= WireRowRecord::USER_CELLS && !register => {
+                        Some(HistoryRowRecord::USER_CELLS + i - WireRowRecord::USER_CELLS)
+                    }
+                    _ => None,
+                };
+                if let Some(source) = source {
+                    let span = input.descriptor().field_span(input.raw(), source)?;
+                    output.extend_from_slice(&input.raw()[span]);
+                    return Ok(());
+                }
+                let value = match index {
+                    3 => Value::U64(stored.created_at().physical_ms()),
+                    5 => Value::U64(stored.updated_at().physical_ms()),
+                    6 => Value::Nullable(stored.deletion().map(|deletion| {
+                        Box::new(Value::EnumTag(match deletion {
+                            DeletionEvent::Deleted => 0,
+                            DeletionEvent::Restored => 1,
+                        }))
+                    })),
+                    _ => Value::Nullable(None),
+                };
+                descriptor.encode_field_into(index, &value, output)?;
+                Ok(())
+            },
+        )?;
+        #[cfg(test)]
+        {
+            // Application equality cannot detect changed durable bytes. Keep
+            // the former value-based encoder as an independent byte oracle.
+            let cells = table
+                .columns
+                .iter()
+                .map(|column| stored.cell(table, &column.name))
+                .collect::<Result<Vec<_>, _>>()?;
+            let expected = VersionRecord::encode(
+                table,
+                schema_version,
+                stored.row_uuid(),
+                stored.parents(),
+                stored.created_by(),
+                stored.created_at().physical_ms(),
+                stored.updated_by(),
+                stored.updated_at().physical_ms(),
+                &cells,
+                stored.deletion(),
+            )?;
+            assert_eq!(raw.as_slice(), expected.record().raw());
+        }
+        Ok(VersionRecord::new(
+            table.name.clone(),
             schema_version,
-            stored.row_uuid(),
-            stored.parents(),
-            stored.created_by(),
-            stored.created_at().physical_ms(),
-            stored.updated_by(),
-            stored.updated_at().physical_ms(),
-            &cells,
-            stored.deletion(),
+            OwnedRecord::new(raw, descriptor),
         )
-        .map(|record| record.with_branch_key(stored.branch_key().clone()))
-        .map(|record| record.with_authored_columns(authored_columns))
-        .map_err(Error::from)
+        .with_branch_key(stored.branch_key().clone())
+        .with_authored_columns(authored_columns))
     }
 }
 
@@ -2096,6 +2141,7 @@ struct HistoryDescriptorCacheEntry {
         crate::schema::LargeValueSemanticKind,
     )>,
     descriptor: records::RecordDescriptor,
+    wire_descriptor: records::RecordDescriptor,
 }
 
 #[cfg(test)]
@@ -2104,6 +2150,12 @@ thread_local! {
 }
 
 fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    version_record_descriptors(table).0
+}
+
+fn version_record_descriptors(
+    table: &TableSchema,
+) -> (records::RecordDescriptor, records::RecordDescriptor) {
     thread_local! {
         static CACHE: std::cell::RefCell<Vec<HistoryDescriptorCacheEntry>> = const {
             std::cell::RefCell::new(Vec::new())
@@ -2124,11 +2176,12 @@ fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
                             && kind == &column.large_value_kind
                     })
         }) {
-            return entry.descriptor;
+            return (entry.descriptor, entry.wire_descriptor);
         }
         #[cfg(test)]
         HISTORY_DESCRIPTOR_BUILDS.with(|count| count.set(count.get() + 1));
         let descriptor = table.authored_history_storage_table().record_schema();
+        let wire_descriptor = table.wire_record_descriptor();
         // Bound retained preparation data even for applications with continual
         // schema changes. Eviction affects preparation cost only, never bytes.
         if cache.len() == 128 {
@@ -2148,8 +2201,9 @@ fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
                 })
                 .collect(),
             descriptor,
+            wire_descriptor,
         });
-        descriptor
+        (descriptor, wire_descriptor)
     })
 }
 
@@ -5186,6 +5240,10 @@ mod authority_storage_codec_tests {
             let expected = table.authored_history_storage_table().record_schema();
             for _ in 0..100 {
                 assert_eq!(history_record_descriptor(table), expected);
+                assert_eq!(
+                    version_record_descriptors(table).1,
+                    table.wire_record_descriptor()
+                );
                 assert_eq!(
                     register_record_descriptor(table),
                     table.register_storage_table().record_schema()
