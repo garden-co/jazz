@@ -1,3 +1,4 @@
+import { describeTable, listTables } from "./schema.js";
 import type { ColumnDescriptor, WasmSchema } from "../drivers/types.js";
 import type { Db, QueryBuilder, TableProxy } from "../runtime/db.js";
 import { TypedTableQueryBuilder, type TableMeta } from "../typed-app.js";
@@ -19,6 +20,8 @@ type Selection = {
   offset?: number;
 };
 export type Statement =
+  | { kind: "show-tables" }
+  | { kind: "describe"; table: string }
   | ({ kind: "select"; table: string } & Selection)
   | { kind: "insert"; table: string; values: [string, Literal][] }
   | { kind: "update"; table: string; values: [string, Literal][]; id: Literal }
@@ -166,7 +169,12 @@ class Parser {
   }
   parse(): Statement {
     let statement: Statement;
-    if (this.take("SELECT")) {
+    if (this.take("SHOW")) {
+      this.expect("TABLES");
+      statement = { kind: "show-tables" };
+    } else if (this.take("DESCRIBE")) {
+      statement = { kind: "describe", table: this.identifier() };
+    } else if (this.take("SELECT")) {
       const columns = this.take("*") ? "*" : this.list(() => this.identifier());
       this.expect("FROM");
       const table = this.identifier();
@@ -216,7 +224,7 @@ class Parser {
     } else if (this.take("DELETE")) {
       this.expect("FROM");
       statement = { kind: "delete", table: this.identifier(), id: this.rowId() };
-    } else this.fail("SELECT, INSERT, UPDATE, or DELETE");
+    } else this.fail("SHOW TABLES, DESCRIBE, SELECT, INSERT, UPDATE, or DELETE");
     this.take(";");
     if (this.index !== this.tokens.length)
       this.fail("end of statement (unsupported clause or multiple statements)");
@@ -224,9 +232,13 @@ class Parser {
   }
 }
 
+export function isSchemaStatement(statement: Statement): boolean {
+  return statement.kind === "show-tables" || statement.kind === "describe";
+}
+
 export function parseSql(sql: string, write = false): Statement {
   const statement = new Parser(tokenize(sql)).parse();
-  if (statement.kind !== "select" && !write)
+  if (statement.kind !== "select" && !isSchemaStatement(statement) && !write)
     throw new Error("Read-only mode: mutations require --write");
   return statement;
 }
@@ -291,14 +303,17 @@ type Row = Record<string, unknown>;
 type Table = TableProxy<Row, Row>;
 export type DataResult = { columns: string[]; rows: Row[] };
 export type CompiledStatement =
+  | { kind: "schema"; result: DataResult }
   | { kind: "select"; query: QueryBuilder<Row>; columns: string[] }
   | { kind: "insert"; table: Table; values: Row }
   | { kind: "update" | "delete"; table: Table; query: QueryBuilder<Row>; id: string; values: Row };
 
 export function compileSql(statement: Statement, schema: WasmSchema): CompiledStatement {
+  if (statement.kind === "show-tables") return { kind: "schema", result: listTables(schema) };
   if (!Object.hasOwn(schema, statement.table))
     throw new Error(`Unknown table ${JSON.stringify(statement.table)}`);
   const definition = schema[statement.table]!;
+  if (statement.kind === "describe") return { kind: "schema", result: describeTable(definition) };
   if (definition.branchBy?.length)
     throw new Error("SQL access to branch-keyed tables is not supported; use the Jazz API");
   const column = (name: string): ColumnDescriptor => {
@@ -380,6 +395,7 @@ export function compileSql(statement: Statement, schema: WasmSchema): CompiledSt
 }
 
 export async function executeSql(db: Db, statement: CompiledStatement): Promise<DataResult> {
+  if (statement.kind === "schema") return statement.result;
   if (statement.kind === "select") {
     const rows = await db.all(statement.query, { tier: "remote" });
     return {

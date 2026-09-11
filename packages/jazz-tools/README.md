@@ -108,54 +108,91 @@ this alpha: the default persistent configuration and the proposal-only
 has only been exercised by Node-based wiring tests, not Metro/Hermes or a device,
 and is not a supported persistence alternative.
 
-## Data CLI: Jazz SQL (draft)
+## Schema discovery and Jazz SQL (draft)
 
-`jazz-tools data query` compiles a small SQL dialect into the existing Jazz SDK
-query and mutation APIs. It runs in Node with `jazz-napi`. SQL is never executed
-by the database engine.
+`jazz-tools sql` compiles a small SQL dialect into the existing Jazz SDK query
+and mutation APIs. It runs in Node with `jazz-napi`. SQL is never executed by
+the database engine. Start by discovering the schema:
 
 ```sh
-# Reads are the default. Uses schema.ts from the current app directory.
 export JAZZ_APP_ID=my-app
 export JAZZ_SERVER_URL=https://your-jazz-server.example
-export JAZZ_BACKEND_SECRET=your-backend-secret
-jazz-tools data query --sql 'SELECT id, title FROM todos WHERE done = FALSE ORDER BY title ASC LIMIT 20'
+export JAZZ_ADMIN_SECRET=your-admin-secret
 
-# Mutations always require --write. INSERT generates the row id.
-jazz-tools data query --write --sql "INSERT INTO todos (title, done) VALUES ('Review draft', FALSE)" --format json
-jazz-tools data query --write --sql "UPDATE todos SET done = TRUE WHERE id = '00000000-0000-0000-0000-000000000001'"
-jazz-tools data query --write --sql "DELETE FROM todos WHERE id = '00000000-0000-0000-0000-000000000001'"
+jazz-tools schema tables
+jazz-tools schema describe todos
+jazz-tools schema describe todos --format json
 
-# Existing user JWT: ordinary row permissions remain enforced.
-jazz-tools data query --jwt "$USER_JWT" --sql 'SELECT * FROM todos'
+# SQL equivalents; schema discovery needs no data credential.
+jazz-tools sql 'SHOW TABLES'
+jazz-tools sql 'DESCRIBE todos'
 
-# A deployed catalogue schema instead of a local schema.ts. Use a full hash.
-# JAZZ_ADMIN_SECRET is used only to fetch this schema.
-jazz-tools data query --schema-hash "$SCHEMA_HASH" --sql 'SELECT * FROM todos' --format jsonl
+# Select a different app with --app-id. schema list is an alias for tables.
+jazz-tools schema tables --app-id another-app
 
-# One statement from a file or stdin. --env-file is also supported.
-printf '%s\n' 'SELECT title FROM todos;' | jazz-tools data query --file - --format json
+# Inspect a local schema without a server, app ID, or credentials.
+jazz-tools schema tables --schema-dir ./my-app
 ```
 
-An optional positional app ID overrides `JAZZ_APP_ID`; the existing framework
-prefixed app/server environment variables also work. `--server-url` overrides
-the server environment variable. `--schema-dir` chooses a local app directory;
-`--schema-hash` instead reads a deployed schema using `--admin-secret` or
-`JAZZ_ADMIN_SECRET`. These schema options are mutually exclusive. Loading a
-local schema executes its TypeScript, just like the schema CLI. It does not
-publish schema or permissions.
+These commands default to the schema named by the server's current permissions
+head. They fail clearly if no head has been deployed; they never guess a latest
+schema from the catalogue. `--schema-hash <full-hash>` pins a stored version;
+`--schema-hash current` explicitly selects the head. `--schema-dir` instead
+loads a local app's `schema.ts`; it is mutually exclusive with `--schema-hash`.
+Local schema loading executes TypeScript, just like the existing schema CLI,
+and does not publish anything. Discovery lists schema information rather than
+permission-filtered application rows and never opens a data session.
 
-Data access requires `--backend-secret` / `JAZZ_BACKEND_SECRET` for unrestricted
+`schema describe` shows columns (including generated `id`), types, nullability,
+defaults, references, indexes, and branch keys. JSON/JSONL additionally retain
+full structured type definitions, sparse/merge metadata, and `hasDefault` to
+distinguish an absent default from a default of NULL. Existing `schema hash`
+and `schema export` commands retain their behavior.
+
+```sh
+export JAZZ_BACKEND_SECRET=your-backend-secret
+
+# Reads are the default. Remote schema loading still needs the admin secret.
+jazz-tools sql 'SELECT id, title FROM todos WHERE done = FALSE ORDER BY title LIMIT 20'
+
+# Mutations always require --write. INSERT generates the row id.
+jazz-tools sql "INSERT INTO todos (title, done) VALUES ('Review draft', FALSE)" --write --format json
+jazz-tools sql "UPDATE todos SET done = TRUE WHERE id = '00000000-0000-0000-0000-000000000001'" --write
+jazz-tools sql "DELETE FROM todos WHERE id = '00000000-0000-0000-0000-000000000001'" --write
+
+# Existing user JWT: ordinary row permissions remain enforced.
+jazz-tools sql 'SELECT * FROM todos' --jwt "$USER_JWT"
+
+# Local schema: row access needs a data credential, but no admin credential.
+jazz-tools sql 'SELECT * FROM todos' --schema-dir ./my-app
+
+# One statement from a file or stdin. --sql is an alternative to positional SQL.
+printf '%s\n' 'SELECT title FROM todos;' | jazz-tools sql --file - --format json
+```
+
+`--app-id` overrides `JAZZ_APP_ID`; existing framework-prefixed app/server
+variables also work. `--server-url` overrides the server environment variable.
+`--env-file` is supported as with other CLI commands. Pass plain URL strings,
+without Markdown link syntax. Do not insert an extra `--` before options.
+
+The original `jazz-tools data query [appId] --sql <statement>` remains supported.
+It also accepts `--app-id`; specify the ID only once. For compatibility, its
+row queries default to local `schema.ts` in the current directory. Its schema
+statements (`SHOW TABLES` / `DESCRIBE`) default to the current deployed schema.
+
+Row access requires `--backend-secret` / `JAZZ_BACKEND_SECRET` for unrestricted
 access, or `--jwt` / `JAZZ_JWT_TOKEN` for an **already registered** user. Admin
-credentials never grant data access. Explicit `--jwt` selects user permissions
+credentials never grant row access. Explicit `--jwt` selects user permissions
 even with an inherited backend secret; explicit `--backend-secret` selects
 backend access even with an inherited JWT. Supplying both flags, or both
-environment credentials without a flag selecting one, is an error. JWT login
-does not create accounts or fall back to backend authority.
+environment credentials without a flag selecting one for row access, is an
+error. JWT login does not create accounts or fall back to backend authority.
 
 The supported grammar is:
 
 ```sql
+SHOW TABLES;
+DESCRIBE table;
 SELECT * | column [, column ...] FROM table
   [WHERE column operator literal [AND column operator literal ...]]
   [ORDER BY column [ASC | DESC] [, column [ASC | DESC] ...]]

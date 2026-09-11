@@ -547,7 +547,10 @@ function isMainModule(): boolean {
 function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
-  console.log("  data query            Read or write application rows using Jazz SQL");
+  console.log("  sql '<statement>'     Query application rows (read-only unless --write)");
+  console.log("  schema tables         List tables in the deployed or local schema");
+  console.log("  schema describe <table> Show columns, types, defaults, and references");
+  console.log("  data query            Compatibility form: [appId] --sql <statement>");
   console.log("  validate              Validate root schema.ts and optional permissions.ts");
   console.log("  schema hash           Print the short hash of the current schema.ts");
   console.log("  schema export         Print the compiled structural schema as JSON");
@@ -605,7 +608,13 @@ function printHelp(): void {
 
 if (isMainModule()) {
   if (process.argv.slice(2).some((arg) => arg === "--help" || arg === "-h")) {
-    if (process.argv[2] === "data") console.log(DATA_HELP);
+    if (
+      process.argv[2] === "data" ||
+      process.argv[2] === "sql" ||
+      (process.argv[2] === "schema" &&
+        ["tables", "list", "describe"].includes(process.argv[3] ?? ""))
+    )
+      console.log(DATA_HELP);
     else printHelp();
     process.exit(0);
   }
@@ -619,15 +628,31 @@ if (isMainModule()) {
   }
   const command = process.argv[2] ?? "";
 
-  if (command === "data") {
+  if (
+    command === "sql" ||
+    command === "data" ||
+    (command === "schema" && ["tables", "list", "describe"].includes(process.argv[3] ?? ""))
+  ) {
+    const mode =
+      command === "sql"
+        ? "sql"
+        : command === "data"
+          ? "data"
+          : process.argv[3] === "describe"
+            ? "describe"
+            : "tables";
     const task =
-      process.argv[3] === "query"
-        ? dataCommand(process.argv.slice(4), {
-            appId: resolveEnvVar(APP_ID_ENV_VARS),
-            serverUrl: resolveEnvVar(SERVER_URL_ENV_VARS),
-          })
-        : Promise.reject(
+      command === "data" && process.argv[3] !== "query"
+        ? Promise.reject(
             new Error("Usage: jazz-tools data query [appId] --sql <statement> [options]"),
+          )
+        : dataCommand(
+            process.argv.slice(command === "sql" ? 3 : 4),
+            {
+              appId: resolveEnvVar(APP_ID_ENV_VARS),
+              serverUrl: resolveEnvVar(SERVER_URL_ENV_VARS),
+            },
+            mode,
           );
     task.catch((err) => {
       console.error(err.message);
@@ -673,7 +698,7 @@ if (isMainModule()) {
         process.exit(1);
       });
     } else {
-      console.error("Usage: node dist/cli.js schema <hash|export> [--schema-dir <path>] [...]");
+      console.error("Usage: node dist/cli.js schema <tables|describe|hash|export> [options]");
       process.exit(1);
     }
   } else if (command === "migrations") {

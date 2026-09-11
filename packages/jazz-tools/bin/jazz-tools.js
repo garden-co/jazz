@@ -96,7 +96,10 @@ function printWrapperHelp() {
   console.log("Usage: jazz-tools <COMMAND> [options]");
   console.log("");
   console.log("Commands:");
-  console.log("  data query            Read or write application rows using Jazz SQL");
+  console.log("  sql '<statement>'     Query application rows (read-only unless --write)");
+  console.log("  schema tables         List tables in the deployed or local schema");
+  console.log("  schema describe       Show a table's columns and types");
+  console.log("  data query            Compatibility form: [appId] --sql <statement>");
   console.log("  validate              Validate root schema.ts and optional permissions.ts");
   console.log(
     "  schema export         Print structural schema JSON from schema.ts or a schema hash",
@@ -127,6 +130,7 @@ if (!command || command === "--help" || command === "-h") {
 } else if (command === "build") {
   fail("`jazz-tools build` has been renamed to `jazz-tools validate`.");
 } else if (
+  command === "sql" ||
   command === "data" ||
   command === "validate" ||
   command === "deploy" ||
