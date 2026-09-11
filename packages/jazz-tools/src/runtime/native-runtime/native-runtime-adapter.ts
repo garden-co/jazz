@@ -467,6 +467,7 @@ type ServerReplacementIntent = {
   generation: number;
   url: string;
   authJson: string;
+  features: number;
 };
 function joinServerTransportRetirements(
   previous: Promise<void> | null,
@@ -1977,6 +1978,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
+    // Validate synchronously before retiring the current transport. Callers
+    // historically observe an incompatible native binding at connect() time.
+    const features = this.nativeWireFeatures();
     const generation = this.serverConnectionGeneration + 1;
     const predecessorRetirement = this.invalidateServerTransport({
       rejectWaiters: false,
@@ -1988,6 +1992,7 @@ export class NativeRuntimeAdapter implements Runtime {
       generation,
       url,
       authJson: normalizedAuthJson,
+      features,
     };
     this.serverReplacementIntent = intent;
     this.serverReplacementRetirement = joinServerTransportRetirements(
@@ -1998,28 +2003,29 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!replacement) {
       replacement = (async () => {
         for (;;) {
-          const retirement = this.serverReplacementRetirement;
-          this.serverReplacementRetirement = null;
-          if (retirement) await retirement;
+          while (this.serverReplacementRetirement) {
+            const retirement = this.serverReplacementRetirement;
+            this.serverReplacementRetirement = null;
+            await retirement;
+          }
           const latest = this.serverReplacementIntent;
           if (!latest || this.closed) throw new Error("server transport disconnected");
           this.serverReplacementIntent = null;
+          let connected: WebSocketCarrier;
           try {
-            await this.startServerConnection(latest);
+            connected = await this.startServerConnection(latest);
           } catch (error) {
             if (
               this.serverReplacementIntent &&
-              errorMessage(error) === "server transport replaced"
+              (errorMessage(error) === "server transport replaced" ||
+                errorMessage(error) === "server transport disconnected")
             ) {
               continue;
             }
             throw error;
           }
           if (!this.serverReplacementIntent && !this.serverReplacementRetirement) {
-            if (!this.serverCarrierPromise) {
-              throw new Error("server transport connection was not started");
-            }
-            return await this.serverCarrierPromise;
+            return connected;
           }
         }
       })();
@@ -2045,7 +2051,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private async startServerConnection(intent: ServerReplacementIntent): Promise<WebSocketCarrier> {
-    const { generation, url, authJson: normalizedAuthJson } = intent;
+    const { generation, url, authJson: normalizedAuthJson, features } = intent;
     const transportIdentity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
@@ -2058,7 +2064,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: transportIdentity,
-      features: this.nativeWireFeatures(),
+      features,
       authJson: normalizedAuthJson,
       requestedLink: this.scopeIsolatedRelay ? "scope_isolated_client_relay" : undefined,
       onFrame: (frame) => {
@@ -2116,8 +2122,13 @@ export class NativeRuntimeAdapter implements Runtime {
     };
     this.serverConnectionAttempt = attempt;
     this.serverCarrier = carrier;
-    const connection = carrier
-      .ready()
+    const ready = Promise.race([
+      carrier.ready(),
+      attempt.terminal.then((error): never => {
+        throw error;
+      }),
+    ]);
+    const connection = ready
       .then(async (negotiation) => {
         if (
           generation !== this.serverConnectionGeneration ||
@@ -2193,12 +2204,25 @@ export class NativeRuntimeAdapter implements Runtime {
         this.finishServerConnectionAttempt(attempt, failure);
         throw attempt.outcome ?? failure;
       });
-    this.serverCarrierPromise = connection;
     connection.catch((error) => {
       if (isRetryablePreHelloWireError(error)) return;
       this.handleServerTransportError(error, generation);
     });
     return await connection;
+  }
+  private startServerRetry(url: string, authJson: string): Promise<WebSocketCarrier> {
+    const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
+    const intent: ServerReplacementIntent = {
+      generation: this.serverConnectionGeneration,
+      url,
+      authJson: normalizedAuthJson,
+      features: this.nativeWireFeatures(),
+    };
+    // Retry from inside the active replacement runner. Calling connect() here
+    // would reuse that runner and make its carrier promise wait on itself.
+    const connection = this.startServerConnection(intent);
+    this.serverCarrierPromise = connection;
+    return connection;
   }
 
   private async connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Promise<Transport> {
@@ -2288,7 +2312,8 @@ export class NativeRuntimeAdapter implements Runtime {
       });
       retirements.push(retirement);
     }
-    return Promise.all(retirements).then(() => undefined);
+    if (retirements.length === 0) return Promise.resolve();
+    return Promise.all(retirements);
   }
 
   async disconnect(
@@ -2726,8 +2751,10 @@ export class NativeRuntimeAdapter implements Runtime {
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
     if (tier !== "edge" && tier !== "global") return;
-    const endpoint = this.serverEndpointUrl;
-    const identity = peerIdentityForWebSocketAuth(this.serverAuthJson ?? "{}", this.peerIdentity);
+    const initialIntent = this.serverReplacementIntent;
+    const endpoint = initialIntent?.url ?? this.serverEndpointUrl;
+    const identityAuthJson = initialIntent?.authJson ?? this.serverAuthJson ?? "{}";
+    const identity = peerIdentityForWebSocketAuth(identityAuthJson, this.peerIdentity);
     // `connect()` starts its WebSocket handshake before it can admit the
     // native transport. A strict remote read begun in that interval must
     // await the in-flight connection instead of falling through to a local
@@ -2745,20 +2772,21 @@ export class NativeRuntimeAdapter implements Runtime {
           ? await Promise.race([connectionOutcome, attempt.terminal])
           : await connectionOutcome;
       if (this.closed) return;
+      const activeIntent = this.serverReplacementIntent;
+      const activeEndpoint = activeIntent?.url ?? this.serverEndpointUrl;
+      const activeAuthJson = activeIntent?.authJson ?? this.serverAuthJson ?? "{}";
       if (
         this.serverCarrierPromise &&
-        (this.serverEndpointUrl !== endpoint ||
-          !bytesEqual(
-            identity,
-            peerIdentityForWebSocketAuth(this.serverAuthJson ?? "{}", this.peerIdentity),
-          ))
+        (activeEndpoint !== endpoint ||
+          !bytesEqual(identity, peerIdentityForWebSocketAuth(activeAuthJson, this.peerIdentity)))
       )
         throw new Error("server transport scope changed while waiting for remote query");
-      // Reauthentication/reconnect can retire a stalled carrier while this
-      // query is waiting. Follow the replacement attempt; only surface a
-      // terminal error when this was still the current connection.
       if (terminal) {
-        if (this.serverCarrierPromise !== null && this.serverCarrierPromise !== pendingConnection) {
+        if (
+          (terminal.message === "server transport replaced" ||
+            terminal.message === "server transport disconnected") &&
+          this.serverCarrierPromise !== null
+        ) {
           continue;
         }
         throw terminal;
@@ -3440,10 +3468,8 @@ export class NativeRuntimeAdapter implements Runtime {
           ) {
             throw new Error("server transport disconnected");
           }
-          this.connect(url, authJson);
-          if (!this.serverCarrierPromise)
-            throw new Error("server transport reconnect was not started");
-          return await this.serverCarrierPromise;
+          const reconnect = this.startServerRetry(url, authJson);
+          return await reconnect;
         })().then(resolve, reject);
       }, delay);
     });
@@ -3495,12 +3521,7 @@ export class NativeRuntimeAdapter implements Runtime {
           reject(new Error("server transport disconnected"));
           return;
         }
-        this.connect(url, authJson);
-        const reconnect = this.serverCarrierPromise;
-        if (!reconnect) {
-          reject(new Error("server transport reconnect was not started"));
-          return;
-        }
+        const reconnect = this.startServerRetry(url, authJson);
         void reconnect.then(resolve, reject);
       }, delay);
     });
@@ -3539,16 +3560,26 @@ export class NativeRuntimeAdapter implements Runtime {
     attempt.transport = null;
     if (transport) {
       if (transport === this.serverTransport) this.serverTransport = null;
-      let retirement: Promise<void>;
       try {
-        retirement = Promise.resolve(this.retirePeerTransport(transport));
+        if (this.coreOperation) {
+          const retirement = Promise.resolve(this.retirePeerTransport(transport));
+          attempt.retirement = retirement;
+          retirement.catch((retirementError) => {
+            if (!this.closed) this.handleServerTransportError(retirementError);
+          });
+        } else {
+          // A synchronous close is already complete. Avoid adding an
+          // unnecessary promise barrier to the ordinary replacement path.
+          this.retirePeerTransport(transport);
+          attempt.retirement = null;
+        }
       } catch (retirementError) {
-        retirement = Promise.reject(retirementError);
+        const retirement = Promise.reject(retirementError);
+        attempt.retirement = retirement;
+        retirement.catch((error) => {
+          if (!this.closed) this.handleServerTransportError(error);
+        });
       }
-      attempt.retirement = retirement;
-      retirement.catch((retirementError) => {
-        if (!this.closed) this.handleServerTransportError(retirementError);
-      });
     }
     if (isCurrent) {
       if (publishError) this.handleServerTransportError(error);
