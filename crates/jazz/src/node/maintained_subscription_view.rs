@@ -10,9 +10,9 @@ use groove::records::{
 
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
-    deletion_event_from_value, history_values_from_parts, nullable_value,
-    register_values_from_parts, runtime_result_identity_bytes, tx_ids_from_value,
-    version_tx_id_from_aliases,
+    authored_column_ids_value, deletion_event_from_value, deletion_event_value,
+    history_values_from_parts, nullable_value, register_values_from_parts,
+    runtime_result_identity_bytes, tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
@@ -99,6 +99,7 @@ enum SourceFactOrigin {
 #[derive(Clone, Debug)]
 struct VersionDecodePlan {
     descriptor: RecordDescriptor,
+    metadata_copy_indices: [Option<usize>; 10],
     branch_idx: Option<usize>,
     row_idx: usize,
     tx_time_idx: usize,
@@ -2782,15 +2783,10 @@ fn decode_typed_version_witness(
         authored_columns,
         deletion,
     };
-    let values = if layer == VersionLayer::Content {
-        history_values_from_parts(table, &parts)?
-    } else {
-        register_values_from_parts(&parts)?
-    };
-    // Query witnesses already contain encoded nullable user cells. Copy those
-    // fields into the history layout instead of allocating a cells map, cloning
-    // its values, and encoding them again. Metadata still follows the existing
-    // normalization path (in particular author admission and packed timestamps).
+    // Most metadata already has its history encoding. Keep semantic decoding
+    // above, but avoid rebuilding a whole Value vector just to encode it again.
+    // Branches, timestamps and the authored-column set still normalize below.
+    let mut fallback_values = None;
     let raw = plan.descriptor.create_with_encoded_fields::<super::Error>(
         record.raw().len(),
         |index, output| {
@@ -2806,9 +2802,34 @@ fn decode_typed_version_witness(
                 let value = record.get_idx(source_index)?;
                 nullable_value(value.clone())?;
                 plan.descriptor.encode_field_into(index, &value, output)?;
+            } else if let Some(source_index) =
+                plan.metadata_copy_indices.get(index).copied().flatten()
+            {
+                let span = record.descriptor().field_span(record.raw(), source_index)?;
+                output.extend_from_slice(&record.raw()[span]);
             } else {
-                plan.descriptor
-                    .encode_field_into(index, &values[index], output)?;
+                let value = match index {
+                    0 => Value::Bytes(parts.branch_key.canonical_bytes()),
+                    7 => Value::U64(parts.created_at.0),
+                    9 => Value::U64(parts.updated_at.0),
+                    i if i >= 10 && layer == VersionLayer::Content => {
+                        authored_column_ids_value(parts.authored_columns.as_ref())
+                    }
+                    10 if layer == VersionLayer::Deletion => {
+                        deletion_event_value(parts.deletion.expect("deletion layer"))
+                    }
+                    _ => {
+                        if fallback_values.is_none() {
+                            fallback_values = Some(if layer == VersionLayer::Content {
+                                history_values_from_parts(table, &parts)?
+                            } else {
+                                register_values_from_parts(&parts)?
+                            });
+                        }
+                        fallback_values.as_ref().unwrap()[index].clone()
+                    }
+                };
+                plan.descriptor.encode_field_into(index, &value, output)?;
             }
             Ok(())
         },
@@ -2876,8 +2897,9 @@ fn build_version_decode_plan(
     } else {
         BTreeMap::new()
     };
-    Ok(VersionDecodePlan {
+    let mut plan = VersionDecodePlan {
         descriptor,
+        metadata_copy_indices: [None; 10],
         branch_idx,
         row_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.row_field)?,
         tx_time_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_time_field)?,
@@ -2896,7 +2918,22 @@ fn build_version_decode_plan(
             terminal_descriptor,
             &schema.authored_columns_field,
         )?,
-    })
+    };
+    for (target, source) in [
+        (1, plan.row_idx),
+        (2, plan.tx_time_idx),
+        (3, plan.tx_node_idx),
+        (4, plan.schema_version_idx),
+        (5, plan.parents_idx),
+        (6, plan.created_by_idx),
+        (8, plan.updated_by_idx),
+    ] {
+        if terminal_descriptor.fields()[source].value_type == descriptor.fields()[target].value_type
+        {
+            plan.metadata_copy_indices[target] = Some(source);
+        }
+    }
+    Ok(plan)
 }
 
 fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {

@@ -4238,7 +4238,7 @@ pub(super) fn authored_column_ids_from_value(
     Ok(ids)
 }
 
-fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Value {
+pub(super) fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Value {
     Value::Nullable(columns.map(|columns| {
         Box::new(Value::Array(
             columns.iter().map(|column| Value::U64(column.0)).collect(),
