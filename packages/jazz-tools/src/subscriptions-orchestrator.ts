@@ -532,6 +532,46 @@ function serializeQueryOptions(options?: QueryOptions): string {
   // The Inspector capability is deliberately non-enumerable, so it cannot be
   // forwarded as an application option. Retain it in cache identity: otherwise
   // an overlay query could share a full-propagation entry with the host app.
-  const serialized = JSON.stringify(options ?? {});
+  const hasBranch =
+    options !== undefined && Object.prototype.propertyIsEnumerable.call(options, "branch");
+  const hasBase =
+    options !== undefined && Object.prototype.propertyIsEnumerable.call(options, "base");
+  const branch = hasBranch ? options?.branch : undefined;
+  const base = hasBase ? options?.base : undefined;
+  const serializedOptions =
+    branch === undefined && base === undefined
+      ? (options ?? {})
+      : {
+          ...options,
+          ...(branch === undefined ? {} : { branch: encodeBranchSelector(branch) }),
+          ...(base === undefined
+            ? {}
+            : {
+                base: Array.isArray(base)
+                  ? [encodeBranchSelector(base[0]), base[1]]
+                  : encodeBranchSelector(base),
+              }),
+        };
+  const serialized = JSON.stringify(serializedOptions);
   return isInspectorLocalQueryOptions(options) ? `inspector-local:${serialized}` : serialized;
+}
+
+/**
+ * Encode only branch selectors for cache identity. Branch values are the one
+ * query-option shape whose scalar types have distinct runtime meanings but
+ * cannot be represented by JSON.stringify (notably bigint). Qualified fields
+ * are represented as sorted entries so insertion order does not affect a key.
+ */
+function encodeBranchSelector(selector: NonNullable<QueryOptions["branch"]>): unknown {
+  if (typeof selector === "string") return ["string", selector];
+  if (typeof selector === "number") return ["number", selector];
+  if (typeof selector === "bigint") return ["bigint", selector.toString()];
+
+  const qualified = selector as Record<string, NonNullable<QueryOptions["branch"]>>;
+  return [
+    "qualified",
+    ...Object.keys(qualified)
+      .sort()
+      .map((name) => [name, encodeBranchSelector(qualified[name])]),
+  ];
 }
