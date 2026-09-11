@@ -790,6 +790,11 @@ fn update_collect_by_root_terminal_state(
     }
 
     for (root_key, before_record) in before {
+        // A new root already emitted its Insert above. With no previous row,
+        // this pass cannot emit an Update, so do not render it a second time.
+        let Some(before_record) = before_record else {
+            continue;
+        };
         // `groups` can retain a root-collector maintenance group before it
         // has ever been presented to this terminal consumer. Without a prior
         // Insert, an Update would address no facade occurrence.
@@ -803,19 +808,16 @@ fn update_collect_by_root_terminal_state(
                 .collect::<Vec<_>>();
             collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
         })?;
+        // Removed roots were retracted before inserts/moves above.
+        let Some(after_record) = after_record else {
+            continue;
+        };
         if before_record == after_record {
             continue;
         }
-        let edit = match (before_record, after_record) {
-            // New roots were inserted above in final collector order.
-            (None, Some(_)) => continue,
-            (Some(_), Some(record)) => TerminalEdit::Update {
-                key: root_key.clone(),
-                value: record.to_vec(),
-            },
-            // Removed roots were retracted before inserts/moves above.
-            (Some(_), None) => continue,
-            (None, None) => continue,
+        let edit = TerminalEdit::Update {
+            key: root_key.clone(),
+            value: after_record.to_vec(),
         };
         operations.push(TerminalOperation {
             root_descriptor: output_desc,
@@ -1506,6 +1508,43 @@ mod root_terminal_tests {
                 }
             }
         }
+    }
+
+    // Internal work bound: the public Insert/Update stream cannot reveal a
+    // discarded second rendering of every newly inserted root.
+    #[test]
+    fn newly_inserted_roots_are_encoded_only_once() {
+        let input = record_descriptor();
+        let collect_by = collector();
+        let mut state = CollectByIncrementalState::default();
+        let deltas = (1..=100)
+            .map(|id| delta(id, id, "new", 1))
+            .collect::<Vec<_>>();
+        crate::records::RECORD_ENCODE_COUNT.with(|count| count.set(0));
+        let operations = update_unbounded_collect_by_terminal_state(
+            input,
+            input,
+            &collect_by,
+            None,
+            &mut state,
+            &deltas,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::records::RECORD_ENCODE_COUNT.with(|count| count.get()),
+            100
+        );
+        assert_eq!(operations.len(), 100);
+        assert!(
+            operations
+                .iter()
+                .all(|op| matches!(op.edit, TerminalEdit::Insert { .. }))
+        );
+        let mut roots = Vec::new();
+        apply_root_operations(&mut roots, &operations);
+        assert_eq!(roots.len(), 100);
+        assert!(roots.iter().all(|(_, rank)| rank == "new"));
     }
 
     #[test]
