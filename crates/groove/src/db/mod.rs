@@ -1463,7 +1463,7 @@ impl AppliedBatch {
             Poll::Pending
         })
         .await;
-        let operations = self.operations.borrow().clone().into_operations();
+        let operations = self.operations.borrow().operations().to_vec();
         let storage_writes = StorageWriteMetrics::from_operations(
             &operations
                 .iter()

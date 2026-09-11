@@ -371,11 +371,9 @@ impl Database {
         let tick = self
             .ivm_runtime
             .assign_resident_publication(resident_tick, publication);
-        let staged_operations = staged_state.borrow().clone().into_operations();
-
         self.resident_writes
             .borrow_mut()
-            .extend(staged_operations.iter().cloned());
+            .extend(staged_state.borrow().operations().iter().cloned());
         self.resident_publications
             .insert(publication, Rc::clone(&staged_state));
         if !roots.is_empty() {
@@ -463,7 +461,7 @@ impl Database {
     pub(super) fn refresh_resident_writes(&mut self) {
         let mut resident_writes = StagedWriteState::default();
         for operations in self.resident_publications.values() {
-            resident_writes.extend(operations.borrow().clone().into_operations());
+            resident_writes.extend(operations.borrow().operations().iter().cloned());
         }
         *self.resident_writes.borrow_mut() = resident_writes;
     }

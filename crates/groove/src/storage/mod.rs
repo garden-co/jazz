@@ -1646,6 +1646,10 @@ impl StagedWriteState {
         }
     }
 
+    pub(crate) fn operations(&self) -> &[OwnedWriteOperation] {
+        &self.operations
+    }
+
     pub(crate) fn into_operations(self) -> Vec<OwnedWriteOperation> {
         self.operations
     }
