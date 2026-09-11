@@ -594,14 +594,9 @@ impl NodeState {
                     }
                 )
             });
-        let estimated_output_bytes = input
-            .deltas
-            .iter()
-            .map(|delta| delta.record.len())
-            .sum::<usize>();
-        let mut output = BytesMut::with_capacity(estimated_output_bytes);
+        let mut output = BytesMut::new();
         let mut spans = Vec::with_capacity(input.deltas.len());
-        for delta in &input.deltas {
+        for (index, delta) in input.deltas.iter().enumerate() {
             let span = if let Some(fields) = raw_projection {
                 let start = output.len();
                 let result = output_desc.project_raw_fields_into(
@@ -652,6 +647,11 @@ impl NodeState {
                 output.extend_from_slice(&record);
                 start..output.len()
             };
+            if index == 0 {
+                // Estimate from output width: a projection can discard most
+                // of the input fields. Later outliers grow the buffer normally.
+                output.reserve(span.len().saturating_mul(input.deltas.len() - 1));
+            }
             spans.push((span, delta.weight));
         }
         #[cfg(feature = "cold-settle-attribution")]
