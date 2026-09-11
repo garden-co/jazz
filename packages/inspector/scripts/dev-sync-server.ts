@@ -91,9 +91,7 @@ if (import.meta.url === new URL(process.argv[1], "file://").href) {
     "Open dev inspector at http://localhost:5173/#serverUrl=" +
       result.serverHandle.url +
       "&appId=" +
-      result.serverHandle.appId +
-      "&adminSecret=" +
-      result.serverHandle.adminSecret,
+      result.serverHandle.appId,
   );
   setInterval(() => {}, 10_000_000);
 }
