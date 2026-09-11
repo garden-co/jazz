@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::JazzClient;
 use jazz::tools::DurabilityTier;
 use jazz_server::JazzServer;
-use jazz_testkit::wait_for_query;
+use jazz_testkit::{connect_ready_user, wait_for_query};
 
 use super::*;
 
@@ -63,7 +63,6 @@ async fn wait_for_admin_row(client: &JazzClient, admin_id: ObjectId, user_id: &s
 /// Verifies that a permissive local insert which fails a server-side EXISTS
 /// INSERT policy is rejected on sync and does not become visible to peers.
 #[tokio::test]
-#[ignore = "#1759: server schema conversion requires policy EXISTS expressions to include an equality against __jazz_outer_row"]
 async fn rebac_exists_clause_denies_non_matching_insert() {
     tokio::task::LocalSet::new()
         .run_until(rebac_exists_clause_denies_non_matching_insert_inner())
@@ -91,26 +90,36 @@ async fn rebac_exists_clause_denies_non_matching_insert_inner() {
         .build();
 
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let bob =
-        jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::BOB_ID))
-            .await
-            .expect("connect bob");
-    let alice = jazz_testkit::connect(server.make_client_context_for_user(schema, super::ALICE_ID))
-        .await
-        .expect("connect alice");
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
 
     let (protected_id, _, transaction_id) = bob
         .insert("protected", crate::row_input!("data" => "secret data"))
         .expect("permissive non-admin insert should succeed locally");
-    let rejected = bob
+    let error = bob
         .wait_for_transaction(
             transaction_id.expect("permissive insert should commit immediately"),
             DurabilityTier::EdgeServer,
         )
-        .await;
+        .await
+        .expect_err("the server must reject a non-admin insert under EXISTS");
     assert!(
-        rejected.is_err(),
-        "non-admin insert should be rejected by EXISTS policy on sync"
+        error.to_string().ends_with("authorization_denied"),
+        "expected an authority policy rejection, got {error}"
     );
     wait_for_protected_row_absent(
         &alice,
@@ -119,6 +128,8 @@ async fn rebac_exists_clause_denies_non_matching_insert_inner() {
     )
     .await;
 
+    bob.shutdown().await.expect("shutdown bob");
+    alice.shutdown().await.expect("shutdown alice");
     server.shutdown().await;
 }
 

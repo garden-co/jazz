@@ -321,3 +321,166 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }
+
+/// An independent, session-filtered grant gates every protected row. Duplicate
+/// grants do not duplicate results; removing the last grant revokes the
+/// existing subscription even though the protected rows themselves do not change.
+#[tokio::test]
+async fn uncorrelated_exists_rel_select_tracks_private_grants() {
+    uncorrelated_select_tracks_private_grants(pe::exists(
+        pe::table("grants").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn uncorrelated_exists_select_tracks_private_grants() {
+    uncorrelated_select_tracks_private_grants(pe::exists(
+        pe::table("grants").where_(pe::eq("user_id", pe::session(vec!["claims", "sub"]))),
+    ))
+    .await;
+}
+
+async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyExpr) {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use jazz::tools::DurabilityTier;
+            use jazz_testkit::{
+                connect_ready_user, has_added_id, has_removed, wait_for_edge_txs, wait_for_query,
+                wait_for_subscription_update,
+            };
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("grants")
+                        .column("user_id", ColumnType::Text)
+                        .policies(permissions(|p| {
+                            p.allow_read().never();
+                            p.allow_insert().always();
+                            p.allow_delete().always();
+                        })),
+                )
+                .table(
+                    TableSchema::builder("protected")
+                        .column("data", ColumnType::Text)
+                        .policies(permissions(|p| {
+                            p.allow_read().where_(policy);
+                            p.allow_insert().always();
+                        })),
+                )
+                .build();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let admin = connect_ready_client(
+                &server,
+                &schema,
+                "exists-select-admin",
+                "grants",
+                Duration::from_secs(30),
+            )
+            .await;
+            let alice = connect_ready_user(
+                &server,
+                &schema,
+                ALICE_ID,
+                "grants",
+                Duration::from_secs(30),
+            )
+            .await;
+            let bob =
+                connect_ready_user(&server, &schema, BOB_ID, "grants", Duration::from_secs(30))
+                    .await;
+            let (row, _, tx) = admin
+                .insert("protected", row_input!("data" => "secret"))
+                .unwrap();
+            wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+            let query = Query::from("protected").select(["data"]);
+            let mut stream = alice.subscribe(query.clone()).await.unwrap();
+            let mut log = Vec::new();
+            wait_for_query(
+                &alice,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(5),
+                "empty grant table denies SELECT",
+                |rows| rows.is_empty().then_some(()),
+            )
+            .await;
+            let (grant1, _, tx1) = admin
+                .insert("grants", row_input!("user_id" => ALICE_ID))
+                .unwrap();
+            let (grant2, _, tx2) = admin
+                .insert("grants", row_input!("user_id" => ALICE_ID))
+                .unwrap();
+            wait_for_edge_txs(&admin, &[tx1.unwrap(), tx2.unwrap()]).await;
+            wait_for_subscription_update(
+                &mut stream,
+                &mut log,
+                Duration::from_secs(5),
+                "adding a grant makes the row visible to the existing subscription",
+                |log| has_added_id(log, row),
+            )
+            .await;
+            wait_for_query(
+                &alice,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(5),
+                "duplicate grants produce one row",
+                |rows| (rows == [(row, vec![Value::Text("secret".into())])]).then_some(()),
+            )
+            .await;
+            wait_for_query(
+                &bob,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(5),
+                "Alice's grant does not authorize Bob",
+                |rows| rows.is_empty().then_some(()),
+            )
+            .await;
+            let tx = admin.delete(grant1).unwrap();
+            wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+            wait_for_query(
+                &alice,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(5),
+                "second grant keeps access",
+                |rows| (rows.len() == 1).then_some(()),
+            )
+            .await;
+            wait_for_query(
+                &alice,
+                Query::from("grants"),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(5),
+                "private grant rows stay hidden",
+                |rows| rows.is_empty().then_some(()),
+            )
+            .await;
+            log.clear();
+            let tx = admin.delete(grant2).unwrap();
+            wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+            wait_for_query(
+                &alice,
+                query,
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(5),
+                "no remaining grants denies SELECT",
+                |rows| rows.is_empty().then_some(()),
+            )
+            .await;
+            wait_for_subscription_update(
+                &mut stream,
+                &mut log,
+                Duration::from_secs(5),
+                "last grant removed revokes subscription",
+                |log| has_removed(log, row),
+            )
+            .await;
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+            admin.shutdown().await.unwrap();
+            server.shutdown().await;
+        })
+        .await;
+}

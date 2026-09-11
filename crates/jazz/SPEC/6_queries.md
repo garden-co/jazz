@@ -636,7 +636,14 @@ source resolver already applies source authorization and schema projection
 before lowered query composition (`crates/jazz/src/node/query_eval.rs:537-1066`,
 `2036-2184`); this target relies on that existing source boundary.
 
-### 6.4.2 Default result ordering
+### 6.4.2 Uncorrelated policy existence
+
+`Exists` and `ExistsRel` may test a relation without referencing the
+protected row. Lowering represents this as `JoinTarget::Uncorrelated`. A semijoin
+with no data keys retains each protected row once while the filtered proof relation
+is nonempty. Removing the last matching proof retracts the result.
+
+### 6.4.3 Default result ordering
 
 Ordering is a core-owned query semantic: it must be expressed in the lowered
 plan and carried through delivered results and delta positions, never
@@ -706,7 +713,7 @@ receiver-local collector alone turns them into application positions. This is
 what lets the same query remain meaningful when a local-first receiver also has
 eligible pending inputs that were absent from the authority's evaluation.
 
-### 6.4.3 Aggregate result representation
+### 6.4.4 Aggregate result representation
 
 An aggregate or grouped query returns its results through the same row-shaped
 surface as any other query, because a caller should not need a second result
@@ -789,7 +796,7 @@ delivery otherwise follows ch. 16 §16.6.
 These are representation requirements, not delivery-strategy requirements: a
 one-shot read, an initial snapshot, a maintained delta, and a settled subscriber
 read of the same aggregate at the same frontier MUST all reduce to the same
-represented result, per §6.4.2.
+represented result, per §6.4.3.
 
 Decision, Anselm 2026-08-07: a scalar global aggregate over no input rows
 delivers a present row — `0` for `count`, `NULL` for `sum`, `avg`, `min` and
@@ -925,7 +932,7 @@ surface. The test plan below records additional intended coverage.
   `row_input!`, and public query/subscription APIs. Do not introduce JSON-like
   schema, permission, or query definitions for this ordering coverage.
 
-### 6.11 Subsumed query and SQL notes
+### 6.8 Subsumed query and SQL notes
 
 The old QueryManager notes are now treated as migration context for this
 chapter's stable query vocabulary. Jazz keeps one normalized query AST for
