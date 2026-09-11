@@ -233,6 +233,69 @@ mod alloc_metrics {
             ALLOCS.load(Ordering::Relaxed),
             BYTES.load(Ordering::Relaxed)
         );
+        // A caller can appear under many monomorphized/async stacks. Attribute
+        // each sample once to its nearest repository allocation site as well.
+        let mut callers: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut resolved: HashMap<usize, Option<String>> = HashMap::new();
+        for (frames, totals) in &ranked {
+            for ip in frames {
+                let caller = resolved.entry(*ip).or_insert_with(|| {
+                    let mut caller = None;
+                    backtrace::resolve(*ip as *mut _, |symbol| {
+                        if caller.is_some() {
+                            return;
+                        }
+                        let Some(file) = symbol.filename() else {
+                            return;
+                        };
+                        let file = file.to_string_lossy();
+                        if !file.contains("/crates/") || file.contains("/benches/") {
+                            return;
+                        }
+                        let Some(name) = symbol.name() else {
+                            return;
+                        };
+                        let name = name.to_string();
+                        let name = name
+                            .rsplit_once("::h")
+                            .filter(|(_, hash)| {
+                                hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                            })
+                            .map(|(name, _)| name)
+                            .unwrap_or(&name);
+                        caller = Some(name.to_owned());
+                    });
+                    caller
+                });
+                if let Some(caller) = caller {
+                    let entry = callers.entry(caller.clone()).or_default();
+                    entry.0 += totals.0;
+                    entry.1 += totals.1;
+                    break;
+                }
+            }
+        }
+        let mut callers = callers.into_iter().collect::<Vec<_>>();
+        for metric in ["count", "bytes"] {
+            callers.sort_by_key(|(_, totals)| {
+                std::cmp::Reverse(if metric == "count" {
+                    totals.0
+                } else {
+                    totals.1
+                })
+            });
+            for (rank, (caller, totals)) in callers.iter().take(30).enumerate() {
+                eprintln!(
+                    "ALLOC_CALLER metric={} rank={} estimated_allocs={} estimated_bytes={} caller={}",
+                    metric,
+                    rank + 1,
+                    totals.0 * sample_rate,
+                    totals.1,
+                    caller
+                );
+            }
+        }
+
         for metric in ["count", "bytes"] {
             ranked.sort_by_key(|(_, totals)| {
                 std::cmp::Reverse(if metric == "count" {
