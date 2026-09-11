@@ -202,5 +202,6 @@ required-features = ["testing"]
 
 [[bench]]
 name = "local_batch_phases"
+path = "benches/local_batch_phases_entry.rs"
 harness = false
 required-features = ["testing"]

@@ -2,8 +2,6 @@
 //! Direct nodes intentionally expose phase boundaries that the public Db owner
 //! loop combines. This excludes JS, IndexedDB, scheduling and auth bootstrap.
 use std::{collections::BTreeMap, time::Instant};
-#[global_allocator]
-static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
 #[path = "support/perf_control.rs"]
 mod perf_control;
 mod schema_fixture;
@@ -367,7 +365,7 @@ pub(crate) fn correctness_smoke() {
     run_fixture(10, 50);
 }
 
-fn main() {
+pub(crate) fn main() {
     if std::env::var_os("JAZZ_PERF_PHASE").is_some() {
         eprintln!("scoped CPU attribution run: timings are not clean latency receipts");
     } else {
