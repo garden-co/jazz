@@ -108,24 +108,23 @@ async fn offline_durable_write_keeps_global_target_and_replays_on_reconnect() {
         .await;
 }
 
-/// Protocol-level topology test through the public `Db` API: explicitly
-/// detaching the upstream is the definitive "no upstream" signal, so a
-/// pending global-tier durability wait for a locally durable write resolves
-/// instead of waiting forever — the write's settlement expectation collapses
-/// to the local tier. The embedded-server client facade exposes only
-/// transport disconnects (which deliberately keep the global target), so the
-/// detach transition is expressed with `Db::detach_connection`.
+/// Explicitly detaching an upstream preserves a pending Global durability
+/// wait. Local durability remains available, and the original Global wait
+/// completes only after a replacement authority accepts the replayed write.
+/// The public `Db` API provides the exact detach operation and lets this test
+/// withhold authority processing; the client facade only exposes transport
+/// disconnects.
 ///
-/// Actors: alice's node with an installed but unanswered upstream.
+/// Actors: alice writes locally, then reconnects to the authority.
 ///
 /// ```text
 /// alice ──insert──► local store   wait(Global) pending
-///   │      detach upstream
-///   └── wait(Global) resolves (no upstream will ever confirm)
+///   ├──detach upstream──────────► wait(Local) ✓, wait(Global) pending
+///   ├──attach new upstream──────► wait(Global) pending
+///   └──replay──► authority ──accept──► original wait(Global) ✓
 /// ```
 #[test]
-#[ignore = "#1766: detaching the upstream leaves a global-tier durability wait pending forever; the write's settlement expectation never collapses to the local tier"]
-fn detaching_the_upstream_resolves_pending_global_wait() {
+fn detaching_the_upstream_keeps_global_wait_pending_until_reconnected_authority_confirms() {
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -135,7 +134,7 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
     use jazz::ids::{AuthorSubject, NodeUuid};
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
-    use jazz::tx::DurabilityTier;
+    use jazz::tx::{DurabilityTier, Fate};
     use jazz_testkit::duplex_transport::duplex;
 
     let source = SchemaBuilder::new()
@@ -148,7 +147,7 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
         .map(String::as_str)
         .collect::<Vec<_>>();
     let node = block_on(Db::open(DbConfig::new(
-        schema,
+        schema.clone(),
         MemoryStorage::new(&refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x51; 16]),
@@ -194,11 +193,64 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
 
     assert!(node.detach_connection(&upstream));
     for _ in 0..3 {
-        block_on(node.tick()).expect("collapse the settlement expectation");
+        block_on(node.tick()).expect("process the detached connection");
     }
+    assert_eq!(
+        global_wait.get(),
+        None,
+        "detaching must not complete or downgrade the pending Global wait"
+    );
+    assert_eq!(
+        block_on(node.wait_for_transaction(tx_id, DurabilityTier::Local))
+            .expect("Local durability remains available after detach"),
+        tx_id,
+    );
+    let state = node.write_state(tx_id).expect("write state after detach");
+    assert_eq!(state.fate, Fate::Pending);
+    assert_eq!(state.durability, DurabilityTier::Local);
+    assert_eq!(state.global_time, None);
+
+    let authority = block_on(Db::open_history_complete(DbConfig::new(
+        schema,
+        MemoryStorage::new(&refs).expect("valid authority storage families"),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x52; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .expect("open authority database");
+    let (replacement_transport, authority_transport) = duplex();
+    let _replacement = block_on(node.connect_upstream(replacement_transport));
+    let _subscriber = authority.accept_subscriber(
+        authority_transport,
+        AuthorSubject::for_test_bytes([0xa9; 16]),
+    );
+    for _ in 0..3 {
+        block_on(node.tick()).expect("queue replay without an authority response");
+    }
+    assert_eq!(
+        global_wait.get(),
+        None,
+        "attaching a replacement must not satisfy Global without confirmation"
+    );
+
+    for _ in 0..100 {
+        block_on(authority.tick()).expect("authority processes the replayed write");
+        block_on(node.tick()).expect("alice receives authority confirmation");
+        if global_wait.get().is_some() {
+            break;
+        }
+    }
+    assert_eq!(
+        global_wait.get(),
+        Some(true),
+        "the original Global wait must succeed after authority confirmation"
+    );
+    let state = node.write_state(tx_id).expect("confirmed write state");
+    assert_eq!(state.fate, Fate::Accepted);
+    assert_eq!(state.durability, DurabilityTier::Global);
     assert!(
-        global_wait.get().is_some(),
-        "detaching the upstream must resolve the pending global wait instead \
-         of leaving it waiting forever"
+        state.global_time.is_some(),
+        "Global requires an authority timestamp"
     );
 }
