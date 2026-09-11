@@ -151,6 +151,8 @@ pub(crate) struct MaintainedSubscriptionView {
     /// sequence key: one flat relation can validly contain more than one
     /// occurrence of the same root.
     structured_root_key_order: Vec<Vec<u8>>,
+    #[cfg(test)]
+    root_order_insert_comparisons: usize,
     structured_app_row_descriptor: Option<RecordDescriptor>,
     /// Whether this maintained subscription retains the recursive app-row
     /// collector. Flat unordered subscriptions release it after their reset;
@@ -189,6 +191,8 @@ impl Default for MaintainedSubscriptionView {
             structured_terminal_records: BTreeMap::new(),
             structured_root_keys: BTreeMap::new(),
             structured_root_key_order: Vec::new(),
+            #[cfg(test)]
+            root_order_insert_comparisons: 0,
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
             storage_backed_result_materialization: false,
@@ -1221,6 +1225,7 @@ impl MaintainedSubscriptionView {
                 })?;
             return Ok(());
         }
+        let root_was_present = self.structured_root_keys.contains_key(&operation.root_key);
         let _root = match &operation.edit {
             TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
                 let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
@@ -1249,8 +1254,18 @@ impl MaintainedSubscriptionView {
                 let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
                 self.structured_app_rows.remove(&operation.root_key);
                 self.apply_structured_app_row_delta(operation.root_key.clone(), record, 1);
-                self.structured_root_key_order
-                    .retain(|key| key != &operation.root_key);
+                // An insert may replace an existing occurrence. Fresh roots
+                // cannot be in the order yet: scanning the growing vector for
+                // each one would make an initial result quadratic.
+                if root_was_present {
+                    self.structured_root_key_order.retain(|key| {
+                        #[cfg(test)]
+                        {
+                            self.root_order_insert_comparisons += 1;
+                        }
+                        key != &operation.root_key
+                    });
+                }
                 self.structured_root_key_order.insert(
                     (*index).min(self.structured_root_key_order.len()),
                     operation.root_key.clone(),
@@ -3626,6 +3641,50 @@ mod tests {
     // runtime hands it opaque terminal keys after CollectBy has already
     // applied sort/window semantics, and a public root UUID cannot express
     // two flat occurrences of that root with different joined payloads.
+    #[test]
+    fn fresh_collector_roots_skip_order_scans_but_reinsert_repositions() {
+        // Internal mechanism test: the public result cannot reveal a scan of
+        // every existing key for each fresh insert. Also pin reinsertion's
+        // occurrence identity and position, so skipping all scans is unsafe.
+        let descriptor = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
+        let root = row(0x82);
+        let value = descriptor.create(&[Value::Uuid(root.0)]).unwrap();
+        let mut view = MaintainedSubscriptionView::default();
+        let insert = |i: u64, index| {
+            let key = i.to_be_bytes().to_vec();
+            TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Insert {
+                    key,
+                    index,
+                    value: value.clone(),
+                },
+            }
+        };
+        for i in 0..2000 {
+            view.apply_structured_terminal_operation(&insert(i, i as usize))
+                .unwrap();
+        }
+        assert_eq!(view.root_order_insert_comparisons, 0);
+        assert_eq!(view.structured_root_key_order.len(), 2000);
+        // The same public root is allowed at many occurrence keys. Reinsert
+        // only one occurrence, replacing its position without duplicating it.
+        view.apply_structured_terminal_operation(&insert(999, 0))
+            .unwrap();
+        assert_eq!(view.structured_root_key_order.len(), 2000);
+        assert_eq!(view.structured_root_key_order[0], 999_u64.to_be_bytes());
+        assert_eq!(view.structured_root_key_order[1], 0_u64.to_be_bytes());
+        assert_eq!(
+            view.structured_root_key_order
+                .iter()
+                .filter(|key| **key == 999_u64.to_be_bytes())
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn collector_terminal_keys_preserve_same_root_payloads_order_and_edits() {
         let descriptor =
