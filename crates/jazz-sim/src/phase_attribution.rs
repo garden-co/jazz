@@ -46,8 +46,13 @@ struct Frame {
     start: u64,
     children: u64,
 }
+const MAX_TIMELINE_INTERVALS: usize = 1_000_000;
+
 struct State {
     epoch: Instant,
+    // [start_ns, end_ns, phase, role, depth], recorded only when requested.
+    timeline: Option<Vec<[u64; 5]>>,
+    timeline_dropped: u64,
     stack: Vec<Frame>,
     totals: [[Timing; PHASES.len()]; ROLES.len()],
 }
@@ -55,12 +60,33 @@ impl Default for State {
     fn default() -> Self {
         Self {
             epoch: Instant::now(),
+            timeline: None,
+            timeline_dropped: 0,
             stack: Vec::new(),
             totals: [[Timing::default(); PHASES.len()]; ROLES.len()],
         }
     }
 }
 impl State {
+    fn now(&self) -> u64 {
+        if self.timeline.is_some() {
+            #[cfg(target_os = "linux")]
+            {
+                let mut time = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                assert_eq!(
+                    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) },
+                    0
+                );
+                return time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64;
+            }
+            #[cfg(not(target_os = "linux"))]
+            unreachable!("phase CPU timelines require Linux CLOCK_MONOTONIC");
+        }
+        self.epoch.elapsed().as_nanos() as u64
+    }
     fn enter(&mut self, phase: usize, now: u64) {
         let role = if phase < 3 {
             phase + 1
@@ -79,6 +105,19 @@ impl State {
     fn exit(&mut self, phase: usize, now: u64) {
         let frame = self.stack.pop().expect("balanced phase spans");
         assert_eq!(frame.phase, phase, "phase span exit must match enter");
+        if let Some(timeline) = &mut self.timeline {
+            if timeline.len() < MAX_TIMELINE_INTERVALS {
+                timeline.push([
+                    frame.start,
+                    now,
+                    phase as u64,
+                    frame.role as u64,
+                    self.stack.len() as u64,
+                ]);
+            } else {
+                self.timeline_dropped += 1;
+            }
+        }
         let elapsed = now.saturating_sub(frame.start);
         assert!(
             frame.children <= elapsed,
@@ -168,14 +207,14 @@ impl Subscriber for Collector {
     fn enter(&self, id: &Id) {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
-            let now = s.epoch.elapsed().as_nanos() as u64;
+            let now = s.now();
             s.enter(id.into_u64() as usize - 1, now);
         });
     }
     fn exit(&self, id: &Id) {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
-            let now = s.epoch.elapsed().as_nanos() as u64;
+            let now = s.now();
             s.exit(id.into_u64() as usize - 1, now);
         });
     }
@@ -184,11 +223,58 @@ impl Subscriber for Collector {
 pub fn reset() {
     STATE.with(|s| {
         assert!(s.borrow().stack.is_empty());
-        *s.borrow_mut() = State::default();
+        let mut state = State::default();
+        if std::env::var_os("JAZZ_PHASE_TIMELINE").is_some() {
+            assert!(
+                cfg!(target_os = "linux"),
+                "phase CPU timelines require Linux CLOCK_MONOTONIC"
+            );
+            state.timeline = Some(Vec::with_capacity(MAX_TIMELINE_INTERVALS));
+        }
+        *s.borrow_mut() = state;
         #[cfg(feature = "bench-alloc-sites")]
         allocations::set_current(None);
     });
 }
+/// Write the requested timeline after readiness and after CPU recording stops.
+/// Other threads must remain a separate bucket when joining samples by TID.
+pub fn write_timeline(path: &std::path::Path) -> std::io::Result<()> {
+    #[derive(serde::Serialize)]
+    struct Document<'a> {
+        clock: &'static str,
+        owner_tid: u64,
+        columns: [&'static str; 5],
+        phases: &'a [&'static str],
+        roles: &'a [&'static str],
+        dropped_intervals: u64,
+        intervals: &'a [[u64; 5]],
+    }
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert!(state.stack.is_empty());
+        let intervals = state
+            .timeline
+            .as_deref()
+            .expect("timeline must be enabled at reset");
+        #[cfg(target_os = "linux")]
+        let owner_tid = unsafe { libc::syscall(libc::SYS_gettid) } as u64;
+        #[cfg(not(target_os = "linux"))]
+        let owner_tid = 0;
+        let document = Document {
+            clock: "CLOCK_MONOTONIC",
+            owner_tid,
+            columns: ["start_ns", "end_ns", "phase", "role", "depth"],
+            phases: &PHASES,
+            roles: &ROLES,
+            dropped_intervals: state.timeline_dropped,
+            intervals,
+        };
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(path)?);
+        serde_json::to_writer(&mut writer, &document)?;
+        std::io::Write::flush(&mut writer)
+    })
+}
+
 /// Capture before diagnostic queries. Inclusive times overlap; exclusive times
 /// partition outer ticks. `entries` counts span entries (polls and scoped cleanup), not logical operations.
 pub fn snapshot() -> serde_json::Value {
@@ -208,7 +294,7 @@ pub fn snapshot() -> serde_json::Value {
             roles.insert((*name).into(), phases.into());
         }
         #[allow(unused_mut)]
-        let mut result = serde_json::json!({"roles":roles, "scope":"setup_and_settle_only", "units":"nanoseconds", "exclusive_times_are_additive":true, "inclusive_times_overlap":true});
+        let mut result = serde_json::json!({"roles":roles, "scope":"setup_and_settle_only", "units":"nanoseconds", "exclusive_times_are_additive":true, "inclusive_times_overlap":true, "timeline_enabled":s.timeline.is_some(), "timeline_dropped_intervals":s.timeline_dropped});
         #[cfg(feature = "bench-alloc-sites")]
         { result["allocation_counts"] = allocations::snapshot(); }
         result
@@ -218,6 +304,36 @@ pub fn snapshot() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Internal deterministic timestamps establish nesting and bounded capture;
+    // neither property is observable through the database API.
+    #[test]
+    fn timeline_records_nested_intervals_and_reports_truncation() {
+        let mut state = State::default();
+        state.timeline = Some(Vec::new());
+        state.enter(0, 10);
+        state.enter(4, 20);
+        state.exit(4, 40);
+        state.exit(0, 50);
+        assert_eq!(
+            state.timeline.as_ref().unwrap(),
+            &[[20, 40, 4, 1, 1], [10, 50, 0, 1, 0],]
+        );
+        assert_eq!(state.totals[1][0].exclusive_ns, 20);
+        state
+            .timeline
+            .as_mut()
+            .unwrap()
+            .resize(MAX_TIMELINE_INTERVALS, [0; 5]);
+        state.enter(1, 60);
+        state.exit(1, 70);
+        assert_eq!(
+            state.timeline.as_ref().unwrap().len(),
+            MAX_TIMELINE_INTERVALS
+        );
+        assert_eq!(state.timeline_dropped, 1);
+        assert_eq!(state.totals[2][1].inclusive_ns, 10);
+    }
+
     #[cfg(feature = "bench-alloc-sites")]
     #[test]
     fn allocation_counts_follow_innermost_phase_and_restore_parent() {

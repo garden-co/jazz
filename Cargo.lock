@@ -2348,6 +2348,7 @@ dependencies = [
  "postcard",
  "pprof",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",

@@ -1610,15 +1610,15 @@ fn run_connect_and_subscribe(
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
-    #[cfg(feature = "bench-perf-control")]
-    let mut perf_control = PerfControl::start();
-    alloc_metrics::reset_and_start();
     #[cfg(feature = "cold-settle-attribution")]
     {
         jazz_sim::phase_attribution::reset();
         jazz::cold_settle_attribution::reset();
         jazz::groove::cold_settle_attribution::reset();
     }
+    alloc_metrics::reset_and_start();
+    #[cfg(feature = "bench-perf-control")]
+    let mut perf_control = PerfControl::start();
     let start = Instant::now();
     let relay_core = duplex_counted();
     let client_relay = duplex_counted();
@@ -1774,6 +1774,11 @@ fn run_connect_and_subscribe(
     #[cfg(feature = "cold-settle-attribution")]
     {
         attribution.phase_timing = jazz_sim::phase_attribution::snapshot();
+        if let Some(mut path) = std::env::var_os("JAZZ_PHASE_TIMELINE") {
+            path.push(format!(".{label}.json"));
+            jazz_sim::phase_attribution::write_timeline(std::path::Path::new(&path))
+                .expect("write phase CPU timeline");
+        }
     }
     if label == "warm" {
         // Warm readiness is relay-local, but the benchmark also asserts that
