@@ -825,6 +825,8 @@ struct AttributionSummary {
 
 #[derive(Clone, Default)]
 struct OperatorAttribution {
+    map_buffer_capacity: u64,
+    map_buffer_used: u64,
     map_calls: [u64; 2],
     map_input_records: [u64; 2],
     map_output_records: [u64; 2],
@@ -841,6 +843,8 @@ impl OperatorAttribution {
         before: jazz::groove::cold_settle_attribution::Snapshot,
         after: jazz::groove::cold_settle_attribution::Snapshot,
     ) {
+        self.map_buffer_capacity += after.map_buffer_capacity - before.map_buffer_capacity;
+        self.map_buffer_used += after.map_buffer_used - before.map_buffer_used;
         for index in 0..2 {
             self.map_calls[index] += after.map_calls[index] - before.map_calls[index];
             self.map_input_records[index] +=
@@ -2739,6 +2743,8 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         json!({
             "map_project": {
                 "calls": operators.map_calls,
+                "new_buffer_capacity_bytes": operators.map_buffer_capacity,
+                "new_buffer_used_bytes": operators.map_buffer_used,
                 "input_records": operators.map_input_records,
                 "output_records": operators.map_output_records,
             },

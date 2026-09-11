@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const BUCKETS: usize = 2;
 
+static MAP_BUFFER_CAPACITY: AtomicU64 = AtomicU64::new(0);
+static MAP_BUFFER_USED: AtomicU64 = AtomicU64::new(0);
+
 static MAP_CALLS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 static MAP_INPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 static MAP_OUTPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
@@ -16,6 +19,8 @@ static JOIN_OUTPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) };
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Snapshot {
+    pub map_buffer_capacity: u64,
+    pub map_buffer_used: u64,
     pub map_calls: [u64; BUCKETS],
     pub map_input_records: [u64; BUCKETS],
     pub map_output_records: [u64; BUCKETS],
@@ -30,6 +35,8 @@ fn bucket(hydrate: bool) -> usize {
 }
 
 pub fn reset() {
+    MAP_BUFFER_CAPACITY.store(0, Ordering::Relaxed);
+    MAP_BUFFER_USED.store(0, Ordering::Relaxed);
     for counters in [
         &MAP_CALLS,
         &MAP_INPUT_RECORDS,
@@ -50,6 +57,8 @@ pub fn snapshot() -> Snapshot {
         std::array::from_fn(|index| counters[index].load(Ordering::Relaxed))
     }
     Snapshot {
+        map_buffer_capacity: MAP_BUFFER_CAPACITY.load(Ordering::Relaxed),
+        map_buffer_used: MAP_BUFFER_USED.load(Ordering::Relaxed),
         map_calls: load(&MAP_CALLS),
         map_input_records: load(&MAP_INPUT_RECORDS),
         map_output_records: load(&MAP_OUTPUT_RECORDS),
@@ -78,4 +87,11 @@ pub fn record_join(
     JOIN_LEFT_RECORDS[index].fetch_add(left_records as u64, Ordering::Relaxed);
     JOIN_RIGHT_RECORDS[index].fetch_add(right_records as u64, Ordering::Relaxed);
     JOIN_OUTPUT_RECORDS[index].fetch_add(output_records as u64, Ordering::Relaxed);
+}
+
+/// Sum completed newly encoded projection buffers, excluding byte-reuse paths.
+/// Capacity is retained allocation capacity, not cumulative realloc traffic.
+pub fn record_map_buffer(capacity: usize, used: usize) {
+    MAP_BUFFER_CAPACITY.fetch_add(capacity as u64, Ordering::Relaxed);
+    MAP_BUFFER_USED.fetch_add(used as u64, Ordering::Relaxed);
 }
