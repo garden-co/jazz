@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const BUCKETS: usize = 4;
+const BUCKETS: usize = 2;
 
 static MAP_CALLS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 static MAP_INPUT_RECORDS: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
@@ -25,8 +25,8 @@ pub struct Snapshot {
     pub join_output_records: [u64; BUCKETS],
 }
 
-fn bucket(hydrate: bool, dominant_child: bool) -> usize {
-    (usize::from(hydrate) << 1) | usize::from(dominant_child)
+fn bucket(hydrate: bool) -> usize {
+    usize::from(hydrate)
 }
 
 pub fn reset() {
@@ -60,13 +60,8 @@ pub fn snapshot() -> Snapshot {
     }
 }
 
-pub fn record_map(
-    hydrate: bool,
-    dominant_child: bool,
-    input_records: usize,
-    output_records: usize,
-) {
-    let index = bucket(hydrate, dominant_child);
+pub fn record_map(hydrate: bool, input_records: usize, output_records: usize) {
+    let index = bucket(hydrate);
     MAP_CALLS[index].fetch_add(1, Ordering::Relaxed);
     MAP_INPUT_RECORDS[index].fetch_add(input_records as u64, Ordering::Relaxed);
     MAP_OUTPUT_RECORDS[index].fetch_add(output_records as u64, Ordering::Relaxed);
@@ -74,12 +69,11 @@ pub fn record_map(
 
 pub fn record_join(
     hydrate: bool,
-    dominant_child: bool,
     left_records: usize,
     right_records: usize,
     output_records: usize,
 ) {
-    let index = bucket(hydrate, dominant_child);
+    let index = bucket(hydrate);
     JOIN_CALLS[index].fetch_add(1, Ordering::Relaxed);
     JOIN_LEFT_RECORDS[index].fetch_add(left_records as u64, Ordering::Relaxed);
     JOIN_RIGHT_RECORDS[index].fetch_add(right_records as u64, Ordering::Relaxed);

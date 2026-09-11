@@ -54,3 +54,31 @@ mangled names through `c++filt -s rust` when grouping callers.
 Do not interpret a filtered inclusive call graph as an exclusive caller
 breakdown. The next analysis groups raw samples by sampled leaf and nearest
 recovered repository caller, weighted by recorded event period.
+
+## Operator counter correction
+
+The old `tick_other` / `tick_dominant_child` split was not reliable after
+lowering: the classifier looked for a logical table name or logical field
+names, whereas the evaluated graph uses physical identities. All dominant
+buckets were zero in the recent captures. Do not interpret those zeroes as
+absence of work for the dominant query. Counts summed across both buckets
+remain useful.
+
+The classifier also recursively traversed the graph, allocating a vector at
+each visited node, every time an operator recorded its counters. This was
+additional observer work, separate from clock reads. Remove that classification
+and report only the directly known `tick` / `hydrate` modes, separated by the
+benchmark's runtime roles. Dominant-query readiness remains measured from its
+actual subscription; this correction affects operator attribution only.
+
+The retained runtime at `1111af7539` measured 18.866s settle and 19.332s dominant
+readiness without instrumentation. The 1,350-of-1,500 todo update roundtrip was
+274.082ms; the worker storage-write phase was 5.493ms within 91.041ms ingest.
+These remain native measurements, not browser reopen timings.
+
+Two subsequent experiments were discarded: broader total-projection composition
+(#2828, 18.912s settle) and direct witness metadata copying (#2830, 18.729s).
+Neither showed a meaningful elapsed improvement over the retained baseline,
+so the extra compiler/encoding logic is not in the retained branch. The latter
+passed all 2,006 Jazz tests after correcting the test shell's file-descriptor
+limit; its initial 14 failures all explicitly reported too many open files.

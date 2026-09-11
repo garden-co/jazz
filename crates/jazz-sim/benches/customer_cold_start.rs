@@ -760,13 +760,13 @@ struct AttributionSummary {
 
 #[derive(Clone, Default)]
 struct OperatorAttribution {
-    map_calls: [u64; 4],
-    map_input_records: [u64; 4],
-    map_output_records: [u64; 4],
-    join_calls: [u64; 4],
-    join_left_records: [u64; 4],
-    join_right_records: [u64; 4],
-    join_output_records: [u64; 4],
+    map_calls: [u64; 2],
+    map_input_records: [u64; 2],
+    map_output_records: [u64; 2],
+    join_calls: [u64; 2],
+    join_left_records: [u64; 2],
+    join_right_records: [u64; 2],
+    join_output_records: [u64; 2],
 }
 
 #[cfg(feature = "cold-settle-attribution")]
@@ -776,7 +776,7 @@ impl OperatorAttribution {
         before: jazz::groove::cold_settle_attribution::Snapshot,
         after: jazz::groove::cold_settle_attribution::Snapshot,
     ) {
-        for index in 0..4 {
+        for index in 0..2 {
             self.map_calls[index] += after.map_calls[index] - before.map_calls[index];
             self.map_input_records[index] +=
                 after.map_input_records[index] - before.map_input_records[index];
@@ -2713,7 +2713,7 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
                 "selected_payload_bytes": attribution.selected_payload_bytes,
             },
             "operator_cardinality": {
-                "bucket_order": ["tick_other", "tick_dominant_child", "hydrate_other", "hydrate_dominant_child"],
+                "bucket_order": ["tick", "hydrate"],
                 "core_to_relay": operator_json(&attribution.core_operators),
                 "relay_to_client": operator_json(&attribution.relay_operators),
                 "client": operator_json(&attribution.client_operators),
