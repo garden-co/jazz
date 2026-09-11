@@ -2005,7 +2005,13 @@ fn encode_nullable(
     match value {
         Some(value) => {
             bytes.push(1);
-            bytes.extend(encode_value(value, inner_type)?);
+            if inner_type.is_fixed_size() {
+                // The parent already owns the output buffer. Fixed payloads
+                // need no temporary Vec, including nested nullable values.
+                encode_fixed_value(bytes, value, inner_type)?;
+            } else {
+                bytes.extend(encode_value(value, inner_type)?);
+            }
         }
         None => {
             bytes.push(0);
