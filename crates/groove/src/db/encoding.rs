@@ -147,8 +147,19 @@ pub(super) fn encode_record(
         }
         .into());
     }
-    // Callers provide values in SQL declaration order. RecordDescriptor stores
-    // fixed-width fields first, so we reorder here before positional encoding.
+    // Descriptors retain logical declaration order even though fixed fields
+    // come first in the physical byte layout. Ordinary table writes therefore
+    // already have the encoder's order and need no cloned staging vector.
+    if descriptor.fields().len() == table.columns.len()
+        && descriptor
+            .fields()
+            .iter()
+            .zip(&table.columns)
+            .all(|(field, column)| field.name.as_deref() == Some(column.name.as_str()))
+    {
+        return Ok(descriptor.create(values)?);
+    }
+    // Variant descriptors can select or reorder declaration fields.
     let values_by_descriptor_order = descriptor
         .fields()
         .iter()
@@ -156,7 +167,7 @@ pub(super) fn encode_record(
             let name = field
                 .name
                 .as_deref()
-                .ok_or(records::Error::FieldNotFound("<unnamed>".to_owned()))?;
+                .ok_or_else(|| records::Error::FieldNotFound("<unnamed>".to_owned()))?;
             let declaration_idx = table
                 .columns
                 .iter()

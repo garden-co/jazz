@@ -201,45 +201,10 @@ impl RecordDescriptor {
             });
         }
 
-        for (field, value) in self.fields.iter().zip(values) {
-            ensure_value_type(value, &field.value_type)?;
-        }
-
-        let fixed_size = self.fixed_size();
-        let variable_count = self.variable_count();
-        let offset_table_size = variable_count.saturating_sub(1) * 4;
-        let mut record = Vec::with_capacity(fixed_size + offset_table_size);
-        let mut variable_values = Vec::with_capacity(variable_count);
-
-        for logical_idx in &self.layout.logical_by_physical {
-            let field = &self.fields[*logical_idx];
-            let value = &values[*logical_idx];
-            let layout = &self.layout.fields[*logical_idx];
-            match layout {
-                FieldLayout::Static { .. } => {
-                    encode_fixed_value(&mut record, value, &field.value_type)?;
-                }
-                FieldLayout::Variable { .. } => {
-                    variable_values.push(encode_value(value, &field.value_type)?);
-                }
-            }
-        }
-
-        let variable_start = fixed_size + offset_table_size;
-        let mut next_offset = variable_start;
-        for encoded in variable_values
-            .iter()
-            .take(variable_values.len().saturating_sub(1))
-        {
-            next_offset = checked_add(next_offset, encoded.len())?;
-            write_u32(&mut record, usize_to_u32(next_offset)?);
-        }
-
-        for encoded in variable_values {
-            record.extend(encoded);
-        }
-
-        Ok(record)
+        let capacity = self.fixed_size() + self.variable_count().saturating_sub(1) * 4;
+        self.create_with_encoded_fields(capacity, |index, output| {
+            self.encode_field_into(index, &values[index], output)
+        })
     }
 
     pub fn project(
