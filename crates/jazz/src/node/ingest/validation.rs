@@ -36,6 +36,15 @@ where
             }
             return Ok(ParentCoordinateValidation::Exact);
         }
+        // A missing exact witness in a partial transaction cannot establish
+        // an invalid parent. Other retained rows provide no evidence about
+        // this coordinate. Avoid loading that fragment for every missing
+        // parent; retain the pending coordinate constraint instead.
+        if parent_tx.view_scoped_cardinality
+            && !self.query.tx_versions_cache.contains_key(&parent)
+        {
+            return Ok(ParentCoordinateValidation::Inconclusive);
+        }
         let coordinate_versions = self
             .query_versions_for_tx_physical_coordinate(
                 parent,
@@ -47,6 +56,9 @@ where
             if self.version_row_matches_parent_coordinate(candidate, coordinate)? {
                 return Ok(ParentCoordinateValidation::Exact);
             }
+        }
+        if parent_tx.view_scoped_cardinality {
+            return Ok(ParentCoordinateValidation::Inconclusive);
         }
         let parent_versions = self.query_versions_for_tx(parent).await?;
         if parent_versions.is_empty() {

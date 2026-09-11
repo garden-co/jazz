@@ -2923,3 +2923,49 @@ fn cold_parent_coordinate_lookup_decodes_one_witness_from_large_transactions() {
         }
     }
 }
+
+#[test]
+fn partial_parent_misses_do_not_materialize_retained_siblings() {
+    // Internal test: public results cannot reveal repeated sibling scans.
+    // Exercise real authored and view-scoped records, then meter both cold
+    // and resident lookup paths. Complete-parent rejection is covered above.
+    use super::super::ingest::ParentCoordinateValidation;
+    for width in [1_u128, 150] {
+        let (_writer_dir, mut writer) = open_node_with_uuid(node(0xa1));
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(0xa2));
+        let parent = writer.commit_mergeable_many_settled(
+            (1..=width + 1).map(|i| {
+                MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(i)), 10)
+                    .cells(title_cells("parent"))
+            }).collect(),
+        ).unwrap();
+        let SyncMessage::CommitUnit { mut tx, mut versions } = writer.commit_unit_for(parent).unwrap() else {
+            panic!("commit unit");
+        };
+        versions.retain(|version| version.row_uuid() != RowUuid(uuid::Uuid::from_u128(width + 1)));
+        tx.n_total_writes = versions.len() as u32;
+        reader.ingest_view_scoped_transaction_with_current_indexes(
+            tx, versions, Fate::Pending, None, DurabilityTier::Local,
+        ).unwrap();
+        let present = ParentCoordinate {
+            physical_table_id: reader.physical_table_id_for_schema(reader.catalogue.current_schema_version_id, "todos").unwrap(),
+            branch_key: BranchKey::default(),
+            row_uuid: RowUuid(uuid::Uuid::from_u128(1)),
+            layer: VersionLayer::Content,
+        };
+        let retained = reader.query_versions_for_tx(parent).unwrap();
+        for resident in [false, true] {
+            reader.invalidate_tx_version_tables_cache(parent);
+            if resident { reader.cache_tx_versions(parent, retained.clone()); }
+            assert_eq!(reader.validate_known_parent_coordinate(parent, &present).resolve().unwrap(), ParentCoordinateValidation::Exact);
+            reader.reset_storage_read_metrics();
+            super::super::reset_query_versions_for_tx_call_count();
+            for i in width + 1..=width + 32 {
+                let missing = ParentCoordinate { row_uuid: RowUuid(uuid::Uuid::from_u128(i)), ..present.clone() };
+                assert_eq!(reader.validate_known_parent_coordinate(parent, &missing).resolve().unwrap(), ParentCoordinateValidation::Inconclusive);
+            }
+            assert_eq!(super::super::query_versions_for_tx_call_count(), 0, "missing partial parents must not load sibling bodies (width={width}, resident={resident})");
+            assert_eq!(reader.storage_read_metrics().history_indexes.reads, 0, "no by_tx index scans for partial misses");
+        }
+    }
+}
