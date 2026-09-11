@@ -1185,16 +1185,16 @@ mod variant_case_tests {
         .unwrap();
         let json_root = json_prepared.value_ref.clone();
         assert!(
-            json_cell.create(&[Value::Large(json_root.clone())]).is_ok(),
+            json_cell.create(&[Value::Large(Box::new(json_root.clone()))]).is_ok(),
             "the JSON physical descriptor accepts its schema-derived large value"
         );
         assert!(
-            text_cell.create(&[Value::Large(json_root.clone())]).is_err(),
+            text_cell.create(&[Value::Large(Box::new(json_root.clone()))]).is_err(),
             "a JSON descriptor must not enter text physical storage"
         );
 
         let json_record = json_cell
-            .create(&[Value::Large(json_root.clone())])
+            .create(&[Value::Large(Box::new(json_root.clone()))])
             .expect("encode JSON physical cell");
         let replayed_values = text_cell.bind(&json_record).to_values().unwrap();
         let [Value::Large(replayed)] = replayed_values.as_slice() else {

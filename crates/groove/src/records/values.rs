@@ -37,8 +37,9 @@ pub enum Value {
     String(String),
     Bytes(Vec<u8>),
     /// Engine-owned indirect physical arm. Public result boundaries
-    /// materialize this back into the declared logical scalar type.
-    Large(crate::large_values::LargeValueRef),
+    /// materialize this back into the declared logical scalar type. Box the
+    /// uncommon reference so every ordinary materialized cell stays compact.
+    Large(Box<crate::large_values::LargeValueRef>),
     Uuid(uuid::Uuid),
     EnumTag(u8),
     Tuple(Vec<Value>),
@@ -1624,14 +1625,14 @@ pub(super) fn encode_value_into(
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))),
         ) if value.kind == *kind => bytes.extend(crate::large_values::encode_stored_scalar(
             *kind,
-            &crate::large_values::StoredScalar::Chunked(value.clone()),
+            &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
         )?),
         (Value::Large(value), ValueType::String)
             if value.kind == crate::large_values::LargeValueKind::String =>
         {
             bytes.extend(crate::large_values::encode_stored_scalar(
                 crate::large_values::LargeValueKind::String,
-                &crate::large_values::StoredScalar::Chunked(value.clone()),
+                &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
             )?)
         }
         (Value::Large(value), ValueType::Bytes)
@@ -1639,7 +1640,7 @@ pub(super) fn encode_value_into(
         {
             bytes.extend(crate::large_values::encode_stored_scalar(
                 crate::large_values::LargeValueKind::Bytes,
-                &crate::large_values::StoredScalar::Chunked(value.clone()),
+                &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
             )?)
         }
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
@@ -1758,7 +1759,7 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
             crate::large_values::StoredScalar::Chunked(value)
                 if value.kind == crate::large_values::LargeValueKind::String =>
             {
-                Ok(Value::Large(value))
+                Ok(Value::Large(Box::new(value)))
             }
             crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
                 expected: value_type.clone(),
@@ -1772,7 +1773,7 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
             crate::large_values::StoredScalar::Chunked(value)
                 if value.kind == crate::large_values::LargeValueKind::Bytes =>
             {
-                Ok(Value::Large(value))
+                Ok(Value::Large(Box::new(value)))
             }
             crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
                 expected: value_type.clone(),
@@ -1796,7 +1797,7 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
                         .map_err(|_| Error::InvalidUtf8),
                 },
                 crate::large_values::StoredScalar::Chunked(value) if value.kind == *kind => {
-                    Ok(Value::Large(value))
+                    Ok(Value::Large(Box::new(value)))
                 }
                 crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
                     expected: value_type.clone(),

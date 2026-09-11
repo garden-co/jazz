@@ -2429,7 +2429,7 @@ impl MergeableCommit {
         nullable: bool,
     ) -> Self {
         let column = column.into();
-        let value = Value::Large(staged.value_ref);
+        let value = Value::Large(Box::new(staged.value_ref));
         self.cells.insert(
             column.clone(),
             if nullable {
@@ -2532,7 +2532,7 @@ fn collect_indirect_descriptors(
     match value {
         Value::Large(value_ref) => {
             if !descriptors.contains(value_ref) {
-                descriptors.push(value_ref.clone());
+                descriptors.push(value_ref.as_ref().clone());
             }
         }
         Value::Tuple(values) | Value::Array(values) => {

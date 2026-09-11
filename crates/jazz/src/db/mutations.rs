@@ -786,7 +786,7 @@ where
                     .node
                     .lock()
                     .await
-                    .append_and_stage_large_value(value_ref, bytes)
+                    .append_and_stage_large_value(*value_ref, bytes)
                     .await?;
                 self.write_staged_large_value_update(table, row, column, staged, nullable)
                     .await
@@ -846,7 +846,7 @@ where
                     .node
                     .lock()
                     .await
-                    .edit_and_stage_large_value(value_ref, offset, delete_length, insert)
+                    .edit_and_stage_large_value(*value_ref, offset, delete_length, insert)
                     .await?;
                 self.write_staged_large_value_update(table, row, column, staged, nullable)
                     .await
@@ -1040,7 +1040,7 @@ where
                 "partial splice requires a bytes or string column",
             ));
         }
-        let Value::Large(mut current) = value else {
+        let Value::Large(current) = value else {
             return Ok((
                 apply_inline_splices(
                     preserve_nullable(value, nullable),
@@ -1052,6 +1052,7 @@ where
                 Vec::new(),
             ));
         };
+        let mut current = *current;
         if current.kind != expected_kind {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -1192,7 +1193,7 @@ where
                 .ok_or_else(|| Error::new(ErrorCode::Query, "splice page length overflows"))?;
         }
         Ok((
-            preserve_nullable(Value::Large(current), nullable),
+            preserve_nullable(Value::Large(Box::new(current)), nullable),
             final_staged,
             prior_claims,
         ))
@@ -1263,10 +1264,10 @@ where
             .node
             .lock()
             .await
-            .edit_and_stage_large_value(large.clone(), 0, large.byte_length, replacement)
+            .edit_and_stage_large_value(large.as_ref().clone(), 0, large.byte_length, replacement)
             .await?;
         Ok((
-            preserve_nullable(Value::Large(staged.value_ref.clone()), nullable),
+            preserve_nullable(Value::Large(Box::new(staged.value_ref.clone())), nullable),
             Some(staged),
             Vec::new(),
         ))
@@ -1324,7 +1325,7 @@ where
                 })?;
             cells.insert(
                 column.to_owned(),
-                preserve_nullable(Value::Large(staged.value_ref.clone()), nullable),
+                preserve_nullable(Value::Large(Box::new(staged.value_ref.clone())), nullable),
             );
             let parents = node
                 .local_content_winner_tx_id_in_schema(self.schema_version_id, table, row)

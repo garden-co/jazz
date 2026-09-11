@@ -8178,7 +8178,7 @@ mod tests {
                 0,
                 "inline nested scalars must remain encoded"
             );
-            let indirect = encode(Value::Large(prepared.value_ref.clone()));
+            let indirect = encode(Value::Large(Box::new(prepared.value_ref.clone())));
             assert!(matches!(
                 materialize_record_attempt(&descriptor, &indirect, &mut inputs),
                 Err(IvmRuntimeError::EvaluationBlocked)
@@ -8212,7 +8212,7 @@ mod tests {
         let raw = descriptor
             .create(&[
                 Value::String("inline".to_owned()),
-                Value::Large(prepared.value_ref),
+                Value::Large(Box::new(prepared.value_ref)),
             ])
             .unwrap();
         let mut inputs = EvaluationInputs::default();
@@ -8858,7 +8858,7 @@ mod tests {
         .value_ref;
         let text_cell =
             RecordDescriptor::new([("cell", physical_storage_value_type(LargeValueKind::String))]);
-        assert!(text_cell.create(&[Value::Large(json)]).is_err());
+        assert!(text_cell.create(&[Value::Large(Box::new(json))]).is_err());
     }
 
     #[test]

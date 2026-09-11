@@ -489,7 +489,10 @@ async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
     let mut batch = database.open_batch();
     batch.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     batch.accept_large_value(staged.id);
     database.commit_batch(batch).await.unwrap();
@@ -497,7 +500,7 @@ async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
     let mut replay = database.open_batch();
     replay.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(staged.value_ref)],
+        vec![Value::U64(2), Value::Large(Box::new(staged.value_ref))],
     );
     replay.accept_large_value(staged.id);
     assert!(matches!(
@@ -581,7 +584,10 @@ async fn present_staged_receipt_has_no_implicit_ttl_and_is_accepted_atomically()
     let mut batch = database.open_batch();
     batch.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     batch.accept_large_value(staged.id);
     database.commit_batch(batch).await.unwrap();
@@ -614,7 +620,7 @@ async fn resident_large_value_acceptance_blocks_stale_eviction_and_reclamation()
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
     );
     insert.accept_large_value(staged.id);
     let applied = database.apply_batch(insert).await.unwrap();
@@ -671,7 +677,7 @@ async fn cross_receipt_eviction_defers_until_resident_publication_is_durable() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(accepted.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(accepted.value_ref))],
     );
     insert.accept_large_value(accepted.id);
     let applied = database.apply_batch(insert).await.unwrap();
@@ -748,7 +754,7 @@ async fn reclamation_uses_durable_zero_and_resident_references_as_a_veto() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(value_ref.clone())],
+        vec![Value::U64(1), Value::Large(Box::new(value_ref.clone()))],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -770,7 +776,7 @@ async fn reclamation_uses_durable_zero_and_resident_references_as_a_veto() {
     let mut first_activation = database.open_batch();
     first_activation.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(value_ref.clone())],
+        vec![Value::U64(2), Value::Large(Box::new(value_ref.clone()))],
     );
     let first_activation = database.apply_batch(first_activation).await.unwrap();
     assert_eq!(
@@ -821,7 +827,7 @@ async fn reclamation_uses_durable_zero_and_resident_references_as_a_veto() {
     let mut second_activation = database.open_batch();
     second_activation.insert(
         "objects",
-        vec![Value::U64(3), Value::Large(value_ref.clone())],
+        vec![Value::U64(3), Value::Large(Box::new(value_ref.clone()))],
     );
     let second_activation = database.apply_batch(second_activation).await.unwrap();
     database
@@ -1556,7 +1562,7 @@ async fn finalized_upload_promotion_is_atomic_and_retry_returns_its_one_receipt(
     let mut accepted = reopened.open_batch();
     accepted.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(prepared.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(prepared.value_ref))],
     );
     accepted.accept_large_value(receipt.id);
     reopened.commit_batch(accepted).await.unwrap();
@@ -2084,11 +2090,17 @@ async fn shared_durable_root_is_reclaimed_only_after_its_last_physical_record() 
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(2),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2498,7 +2510,10 @@ async fn pipelined_applied_batches_compose_large_value_root_references() {
     let mut first_batch = database.open_batch();
     first_batch.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(first_staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(first_staged.value_ref.clone())),
+        ],
     );
     first_batch.accept_large_value(first_staged.id);
     let first = database.apply_batch(first_batch).await.unwrap();
@@ -2506,7 +2521,10 @@ async fn pipelined_applied_batches_compose_large_value_root_references() {
     let mut second_batch = database.open_batch();
     second_batch.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(second_staged.value_ref.clone())],
+        vec![
+            Value::U64(2),
+            Value::Large(Box::new(second_staged.value_ref.clone())),
+        ],
     );
     second_batch.accept_large_value(second_staged.id);
     let second = database.apply_batch(second_batch).await.unwrap();
@@ -2574,7 +2592,10 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2677,7 +2698,10 @@ async fn corrupt_large_value_root_does_not_leave_a_publication_hole() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2739,7 +2763,7 @@ async fn cancelled_lifecycle_wait_does_not_leave_a_publication_hole() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2807,7 +2831,10 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2943,7 +2970,7 @@ async fn missing_chunk_observer_completes_during_tick_before_lifecycle_lock() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
     );
     insert.accept_large_value(staged.id);
     let applied = database.apply_batch(insert).await.unwrap();
@@ -3020,7 +3047,10 @@ async fn sequential_cold_large_value_publications_do_not_deadlock_observer() {
     let mut first = database.open_batch();
     first.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(first_staged.value_ref)],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(first_staged.value_ref)),
+        ],
     );
     first.accept_large_value(first_staged.id);
     let first = database.apply_batch(first).await.unwrap();
@@ -3040,7 +3070,10 @@ async fn sequential_cold_large_value_publications_do_not_deadlock_observer() {
     let mut second = database.open_batch();
     second.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(second_staged.value_ref)],
+        vec![
+            Value::U64(2),
+            Value::Large(Box::new(second_staged.value_ref)),
+        ],
     );
     second.accept_large_value(second_staged.id);
     let mut second_application = Box::pin(database.apply_batch(second));
@@ -3128,7 +3161,7 @@ async fn first_cold_publication_persists_before_resolver_without_deadlock() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
     );
     insert.accept_large_value(staged.id);
     let applied = database.apply_batch(insert).await.unwrap();
@@ -3229,7 +3262,7 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
     let mut first_batch = database.open_batch();
     first_batch.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(first.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(first.value_ref))],
     );
     first_batch.accept_large_value(first.id);
     let first = database.apply_batch(first_batch).await.unwrap();
@@ -3245,7 +3278,7 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
     let mut second_batch = database.open_batch();
     second_batch.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(second.value_ref)],
+        vec![Value::U64(2), Value::Large(Box::new(second.value_ref))],
     );
     second_batch.accept_large_value(second.id);
     let second = database.apply_batch(second_batch).await.unwrap();
@@ -3364,7 +3397,7 @@ async fn late_publication_metadata_write_failure_is_fatal_and_observable() {
     let mut second = database.open_batch();
     second.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(staged.value_ref)],
+        vec![Value::U64(2), Value::Large(Box::new(staged.value_ref))],
     );
     second.accept_large_value(staged.id);
     let second = database.apply_batch(second).await.unwrap();
@@ -3468,7 +3501,7 @@ async fn external_chunk_backend_error_cannot_forge_publication_durability_failur
     let mut second = database.open_batch();
     second.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(staged.value_ref)],
+        vec![Value::U64(2), Value::Large(Box::new(staged.value_ref))],
     );
     second.accept_large_value(staged.id);
     let second = database.apply_batch(second).await.unwrap();

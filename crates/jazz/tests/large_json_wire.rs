@@ -55,7 +55,7 @@ fn json_version_records_freeze_inline_and_indirect_semantics() {
     let prepared =
         prepare_with_fixture_locators(LargeValueKind::Json, json.as_bytes(), b"jazz-json-wire-v1")
             .unwrap();
-    let indirect_value = Value::Large(prepared.value_ref);
+    let indirect_value = Value::Large(Box::new(prepared.value_ref));
     let indirect = make(indirect_value.clone());
     let legacy_descriptor =
         RecordDescriptor::new(inline.record().descriptor().fields().iter().map(|field| {

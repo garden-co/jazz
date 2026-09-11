@@ -2510,7 +2510,10 @@ async fn pending_incremental_checksum_survives_last_subscription_gc() {
                 descriptor: objects.clone(),
                 deltas: vec![RecordDelta {
                     record: objects
-                        .create(&[Value::U64(1), Value::Large(prepared.value_ref.clone())])
+                        .create(&[
+                            Value::U64(1),
+                            Value::Large(Box::new(prepared.value_ref.clone())),
+                        ])
                         .unwrap()
                         .into(),
                     weight: 1,

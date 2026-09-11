@@ -2922,7 +2922,7 @@ impl TickEvaluator<'_> {
                 Value::Large(value) => {
                     if pending.current.is_none() {
                         pending.current = Some(crate::large_values::StreamingChecksum::new(
-                            value.clone(),
+                            value.as_ref().clone(),
                             checksum.window_bytes,
                             checksum.max_bytes_per_turn,
                         )?);

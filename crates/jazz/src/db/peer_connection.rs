@@ -885,7 +885,7 @@ fn collect_large_value_refs(value: &Value, refs: &mut Vec<groove::large_values::
     match value {
         Value::Large(value_ref) => {
             if !refs.contains(value_ref) {
-                refs.push(value_ref.clone());
+                refs.push(value_ref.as_ref().clone());
             }
         }
         Value::Tuple(values) | Value::Array(values) => {

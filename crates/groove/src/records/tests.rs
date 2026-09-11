@@ -2116,12 +2116,12 @@ fn indirect_string_uses_the_same_logical_value_type_with_an_explicit_physical_ar
     )
     .unwrap();
     let record = descriptor
-        .create(&[Value::Large(prepared.value_ref.clone())])
+        .create(&[Value::Large(Box::new(prepared.value_ref.clone()))])
         .unwrap();
 
     assert_eq!(
         descriptor.get_idx(&record, 0).unwrap(),
-        Value::Large(prepared.value_ref)
+        Value::Large(Box::new(prepared.value_ref))
     );
     assert_eq!(
         descriptor.bind(&record).get_str(0).unwrap_err(),
@@ -2471,7 +2471,11 @@ fn embedded_record_admission_matches_legacy_roundtrip_corpus() {
     ] {
         let prepared = crate::large_values::prepare(kind, logical).unwrap();
         let d = descriptor([ValueType::stored_scalar(kind)]);
-        cases.push((d, d.create(&[Value::Large(prepared.value_ref)]).unwrap()));
+        cases.push((
+            d,
+            d.create(&[Value::Large(Box::new(prepared.value_ref))])
+                .unwrap(),
+        ));
     }
     let composite = descriptor([
         ValueType::Record(Box::new(child)),
@@ -2604,7 +2608,9 @@ fn indirect_reference_visitor_preserves_nested_multiplicity_and_early_stop() {
         .value_ref;
     let nested = descriptor([ValueType::String]);
     let child = OwnedRecord::new(
-        nested.create(&[Value::Large(reference.clone())]).unwrap(),
+        nested
+            .create(&[Value::Large(Box::new(reference.clone()))])
+            .unwrap(),
         nested,
     );
     let d = descriptor([
@@ -2617,9 +2623,9 @@ fn indirect_reference_visitor_preserves_nested_multiplicity_and_early_stop() {
             Value::String("inline contents".repeat(100)),
             Value::Array(vec![
                 Value::Nullable(None),
-                Value::Nullable(Some(Box::new(Value::Large(reference.clone())))),
+                Value::Nullable(Some(Box::new(Value::Large(Box::new(reference.clone()))))),
                 Value::Nullable(Some(Box::new(Value::String("inline".into())))),
-                Value::Nullable(Some(Box::new(Value::Large(reference.clone())))),
+                Value::Nullable(Some(Box::new(Value::Large(Box::new(reference.clone()))))),
             ]),
             Value::Record(child),
         ])
@@ -2719,4 +2725,47 @@ fn variable_field_failure_preserves_preexisting_output() {
     let mut output = vec![91, 92, 93];
     assert!(d.encode_field_into(0, &value, &mut output).is_err());
     assert_eq!(output, [91, 92, 93]);
+}
+
+// An internal representation budget: every ordinary scalar in a materialized
+// row pays Value's inline width, even when no indirect large value is present.
+#[test]
+fn materialized_value_cells_have_a_small_inline_representation() {
+    assert!(
+        std::mem::size_of::<Value>() <= 64,
+        "Value occupies {} bytes; uncommon payloads must not inflate every cell",
+        std::mem::size_of::<Value>()
+    );
+}
+
+// Boxing changes Rust ownership only. Pin both the native scalar carrier and
+// the existing serde enum discriminant/payload independently of Value's layout.
+#[test]
+fn compact_large_value_preserves_native_and_serde_encodings() {
+    use crate::large_values::{LargeValueKind, StoredScalar, encode_stored_scalar, prepare};
+    let reference = prepare(LargeValueKind::Bytes, b"same payload")
+        .unwrap()
+        .value_ref;
+    let value = Value::Large(reference.clone().into());
+    let descriptor = descriptor([ValueType::Bytes]);
+    let stored = descriptor.create(std::slice::from_ref(&value)).unwrap();
+    assert_eq!(
+        stored,
+        encode_stored_scalar(
+            LargeValueKind::Bytes,
+            &StoredScalar::Chunked(reference.clone())
+        )
+        .unwrap()
+    );
+    assert_eq!(descriptor.bind(&stored).get_idx(0).unwrap(), value);
+    // Large remains enum variant 8 in the existing generic Value carrier.
+    let mut expected = vec![8];
+    expected.extend(postcard::to_allocvec(&reference).unwrap());
+    let encoded = postcard::to_allocvec(&value).unwrap();
+    assert_eq!(encoded, expected);
+    assert_eq!(postcard::from_bytes::<Value>(&encoded).unwrap(), value);
+    assert_eq!(
+        serde_json::to_value(&value).unwrap(),
+        serde_json::json!({"Large": reference})
+    );
 }
