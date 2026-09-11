@@ -2313,7 +2313,7 @@ export class NativeRuntimeAdapter implements Runtime {
       retirements.push(retirement);
     }
     if (retirements.length === 0) return Promise.resolve();
-    return Promise.all(retirements);
+    return Promise.all(retirements).then(() => undefined);
   }
 
   async disconnect(
