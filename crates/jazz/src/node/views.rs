@@ -1593,18 +1593,14 @@ where
             .iter()
             .map(|bundle| bundle.tx.tx_id)
             .collect::<BTreeSet<_>>();
-        let bulk_candidate_bundles = preflight
+        let bulk_candidate_refs = preflight
             .bundles
             .iter()
             .filter(|(tx_id, bundle)| {
                 bulk_candidate_tx_ids.contains(tx_id)
                     && bundle.scope == crate::protocol::VersionBundleScope::CompleteTransaction
             })
-            .map(|(_, bundle)| bundle.clone())
-            .collect::<Vec<_>>();
-        let bulk_candidate_refs = bulk_candidate_bundles
-            .iter()
-            .map(VersionBundle::as_ref)
+            .map(|(_, bundle)| bundle.as_ref())
             .collect::<Vec<_>>();
         let bulk_loaded_tx_ids = self
             .ingest_reset_view_bundle_refs_in_bulk(
@@ -1637,11 +1633,11 @@ where
         let mut receiver_batch_content_versions = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
         let mut deferred_bundles = Vec::new();
-        for bundle in receiver_candidates.values() {
+        for bundle in receiver_candidates.into_values() {
             let staged = self
                 .stage_view_bundle(
                     &mut receiver_batch,
-                    bundle,
+                    &bundle,
                     &mut receiver_batch_tx_ids,
                     &mut receiver_batch_global_times,
                     &mut receiver_batch_content_versions,
@@ -1650,7 +1646,7 @@ where
             if staged {
                 receiver_batch_bundle_count += 1;
             } else {
-                deferred_bundles.push(bundle.clone());
+                deferred_bundles.push(bundle);
             }
         }
         self.write_merge_heads_for_bulk_content_versions(
@@ -1722,8 +1718,8 @@ where
     ) -> Result<(), Error> {
         let bundle_refs = version_bundle_refs_for_carriers(carriers)?;
         let preflight = self.preflight_view_bundle_conflicts(&bundle_refs).await?;
-        for bundle in preflight.bundles.values() {
-            self.ingest_view_bundle(bundle.clone()).await?;
+        for bundle in preflight.bundles.into_values() {
+            self.ingest_view_bundle(bundle).await?;
         }
         Ok(())
     }
@@ -2283,13 +2279,13 @@ where
                 .live_settled = false;
         }
         let version_bundles_is_empty = version_bundle_refs.is_empty();
-        if let Some(preflight) = &preflight {
-            for bundle in preflight.bundles.values() {
+        if let Some(preflight) = preflight {
+            for bundle in preflight.bundles.into_values() {
                 if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
                     continue;
                 }
                 self.sync_metrics.receiver_per_bundle_ingests += 1;
-                self.ingest_view_bundle(bundle.clone()).await?;
+                self.ingest_view_bundle(bundle).await?;
             }
         }
         // Retain the active peer payload inventory diagnostic independently
