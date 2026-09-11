@@ -2205,6 +2205,8 @@ class FakeTransport implements Transport {
     return this.auxiliaryOutgoing.splice(0);
   }
 
+  setAuxiliaryTraceEnabled(_enabled: boolean): void {}
+
   tick(): number {
     this.tickCount += 1;
     return 0;
