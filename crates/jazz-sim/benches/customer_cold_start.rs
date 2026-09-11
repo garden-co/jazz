@@ -115,6 +115,8 @@ mod alloc_metrics {
             if ACTIVE.load(Ordering::Relaxed) {
                 let alloc_index = ALLOCS.fetch_add(1, Ordering::Relaxed) + 1;
                 let size = layout.size() as u64;
+                #[cfg(feature = "cold-settle-attribution")]
+                jazz_sim::phase_attribution::record_allocation(layout.size());
                 let before_bytes = BYTES.fetch_add(size, Ordering::Relaxed);
                 let byte_sample = before_bytes / BYTE_SAMPLE_INTERVAL
                     != (before_bytes + size) / BYTE_SAMPLE_INTERVAL;
@@ -171,6 +173,8 @@ mod alloc_metrics {
         }
         ALLOCS.store(0, Ordering::Relaxed);
         BYTES.store(0, Ordering::Relaxed);
+        #[cfg(feature = "cold-settle-attribution")]
+        jazz_sim::phase_attribution::reset_allocation_counts();
         ACTIVE.store(true, Ordering::Relaxed);
     }
 
@@ -180,6 +184,12 @@ mod alloc_metrics {
             allocs: ALLOCS.load(Ordering::Relaxed),
             bytes: BYTES.load(Ordering::Relaxed),
         };
+        #[cfg(feature = "cold-settle-attribution")]
+        assert_eq!(
+            jazz_sim::phase_attribution::allocation_totals(),
+            (snapshot.allocs, snapshot.bytes),
+            "exclusive phase allocations must account for the global totals"
+        );
         report_sites();
         snapshot
     }

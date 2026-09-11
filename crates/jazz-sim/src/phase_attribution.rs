@@ -73,6 +73,8 @@ impl State {
             start: now,
             children: 0,
         });
+        #[cfg(feature = "bench-alloc-sites")]
+        allocations::set_current(Some((role, phase)));
     }
     fn exit(&mut self, phase: usize, now: u64) {
         let frame = self.stack.pop().expect("balanced phase spans");
@@ -89,6 +91,8 @@ impl State {
         if let Some(parent) = self.stack.last_mut() {
             parent.children += elapsed;
         }
+        #[cfg(feature = "bench-alloc-sites")]
+        allocations::set_current(self.stack.last().map(|frame| (frame.role, frame.phase)));
     }
 }
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
@@ -96,6 +100,59 @@ fn phase(metadata: &Metadata<'_>) -> Option<usize> {
     let name = metadata.name().strip_prefix("cold.phase.")?;
     PHASES.iter().position(|candidate| *candidate == name)
 }
+// Separate constant-initialized TLS avoids recursively borrowing the timing
+// stack when an allocation itself grows that stack. Uninstrumented threads
+// and work outside spans remain in an explicit unscoped bucket.
+#[cfg(feature = "bench-alloc-sites")]
+mod allocations {
+    use super::{PHASES, ROLES};
+    use std::{
+        cell::Cell,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    const UNSCOPED: usize = PHASES.len() * ROLES.len();
+    static COUNTS: [AtomicU64; UNSCOPED + 1] = [const { AtomicU64::new(0) }; UNSCOPED + 1];
+    static BYTES: [AtomicU64; UNSCOPED + 1] = [const { AtomicU64::new(0) }; UNSCOPED + 1];
+    thread_local! { static CURRENT: Cell<usize> = const { Cell::new(UNSCOPED) }; }
+    pub(super) fn set_current(frame: Option<(usize, usize)>) {
+        CURRENT.with(|current| {
+            current.set(frame.map_or(UNSCOPED, |(role, phase)| role * PHASES.len() + phase))
+        });
+    }
+    pub fn record_allocation(bytes: usize) {
+        let phase = CURRENT.try_with(Cell::get).unwrap_or(UNSCOPED);
+        COUNTS[phase].fetch_add(1, Ordering::Relaxed);
+        BYTES[phase].fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    pub fn reset_allocation_counts() {
+        for value in COUNTS.iter().chain(BYTES.iter()) {
+            value.store(0, Ordering::Relaxed);
+        }
+    }
+    pub fn allocation_totals() -> (u64, u64) {
+        (
+            COUNTS.iter().map(|v| v.load(Ordering::Relaxed)).sum(),
+            BYTES.iter().map(|v| v.load(Ordering::Relaxed)).sum(),
+        )
+    }
+    pub(super) fn snapshot() -> serde_json::Value {
+        let entries = (0..=UNSCOPED)
+            .filter_map(|index| {
+                let count = COUNTS[index].load(Ordering::Relaxed);
+                let bytes = BYTES[index].load(Ordering::Relaxed);
+                (count != 0).then(|| serde_json::json!({
+                "role": if index == UNSCOPED { "unscoped" } else { ROLES[index / PHASES.len()] },
+                "phase": if index == UNSCOPED { "unscoped" } else { PHASES[index % PHASES.len()] },
+                "allocations": count, "requested_bytes": bytes
+            }))
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({"exclusive":true,"allocator":"Rust global allocator","entries":entries})
+    }
+}
+#[cfg(feature = "bench-alloc-sites")]
+pub use allocations::{allocation_totals, record_allocation, reset_allocation_counts};
+
 /// Minimal subscriber: unrelated spans and events stay disabled.
 pub struct Collector;
 impl Subscriber for Collector {
@@ -128,6 +185,8 @@ pub fn reset() {
     STATE.with(|s| {
         assert!(s.borrow().stack.is_empty());
         *s.borrow_mut() = State::default();
+        #[cfg(feature = "bench-alloc-sites")]
+        allocations::set_current(None);
     });
 }
 /// Capture before diagnostic queries. Inclusive times overlap; exclusive times
@@ -148,13 +207,50 @@ pub fn snapshot() -> serde_json::Value {
             }
             roles.insert((*name).into(), phases.into());
         }
-        serde_json::json!({"roles":roles, "scope":"setup_and_settle_only", "units":"nanoseconds", "exclusive_times_are_additive":true, "inclusive_times_overlap":true})
+        #[allow(unused_mut)]
+        let mut result = serde_json::json!({"roles":roles, "scope":"setup_and_settle_only", "units":"nanoseconds", "exclusive_times_are_additive":true, "inclusive_times_overlap":true});
+        #[cfg(feature = "bench-alloc-sites")]
+        { result["allocation_counts"] = allocations::snapshot(); }
+        result
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "bench-alloc-sites")]
+    #[test]
+    fn allocation_counts_follow_innermost_phase_and_restore_parent() {
+        reset_allocation_counts();
+        allocations::set_current(None);
+        record_allocation(5);
+        let mut state = State::default();
+        state.enter(0, 0);
+        record_allocation(11);
+        state.enter(4, 1);
+        record_allocation(13);
+        state.exit(4, 2);
+        record_allocation(17);
+        state.exit(0, 3);
+        state.enter(1, 4);
+        record_allocation(19);
+        state.exit(1, 5);
+        assert_eq!(allocation_totals(), (5, 65));
+        let snapshot = allocations::snapshot();
+        let entries = snapshot["entries"].as_array().unwrap();
+        let find = |role, phase| {
+            entries
+                .iter()
+                .find(|entry| entry["role"] == role && entry["phase"] == phase)
+                .unwrap()
+        };
+        assert_eq!(find("core", "core")["allocations"], 2);
+        assert_eq!(find("core", "core")["requested_bytes"], 28);
+        assert_eq!(find("core", "ingest")["requested_bytes"], 13);
+        assert_eq!(find("relay", "relay")["requested_bytes"], 19);
+        assert_eq!(find("unscoped", "unscoped")["requested_bytes"], 5);
+    }
+
     // Internal instrumentation invariants need deterministic clock values rather
     // than flaky sleeps or application query assertions.
     #[test]
