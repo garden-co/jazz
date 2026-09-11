@@ -384,6 +384,10 @@ pub struct CollectBySlotBuilder {
     /// child to this slot. This lets callers retain parent anchor records for
     /// empty collections without treating the anchor as a null child.
     pub presence_col: Option<FieldRef>,
+    /// Parent UUID reference sequence; repeats expand into separate children.
+    pub reference_array_col: Option<FieldRef>,
+    /// Use reference positions instead of the explicit child comparator.
+    pub reference_order: bool,
     pub offset: u64,
     pub limit: TopByLimit,
 }
@@ -414,6 +418,8 @@ impl CollectBySlotBuilder {
             order_cols: order_cols.into_iter().collect(),
             tie_cols: tie_cols.into_iter().map(FieldRef::name).collect(),
             presence_col: None,
+            reference_array_col: None,
+            reference_order: false,
             offset,
             limit,
         }

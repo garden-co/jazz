@@ -219,7 +219,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       ]);
     });
 
-    it("orders forward-array and reverse-relation payloads by child row id", async () => {
+    it("preserves forward-array references and orders reverse relations by child row id", async () => {
       db.upsert(app.users, orderedIds.high, { name: "High", friendsIds: [] });
       db.upsert(app.users, orderedIds.low, { name: "Low", friendsIds: [] });
       db.upsert(app.users, orderedIds.middle, { name: "Middle", friendsIds: [] });
@@ -234,7 +234,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         tags: [],
         projectId: project.id,
         ownerId: null,
-        assigneesIds: [orderedIds.high, orderedIds.low, orderedIds.middle],
+        assigneesIds: [orderedIds.high, orderedIds.low, orderedIds.middle, orderedIds.high],
       });
       db.upsert(app.todos, todoIds.low, {
         title: "Low",
@@ -252,6 +252,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       );
       assert(todo, "Todo is not defined");
       expect(todo.assignees.map((user) => user.id)).toEqual([
+        orderedIds.high,
         orderedIds.low,
         orderedIds.middle,
         orderedIds.high,
@@ -264,6 +265,91 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       );
       assert(parent, "Project is not defined");
       expect(parent.todosViaProject.map((child) => child.id)).toEqual([todoIds.low, todoIds.high]);
+    });
+
+    it("hydrates repeated array references through live nested updates and reorders", async () => {
+      const a = insertUser(db, "A");
+      const b = insertUser(db, "B");
+      db.update(app.users, b.id, { friendsIds: [a.id, a.id] });
+      const todo = insertTodo(db, { assigneesIds: [b.id, a.id, b.id] });
+      const query = app.todos.where({ id: { eq: todo.id } }).include({
+        assignees: app.users.include({ friends: true }),
+      });
+      let observed: { name: string; friends: string[] }[] = [];
+      const unsubscribe = db.subscribe(query, (rows) => {
+        observed = (rows[0]?.assignees ?? []).map((user) => ({
+          name: user.name,
+          friends: user.friends.map((friend) => friend.name),
+        }));
+      });
+      const aRow = { name: "A", friends: [] };
+      const bRow = { name: "B", friends: ["A", "A"] };
+      try {
+        await expect.poll(() => observed).toEqual([bRow, aRow, bRow]);
+        db.update(app.users, a.id, { name: "A2" });
+        const a2 = { name: "A2", friends: [] };
+        const b2 = { name: "B", friends: ["A2", "A2"] };
+        await expect.poll(() => observed).toEqual([b2, a2, b2]);
+        db.update(app.todos, todo.id, { assigneesIds: [a.id, b.id, b.id] });
+        await expect.poll(() => observed).toEqual([a2, b2, b2]);
+        db.update(app.users, b.id, { friendsIds: [a.id] });
+        const b3 = { name: "B", friends: ["A2"] };
+        await expect.poll(() => observed).toEqual([a2, b3, b3]);
+        db.update(app.todos, todo.id, { assigneesIds: [b.id] });
+        await expect.poll(() => observed).toEqual([b3]);
+        const snapshot = await readOne(query);
+        expect(
+          snapshot?.assignees.map((user) => ({
+            name: user.name,
+            friends: user.friends.map((friend) => friend.name),
+          })),
+        ).toEqual(observed);
+      } finally {
+        unsubscribe();
+      }
+    });
+
+    it("limits hydrated array references in their original order", async () => {
+      const a = insertUser(db, "A");
+      const b = insertUser(db, "B");
+      const todo = insertTodo(db, { assigneesIds: [b.id, a.id, b.id] });
+      const query = app.todos.where({ id: { eq: todo.id } });
+
+      const limited = await readOne(query.include({ assignees: app.users.limit(2) }));
+
+      expect(limited?.assignees.map((user) => user.name)).toEqual(["B", "A"]);
+    });
+
+    it("filters hydrated array references while preserving order and duplicates", async () => {
+      const a = insertUser(db, "A");
+      const b = insertUser(db, "B");
+      const c = insertUser(db, "C");
+      const todo = insertTodo(db, { assigneesIds: [b.id, a.id, c.id, b.id] });
+      const query = app.todos.where({ id: { eq: todo.id } });
+
+      const filtered = await readOne(
+        query.include({
+          assignees: app.users.where({ name: { in: ["B", "C"] } }),
+        }),
+      );
+
+      expect(filtered?.assignees.map((user) => user.name)).toEqual(["B", "C", "B"]);
+    });
+
+    it("applies explicit ordering before limiting hydrated array references", async () => {
+      const a = insertUser(db, "A");
+      const b = insertUser(db, "B");
+      const todo = insertTodo(db, { assigneesIds: [b.id, a.id, b.id] });
+      const query = app.todos.where({ id: { eq: todo.id } });
+
+      const sorted = await readOne(
+        query.include({
+          assignees: app.users.orderBy("name", "asc").limit(2),
+        }),
+      );
+
+      expect(sorted?.assignees.map((user) => user.name)).toEqual(["A", "B"]);
+      expect(sorted?.assigneesIds).toEqual([b.id, a.id, b.id]);
     });
   });
 

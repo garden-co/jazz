@@ -1052,7 +1052,6 @@ local_tokio_test! {
 ///
 /// Actors: alice writes file parts and a file, bob reads the file with resolved
 /// part rows.
-#[ignore = "#1765: UUID-array correlation deduplicates repeated references instead of preserving outer-array multiplicity"]
 async fn array_subquery_materializes_uuid_array_refs_in_order_with_duplicates() {
     let clients = Clients::start().await;
 
@@ -1183,4 +1182,84 @@ fn file_counts_by_part_label(rows: &QueryRows) -> BTreeMap<String, usize> {
             (label, file_count)
         })
         .collect()
+}
+
+fn included_part_labels(value: &Value) -> Vec<&str> {
+    value
+        .as_array()
+        .expect("included parts")
+        .iter()
+        .map(|part| match &row_values(part)[0] {
+            Value::Text(label) => label.as_str(),
+            other => panic!("expected part label, got {other:?}"),
+        })
+        .collect()
+}
+
+local_tokio_test! {
+/// Alice creates [B, A, B], changes B, then reorders, removes, and adds references.
+/// Bob's live includes must preserve every occurrence and agree with fresh reads.
+async fn array_fk_subscription_preserves_occurrences_through_updates_and_reorders() {
+    let clients = Clients::start().await;
+    let a = create_file_part(&clients.alice, "A").await;
+    let b = create_file_part(&clients.alice, "B").await;
+    let file = create_file(&clients.alice, "bundle", &[b, a, b]).await;
+    let query = Query::from("files").array_subquery(
+        ArraySubquery::new("part_rows", "file_parts", "id", "parts")
+            .nested(ArraySubquery::new("files", "files", "parts", "id")),
+    );
+    let mut stream = clients.bob.subscribe(query.clone()).await.expect("subscribe");
+    let mut log = Vec::new();
+    wait_for_subscription_update(&mut stream, &mut log, QUERY_TIMEOUT, "initial repeated parts", |log| {
+        log.iter().flat_map(|delta| &delta.added).any(|added|
+            added.row.get("part_rows").is_some_and(|value| included_part_labels(value) == ["B", "A", "B"]))
+    }).await;
+
+    for (id, fields, expected) in [
+        (b, vec![("label".to_owned(), Value::Text("B2".to_owned()))], vec!["B2", "A", "B2"]),
+        (file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(a), Value::Uuid(b), Value::Uuid(b)]))], vec!["A", "B2", "B2"]),
+        (file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(b), Value::Uuid(a)]))], vec!["B2", "A"]),
+        (file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(b), Value::Uuid(b), Value::Uuid(a)]))], vec!["B2", "B2", "A"]),
+        (file, vec![("parts".to_owned(), Value::Array(vec![]))], vec![]),
+    ] {
+        log.clear();
+        clients.alice.update(id, fields).expect("update reference or child");
+        wait_for_subscription_update(&mut stream, &mut log, QUERY_TIMEOUT, format!("ordered occurrence update: {expected:?}"), |log| {
+            log.iter().flat_map(|delta| &delta.updated).filter_map(|updated| updated.row.as_ref()).any(|row|
+                row.get("part_rows").is_some_and(|value| included_part_labels(value) == expected))
+        }).await;
+        let rows = wait_for_rows(&clients.bob, query.clone(), "snapshot agrees with subscription", |rows| {
+            rows.iter().any(|(id, values)| *id == file && included_part_labels(&values[2]) == expected).then_some(rows)
+        }).await;
+        assert_eq!(included_part_labels(&find_row_by_id(&rows, file)[2]), expected);
+    }
+    clients.shutdown().await;
+}
+}
+
+local_tokio_test! {
+/// Bob hydrates Alice's [B, missing, A, B] with child filters, ordering and windows.
+/// Missing children are omitted and limits count occurrences; stored IDs stay intact.
+async fn array_fk_filters_and_windows_apply_to_reference_occurrences() {
+    let clients = Clients::start().await;
+    let a = create_file_part(&clients.alice, "A").await;
+    let b = create_file_part(&clients.alice, "B").await;
+    let missing = ObjectId::new();
+    let file = create_file(&clients.alice, "bundle", &[b, missing, a, b]).await;
+    for (include, expected) in [
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").limit(2), vec!["B", "A"]),
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").offset(1).limit(2), vec!["A", "B"]),
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").filter(eq(col("label"), lit("B"))), vec!["B", "B"]),
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").order_by("label", OrderDirection::Asc).limit(2), vec!["A", "B"]),
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").order_by("label", OrderDirection::Desc).limit(2), vec!["B", "B"]),
+    ] {
+        let query = Query::from("files").array_subquery(include);
+        let rows = wait_for_rows(&clients.bob, query, "filtered and bounded reference occurrences", |rows| {
+            rows.iter().any(|(id, values)| *id == file && included_part_labels(&values[2]) == expected).then_some(rows)
+        }).await;
+        assert_eq!(included_part_labels(&find_row_by_id(&rows, file)[2]), expected);
+        assert_eq!(find_row_by_id(&rows, file)[1].as_array().unwrap(), &[Value::Uuid(b), Value::Uuid(missing), Value::Uuid(a), Value::Uuid(b)]);
+    }
+    clients.shutdown().await;
+}
 }

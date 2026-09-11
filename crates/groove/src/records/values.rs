@@ -1187,6 +1187,23 @@ pub fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
 }
 
 impl ValueType {
+    /// Returns the underlying type after removing all outer `Nullable` wrappers.
+    /// Does not unwrap containers or change the nullability of their members.
+    pub fn non_nullable(&self) -> &Self {
+        let mut value_type = self;
+        while let Self::Nullable(inner) = value_type {
+            value_type = inner;
+        }
+        value_type
+    }
+
+    /// Whether this has the `Array<Uuid>` shape used for array foreign keys.
+    /// Call `non_nullable()` first to accept outer `Nullable` wrappers.
+    /// This checks the value type, not schema reference metadata.
+    pub fn is_array_fk(&self) -> bool {
+        matches!(self, Self::Array(inner) if **inner == Self::Uuid)
+    }
+
     /// Whether this is an engine-only physical backing type. Public schema and
     /// binding layers use this predicate to reject it without gaining access to
     /// the private representation.

@@ -412,6 +412,76 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
+  it("keeps duplicate child occurrences distinct across hydration, moves, and edits", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const a = "00000000-0000-4000-8000-000000000002";
+    const b = "00000000-0000-4000-8000-000000000003";
+    const rootKey = [10, ...uuidBytes(rootId)];
+    const aKey = [10, ...uuidBytes(a)];
+    const bKey = [10, ...uuidBytes(b)];
+    // Pinned terminal child occurrence key v1: second copy, u64 BE ordinal 1.
+    const bAgain = [...bKey, 255, 0, 0, 0, 0, 0, 0, 0, 1];
+    const added = runtimeAddedRoot(rootId, 0, "root");
+    const children = added.row.values[1]!;
+    if (children.type !== "Array") throw new Error("expected children");
+    children.value.push(
+      ...[b, a, b].map((id) => ({
+        type: "Row" as const,
+        value: terminalTextChild(id, id === a ? "A" : "B"),
+      })),
+    );
+    manager.handleDelta(emptyRuntimeDelta({ added: [added] }), transformIncluded);
+    const apply = (
+      edit: NonNullable<RuntimeSubscriptionDelta["terminalOperations"]>[number]["edit"],
+    ) =>
+      manager.handleDelta(
+        emptyRuntimeDelta({
+          terminalOperations: [{ root_key: rootKey, path: [{ Collection: 1 }], edit }],
+        }),
+        transformIncluded,
+      );
+    apply({ Update: { key: bAgain, row: terminalTextChild(b, "second") } });
+    expect(manager.all()[0]?.children.map((child) => child.name)).toEqual(["B", "A", "second"]);
+    apply({ Move: { key: bAgain, index: 0 } });
+    apply({ Update: { key: bKey, row: terminalTextChild(b, "first") } });
+    expect(manager.all()[0]?.children.map((child) => child.name)).toEqual(["second", "first", "A"]);
+    apply({ Remove: { key: bAgain } });
+    expect(manager.all()[0]?.children.map((child) => child.name)).toEqual(["first", "A"]);
+    apply({ Insert: { key: bAgain, index: 2, row: terminalTextChild(b, "again") } });
+    apply({ Move: { key: aKey, index: 0 } });
+    expect(manager.all()[0]?.children.map((child) => child.name)).toEqual(["A", "first", "again"]);
+    expect(manager.all()[0]?.children.map((child) => child.id)).toEqual([a, b, b]);
+    expect(() => apply({ Remove: { key: [...bKey, 255, 0, 0, 0, 0, 0, 0, 0, 0] } })).toThrow(
+      /noncanonical zero/,
+    );
+  });
+
+  it("does not replay descendant removals already included in a complete root update", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const childId = "00000000-0000-4000-8000-000000000002";
+    const added = runtimeAddedRoot(rootId, 0, "before");
+    const children = added.row.values[1]!;
+    if (children.type !== "Array") throw new Error("expected children");
+    children.value.push({ type: "Row", value: terminalTextChild(childId, "child") });
+    manager.handleDelta(emptyRuntimeDelta({ added: [added] }), transformIncluded);
+    const result = manager.handleDelta(
+      emptyRuntimeDelta({
+        updated: [runtimeAddedRoot(rootId, 0, "after")],
+        terminalOperations: [
+          {
+            root_key: [10, ...uuidBytes(rootId)],
+            path: [{ Collection: 1 }],
+            edit: { Remove: { key: [10, ...uuidBytes(childId)] } },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(result.all).toEqual([{ id: rootId, title: "after", children: [] }]);
+  });
+
   it("replays a descendant edit that arrives before its root", () => {
     const manager = new SubscriptionManager<IncludedRoot>();
     const rootId = "00000000-0000-4000-8000-000000000001";

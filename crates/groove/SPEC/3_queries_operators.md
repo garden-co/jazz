@@ -321,11 +321,30 @@ The `CollectBy` descriptor MUST include every output-affecting input:
 - in collect mode, the output parent-field sources and a tree of collection
   slots; a slot is addressed by its unique output field name within its owner
   and carries its owner-group fields, child projection, scalar order and tie
-  fields, direction, offset, limit, and nested slots. Siblings are distinct
+  fields, direction, offset, limit, optional UUID reference-array field and
+  reference-order flag, and nested slots. Siblings are distinct
   named slots on one record; descendants are slots on a child record. A slot's
   group fields are source fields available on its owner, so it selects its own
   owner-correlated flat rows; in expand mode, the tuple projection;
 - the parent/child presence rules needed to render empty arrays in collect mode.
+
+A slot with a reference-array field hydrates that owner's UUID sequence from the
+available distinct child records; its first child projection MUST be a UUID.
+Repeated references repeat the child payload, while absent children are omitted.
+The reference-order flag retains that sequence instead of scalar sort order;
+otherwise explicit scalar ordering sorts all occurrences. Offset and limit count
+these occurrences. The array is payload metadata, never an arrangement key.
+
+Terminal child occurrence key **v1** retains the typed row key for ordinal zero.
+Each further copy of the same child in the rendered sibling collection appends
+one byte `0xff` and the nonzero repeat ordinal as eight unsigned big-endian bytes.
+For Jazz UUID children the base is exactly `0x0a || uuid[16]` (17 bytes), and a
+repeat key is exactly 26 bytes. The UUID bytes use network order. An appended zero
+ordinal is noncanonical and MUST be rejected. Initial snapshots reconstruct these
+keys by counting each UUID's copies in sibling order; edit reducers retain the
+assigned keys across moves within a batch. Public row ids remain unchanged.
+The corpus in `tests/terminal_occurrence_keys.rs` pins v1 independently of serde;
+TypeScript reducer tests pin repeated-key decoding and rejection of ordinal zero.
 
 Descriptor recursion is limited by Groove's own
 `MAX_COLLECT_BY_TREE_DEPTH` validation (currently 16). It intentionally does
