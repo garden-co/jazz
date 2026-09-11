@@ -468,6 +468,26 @@ impl RecordDescriptor {
         record_value_span(record, self, field_idx)
     }
 
+    pub(crate) fn fields_contain_indirect_values(
+        &self,
+        record: &[u8],
+        indices: impl IntoIterator<Item = usize>,
+    ) -> Result<bool, Error> {
+        for index in indices {
+            let field = self.fields.get(index).ok_or(Error::FieldIndexOutOfBounds {
+                index,
+                len: self.fields.len(),
+            })?;
+            if field.value_type.may_contain_stored_scalar() {
+                let span = self.field_span(record, index)?;
+                if values::encoded_contains_indirect_value(&record[span], &field.value_type)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     pub fn patch_field(
         &self,
         record: &[u8],

@@ -2276,6 +2276,7 @@ fn encode_stored_scalar_canonical(
 #[cfg(test)]
 std::thread_local! {
     static STORED_SCALAR_ENCODE_CALLS: Cell<usize> = const { Cell::new(0) };
+    static STORED_SCALAR_DECODE_CALLS: Cell<usize> = const { Cell::new(0) };
     static STORED_SCALAR_CANONICAL_ENCODE_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -2294,6 +2295,8 @@ fn stored_scalar_encode_calls() -> usize {
 /// interpreted directly through that schema; indirect values authenticate the
 /// expected kind when their content-addressed nodes are decoded.
 pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<StoredScalar, Error> {
+    #[cfg(test)]
+    STORED_SCALAR_DECODE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let (tag, payload) =
         crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
     let decoded = match tag {
@@ -3978,6 +3981,9 @@ pub(crate) fn materialize_record_attempt(
     raw: &[u8],
     inputs: &mut EvaluationInputs,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
+    if !descriptor.fields_contain_indirect_values(raw, 0..descriptor.fields().len())? {
+        return Ok(raw.to_vec());
+    }
     let mut values = descriptor.bind(raw).to_values()?;
     let mut blocked = false;
     let mut changed = false;
@@ -4002,6 +4008,9 @@ pub(crate) fn materialize_record_fields_attempt(
     field_indices: &[usize],
     inputs: &mut EvaluationInputs,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
+    if !descriptor.fields_contain_indirect_values(raw, field_indices.iter().copied())? {
+        return Ok(raw.to_vec());
+    }
     let mut values = descriptor.bind(raw).to_values()?;
     let mut blocked = false;
     let mut changed = false;
@@ -8054,6 +8063,116 @@ mod tests {
         assert!(!std::ptr::eq(bytes, string));
         assert!(!std::ptr::eq(bytes, json));
         assert!(!std::ptr::eq(string, json));
+    }
+
+    #[test]
+    fn materialization_probe_preserves_inline_nested_records_and_resolves_indirect_values() {
+        // Internal receipt: public equality alone cannot prove that inline
+        // values avoided allocation/decoding. Exercise the real materializer
+        // through nullable, array, enum and record boundaries, including retry.
+        for kind in [
+            LargeValueKind::Bytes,
+            LargeValueKind::String,
+            LargeValueKind::Json,
+        ] {
+            let payload = br#"{"value":"nested"}"#;
+            let prepared = prepare_with_locator(kind, payload, deterministic_locator).unwrap();
+            let scalar_type = match kind {
+                LargeValueKind::Bytes => ValueType::Bytes,
+                LargeValueKind::String => ValueType::String,
+                LargeValueKind::Json => physical_storage_value_type(kind),
+            };
+            let inline = match kind {
+                LargeValueKind::Bytes => Value::Bytes(payload.to_vec()),
+                _ => Value::String(String::from_utf8(payload.to_vec()).unwrap()),
+            };
+            let leaf = RecordDescriptor::new([("value", scalar_type)]);
+            let wrapper = RecordDescriptor::new([("leaf", ValueType::Record(Box::new(leaf)))]);
+            let cases = EnumSchema::new(
+                "test.materialization_probe",
+                [EnumCase::new("Value", wrapper)],
+            )
+            .unwrap();
+            let descriptor = RecordDescriptor::new([(
+                "items",
+                ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::Enum(
+                    Box::new(cases),
+                ))))),
+            )]);
+            let encode = |scalar| {
+                let leaf_record =
+                    crate::records::OwnedRecord::new(leaf.create(&[scalar]).unwrap(), leaf);
+                let wrapper_record = crate::records::OwnedRecord::new(
+                    wrapper.create(&[Value::Record(leaf_record)]).unwrap(),
+                    wrapper,
+                );
+                descriptor
+                    .create(&[Value::Array(vec![
+                        Value::Nullable(None),
+                        Value::Nullable(Some(Box::new(Value::Enum(
+                            crate::records::EnumValue::new(0, wrapper_record),
+                        )))),
+                    ])])
+                    .unwrap()
+            };
+            let expected = encode(inline);
+            let mut inputs = EvaluationInputs::default();
+            STORED_SCALAR_DECODE_CALLS.with(|calls| calls.set(0));
+            assert_eq!(
+                materialize_record_attempt(&descriptor, &expected, &mut inputs).unwrap(),
+                expected
+            );
+            assert_eq!(
+                STORED_SCALAR_DECODE_CALLS.with(Cell::get),
+                0,
+                "inline nested scalars must remain encoded"
+            );
+            let indirect = encode(Value::Large(prepared.value_ref.clone()));
+            assert!(matches!(
+                materialize_record_attempt(&descriptor, &indirect, &mut inputs),
+                Err(IvmRuntimeError::EvaluationBlocked)
+            ));
+            assert!(!inputs.take_missing_chunks().is_empty());
+            for chunk in &prepared.staged_chunks {
+                inputs.install_chunk(
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator,
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                );
+            }
+            assert_eq!(
+                materialize_record_attempt(&descriptor, &indirect, &mut inputs).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn materialization_probe_ignores_unselected_indirect_fields() {
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, b"unselected", deterministic_locator)
+                .unwrap();
+        let descriptor = RecordDescriptor::new([
+            ("inline", ValueType::String),
+            ("indirect", ValueType::Bytes),
+        ]);
+        let raw = descriptor
+            .create(&[
+                Value::String("inline".to_owned()),
+                Value::Large(prepared.value_ref),
+            ])
+            .unwrap();
+        let mut inputs = EvaluationInputs::default();
+        STORED_SCALAR_DECODE_CALLS.with(|calls| calls.set(0));
+        assert_eq!(
+            materialize_record_fields_attempt(&descriptor, &raw, &[0], &mut inputs).unwrap(),
+            raw
+        );
+        assert!(inputs.take_missing_chunks().is_empty());
+        assert_eq!(STORED_SCALAR_DECODE_CALLS.with(Cell::get), 0);
+        assert!(materialize_record_fields_attempt(&descriptor, &raw, &[2], &mut inputs).is_err());
     }
 
     #[test]

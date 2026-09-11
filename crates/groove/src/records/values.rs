@@ -1213,7 +1213,9 @@ impl ValueType {
     /// on large-value hydration.
     pub(crate) fn may_contain_stored_scalar(&self) -> bool {
         match self {
-            Self::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => true,
+            Self::String
+            | Self::Bytes
+            | Self::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => true,
             Self::Tuple(members) => members.iter().any(Self::may_contain_stored_scalar),
             Self::Array(inner) | Self::Nullable(inner) => inner.may_contain_stored_scalar(),
             Self::Record(descriptor) => descriptor
@@ -2011,6 +2013,75 @@ fn encode_nullable(
         }
     }
     Ok(())
+}
+
+/// Inspect only framing needed to find an indirect scalar. Admission owns
+/// validity of the record; this is not another canonical decoding pass.
+pub(super) fn encoded_contains_indirect_value(
+    bytes: &[u8],
+    value_type: &ValueType,
+) -> Result<bool, Error> {
+    match value_type {
+        ValueType::String
+        | ValueType::Bytes
+        | ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => {
+            let (tag, _) = super::split_variant_record(bytes)?;
+            match tag {
+                2 => Ok(false),
+                3 => Ok(true),
+                _ => Err(Error::LargeValue(
+                    crate::large_values::Error::MalformedScalar,
+                )),
+            }
+        }
+        ValueType::Nullable(inner) => {
+            let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
+            match flag {
+                0 => Ok(false),
+                1 => encoded_contains_indirect_value(payload, inner),
+                flag => Err(Error::InvalidNullFlag(flag)),
+            }
+        }
+        ValueType::Record(descriptor) => {
+            descriptor.fields_contain_indirect_values(bytes, 0..descriptor.fields().len())
+        }
+        ValueType::Enum(schema) => {
+            let (tag, payload) = super::split_variant_record(bytes)?;
+            let descriptor = schema.case(tag)?.payload;
+            descriptor.fields_contain_indirect_values(payload, 0..descriptor.fields().len())
+        }
+        ValueType::Array(inner) if inner.may_contain_stored_scalar() => {
+            // Indirect-capable array elements are variable-width. Bounds-check
+            // the offset table before visiting entries, without allocating it.
+            let count = u32_to_usize(read_u32_at(bytes, 0)?)?;
+            let mut start = checked_add(
+                4,
+                count
+                    .saturating_sub(1)
+                    .checked_mul(4)
+                    .ok_or(Error::InvalidOffset)?,
+            )?;
+            if start > bytes.len() {
+                return Err(Error::UnexpectedEof);
+            }
+            for index in 0..count {
+                let end = if index + 1 == count {
+                    bytes.len()
+                } else {
+                    u32_to_usize(read_u32_at(bytes, 4 + index * 4)?)?
+                };
+                let item = bytes.get(start..end).ok_or(Error::InvalidOffset)?;
+                if encoded_contains_indirect_value(item, inner)? {
+                    return Ok(true);
+                }
+                start = end;
+            }
+            Ok(false)
+        }
+        // Tuples are restricted to fixed-size members and cannot contain an
+        // indirect scalar. Raw engine fields and all other scalars cannot either.
+        _ => Ok(false),
+    }
 }
 
 fn decode_nullable(bytes: &[u8], inner_type: &ValueType) -> Result<Value, Error> {
