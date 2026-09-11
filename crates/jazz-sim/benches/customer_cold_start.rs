@@ -460,7 +460,7 @@ impl PerfControl {
             .read_line(&mut acknowledgement)
             .expect("read perf acknowledgement");
         assert_eq!(
-            acknowledgement.trim(),
+            acknowledgement.trim_matches(|ch: char| ch == '\0' || ch.is_ascii_whitespace()),
             "ack",
             "unexpected perf acknowledgement"
         );
