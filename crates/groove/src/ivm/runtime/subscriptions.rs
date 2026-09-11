@@ -3223,6 +3223,10 @@ impl IvmRuntime {
         })
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_prepare")
+    )]
     pub async fn prepare<I, S>(
         &mut self,
         terminals: I,
@@ -3394,6 +3398,10 @@ impl IvmRuntime {
         Ok(subscription)
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_bind")
+    )]
     fn bind_shape_with_public_fields_staged<S>(
         &mut self,
         shape_id: PreparedShapeId,

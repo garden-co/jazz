@@ -23,6 +23,10 @@ impl IvmRuntime {
         node
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_graph_compile")
+    )]
     pub(super) fn add_dedup_graph(
         &mut self,
         graph: &GraphBuilder,
