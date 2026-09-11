@@ -737,7 +737,28 @@ fn validate_join(
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
     let join_table = schema_table(schema, &join.table)?;
+    if join.target == JoinTarget::Uncorrelated {
+        if !join.on_column.is_empty()
+            || join.source_column.is_some()
+            || join.source_lookup.is_some()
+            || !join.correlated_filters.is_empty()
+        {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: join.table.clone(),
+                column: join.on_column.clone(),
+                target_table: "uncorrelated existence (no join keys)".to_owned(),
+            });
+        }
+        for predicate in &mut join.filters {
+            validate_predicate(&join_table, predicate, params)?;
+        }
+        for nested in &mut join.nested_joins {
+            validate_join(schema, &join_table, &join.table, nested, params)?;
+        }
+        return Ok(());
+    }
     match join.target {
+        JoinTarget::Uncorrelated => unreachable!("validated above"),
         JoinTarget::Column => {
             planner_column_type(&join_table, &join.on_column)?;
         }
@@ -808,6 +829,7 @@ fn validate_join(
         }
     }
     match join.target {
+        JoinTarget::Uncorrelated => unreachable!("validated above"),
         JoinTarget::Column => match join_table.references.get(&join.on_column) {
             Some(target) if target == &target_table => {}
             None if join.on_column == "id" && join.table == target_table => {}
@@ -1100,6 +1122,13 @@ fn validate_reachable(
         }
     }
     let team_table = match reachable.access_team_target {
+        JoinTarget::Uncorrelated => {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: reachable.access_table.clone(),
+                column: reachable.access_team_column.clone(),
+                target_table: "reachability requires a team reference".to_owned(),
+            });
+        }
         JoinTarget::Column => access
             .references
             .get(&reachable.access_team_column)

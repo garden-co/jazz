@@ -2135,6 +2135,9 @@ fn join_via_predicate(
     right_source: &SourceId,
     join: &JoinVia,
 ) -> NormalizedPredicateExpr {
+    if join.target == JoinTarget::Uncorrelated {
+        return NormalizedPredicateExpr::True;
+    }
     let mut key_pairs = vec![if let Some(lookup) = &join.source_lookup {
         (
             NormalizedValueRef::SourceField {
@@ -2350,7 +2353,11 @@ fn normalize_filter_join_chain(
             RowSetExpr::Join {
                 left: current,
                 right,
-                mode: NormalizedJoinMode::Inner,
+                mode: if join.target == JoinTarget::Uncorrelated {
+                    NormalizedJoinMode::Semi
+                } else {
+                    NormalizedJoinMode::Inner
+                },
                 on: join_predicate,
             },
         );

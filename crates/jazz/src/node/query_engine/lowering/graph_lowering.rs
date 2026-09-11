@@ -2276,6 +2276,11 @@ fn lower_join_key_pairs(
     right_source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    // A true join condition is an uncorrelated existence gate. Routing keys
+    // are added by the caller, so independent prepared sessions stay isolated.
+    if matches!(predicate, PredicateExpr::True) {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let pairs = match predicate {
         PredicateExpr::And(predicates) => predicates
             .iter()
@@ -2345,6 +2350,11 @@ fn lower_linear_join_key_pairs(
     accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    // A true join condition is an uncorrelated existence gate. Routing keys
+    // are added by the caller, so independent prepared sessions stay isolated.
+    if matches!(predicate, PredicateExpr::True) {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let pairs = match predicate {
         PredicateExpr::And(predicates) => predicates
             .iter()
@@ -2401,6 +2411,11 @@ pub(super) fn lower_root_to_relation_key_pairs(
     right_output: &LoweredRelationInput,
     request: &QueryProgramRequest,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    // A true join condition is an uncorrelated existence gate. Routing keys
+    // are added by the caller, so independent prepared sessions stay isolated.
+    if matches!(predicate, PredicateExpr::True) {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let pairs = match predicate {
         PredicateExpr::And(predicates) => predicates
             .iter()

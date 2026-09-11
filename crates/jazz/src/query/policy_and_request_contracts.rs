@@ -382,8 +382,9 @@ pub struct JoinVia {
     pub table: String,
     /// Column on the junction/target table. For [`JoinTarget::RowId`], this is
     /// the public row-id name and execution uses the table's internal row UUID.
+    /// Empty for [`JoinTarget::Uncorrelated`].
     pub on_column: String,
-    /// Which target-table field `on_column` names.
+    /// How the target relation is matched.
     #[serde(default)]
     pub target: JoinTarget,
     /// Optional root-table column used for row-correlated policy joins.
@@ -424,7 +425,7 @@ pub struct JoinSourceLookup {
     pub value_column: String,
 }
 
-/// Target-table field used by a [`JoinVia`] traversal.
+/// Matching mode used by a [`JoinVia`] traversal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum JoinTarget {
     /// Join against a declared application column.
@@ -432,6 +433,9 @@ pub enum JoinTarget {
     Column,
     /// Join against the target table's row id.
     RowId,
+    /// Test whether the filtered relation is nonempty, independently of the source row.
+    /// This target has no join columns, lookup, or outer correlations.
+    Uncorrelated,
 }
 
 /// Recursive reachability through a transitive edge table plus an access table.

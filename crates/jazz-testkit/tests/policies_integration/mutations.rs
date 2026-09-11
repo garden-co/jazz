@@ -157,7 +157,6 @@ async fn rebac_update_denied_by_using_policy_inner() {
 /// Verifies that synced soft deletes are authorized by DELETE policies, and
 /// that a rejected optimistic delete restores the row for the originating peer.
 #[tokio::test]
-#[ignore = "#1759: server schema conversion requires the DELETE ExistsRel policy to include an outer-row equality"]
 async fn synced_soft_delete_should_use_delete_policy() {
     tokio::task::LocalSet::new()
         .run_until(synced_soft_delete_should_use_delete_policy_inner())
@@ -190,14 +189,22 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
         .build();
 
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let alice =
-        jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::ALICE_ID))
-            .await
-            .expect("connect alice");
-    let bob =
-        jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::BOB_ID))
-            .await
-            .expect("connect bob");
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
 
     let (admin_id, _, _) = alice
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
