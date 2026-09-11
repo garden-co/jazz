@@ -199,3 +199,8 @@ required-features = ["runtime"]
 [[test]]
 name = "fate_replay"
 required-features = ["testing"]
+
+[[bench]]
+name = "local_batch_phases"
+harness = false
+required-features = ["testing"]

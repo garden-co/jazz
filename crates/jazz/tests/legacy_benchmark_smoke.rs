@@ -41,3 +41,12 @@ fn relation_include_delivery_correctness_smoke() {
 fn route_subscription_curve_correctness_smoke() {
     route_subscription_curve::correctness_smoke();
 }
+
+#[allow(dead_code)]
+#[path = "../benches/local_batch_phases.rs"]
+mod local_batch_phases;
+
+#[test]
+fn local_batch_phases_correctness_smoke() {
+    local_batch_phases::correctness_smoke();
+}
