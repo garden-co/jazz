@@ -5767,3 +5767,98 @@ async fn immutable_batch_rejects_later_overwrite_and_other_database() {
         Err(Error::StaleImmutableBatch)
     ));
 }
+
+// Internal because correct row output alone cannot prove batch-amortized
+// descriptor preparation. Exercise two stored layouts and verify their deltas.
+#[futures_test::test]
+async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
+    use super::super::storage_helpers::{PendingTableWrite, compute_table_deltas};
+    use crate::storage::{OwnedWriteOperation, RecordStore};
+
+    let table = crate::schema::TableSchema::new(
+        "variant_rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("label", ColumnType::String),
+        ],
+    )
+    .with_variant(1, ["id"])
+    .with_variant(2, ["id", "label"]);
+    let first = table.record_schema_for_variant(1).unwrap();
+    let second = table.record_schema_for_variant(2).unwrap();
+    let carrier = table.record_schema();
+    let schema = DatabaseSchema::new([table]);
+    let storage = MemoryStorage::new(&["variant_rows"]).unwrap();
+    let mut seeds = Vec::new();
+    let mut writes = Vec::new();
+    for id in 0..1000u64 {
+        let (tag, payload) = if id % 2 == 0 {
+            (1, first.create(&[Value::U64(id)]).unwrap())
+        } else {
+            (
+                2,
+                second
+                    .create(&[Value::U64(id), Value::String("row".into())])
+                    .unwrap(),
+            )
+        };
+        let key = id.to_be_bytes().to_vec();
+        seeds.push(OwnedWriteOperation::Set {
+            cf: "variant_rows".into(),
+            key: key.clone(),
+            value: crate::records::encode_variant_record(tag, &payload),
+        });
+        writes.push(PendingTableWrite::Delete {
+            table: "variant_rows".into(),
+            key,
+            descriptor: carrier,
+        });
+    }
+    storage.write_many(seeds).await.unwrap();
+    let stores = writes
+        .iter()
+        .map(|_| RecordStore::new(&storage, "variant_rows", &carrier))
+        .collect::<Vec<_>>();
+    crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
+    let deltas = compute_table_deltas(&writes, &stores, &schema)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.get()),
+        2
+    );
+    assert_eq!(deltas.len(), 2);
+    for group in deltas {
+        assert_eq!(
+            group.descriptor,
+            if group.variant_tag == 1 {
+                first
+            } else {
+                second
+            }
+        );
+        assert_eq!(group.deltas.len(), 500);
+        for delta in group.deltas {
+            assert_eq!(delta.weight, -1);
+            let record = group.descriptor.bind(&delta.record);
+            let id = record.get_u64(0).unwrap();
+            assert!(id < 1000);
+            assert_eq!(id % 2, u64::from(group.variant_tag - 1));
+            if group.variant_tag == 2 {
+                assert_eq!(record.get_str(1).unwrap(), "row");
+            }
+        }
+    }
+    storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: "variant_rows".into(),
+            key: writes[0].key().to_vec(),
+            value: crate::records::encode_variant_record(3, &[]),
+        }])
+        .await
+        .unwrap();
+    assert!(matches!(
+        compute_table_deltas(&writes[..1], &stores[..1], &schema).await,
+        Err(Error::UnknownTableVariant { version: 3, .. })
+    ));
+}

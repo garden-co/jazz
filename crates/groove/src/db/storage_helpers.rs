@@ -923,6 +923,9 @@ where
     // previous path allocated a singleton TableDelta (and Vec) per old/new
     // record, then hashed every group and record again in a second pass.
     let mut by_table = HashMap::<(&str, u32, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
+    // The schema is fixed for this batch. Old rows may use several variants,
+    // but each variant's descriptor needs preparation only once.
+    let mut old_descriptors = HashMap::<(&str, u32), RecordDescriptor>::new();
 
     for (write, store) in pending_writes.iter().zip(stores) {
         let overlay_key = (write.table(), write.key());
@@ -957,12 +960,19 @@ where
             .ok_or_else(|| Error::TableNotFound(write.table().to_owned()))?;
         if let Some(current) = current.as_deref() {
             let (variant_tag, payload) = split_variant_record(current)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| Error::UnknownTableVariant {
-                    table: table_schema.name.clone(),
-                    version: u64::from(variant_tag),
-                })?;
+            let descriptor_key = (write.table(), variant_tag);
+            let descriptor = if let Some(descriptor) = old_descriptors.get(&descriptor_key) {
+                *descriptor
+            } else {
+                let descriptor = table_schema
+                    .record_schema_for_variant(variant_tag)
+                    .ok_or_else(|| Error::UnknownTableVariant {
+                        table: table_schema.name.clone(),
+                        version: u64::from(variant_tag),
+                    })?;
+                old_descriptors.insert(descriptor_key, descriptor);
+                descriptor
+            };
             *by_table
                 .entry((write.table(), variant_tag, descriptor))
                 .or_default()
