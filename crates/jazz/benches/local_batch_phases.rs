@@ -2,6 +2,8 @@
 //! Direct nodes intentionally expose phase boundaries that the public Db owner
 //! loop combines. This excludes JS, IndexedDB, scheduling and auth bootstrap.
 use std::{collections::BTreeMap, time::Instant};
+#[global_allocator]
+static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
 #[path = "support/perf_control.rs"]
 mod perf_control;
 mod schema_fixture;
@@ -52,7 +54,7 @@ fn phase<T>(backend: &str, count: usize, name: &str, f: impl FnOnce() -> T) -> T
     drop(profile);
     println!(
         "{}",
-        json!({"backend":backend,"rows":count,"phase":name,"wall_us":elapsed.as_micros(),"start_ns":start_ns,"end_ns":end_ns,"cpu_profiled":cpu_profiled})
+        json!({"rust_allocator":jazz_benchmark_guard::ALLOCATOR_NAME,"allocator_preload":std::env::var_os("LD_PRELOAD").is_some(),"backend":backend,"rows":count,"phase":name,"wall_us":elapsed.as_micros(),"start_ns":start_ns,"end_ns":end_ns,"cpu_profiled":cpu_profiled})
     );
     result
 }

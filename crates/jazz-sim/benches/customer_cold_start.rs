@@ -31,9 +31,14 @@ use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
 
+#[cfg(not(any(feature = "bench-alloc-metrics", feature = "bench-alloc-sites")))]
+#[global_allocator]
+static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
+
 #[cfg(all(feature = "bench-alloc-metrics", not(feature = "bench-alloc-sites")))]
 mod alloc_metrics {
-    use std::alloc::{GlobalAlloc, Layout, System};
+    use jazz_benchmark_guard::Allocator;
+    use std::alloc::{GlobalAlloc, Layout};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     pub struct CountingAllocator;
@@ -42,17 +47,28 @@ mod alloc_metrics {
     static ALLOCS: AtomicU64 = AtomicU64::new(0);
     static BYTES: AtomicU64 = AtomicU64::new(0);
 
+    fn record_request(bytes: usize) {
+        if ACTIVE.load(Ordering::Relaxed) {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
+    }
+
     unsafe impl GlobalAlloc for CountingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if ACTIVE.load(Ordering::Relaxed) {
-                ALLOCS.fetch_add(1, Ordering::Relaxed);
-                BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-            }
-            unsafe { System.alloc(layout) }
+            record_request(layout.size());
+            unsafe { Allocator.alloc(layout) }
         }
-
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record_request(layout.size());
+            unsafe { Allocator.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record_request(new_size);
+            unsafe { Allocator.realloc(ptr, layout, new_size) }
+        }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
+            unsafe { Allocator.dealloc(ptr, layout) }
         }
     }
 
@@ -82,7 +98,8 @@ mod alloc_metrics {
 
 #[cfg(feature = "bench-alloc-sites")]
 mod alloc_metrics {
-    use std::alloc::{GlobalAlloc, Layout, System};
+    use jazz_benchmark_guard::Allocator;
+    use std::alloc::{GlobalAlloc, Layout};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -111,35 +128,46 @@ mod alloc_metrics {
     static MAX_SAMPLES: AtomicU64 = AtomicU64::new(DEFAULT_MAX_SAMPLES as u64);
     static SAMPLES: Mutex<Vec<StackSample>> = Mutex::new(Vec::new());
 
+    fn record_request(bytes: usize) {
+        if ACTIVE.load(Ordering::Relaxed) {
+            let alloc_index = ALLOCS.fetch_add(1, Ordering::Relaxed) + 1;
+            let size = bytes as u64;
+            #[cfg(feature = "cold-settle-attribution")]
+            jazz_sim::phase_attribution::record_allocation(bytes);
+            let before_bytes = BYTES.fetch_add(size, Ordering::Relaxed);
+            let byte_sample =
+                before_bytes / BYTE_SAMPLE_INTERVAL != (before_bytes + size) / BYTE_SAMPLE_INTERVAL;
+            let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed).max(1);
+            let count_sample = alloc_index.is_multiple_of(sample_rate);
+            if (count_sample || byte_sample) && !IN_SAMPLE.swap(true, Ordering::Relaxed) {
+                sample_stack(
+                    count_sample,
+                    if byte_sample {
+                        size.max(BYTE_SAMPLE_INTERVAL)
+                    } else {
+                        0
+                    },
+                );
+                IN_SAMPLE.store(false, Ordering::Relaxed);
+            }
+        }
+    }
+
     unsafe impl GlobalAlloc for SiteAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if ACTIVE.load(Ordering::Relaxed) {
-                let alloc_index = ALLOCS.fetch_add(1, Ordering::Relaxed) + 1;
-                let size = layout.size() as u64;
-                #[cfg(feature = "cold-settle-attribution")]
-                jazz_sim::phase_attribution::record_allocation(layout.size());
-                let before_bytes = BYTES.fetch_add(size, Ordering::Relaxed);
-                let byte_sample = before_bytes / BYTE_SAMPLE_INTERVAL
-                    != (before_bytes + size) / BYTE_SAMPLE_INTERVAL;
-                let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed).max(1);
-                let count_sample = alloc_index.is_multiple_of(sample_rate);
-                if (count_sample || byte_sample) && !IN_SAMPLE.swap(true, Ordering::Relaxed) {
-                    sample_stack(
-                        count_sample,
-                        if byte_sample {
-                            size.max(BYTE_SAMPLE_INTERVAL)
-                        } else {
-                            0
-                        },
-                    );
-                    IN_SAMPLE.store(false, Ordering::Relaxed);
-                }
-            }
-            unsafe { System.alloc(layout) }
+            record_request(layout.size());
+            unsafe { Allocator.alloc(layout) }
         }
-
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record_request(layout.size());
+            unsafe { Allocator.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record_request(new_size);
+            unsafe { Allocator.realloc(ptr, layout, new_size) }
+        }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
+            unsafe { Allocator.dealloc(ptr, layout) }
         }
     }
 
@@ -2588,6 +2616,14 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         "allocation_scope".to_owned(),
         json!("connect_subscribe_settle"),
     );
+    fields.insert(
+        "rust_allocator".to_owned(),
+        json!(jazz_benchmark_guard::ALLOCATOR_NAME),
+    );
+    fields.insert(
+        "allocator_preload".to_owned(),
+        json!(std::env::var_os("LD_PRELOAD").is_some()),
+    );
     fields.insert("peak_rss_bytes".to_owned(), json!(summary.peak_rss_bytes));
     fields.insert(
         "core_encoded_storage_bytes".to_owned(),
@@ -2880,15 +2916,19 @@ fn env_f64(name: &str, default: f64) -> f64 {
 }
 
 fn peak_rss_bytes() -> u64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     unsafe {
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
         if libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) == 0 {
-            return usage.assume_init().ru_maxrss as u64;
+            let peak = usage.assume_init().ru_maxrss as u64;
+            #[cfg(target_os = "linux")]
+            return peak.saturating_mul(1024);
+            #[cfg(target_os = "macos")]
+            return peak;
         }
         0
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         0
     }

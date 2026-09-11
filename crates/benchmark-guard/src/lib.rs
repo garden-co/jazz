@@ -1,5 +1,17 @@
 //! Refuse benchmark and receipt runs whose instrumentation changes the numbers.
 
+/// Explicit allocator for native benchmark leaves. Opt into `mimalloc` to
+/// match jazz-tools' Rust allocator; default System preserves older receipts.
+#[cfg(all(feature = "mimalloc", not(target_arch = "wasm32")))]
+pub use mimalloc::MiMalloc as Allocator;
+#[cfg(not(all(feature = "mimalloc", not(target_arch = "wasm32"))))]
+pub use std::alloc::System as Allocator;
+
+#[cfg(all(feature = "mimalloc", not(target_arch = "wasm32")))]
+pub const ALLOCATOR_NAME: &str = "mimalloc";
+#[cfg(not(all(feature = "mimalloc", not(target_arch = "wasm32"))))]
+pub const ALLOCATOR_NAME: &str = "system";
+
 /// An environment switch that changes the work performed by a measurement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContaminatingInstrumentation {
