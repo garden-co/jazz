@@ -1,5 +1,8 @@
 //! Hash-consed GraphBuilder compilation into executable IVM nodes.
 
+#[cfg(test)]
+thread_local! { pub(super) static BUILDER_COMPILATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 use super::*;
 
 impl IvmRuntime {
@@ -27,19 +30,64 @@ impl IvmRuntime {
         &mut self,
         graph: &GraphBuilder,
     ) -> Result<CompiledNode, IvmRuntimeError> {
+        self.compile_graph_with_retained_input(graph, None)
+            .map(|(output, _)| output)
+    }
+
+    pub(super) fn add_prepared_graph(
+        &mut self,
+        graph: &GraphBuilder,
+    ) -> Result<(CompiledNode, CompiledNode), IvmRuntimeError> {
+        self.compile_graph_with_retained_input(graph, None)
+    }
+
+    pub(super) fn add_bound_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        retained_builder: &GraphBuilder,
+        retained: &CompiledNode,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        self.compile_graph_with_retained_input(graph, Some((retained_builder, retained)))
+            .map(|(output, _)| output)
+    }
+
+    fn compile_graph_with_retained_input(
+        &mut self,
+        graph: &GraphBuilder,
+        retained: Option<(&GraphBuilder, &CompiledNode)>,
+    ) -> Result<(CompiledNode, CompiledNode), IvmRuntimeError> {
         validate_collect_by_terminality(graph)?;
         let mut output_memo = HashMap::default();
-        // Precompute descriptors once for the complete graph. The postorder
-        // compiler below can then reuse those descriptors without repeatedly
-        // traversing a long policy graph from each parent.
-        self.infer_builder_output_cached(graph, &mut output_memo)?;
         let mut compiled_memo = HashMap::default();
-        for builder in graph.postorder() {
+        if let Some((builder, compiled)) = retained {
+            self.graph
+                .node(compiled.node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(compiled.node))?;
+            let key = graph_builder_key(builder);
+            output_memo.insert(key, compiled.output);
+            compiled_memo.insert(key, compiled.clone());
+        }
+        self.infer_builder_output_cached(graph, &mut output_memo)?;
+        for builder in graph
+            .postorder_skipping(|builder| compiled_memo.contains_key(&graph_builder_key(builder)))
+        {
             self.add_dedup_graph_cached(builder, &mut output_memo, &mut compiled_memo)?;
         }
-        compiled_memo
-            .remove(&graph_builder_key(graph))
-            .ok_or(IvmRuntimeError::UnsupportedOperator)
+        let output = compiled_memo
+            .get(&graph_builder_key(graph))
+            .cloned()
+            .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+        // A bound collector changes its terminal projection and routing. Its
+        // flat input remains reusable; ordinary terminals reuse their output.
+        let input = match graph {
+            GraphBuilder::CollectBy { input, .. } => input.as_ref(),
+            _ => graph,
+        };
+        let binding_input = compiled_memo
+            .get(&graph_builder_key(input))
+            .cloned()
+            .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+        Ok((output, binding_input))
     }
 
     fn add_dedup_graph_cached(
@@ -52,6 +100,8 @@ impl IvmRuntime {
         if let Some(compiled) = compiled_memo.get(&key) {
             return Ok(compiled.clone());
         }
+        #[cfg(test)]
+        BUILDER_COMPILATION_COUNT.with(|count| count.set(count.get() + 1));
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         let compiled = match graph {
             GraphBuilder::Table { .. }

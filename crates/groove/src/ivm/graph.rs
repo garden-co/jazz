@@ -699,9 +699,17 @@ impl GraphBuilder {
     /// recursion. Runtime setup uses this for deeply nested valid query and
     /// policy graphs, which must not consume the owner thread's call stack.
     pub(crate) fn postorder(&self) -> Vec<&Self> {
+        self.postorder_skipping(|_| false)
+    }
+
+    /// Stop at already prepared fragments without walking their descendants.
+    pub(crate) fn postorder_skipping(&self, mut skip: impl FnMut(&Self) -> bool) -> Vec<&Self> {
         let mut pending = vec![(self, false)];
         let mut ordered = Vec::new();
         while let Some((graph, visited)) = pending.pop() {
+            if skip(graph) {
+                continue;
+            }
             if visited {
                 ordered.push(graph);
                 continue;

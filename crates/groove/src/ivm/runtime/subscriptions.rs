@@ -3,6 +3,9 @@
 use super::evaluation_session::EvaluationInputs;
 use super::*;
 
+#[cfg(test)]
+thread_local! { pub(super) static BUILDER_INFERENCE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn resolved_record_value(
     record: BorrowedRecord<'_>,
     field: &str,
@@ -695,6 +698,7 @@ pub(super) struct RoutedMultisinkShapeState {
 pub(super) struct RoutedMultisinkTerminalState {
     pub(super) terminal: RoutedMultisinkTerminal,
     pub(super) output: CompiledNode,
+    pub(super) binding_input: CompiledNode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1424,7 +1428,7 @@ fn bound_routed_multisink_graph(
     terminal: &RoutedMultisinkTerminal,
     binding_values: &[Value],
     output: &RecordDescriptor,
-) -> Result<GraphBuilder, IvmRuntimeError> {
+) -> Result<(GraphBuilder, Arc<GraphBuilder>), IvmRuntimeError> {
     let predicates = terminal
         .route_fields
         .iter()
@@ -1452,17 +1456,34 @@ fn bound_routed_multisink_graph(
             .tuple_fields
             .retain(|field| terminal.public_fields.contains(&field.output_name));
         strip_bound_route_fields_from_collect(&mut collect, &terminal.route_fields);
+        let retained = Arc::clone(input);
         let input = predicate
-            .map(|predicate| input.as_ref().clone().filter(predicate))
-            .unwrap_or_else(|| input.as_ref().clone());
-        return Ok(GraphBuilder::CollectBy {
-            input: Arc::new(input),
-            collect: Box::new(collect),
-        });
+            .map(|predicate| {
+                Arc::new(GraphBuilder::Filter {
+                    input: Arc::clone(&retained),
+                    predicate,
+                    comparison: ValueComparison::Exact,
+                })
+            })
+            .unwrap_or_else(|| Arc::clone(&retained));
+        return Ok((
+            GraphBuilder::CollectBy {
+                input,
+                collect: Box::new(collect),
+            },
+            retained,
+        ));
     }
-    let graph = predicate
-        .map(|predicate| terminal.graph.clone().filter(predicate))
-        .unwrap_or_else(|| terminal.graph.clone());
+    let retained = Arc::new(terminal.graph.clone());
+    let input = predicate
+        .map(|predicate| {
+            Arc::new(GraphBuilder::Filter {
+                input: Arc::clone(&retained),
+                predicate,
+                comparison: ValueComparison::Exact,
+            })
+        })
+        .unwrap_or_else(|| Arc::clone(&retained));
     let fields = terminal
         .public_fields
         .iter()
@@ -1480,7 +1501,7 @@ fn bound_routed_multisink_graph(
             })
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-    Ok(graph.project_fields(fields))
+    Ok((GraphBuilder::Project { input, fields }, retained))
 }
 
 /// A routed terminal is compiled once but a bound subscription executes one
@@ -3304,7 +3325,7 @@ impl IvmRuntime {
         let runtime = install.runtime();
         let mut terminal_states = BTreeMap::new();
         for terminal in terminals {
-            let output = match runtime.add_dedup_graph(&terminal.graph) {
+            let (output, binding_input) = match runtime.add_prepared_graph(&terminal.graph) {
                 Ok(output) => output,
                 Err(error) => {
                     if inserted_source {
@@ -3317,7 +3338,11 @@ impl IvmRuntime {
             };
             terminal_states.insert(
                 terminal.sink.clone(),
-                RoutedMultisinkTerminalState { terminal, output },
+                RoutedMultisinkTerminalState {
+                    terminal,
+                    output,
+                    binding_input,
+                },
             );
         }
         // Publish retainers only after every terminal compiles, so the guard
@@ -3426,12 +3451,13 @@ impl IvmRuntime {
                 if let Some(fields) = public_fields.get(sink) {
                     terminal.public_fields = fields.clone();
                 }
-                let graph = bound_routed_multisink_graph(
+                let (graph, retained) = bound_routed_multisink_graph(
                     &terminal,
                     binding_values,
                     &prepared_terminal.output.output,
                 )?;
-                let output = runtime.add_dedup_graph(&graph)?;
+                let output =
+                    runtime.add_bound_graph(&graph, &retained, &prepared_terminal.binding_input)?;
                 outputs.insert(sink.clone(), output);
             }
             let binding_shape = runtime.binding_source_shape_name(shape_id)?;
@@ -3901,8 +3927,12 @@ impl IvmRuntime {
         // inheritance policy after its public result and routing projections
         // have been attached). Infer every child before its parent explicitly
         // so descriptor inference does not consume the server owner's stack.
-        for builder in graph.postorder() {
+        for builder in graph.postorder_skipping(|builder| {
+            output_memo.contains_key(&(builder as *const GraphBuilder as usize))
+        }) {
             let key = builder as *const GraphBuilder as usize;
+            // The traversal was collected before this loop. Shared fragments
+            // reached twice may have been inferred by an earlier iteration.
             if output_memo.contains_key(&key) {
                 continue;
             }
@@ -3920,6 +3950,8 @@ impl IvmRuntime {
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        #[cfg(test)]
+        BUILDER_INFERENCE_COUNT.with(|count| count.set(count.get() + 1));
         match graph {
             GraphBuilder::Table {
                 table,

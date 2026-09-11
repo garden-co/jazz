@@ -3246,3 +3246,91 @@ fn source_batch_prepares_one_descriptor_per_variant() {
         Err(IvmRuntimeError::UnknownTableVariant { version: 3, .. })
     ));
 }
+
+// Public results alone cannot expose recompilation of an already retained
+// policy graph. Pair the work bound with distinct route/output assertions.
+#[futures_test::test]
+async fn binding_reuses_prepared_graph_without_crossing_routes() {
+    let schema = albums_schema();
+    let albums = schema.table("albums").unwrap().record_schema();
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    write_two_album_rows(&storage, &albums).await;
+    let mut graph = GraphBuilder::table("albums");
+    for _ in 0..40 {
+        graph = graph.project(["id", "title"]);
+    }
+    let terminals = (0..8)
+        .map(|index| {
+            let field = if index % 2 == 0 { "id" } else { "title" };
+            RoutedMultisinkTerminal::new(format!("rows{index}"), graph.clone(), ["id"], [field])
+        })
+        .collect::<Vec<_>>();
+    let prepared = runtime
+        .prepare(
+            terminals,
+            "reuse-work",
+            RecordDescriptor::new([("route", ValueType::U64)]),
+            storage.as_ref(),
+        )
+        .await
+        .unwrap();
+    let mut subscriptions = Vec::new();
+    for id in [1, 2] {
+        compilation::BUILDER_COMPILATION_COUNT.with(|count| count.set(0));
+        subscriptions::BUILDER_INFERENCE_COUNT.with(|count| count.set(0));
+        let subscription = runtime
+            .bind_shape(prepared.id(), &[Value::U64(id)], &storage)
+            .unwrap();
+        let compiled = compilation::BUILDER_COMPILATION_COUNT.with(|count| count.get());
+        let inferred = subscriptions::BUILDER_INFERENCE_COUNT.with(|count| count.get());
+        assert!(
+            inferred <= 24,
+            "binding re-inferred {inferred} retained nodes"
+        );
+        eprintln!("bind route={id}: compiled={compiled}, inferred={inferred}");
+        assert!(
+            compiled <= 24,
+            "binding recompiled {compiled} nodes from the retained graph"
+        );
+        runtime.drive_pending_incremental().await.unwrap();
+        let initial = subscription.try_recv().unwrap();
+        assert_eq!(initial.sinks.len(), 8);
+        for (sink, rows) in &initial.sinks {
+            let index = sink.strip_prefix("rows").unwrap().parse::<usize>().unwrap();
+            let expected = if index % 2 == 0 {
+                Value::U64(id)
+            } else {
+                Value::String(if id == 1 { "one" } else { "two" }.into())
+            };
+            assert_eq!(rows.to_values().unwrap(), vec![(vec![expected], 1)]);
+        }
+        subscriptions.push(subscription);
+    }
+    assert!(
+        subscriptions[0].try_recv().is_err(),
+        "second binding changed first route"
+    );
+}
+
+#[test]
+fn compilation_infers_each_shared_fragment_once() {
+    // This internal work invariant is invisible in the resulting descriptor.
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let mut graph = GraphBuilder::table("albums");
+    for _ in 0..40 {
+        graph = graph.project(["id", "title"]);
+    }
+    let shared = Arc::new(graph);
+    let graph = GraphBuilder::Union {
+        inputs: vec![Arc::clone(&shared), shared],
+    };
+    subscriptions::BUILDER_INFERENCE_COUNT.with(|count| count.set(0));
+    let compiled = runtime.add_dedup_graph(&graph).unwrap();
+    assert_eq!(compiled.output.fields().len(), 2);
+    let inferred = subscriptions::BUILDER_INFERENCE_COUNT.with(|count| count.get());
+    assert!(
+        inferred <= 42,
+        "inferred {inferred} nodes for 42 distinct fragments"
+    );
+}
