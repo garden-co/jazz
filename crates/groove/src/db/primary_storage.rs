@@ -292,8 +292,7 @@ impl Database {
         if !staged_contains_key {
             let resident = self.resident_storage();
             let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
-            let key_descriptor = primary_key_descriptor(primary_key);
-            let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
+            let store = RecordStore::new(&storage, table, &descriptor);
             return store
                 .get_raw(&encoded_key)
                 .await?
@@ -304,8 +303,7 @@ impl Database {
         let resident = self.resident_storage();
         let overlay = StagedWriteOverlay::new(&resident, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
+        let store = RecordStore::new(&storage, table, &descriptor);
         store
             .get_raw(&encoded_key)
             .await?
@@ -340,8 +338,7 @@ impl Database {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut encoded_key, value)?;
         }
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(storage, table, Some(key_descriptor), &descriptor);
+        let store = RecordStore::new(storage, table, &descriptor);
         store
             .get_raw(&encoded_key)
             .await?
@@ -376,8 +373,7 @@ impl Database {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut key_prefix, value)?;
         }
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(storage, table, Some(key_descriptor), &descriptor);
+        let store = RecordStore::new(storage, table, &descriptor);
         store
             .prefix(&key_prefix)
             .await?
@@ -413,8 +409,7 @@ impl Database {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut key_prefix, value)?;
         }
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(storage, table, Some(key_descriptor), &descriptor);
+        let store = RecordStore::new(storage, table, &descriptor);
         store
             .last_with_prefix(&key_prefix)
             .await?
@@ -464,8 +459,7 @@ impl Database {
         }
         let resident = self.resident_storage();
         let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
+        let store = RecordStore::new(&storage, table, &descriptor);
         store
             .range(&start_key, &end_key)
             .await?
@@ -555,8 +549,7 @@ impl Database {
         }
         let resident = self.resident_storage();
         let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
+        let store = RecordStore::new(&storage, table, &descriptor);
         store
             .last_with_prefix_before_or_at(&key_prefix, &upper_key)
             .await?
@@ -736,11 +729,7 @@ impl Database {
     {
         let table_schema = self.table(table)?;
         let storage_descriptor = self.table_storage_descriptor(table)?;
-        let key_descriptor = table_schema
-            .primary_key
-            .as_ref()
-            .map(primary_key_descriptor);
-        let store = record_store_for_table(storage, table, key_descriptor, &storage_descriptor);
+        let store = RecordStore::new(storage, table, &storage_descriptor);
         let index_descriptor = index_record_descriptor();
         let mut records = Vec::new();
         for (storage_key, persisted_record) in raw_entries {

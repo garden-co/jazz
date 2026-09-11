@@ -31,7 +31,7 @@ use crate::records::{
     encode_variant_record, split_variant_record,
 };
 use crate::schema::{
-    ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType, PrimaryKey,
+    ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableVariant,
 };
 use crate::storage::{

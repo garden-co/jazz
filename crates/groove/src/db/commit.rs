@@ -176,13 +176,7 @@ impl Database {
         let stores = pending_writes
             .iter()
             .zip(&descriptors)
-            .map(|(write, descriptor)| {
-                let key_descriptor = self
-                    .table(write.table())
-                    .ok()
-                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
-                record_store_for_table(&overlay, write.table(), key_descriptor, descriptor)
-            })
+            .map(|(write, descriptor)| RecordStore::new(&overlay, write.table(), descriptor))
             .collect::<Vec<_>>();
         let table_deltas =
             compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;

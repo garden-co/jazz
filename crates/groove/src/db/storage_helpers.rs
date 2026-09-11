@@ -1004,25 +1004,3 @@ where
         })
         .collect())
 }
-
-pub(super) fn record_store_for_table<'a, S>(
-    storage: &'a S,
-    table: &'a str,
-    key_descriptor: Option<RecordDescriptor>,
-    descriptor: &'a RecordDescriptor,
-) -> RecordStore<'a, S>
-where
-    S: OrderedKvStorage,
-{
-    let _ = key_descriptor;
-    RecordStore::new(storage, table, descriptor)
-}
-
-pub(super) fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
-    RecordDescriptor::new(
-        primary_key
-            .columns
-            .iter()
-            .map(|column| (column.column.clone(), column.key_type.column_type().clone())),
-    )
-}
