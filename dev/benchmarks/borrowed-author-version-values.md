@@ -33,7 +33,9 @@ browser reopen or the 1,500-todo bulk-write benchmark.
 | Allocation requests               |     383,877,574 |     318,503,788 |
 | Cumulative allocated bytes        | 289,350,646,379 | 275,184,546,230 |
 
-The clean timing run improves readiness by 9.0%. These are individual runs,
+A second clean run after restoration and rebuild reached all-ready at 29,720 ms
+(settle 29,249 ms; full wall 31,188 ms), with all 27,518 expected rows. The two
+clean runs improve readiness by 8.3–9.0%. These are individual runs,
 not statistically established confidence intervals. Allocation totals come from
 separate instrumented runs and include final diagnostic queries. They decrease
 17.0% in requests and 4.9% in bytes; cumulative bytes are not peak RAM.
