@@ -2229,16 +2229,29 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
 /// Encode the primitive arm from borrowed logical bytes. Its sole raw payload
 /// field is the complete record payload, so only ordinary variant framing is
 /// needed; no Value, field map, or intermediate record is required.
+#[cfg(test)]
 pub(crate) fn encode_primitive_stored_scalar(
     kind: LargeValueKind,
     bytes: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    let mut output = Vec::new();
+    encode_primitive_stored_scalar_into(kind, bytes, &mut output)?;
+    Ok(output)
+}
+
+pub(crate) fn encode_primitive_stored_scalar_into(
+    kind: LargeValueKind,
+    bytes: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<(), Error> {
     #[cfg(test)]
     {
         STORED_SCALAR_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
         STORED_SCALAR_CANONICAL_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
     }
-    encode_primitive_payload(kind, bytes)
+    validate_logical(kind, bytes)?;
+    crate::records::append_variant_record(output, 2, bytes);
+    Ok(())
 }
 
 fn encode_primitive_payload(kind: LargeValueKind, bytes: &[u8]) -> Result<Vec<u8>, Error> {

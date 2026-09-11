@@ -537,8 +537,13 @@ impl RecordDescriptor {
         if field.value_type.is_fixed_size() {
             encode_fixed_value(output, value, &field.value_type)
         } else {
-            output.extend_from_slice(&encode_value(value, &field.value_type)?);
-            Ok(())
+            let start = output.len();
+            let result = values::encode_value_into(output, value, &field.value_type);
+            if result.is_err() {
+                // The allocating variable-field path appended nothing on error.
+                output.truncate(start);
+            }
+            result
         }
     }
 
@@ -1932,9 +1937,13 @@ impl ValidatedVariantRecord {
 
 pub fn encode_variant_record(variant_tag: u32, payload: &[u8]) -> Vec<u8> {
     let mut stored = Vec::with_capacity(MAX_VARIANT_TAG_LEN + payload.len());
-    put_canonical_u32_varint(&mut stored, variant_tag);
-    stored.extend_from_slice(payload);
+    append_variant_record(&mut stored, variant_tag, payload);
     stored
+}
+
+pub(crate) fn append_variant_record(stored: &mut Vec<u8>, variant_tag: u32, payload: &[u8]) {
+    put_canonical_u32_varint(stored, variant_tag);
+    stored.extend_from_slice(payload);
 }
 
 pub fn split_variant_record(stored: &[u8]) -> Result<(u32, &[u8]), Error> {

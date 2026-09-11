@@ -1562,18 +1562,29 @@ impl ValueType {
 
 pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
+    encode_value_into(&mut bytes, value, value_type)?;
+    Ok(bytes)
+}
+
+pub(super) fn encode_value_into(
+    bytes: &mut Vec<u8>,
+    value: &Value,
+    value_type: &ValueType,
+) -> Result<(), Error> {
     match (value, value_type) {
         (Value::String(value), ValueType::String) => {
-            return Ok(crate::large_values::encode_primitive_stored_scalar(
+            crate::large_values::encode_primitive_stored_scalar_into(
                 crate::large_values::LargeValueKind::String,
                 value.as_bytes(),
-            )?);
+                bytes,
+            )?;
         }
         (Value::Bytes(value), ValueType::Bytes) => {
-            return Ok(crate::large_values::encode_primitive_stored_scalar(
+            crate::large_values::encode_primitive_stored_scalar_into(
                 crate::large_values::LargeValueKind::Bytes,
                 value,
-            )?);
+                bytes,
+            )?;
         }
         (
             Value::String(value),
@@ -1589,10 +1600,11 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
                 crate::large_values::LargeValueKind::Bytes,
             ))),
         ) => {
-            return Ok(crate::large_values::encode_primitive_stored_scalar(
+            crate::large_values::encode_primitive_stored_scalar_into(
                 crate::large_values::LargeValueKind::Bytes,
                 value,
-            )?);
+                bytes,
+            )?;
         }
         (
             Value::String(value),
@@ -1601,10 +1613,11 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
                 | crate::large_values::LargeValueKind::Json),
             ))),
         ) => {
-            return Ok(crate::large_values::encode_primitive_stored_scalar(
+            crate::large_values::encode_primitive_stored_scalar_into(
                 *kind,
                 value.as_bytes(),
-            )?);
+                bytes,
+            )?;
         }
         (
             Value::Large(value),
@@ -1635,13 +1648,13 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
         }
         (Value::EnumTag(value), ValueType::EnumTag(_)) => bytes.push(*value),
         (Value::Tuple(values), ValueType::Tuple(members)) => {
-            encode_tuple(&mut bytes, values, members)?;
+            encode_tuple(bytes, values, members)?;
         }
         (Value::Array(values), ValueType::Array(element_type)) => {
-            encode_array(&mut bytes, values, element_type)?;
+            encode_array(bytes, values, element_type)?;
         }
         (Value::Nullable(value), ValueType::Nullable(inner_type)) => {
-            encode_nullable(&mut bytes, value.as_deref(), inner_type)?;
+            encode_nullable(bytes, value.as_deref(), inner_type)?;
         }
         (Value::Record(record), ValueType::Record(_)) => {
             ensure_value_type(value, value_type)?;
@@ -1649,19 +1662,16 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
         }
         (Value::Enum(enum_value), ValueType::Enum(schema)) => {
             ensure_enum_value(enum_value, schema)?;
-            bytes.extend(super::encode_variant_record(
-                enum_value.tag,
-                enum_value.record.raw(),
-            ));
+            super::append_variant_record(bytes, enum_value.tag, enum_value.record.raw());
         }
-        _ if value_type.is_fixed_size() => encode_fixed_value(&mut bytes, value, value_type)?,
+        _ if value_type.is_fixed_size() => encode_fixed_value(bytes, value, value_type)?,
         _ => {
             return Err(Error::TypeMismatch {
                 expected: value_type.clone(),
             });
         }
     }
-    Ok(bytes)
+    Ok(())
 }
 
 pub(super) fn encode_fixed_value(
@@ -2010,7 +2020,7 @@ fn encode_nullable(
                 // need no temporary Vec, including nested nullable values.
                 encode_fixed_value(bytes, value, inner_type)?;
             } else {
-                bytes.extend(encode_value(value, inner_type)?);
+                encode_value_into(bytes, value, inner_type)?;
             }
         }
         None => {
@@ -2129,22 +2139,20 @@ fn encode_array(
         return Ok(());
     }
 
+    let base = bytes.len();
     write_u32(bytes, usize_to_u32(values.len())?);
-    let encoded_values = values
-        .iter()
-        .map(|value| encode_value(value, element_type))
-        .collect::<Result<Vec<_>, _>>()?;
-    let offset_table_size = encoded_values.len().saturating_sub(1) * 4;
-    let mut next_offset = 4 + offset_table_size;
-    for encoded in encoded_values
-        .iter()
-        .take(encoded_values.len().saturating_sub(1))
-    {
-        next_offset = checked_add(next_offset, encoded.len())?;
-        write_u32(bytes, usize_to_u32(next_offset)?);
-    }
-    for encoded in encoded_values {
-        bytes.extend(encoded);
+    let offset_count = values.len().saturating_sub(1);
+    let payload_start = checked_add(bytes.len(), offset_count * 4)?;
+    bytes.resize(payload_start, 0);
+    for (index, value) in values.iter().enumerate() {
+        encode_value_into(bytes, value, element_type)?;
+        if index < offset_count {
+            // Offsets belong to this array, even when nested inside another
+            // array, nullable value or a record's shared output buffer.
+            let end = usize_to_u32(bytes.len() - base)?;
+            let slot = base + 4 + index * 4;
+            bytes[slot..slot + 4].copy_from_slice(&end.to_le_bytes());
+        }
     }
     Ok(())
 }

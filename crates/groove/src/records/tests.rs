@@ -2644,3 +2644,79 @@ fn indirect_reference_visitor_preserves_nested_multiplicity_and_early_stop() {
     );
     assert_eq!(count, 1);
 }
+
+// Internal byte fixtures pin array-relative offsets and nullable/scalar framing,
+// which are deliberately not visible in database query results.
+#[test]
+fn variable_fields_append_exact_bytes_into_existing_output() {
+    let nullable_string = ValueType::Nullable(Box::new(ValueType::String));
+    let nested_type = ValueType::Array(Box::new(ValueType::Array(Box::new(
+        nullable_string.clone(),
+    ))));
+    let cases = [
+        (
+            nullable_string,
+            Value::Nullable(Some(Box::new(Value::String("abc".into())))),
+            vec![1, 2, b'a', b'b', b'c'],
+        ),
+        (
+            ValueType::Array(Box::new(ValueType::String)),
+            Value::Array(vec![
+                Value::String("a".into()),
+                Value::String("bc".into()),
+                Value::String(String::new()),
+            ]),
+            vec![
+                3, 0, 0, 0, 14, 0, 0, 0, 17, 0, 0, 0, 2, b'a', 2, b'b', b'c', 2,
+            ],
+        ),
+        (
+            nested_type,
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::Nullable(Some(Box::new(Value::String("a".into())))),
+                    Value::Nullable(None),
+                ]),
+                Value::Array(vec![]),
+            ]),
+            vec![
+                2, 0, 0, 0, 20, 0, 0, 0, 2, 0, 0, 0, 11, 0, 0, 0, 1, 2, b'a', 0, 0, 0, 0, 0,
+            ],
+        ),
+        (
+            ValueType::Bytes,
+            Value::Bytes(vec![0, 255]),
+            vec![2, 0, 255],
+        ),
+        (
+            ValueType::Array(Box::new(ValueType::String)),
+            Value::Array(vec![]),
+            vec![0, 0, 0, 0],
+        ),
+    ];
+    for (value_type, value, expected) in cases {
+        let d = descriptor([value_type]);
+        let mut output = Vec::with_capacity(512);
+        output.extend_from_slice(&[91, 92, 93]);
+        let pointer = output.as_ptr();
+        d.encode_field_into(0, &value, &mut output).unwrap();
+        assert_eq!(&output[..3], &[91, 92, 93]);
+        assert_eq!(&output[3..], expected);
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(d.bind(&output[3..]).get_idx(0).unwrap(), value);
+    }
+}
+
+#[test]
+fn variable_field_failure_preserves_preexisting_output() {
+    let d = descriptor([ValueType::Array(Box::new(ValueType::stored_scalar(
+        crate::large_values::LargeValueKind::Json,
+    )))]);
+    let value = Value::Array(vec![
+        Value::String("{}".into()),
+        Value::String("invalid-json".into()),
+    ]);
+    let mut output = vec![91, 92, 93];
+    assert!(d.encode_field_into(0, &value, &mut output).is_err());
+    assert_eq!(output, [91, 92, 93]);
+}
