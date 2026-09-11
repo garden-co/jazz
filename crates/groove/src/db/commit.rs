@@ -110,6 +110,10 @@ impl Database {
     /// persistence. The returned handle owns the pending persistence work and
     /// no longer borrows this database, so resident queries may continue while
     /// storage suspends.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.storage_apply")
+    )]
     pub async fn apply_batch(&mut self, mut batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
         batch.check_exact_base(self)?;
         self.ensure_not_poisoned()?;

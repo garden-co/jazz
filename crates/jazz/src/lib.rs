@@ -442,8 +442,6 @@ pub mod account_registry;
 pub mod authorization_scope;
 /// Shared binary row payload contract for the NAPI and WASM bindings.
 pub mod binding_codec;
-/// Opaque immutable chunk staging and retrieval used by Groove large values.
-
 /// Disabled-by-default counters used by the native cold-settle attribution bench.
 #[cfg(feature = "cold-settle-attribution")]
 pub mod cold_settle_attribution;

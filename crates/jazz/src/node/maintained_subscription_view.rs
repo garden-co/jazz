@@ -485,6 +485,10 @@ impl MaintainedSubscriptionView {
         Ok(transitions)
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.decode_query_outputs")
+    )]
     pub(crate) fn apply_multisink_deltas(
         &mut self,
         deltas: MultisinkDeltas,

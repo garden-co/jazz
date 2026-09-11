@@ -305,6 +305,9 @@ const RESOURCE_SPECS: [ResourceSpec; 14] = [
 ];
 
 fn main() {
+    #[cfg(feature = "cold-settle-attribution")]
+    let _phase_subscriber =
+        tracing::subscriber::set_default(jazz_sim::phase_attribution::Collector);
     jazz_benchmark_guard::refuse_contaminated_measurement();
     let config = Config::from_env();
     let schema = schema();
@@ -535,6 +538,7 @@ struct RunSummary {
 /// sender's required sizing work before it can decide whether to chunk.
 #[derive(Clone, Default)]
 struct AttributionSummary {
+    phase_timing: JsonValue,
     core_tick_ns: u64,
     relay_tick_ns: u64,
     client_tick_ns: u64,
@@ -752,6 +756,10 @@ struct CountedDuplex {
 }
 
 impl Transport for DuplexTransport {
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.benchmark_transport")
+    )]
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         self.metrics.messages.set(self.metrics.messages.get() + 1);
         if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
@@ -1415,6 +1423,7 @@ fn run_connect_and_subscribe(
     alloc_metrics::reset_and_start();
     #[cfg(feature = "cold-settle-attribution")]
     {
+        jazz_sim::phase_attribution::reset();
         jazz::cold_settle_attribution::reset();
         jazz::groove::cold_settle_attribution::reset();
     }
@@ -1488,6 +1497,11 @@ fn run_connect_and_subscribe(
         let core_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let core_tick_start = Instant::now();
+        #[cfg(feature = "cold-settle-attribution")]
+        tracing::trace_span!("cold.phase.core")
+            .in_scope(|| block_on(seeded.core.tick()))
+            .unwrap();
+        #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(seeded.core.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
@@ -1506,6 +1520,11 @@ fn run_connect_and_subscribe(
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let relay_tick_start = Instant::now();
+        #[cfg(feature = "cold-settle-attribution")]
+        tracing::trace_span!("cold.phase.relay")
+            .in_scope(|| block_on(relay.db.tick()))
+            .unwrap();
+        #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(relay.db.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
@@ -1524,6 +1543,11 @@ fn run_connect_and_subscribe(
         let client_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         #[cfg(feature = "cold-settle-attribution")]
         let client_tick_start = Instant::now();
+        #[cfg(feature = "cold-settle-attribution")]
+        tracing::trace_span!("cold.phase.client")
+            .in_scope(|| block_on(client.db.tick()))
+            .unwrap();
+        #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(client.db.tick()).unwrap();
         #[cfg(feature = "cold-settle-attribution")]
         {
@@ -1550,6 +1574,10 @@ fn run_connect_and_subscribe(
         ticks += 1;
     }
     let settle_ms = settle_start.elapsed().as_millis();
+    #[cfg(feature = "cold-settle-attribution")]
+    {
+        attribution.phase_timing = jazz_sim::phase_attribution::snapshot();
+    }
     if label == "warm" {
         // Warm readiness is relay-local, but the benchmark also asserts that
         // the hot relay declares known state when it reconnects upstream. Drive
@@ -2406,6 +2434,10 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         ),
     );
     let attribution = &summary.attribution;
+    fields.insert(
+        "settle_phase_timing".to_owned(),
+        attribution.phase_timing.clone(),
+    );
     let operator_json = |operators: &OperatorAttribution| {
         json!({
             "map_project": {

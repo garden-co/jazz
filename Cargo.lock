@@ -1526,6 +1526,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "thiserror",
+ "tracing",
  "uuid",
  "web-time",
 ]
@@ -2349,6 +2350,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
+ "tracing",
  "uuid",
  "zstd",
 ]

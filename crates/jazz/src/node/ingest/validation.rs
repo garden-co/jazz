@@ -101,6 +101,7 @@ where
                 == coordinate.physical_table_id)
     }
 
+    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.parent_completion"))]
     async fn complete_parent_versions(
         &mut self,
         tx: &Transaction,

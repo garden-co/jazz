@@ -5382,6 +5382,10 @@ fn apply_maintained_membership_update_to_snapshot(
 /// Applies only top-level structured-terminal edits to the producer-owned
 /// subscription snapshot. Descendant edits remain in the returned event for
 /// binding object reducers, which own nested object materialization.
+#[cfg_attr(
+    feature = "cold-settle-attribution",
+    tracing::instrument(skip_all, name = "cold.phase.deliver_query_outputs")
+)]
 fn apply_terminal_operations_to_subscription_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,

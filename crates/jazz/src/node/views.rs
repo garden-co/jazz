@@ -887,6 +887,10 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.publish_supporting_rows")
+    )]
     pub(crate) async fn view_update_for_maintained_result_members(
         &mut self,
         inputs: MaintainedViewBundleInputs<'_>,
@@ -1507,6 +1511,10 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.receive_updates")
+    )]
     pub(crate) async fn apply_view_updates_in_batch(
         &mut self,
         mut updates: Vec<ViewUpdateParts>,
