@@ -122,11 +122,14 @@ impl Database {
             batch.notification_timing == NotificationTiming::AfterPersistence;
         // Later ordinary writes must not invalidate an ensure_exact result.
         let exact_keys = std::mem::take(&mut batch.exact_keys);
+        let borrowed_exact_keys = exact_keys
+            .iter()
+            .map(|((table, key), value)| ((table.as_str(), key.as_slice()), value))
+            .collect::<HashMap<_, _>>();
         let pending_writes = self.pending_writes_from_batch(batch)?;
         for write in &pending_writes {
-            if let Some(expected) =
-                exact_keys.get(&(write.table().to_owned(), write.key().to_vec()))
-                && write.stored_record().as_ref() != Some(expected)
+            if let Some(expected) = borrowed_exact_keys.get(&(write.table(), write.key()))
+                && write.stored_record().as_ref() != Some(*expected)
             {
                 return Err(Error::ImmutableBatchConflict);
             }
@@ -194,17 +197,22 @@ impl Database {
             }
         }
         let mut staged_operations = pending_writes
-            .iter()
+            .into_iter()
             .map(|write| match write {
-                PendingTableWrite::Set { key, .. } => OwnedWriteOperation::Set {
-                    cf: write.table().to_owned(),
-                    key: key.clone(),
-                    value: write.stored_record().expect("set has a stored record"),
+                PendingTableWrite::Set {
+                    table,
+                    key,
+                    variant_tag,
+                    record,
+                    ..
+                } => OwnedWriteOperation::Set {
+                    cf: table,
+                    key,
+                    value: encode_variant_record(variant_tag, &record),
                 },
-                PendingTableWrite::Delete { key, .. } => OwnedWriteOperation::Delete {
-                    cf: write.table().to_owned(),
-                    key: key.clone(),
-                },
+                PendingTableWrite::Delete { table, key, .. } => {
+                    OwnedWriteOperation::Delete { cf: table, key }
+                }
             })
             .collect::<Vec<_>>();
         for staged_id in accepted_large_values {

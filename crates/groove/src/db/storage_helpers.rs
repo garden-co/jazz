@@ -918,7 +918,7 @@ where
     // instead of allocating a second table name and primary-key buffer for
     // every write merely to track same-batch visibility.
     let mut overlay =
-        HashMap::<(&str, &[u8]), Option<Vec<u8>>>::with_capacity(pending_writes.len());
+        HashMap::<(&str, &[u8]), Option<(u32, &[u8])>>::with_capacity(pending_writes.len());
     // Accumulate directly into the homogeneous groups consumed by IVM. The
     // previous path allocated a singleton TableDelta (and Vec) per old/new
     // record, then hashed every group and record again in a second pass.
@@ -929,8 +929,9 @@ where
 
     for (write, store) in pending_writes.iter().zip(stores) {
         let overlay_key = (write.table(), write.key());
+        let stored_current;
         let current = if let Some(record) = overlay.get(&overlay_key) {
-            record.clone()
+            *record
         } else if matches!(
             write,
             PendingTableWrite::Set {
@@ -940,7 +941,11 @@ where
         ) {
             None
         } else {
-            store.get_raw(write.key()).await?
+            stored_current = store.get_raw(write.key()).await?;
+            stored_current
+                .as_deref()
+                .map(split_variant_record)
+                .transpose()?
         };
         if matches!(
             write,
@@ -958,8 +963,7 @@ where
         let table_schema = schema
             .table(write.table())
             .ok_or_else(|| Error::TableNotFound(write.table().to_owned()))?;
-        if let Some(current) = current.as_deref() {
-            let (variant_tag, payload) = split_variant_record(current)?;
+        if let Some((variant_tag, payload)) = current {
             let descriptor_key = (write.table(), variant_tag);
             let descriptor = if let Some(descriptor) = old_descriptors.get(&descriptor_key) {
                 *descriptor
@@ -992,7 +996,14 @@ where
                 .entry(bytes::Bytes::copy_from_slice(record))
                 .or_default() += 1;
         }
-        let next = write.stored_record();
+        let next = match write {
+            PendingTableWrite::Set {
+                variant_tag,
+                record,
+                ..
+            } => Some((*variant_tag, record.as_slice())),
+            PendingTableWrite::Delete { .. } => None,
+        };
         overlay.insert(overlay_key, next);
     }
 
