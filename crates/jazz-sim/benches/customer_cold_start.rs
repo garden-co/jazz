@@ -237,6 +237,7 @@ mod alloc_metrics {
         // each sample once to its nearest repository allocation site as well.
         let mut callers: HashMap<String, (u64, u64)> = HashMap::new();
         let mut resolved: HashMap<usize, Option<String>> = HashMap::new();
+        let mut examples: HashMap<String, (u64, Vec<usize>)> = HashMap::new();
         for (frames, totals) in &ranked {
             for ip in frames {
                 let caller = resolved.entry(*ip).or_insert_with(|| {
@@ -271,6 +272,10 @@ mod alloc_metrics {
                     let entry = callers.entry(caller.clone()).or_default();
                     entry.0 += totals.0;
                     entry.1 += totals.1;
+                    let example = examples.entry(caller.clone()).or_default();
+                    if totals.0 > example.0 {
+                        *example = (totals.0, frames.clone());
+                    }
                     break;
                 }
             }
@@ -293,6 +298,31 @@ mod alloc_metrics {
                     totals.1,
                     caller
                 );
+                // Show the most frequently count-sampled calling context, not
+                // an invented aggregate stack. Reporting runs after tracking stops.
+                if metric == "count" {
+                    if let Some((samples, frames)) = examples.get(caller) {
+                        eprintln!("  representative_context_samples={samples}");
+                        for ip in frames {
+                            backtrace::resolve(*ip as *mut _, |symbol| {
+                                let Some(file) = symbol.filename() else {
+                                    return;
+                                };
+                                let path = file.to_string_lossy();
+                                if !path.contains("/crates/") || path.contains("/benches/") {
+                                    return;
+                                }
+                                if let Some(name) = symbol.name() {
+                                    eprintln!(
+                                        "    {name} {}:{}",
+                                        file.display(),
+                                        symbol.lineno().unwrap_or(0)
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
             }
         }
 
