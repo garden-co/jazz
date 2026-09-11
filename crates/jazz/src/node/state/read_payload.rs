@@ -255,9 +255,9 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "history schema version alias must exist",
             ))?;
-        let table = self.table_in_schema(version.table(), schema_version)?;
+        let table = self.table_in_schema_ref(version.table(), schema_version)?;
         let authored_columns = self.authored_columns_for_version(version)?;
-        VersionRecord::from_stored(version, &table, schema_version, authored_columns)
+        VersionRecord::from_stored(version, table, schema_version, authored_columns)
     }
 
     /// Resolve a projected repair name to the current name of its exact body

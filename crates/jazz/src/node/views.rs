@@ -2956,7 +2956,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "maintained witness schema version alias must exist",
             ))?;
-        match self.table_in_schema(version.table(), authored_schema) {
+        match self.table_in_schema_ref(version.table(), authored_schema) {
             Ok(_) => {}
             Err(Error::TableNotFound(_)) => {
                 // A current-query source may have been projected through a
