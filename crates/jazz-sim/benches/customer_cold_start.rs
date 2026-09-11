@@ -308,7 +308,14 @@ fn main() {
     #[cfg(feature = "cold-settle-attribution")]
     let _phase_subscriber =
         tracing::subscriber::set_default(jazz_sim::phase_attribution::Collector);
+    // Allocation attribution deliberately instruments the workload. Its timing
+    // is not a benchmark receipt, and sampler configuration must remain usable.
+    #[cfg(not(any(feature = "bench-alloc-sites", feature = "bench-alloc-metrics")))]
     jazz_benchmark_guard::refuse_contaminated_measurement();
+    #[cfg(any(feature = "bench-alloc-sites", feature = "bench-alloc-metrics"))]
+    eprintln!(
+        "allocation attribution run: wall-clock timings are not comparable to clean receipts"
+    );
     let config = Config::from_env();
     let schema = schema();
     let seeded = seed_core(&schema, &config);
@@ -2157,6 +2164,13 @@ fn pending_description(subscriptions: &[OpenSubscription]) -> String {
 
 fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     let mut fields = metadata_fields("customer_cold_start", "native", config.seed, "full");
+    fields.insert(
+        "allocation_instrumented".to_owned(),
+        json!(cfg!(any(
+            feature = "bench-alloc-sites",
+            feature = "bench-alloc-metrics"
+        ))),
+    );
     fields
         .get_mut("knobs")
         .and_then(JsonValue::as_object_mut)
