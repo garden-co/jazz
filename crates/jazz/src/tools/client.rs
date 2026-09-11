@@ -20,6 +20,7 @@ use crate::db::{
     PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
     TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
+    WriteIdentity as CoreWriteIdentity,
 };
 use crate::groove::records::{
     BorrowedRecord, OwnedRecord, Value as CoreValue, ValueType as CoreValueType,
@@ -411,11 +412,19 @@ impl Backend {
         storage: StorageBundle,
         identity: CoreDbIdentity,
     ) -> Result<Self> {
-        Ok(Self(Rc::new(
-            StackSafeFuture::new(CoreDb::open(CoreDbConfig::new(schema, storage, identity)))
-                .await
-                .map_err(|error| JazzError::Connection(error.to_string()))?,
-        )))
+        let config = CoreDbConfig::new(schema, storage, identity);
+        let db = if identity.author == CoreAuthorSubject::SYSTEM {
+            // SAFETY: core_identity selects SYSTEM only for a host-provided
+            // backend/admin credential. Online connect authenticates that
+            // credential before exposing the client; ordinary sessions cannot
+            // select this capability.
+            StackSafeFuture::new(unsafe { CoreDb::open_with_backend_attribution(config) }).await
+        } else {
+            StackSafeFuture::new(CoreDb::open(config)).await
+        };
+        Ok(Self(Rc::new(db.map_err(|error| {
+            JazzError::Connection(error.to_string())
+        })?)))
     }
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
@@ -459,7 +468,7 @@ impl Backend {
 
     fn insert_for_identity(
         &self,
-        identity: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
@@ -467,7 +476,7 @@ impl Backend {
             table,
             cells,
             crate::db::InsertOptions {
-                identity: crate::db::WriteIdentity::Session(identity),
+                identity,
                 ..Default::default()
             },
         ))?;
@@ -493,7 +502,7 @@ impl Backend {
 
     fn insert_with_id_for_identity(
         &self,
-        identity: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -503,7 +512,7 @@ impl Backend {
             cells,
             crate::db::InsertOptions {
                 row_id: Some(row_id),
-                identity: crate::db::WriteIdentity::Session(identity),
+                identity,
                 ..Default::default()
             },
         ))?
@@ -531,7 +540,7 @@ impl Backend {
 
     fn upsert_for_identity(
         &self,
-        identity: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -542,7 +551,7 @@ impl Backend {
             row_id,
             cells,
             crate::db::UpsertOptions {
-                identity: crate::db::WriteIdentity::Session(identity),
+                identity,
                 updated_at_ms,
                 ..Default::default()
             },
@@ -571,7 +580,7 @@ impl Backend {
 
     fn delete_for_identity(
         &self,
-        identity: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
@@ -579,7 +588,7 @@ impl Backend {
             table,
             row_id,
             crate::db::DeleteOptions {
-                identity: crate::db::WriteIdentity::Session(identity),
+                identity,
                 ..Default::default()
             },
         ))?
@@ -669,9 +678,9 @@ impl Backend {
     fn begin_exclusive_for_identity(
         &self,
         id: OpenTransactionId,
-        author: CoreAuthorSubject,
+        identity: CoreWriteIdentity,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.begin_exclusive_for_identity(id, author))
+        crate::db::block_on(self.0.begin_exclusive_with_identity(id, identity))
     }
 
     fn exclusive_write(
@@ -1060,7 +1069,7 @@ impl ClientDb {
         table: String,
         row_id: Option<Uuid>,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorSubject>,
+        identity: Option<CoreWriteIdentity>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
         let (row_uuid, tx_id) = match row_id {
@@ -1127,7 +1136,7 @@ impl ClientDb {
         table: String,
         row_id: Uuid,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorSubject>,
+        identity: Option<CoreWriteIdentity>,
         updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
@@ -1182,7 +1191,7 @@ impl ClientDb {
         &self,
         row_id: ObjectId,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorSubject>,
+        identity: Option<CoreWriteIdentity>,
         updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
@@ -1234,7 +1243,7 @@ impl ClientDb {
         Ok(())
     }
 
-    fn delete(&self, row_id: ObjectId, identity: Option<CoreAuthorSubject>) -> Result<CoreTxId> {
+    fn delete(&self, row_id: ObjectId, identity: Option<CoreWriteIdentity>) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
@@ -1273,7 +1282,7 @@ impl ClientDb {
         Ok(())
     }
 
-    fn begin_transaction(&self, author: Option<CoreAuthorSubject>) -> Result<OpenTransactionId> {
+    fn begin_transaction(&self, identity: Option<CoreWriteIdentity>) -> Result<OpenTransactionId> {
         let mut inner = self.inner.borrow_mut();
         let mut transaction_id = OpenTransactionId::new();
         while inner.transactions.contains_key(&transaction_id)
@@ -1281,13 +1290,19 @@ impl ClientDb {
         {
             transaction_id = OpenTransactionId::new();
         }
-        match author {
-            Some(author) => inner
+        match identity {
+            Some(identity) => inner
                 .backend()?
-                .begin_exclusive_for_identity(transaction_id, author),
+                .begin_exclusive_for_identity(transaction_id, identity),
             None => inner.backend()?.begin_exclusive(transaction_id),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
+        // Explicit sessions bind commit identity; attributed transactions use
+        // the core's bound commit path to retain their separate provenance.
+        let author = identity.and_then(|identity| match identity {
+            CoreWriteIdentity::Session(author) => Some(author),
+            CoreWriteIdentity::Attribution(_) | CoreWriteIdentity::Database => None,
+        });
         inner.transactions.insert(
             transaction_id,
             ExclusiveTransactionState {
@@ -3081,7 +3096,30 @@ impl JazzClient {
         )))
     }
 
-    fn write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
+    fn write_identity(&self) -> Result<Option<CoreWriteIdentity>> {
+        if let Some(context) = &self.write_context
+            && let Some(attribution) = &context.attribution
+        {
+            if context.session.is_some() {
+                return Err(JazzError::Write(
+                    "attribution cannot override the permission session".into(),
+                ));
+            }
+            let author = CoreAuthorSubject::from_untrusted_canonical(attribution)
+                .map_err(|error| JazzError::Write(error.to_string()))?;
+            if author.account_id().is_none() {
+                return Err(JazzError::Write(
+                    "attribution requires an admitted account identity".into(),
+                ));
+            }
+            return Ok(Some(CoreWriteIdentity::Attribution(author)));
+        }
+        Ok(self
+            .session_write_identity()?
+            .map(CoreWriteIdentity::Session))
+    }
+
+    fn session_write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
         let session = self
             .write_context
             .as_ref()
@@ -3778,7 +3816,7 @@ impl JazzClient {
             .and_then(|ctx| ctx.transaction_id)
         {
             let author = self
-                .write_identity()?
+                .session_write_identity()?
                 .unwrap_or_else(|| self.db.inner.borrow().identity.author);
             self.db
                 .query_transaction_rows(query.clone(), opts, transaction_id, table, author)
@@ -3941,8 +3979,8 @@ impl JazzClient {
     /// not visible to ordinary reads until the transaction is committed and
     /// accepted by the authority.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        let author = self.write_identity()?;
-        let transaction_id = self.db.begin_transaction(author)?;
+        let identity = self.write_identity()?;
+        let transaction_id = self.db.begin_transaction(identity)?;
         // Keep an explicit session/attribution context when adding the
         // transaction id. In particular, a backend connection is SYSTEM by
         // default, but `for_session(..).begin_transaction()` must continue to

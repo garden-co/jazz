@@ -179,11 +179,11 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
 
 async fn create_note_with_backend_attribution(
     backend: &JazzClient,
-    attributed_user_id: &str,
+    attributed_author: &str,
     title: &str,
 ) -> ObjectId {
     let write_context = WriteContext {
-        attribution: Some(attributed_user_id.to_string()),
+        attribution: Some(attributed_author.to_string()),
         ..Default::default()
     };
     let (note_id, _, transaction_id) = backend
@@ -549,7 +549,6 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
 /// bob query ──────────────────────────────────► sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "#1758: trusted backend attribution is ignored by the Rust client, so an INSERT policy of never is rejected with authorization_denied"]
 async fn created_by_policies_allow_backend_attribution_to_specific_user() {
     tokio::task::LocalSet::new()
         .run_until(created_by_policies_allow_backend_attribution_to_specific_user_inner())
@@ -576,12 +575,42 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() 
         .start()
         .await
         .expect("start test server");
-    let (alice, _alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
+    let (alice_context, alice) = jazz_testkit::TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id(super::ALICE_ID)
+        .as_user()
+        .ready_on("notes", READY_TIMEOUT)
+        .connect_with_context()
+        .await;
+    let alice_account = alice_context.account_id.expect("enrolled Alice account");
+    let alice_author = structured_author(super::ALICE_ID, Some(alice_account));
+    let mut alice_session = Session::new("urn:jazz:test", super::ALICE_ID);
+    alice_session.account_id = Some(alice_account);
+    let attribution = alice_session
+        .author_subject()
+        .expect("Alice author")
+        .canonical()
+        .to_owned();
     let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
 
+    let error = bob
+        .with_write_context(WriteContext {
+            attribution: Some(attribution.to_owned()),
+            ..Default::default()
+        })
+        .insert("notes", note_input("forged attribution"))
+        .expect_err("ordinary users cannot attribute writes to Alice");
+    assert!(
+        error
+            .to_string()
+            .contains("attribution requires a trusted serving node"),
+        "{error}"
+    );
+
     let attributed_note =
-        create_note_with_backend_attribution(&backend, super::ALICE_ID, "backend for alice").await;
+        create_note_with_backend_attribution(&backend, &attribution, "backend for alice").await;
     let query = Query::from("notes").select(["title", "$createdBy", "$updatedBy"]);
 
     let alice_rows = wait_for_rows(
@@ -593,7 +622,11 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() 
     .await;
     assert_eq!(
         alice_rows[0].1,
-        provenance_values("backend for alice", super::ALICE_ID, super::ALICE_ID)
+        vec![
+            "backend for alice".into(),
+            alice_author.clone(),
+            alice_author
+        ]
     );
 
     let bob_rows = wait_for_rows(
@@ -609,6 +642,113 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
+}
+
+/// Attribution survives transaction staging and commit without replacing
+/// backend authorization, even when every user mutation policy denies writes.
+#[tokio::test]
+async fn backend_attribution_survives_transactions_and_later_mutations() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(make_notes_schema(
+                    "notes",
+                    permissions(|p| {
+                        p.allow_read().always();
+                        p.allow_insert().never();
+                        p.allow_update().never();
+                        p.allow_delete().never();
+                    }),
+                ))
+                .build();
+            let server = JazzServer::builder()
+                .with_schema(schema.clone())
+                .start()
+                .await
+                .expect("start test server");
+            let (context, alice) = jazz_testkit::TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id(super::ALICE_ID)
+                .as_user()
+                .ready_on("notes", READY_TIMEOUT)
+                .connect_with_context()
+                .await;
+            let account = context.account_id.expect("enrolled account");
+            let author = structured_author(super::ALICE_ID, Some(account));
+            let mut session = Session::new("urn:jazz:test", super::ALICE_ID);
+            session.account_id = Some(account);
+            let backend =
+                connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
+            let attributed = backend.with_write_context(WriteContext {
+                attribution: Some(session.author_subject().unwrap().canonical().to_owned()),
+                ..Default::default()
+            });
+            let transaction = attributed
+                .begin_transaction()
+                .expect("begin attributed transaction");
+            let (id, _, _) = transaction
+                .insert("notes", note_input("staged"))
+                .expect("stage insert");
+            let query = Query::from("notes").select(["title", "$createdBy", "$updatedBy"]);
+            let staged = transaction
+                .query(query.clone(), None)
+                .await
+                .expect("read staged attribution");
+            assert_eq!(
+                staged[0].1,
+                vec!["staged".into(), author.clone(), author.clone()]
+            );
+            wait_for_edge_txs(
+                &backend,
+                &[transaction.commit().expect("commit attribution")],
+            )
+            .await;
+            let update = attributed
+                .update(id, vec![("title".into(), "updated".into())])
+                .expect("attributed update")
+                .unwrap();
+            wait_for_edge_txs(&backend, &[update]).await;
+            let updated = wait_for_rows(
+                &alice,
+                query.clone(),
+                "Alice sees attributed update",
+                |rows| {
+                    (rows.len() == 1 && rows[0].1[0] == Value::Text("updated".into()))
+                        .then_some(rows)
+                },
+            )
+            .await;
+            assert_eq!(
+                updated[0].1,
+                vec!["updated".into(), author.clone(), author.clone()]
+            );
+            let upsert = attributed
+                .upsert("notes", *id.uuid(), note_input("upserted"))
+                .expect("attributed upsert");
+            wait_for_edge_txs(&backend, &[upsert.expect("upsert transaction")]).await;
+            let rows = wait_for_rows(&alice, query, "Alice sees attributed mutations", |rows| {
+                (rows.len() == 1 && rows[0].1[0] == Value::Text("upserted".into())).then_some(rows)
+            })
+            .await;
+            assert_eq!(rows[0].1, vec!["upserted".into(), author.clone(), author]);
+            wait_for_edge_txs(
+                &backend,
+                &[attributed.delete(id).expect("attributed delete").unwrap()],
+            )
+            .await;
+            wait_for_rows(
+                &alice,
+                Query::from("notes"),
+                "attributed delete settles",
+                |rows| rows.is_empty().then_some(()),
+            )
+            .await;
+            backend.shutdown().await.expect("shutdown backend");
+            alice.shutdown().await.expect("shutdown Alice");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 /// Verifies that a `$updatedBy` select policy moves visibility to the latest
