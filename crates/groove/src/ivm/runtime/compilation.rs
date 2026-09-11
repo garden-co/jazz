@@ -2,6 +2,11 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static BUILDER_COMPILATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl IvmRuntime {
     fn add_arrangement_node(
         &mut self,
@@ -27,18 +32,26 @@ impl IvmRuntime {
         &mut self,
         graph: &GraphBuilder,
     ) -> Result<CompiledNode, IvmRuntimeError> {
+        self.add_dedup_graph_with_memos(graph, &mut HashMap::default(), &mut HashMap::default())
+    }
+
+    /// Reuse planning within one operation over stable borrowed graphs. The
+    /// caller must keep every graph in place until both pointer-keyed memos
+    /// are discarded; never retain these memos across operations.
+    pub(super) fn add_dedup_graph_with_memos(
+        &mut self,
+        graph: &GraphBuilder,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+        compiled_memo: &mut HashMap<usize, CompiledNode>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
         validate_collect_by_terminality(graph)?;
-        let mut output_memo = HashMap::default();
-        // Precompute descriptors once for the complete graph. The postorder
-        // compiler below can then reuse those descriptors without repeatedly
-        // traversing a long policy graph from each parent.
-        self.infer_builder_output_cached(graph, &mut output_memo)?;
-        let mut compiled_memo = HashMap::default();
+        self.infer_builder_output_cached(graph, output_memo)?;
         for builder in graph.postorder() {
-            self.add_dedup_graph_cached(builder, &mut output_memo, &mut compiled_memo)?;
+            self.add_dedup_graph_cached(builder, output_memo, compiled_memo)?;
         }
         compiled_memo
-            .remove(&graph_builder_key(graph))
+            .get(&graph_builder_key(graph))
+            .cloned()
             .ok_or(IvmRuntimeError::UnsupportedOperator)
     }
 
@@ -52,6 +65,8 @@ impl IvmRuntime {
         if let Some(compiled) = compiled_memo.get(&key) {
             return Ok(compiled.clone());
         }
+        #[cfg(test)]
+        BUILDER_COMPILATION_COUNT.with(|count| count.set(count.get() + 1));
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         let compiled = match graph {
             GraphBuilder::Table { .. }

@@ -1,5 +1,10 @@
 //! Prepared shapes, routed bindings, and subscription delivery state.
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static BUILDER_INFERENCE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 use super::evaluation_session::EvaluationInputs;
 use super::*;
 
@@ -3240,6 +3245,7 @@ impl IvmRuntime {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
         }
         let mut sink_names = HashSet::new();
+        let mut output_memo = HashMap::default();
         for terminal in &terminals {
             if !sink_names.insert(terminal.sink.clone()) {
                 return Err(IvmRuntimeError::DuplicateMultisinkSink(
@@ -3267,7 +3273,7 @@ impl IvmRuntime {
             {
                 return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
             }
-            let output = self.infer_builder_output(&terminal.graph)?;
+            let output = self.infer_builder_output_cached(&terminal.graph, &mut output_memo)?;
             for field in &terminal.route_fields {
                 if output.field_index(field).is_none() {
                     return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
@@ -3302,24 +3308,42 @@ impl IvmRuntime {
         };
         let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
         let runtime = install.runtime();
-        let mut terminal_states = BTreeMap::new();
-        for terminal in terminals {
-            let output = match runtime.add_dedup_graph(&terminal.graph) {
-                Ok(output) => output,
-                Err(error) => {
-                    if inserted_source {
-                        runtime
-                            .binding_sources
-                            .remove(&BindingSourceKey::prepared(shape));
-                    }
-                    return Err(error);
+        let mut compiled_memo = HashMap::default();
+        // Borrow the stable terminal vector through validation and compilation.
+        // Moving each graph before compilation could recycle a memoized address.
+        let outputs = terminals
+            .iter()
+            .map(|terminal| {
+                runtime.add_dedup_graph_with_memos(
+                    &terminal.graph,
+                    &mut output_memo,
+                    &mut compiled_memo,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let outputs = match outputs {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                if inserted_source {
+                    runtime
+                        .binding_sources
+                        .remove(&BindingSourceKey::prepared(shape));
                 }
-            };
-            terminal_states.insert(
-                terminal.sink.clone(),
-                RoutedMultisinkTerminalState { terminal, output },
-            );
-        }
+                return Err(error);
+            }
+        };
+        drop(output_memo);
+        drop(compiled_memo);
+        let terminal_states = terminals
+            .into_iter()
+            .zip(outputs)
+            .map(|(terminal, output)| {
+                (
+                    terminal.sink.clone(),
+                    RoutedMultisinkTerminalState { terminal, output },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         // Publish retainers only after every terminal compiles, so the guard
         // can collect failed additions without disturbing existing shapes.
         for terminal in terminal_states.values() {
@@ -3420,18 +3444,32 @@ impl IvmRuntime {
                 .values()
                 .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
                 .sum::<usize>() as u64;
+            // Construct all bound wrappers first so memo keys stay stable.
+            let graphs = shape
+                .terminals
+                .iter()
+                .map(|(sink, prepared_terminal)| {
+                    let mut terminal = prepared_terminal.terminal.clone();
+                    if let Some(fields) = public_fields.get(sink) {
+                        terminal.public_fields = fields.clone();
+                    }
+                    let graph = bound_routed_multisink_graph(
+                        &terminal,
+                        binding_values,
+                        &prepared_terminal.output.output,
+                    )?;
+                    Ok::<_, IvmRuntimeError>((sink.clone(), graph))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut output_memo = HashMap::default();
+            let mut compiled_memo = HashMap::default();
             let mut outputs = BTreeMap::new();
-            for (sink, prepared_terminal) in &shape.terminals {
-                let mut terminal = prepared_terminal.terminal.clone();
-                if let Some(fields) = public_fields.get(sink) {
-                    terminal.public_fields = fields.clone();
-                }
-                let graph = bound_routed_multisink_graph(
-                    &terminal,
-                    binding_values,
-                    &prepared_terminal.output.output,
+            for (sink, graph) in &graphs {
+                let output = runtime.add_dedup_graph_with_memos(
+                    graph,
+                    &mut output_memo,
+                    &mut compiled_memo,
                 )?;
-                let output = runtime.add_dedup_graph(&graph)?;
                 outputs.insert(sink.clone(), output);
             }
             let binding_shape = runtime.binding_source_shape_name(shape_id)?;
@@ -3920,6 +3958,8 @@ impl IvmRuntime {
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        #[cfg(test)]
+        BUILDER_INFERENCE_COUNT.with(|count| count.set(count.get() + 1));
         match graph {
             GraphBuilder::Table {
                 table,

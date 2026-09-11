@@ -3246,3 +3246,82 @@ fn source_batch_prepares_one_descriptor_per_variant() {
         Err(IvmRuntimeError::UnknownTableVariant { version: 3, .. })
     ));
 }
+
+// Internal work bound: identical query results cannot expose repeated planning
+// of a shared graph independently for every sink of one prepare/bind operation.
+#[futures_test::test]
+async fn multisink_prepare_and_bind_infer_shared_graphs_once() {
+    let schema = albums_schema();
+    let albums = schema.table("albums").unwrap().record_schema();
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    write_two_album_rows(&storage, &albums).await;
+    let mut graph = GraphBuilder::table("albums");
+    for _ in 0..20 {
+        graph = graph.project(["id", "title"]);
+    }
+    let terminals = (0..8)
+        .map(|index| {
+            let field = if index % 2 == 0 { "id" } else { "title" };
+            RoutedMultisinkTerminal::new(
+                format!("rows{index}"),
+                graph.clone().project([field]),
+                Vec::<String>::new(),
+                [field],
+            )
+        })
+        .collect::<Vec<_>>();
+    subscriptions::BUILDER_INFERENCE_COUNT.with(|count| count.set(0));
+    compilation::BUILDER_COMPILATION_COUNT.with(|count| count.set(0));
+    let prepared = runtime
+        .prepare(
+            terminals,
+            "shared-work",
+            RecordDescriptor::default(),
+            storage.as_ref(),
+        )
+        .await
+        .unwrap();
+    let prepare_count = subscriptions::BUILDER_INFERENCE_COUNT.with(|count| count.get());
+    let prepare_compiles = compilation::BUILDER_COMPILATION_COUNT.with(|count| count.get());
+    assert!(
+        prepare_compiles <= 80,
+        "prepare compiled {prepare_compiles} shared nodes"
+    );
+    assert!(
+        prepare_count <= 80,
+        "prepare inferred {prepare_count} nodes for shared graphs"
+    );
+    subscriptions::BUILDER_INFERENCE_COUNT.with(|count| count.set(0));
+    compilation::BUILDER_COMPILATION_COUNT.with(|count| count.set(0));
+    let subscription = runtime.bind_shape(prepared.id(), &[], &storage).unwrap();
+    let bind_count = subscriptions::BUILDER_INFERENCE_COUNT.with(|count| count.get());
+    let bind_compiles = compilation::BUILDER_COMPILATION_COUNT.with(|count| count.get());
+    assert!(
+        bind_compiles <= 80,
+        "bind compiled {bind_compiles} shared nodes"
+    );
+    eprintln!(
+        "prepare inferred={prepare_count} compiled={prepare_compiles}; bind inferred={bind_count} compiled={bind_compiles}"
+    );
+    assert!(
+        bind_count <= 80,
+        "bind inferred {bind_count} nodes for shared graphs"
+    );
+    runtime.drive_pending_incremental().await.unwrap();
+    let initial = subscription.try_recv().unwrap();
+    assert_eq!(initial.sinks.len(), 8);
+    for (sink, rows) in &initial.sinks {
+        let values = rows.to_values().unwrap();
+        assert_eq!(values.len(), 2);
+        assert!(values.iter().all(|(_, weight)| *weight == 1));
+        let expected = if sink.strip_prefix("rows").unwrap().parse::<usize>().unwrap() % 2 == 0 {
+            [Value::U64(1), Value::U64(2)]
+        } else {
+            [Value::String("one".into()), Value::String("two".into())]
+        };
+        for value in expected {
+            assert!(values.contains(&(vec![value], 1)));
+        }
+    }
+}
