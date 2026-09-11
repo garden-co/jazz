@@ -11,8 +11,12 @@ Set `JAZZ_PERF_BACKEND=rocksdb_wal` and, for example,
 paths use `JAZZ_PERF_CONTROL_FIFO` and `JAZZ_PERF_ACK_FIFO`, as in the permissioned
 benchmark. Start perf disabled with `--delay=-1 --control fd:3,4`, where those
 file descriptors are opened read/write on the respective FIFOs. Repeat the
-benchmark process to collect enough samples for these short phases. Each process
+fixture within one process to collect enough samples for these short phases,
+using a repeated list such as `JAZZ_BATCH_ROWS=1500,1500,1500`. Each fixture
 enables only the requested phase and disables capture before printing its result.
+Repeated child processes while recording is disabled left later executable
+mappings unavailable to the unwinder in this environment; their empty stacks
+must not be treated as zero CPU cost.
 
 Use an explicit event (`-e cycles`) and retain the event configuration alongside
 the capture. Use `perf script --no-inline --ns` for stack extraction, then select
@@ -31,3 +35,10 @@ for 1,350 updates among 1,500 rows. Worker ingest was 91.041ms, publication
 85.635ms, and receiver ingest 36.007ms. The worker's recorded storage-write phase
 was 5.493ms within ingest. These are native synthetic measurements, not browser
 or IndexedDB results.
+
+A selected worker-ingest capture at retained runtime #2827, with these benchmark
+changes, recorded 996 samples in 62.6MiB. Filtering by the 20 actual phase windows
+left 961 samples, all with nonempty stacks, and perf reported no sample loss.
+Named allocation/free routines account for approximately 21% of weighted samples,
+byte comparison 7%, and copying 6%. Some outer callers remain unresolved; these
+are sampling estimates, not independently additive elapsed-time savings.
