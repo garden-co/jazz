@@ -30,20 +30,17 @@ fn subquery_schema() -> Schema {
         .table(TableSchema::builder("users").column("name", ColumnType::Text))
         .table(
             TableSchema::builder("posts")
-                .column("post_number", ColumnType::Integer)
                 .column("title", ColumnType::Text)
                 .fk_column("author_id", "users"),
         )
         .table(
             TableSchema::builder("comments")
-                .column("comment_number", ColumnType::Integer)
                 .column("text", ColumnType::Text)
                 .fk_column("post_id", "posts")
                 .fk_column("author_id", "users"),
         )
         .table(
             TableSchema::builder("groups")
-                .column("group_number", ColumnType::Integer)
                 .column("name", ColumnType::Text)
                 .array_fk_column("member_ids", "users"),
         )
@@ -105,16 +102,12 @@ async fn create_user_with_id(client: &JazzClient, object_id: ObjectId, name: &st
         .0
 }
 
-async fn create_post(
-    client: &JazzClient,
-    post_number: i32,
-    title: &str,
-    author_id: ObjectId,
-) -> ObjectId {
+async fn create_post(client: &JazzClient, id: i32, title: &str, author_id: ObjectId) -> ObjectId {
     client
-        .insert(
+        .insert_with_id(
             "posts",
-            row_input!("post_number" => post_number, "title" => title, "author_id" => author_id),
+            uuid::Uuid::from_u128(id as u128),
+            row_input!("title" => title, "author_id" => author_id),
         )
         .expect("create post")
         .0
@@ -122,16 +115,16 @@ async fn create_post(
 
 async fn create_comment(
     client: &JazzClient,
-    comment_number: i32,
+    id: i32,
     text: &str,
     post_id: ObjectId,
     author_id: ObjectId,
 ) -> ObjectId {
     client
-        .insert(
+        .insert_with_id(
             "comments",
+            uuid::Uuid::from_u128(id as u128),
             row_input!(
-                "comment_number" => comment_number,
                 "text" => text,
                 "post_id" => post_id,
                 "author_id" => author_id,
@@ -143,15 +136,15 @@ async fn create_comment(
 
 async fn create_group(
     client: &JazzClient,
-    group_number: i32,
+    id: i32,
     name: &str,
     member_ids: &[ObjectId],
 ) -> ObjectId {
     client
-        .insert(
+        .insert_with_id(
             "groups",
+            uuid::Uuid::from_u128(id as u128),
             row_input!(
-                "group_number" => group_number,
                 "name" => name,
                 "member_ids" => Value::Array(
                     member_ids.iter().copied().map(Value::Uuid).collect(),
@@ -194,12 +187,14 @@ fn row_values(value: &Value) -> &[Value] {
     value.as_row().expect("included element should be a row")
 }
 
-fn post_numbers(posts: &[Value]) -> Vec<i32> {
+fn post_ids(posts: &[Value]) -> Vec<i32> {
     posts
         .iter()
-        .map(|post| match row_values(post)[0] {
-            Value::Integer(id) => id,
-            ref other => panic!("post number should be an integer, got {other:?}"),
+        .map(|post| {
+            post.row_id()
+                .expect("post should retain its row ID")
+                .uuid()
+                .as_u128() as i32
         })
         .collect()
 }
@@ -321,17 +316,15 @@ async fn array_subquery_with_join_returns_joined_elements() {
         let values = pair
             .as_row()
             .expect("joined subquery element should be a row");
-        assert_eq!(values.len(), 7);
+        assert_eq!(values.len(), 5);
         assert!(pair.row_id().is_some(), "joined row should retain an id");
-        let Value::Integer(post_number) = values[0] else {
-            panic!("joined post number should be an integer");
-        };
+        let post_number = pair.row_id().unwrap().uuid().as_u128();
         let expected_post_id = match post_number {
             100 => post_a,
             101 => post_b,
-            other => panic!("unexpected joined post number: {other}"),
+            other => panic!("unexpected joined post id: {other}"),
         };
-        assert_eq!(values[5], Value::Uuid(expected_post_id));
+        assert_eq!(values[3], Value::Uuid(expected_post_id));
     }
 
     clients.shutdown().await;
@@ -360,7 +353,7 @@ async fn array_subquery_returns_related_rows_for_single_parent() {
 
     let values = find_row_by_id(&rows, user_id);
     assert_eq!(values[0], Value::Text("Alice".to_string()));
-    assert_eq!(post_numbers(posts_array(values)), vec![100, 101]);
+    assert_eq!(post_ids(posts_array(values)), vec![100, 101]);
 
     clients.shutdown().await;
 }
@@ -387,18 +380,18 @@ async fn array_subquery_correlates_rows_per_parent() {
             let by_name = rows_by_name(&rows);
             let alice_ok = by_name
                 .get("Alice")
-                .is_some_and(|values| post_numbers(posts_array(values)) == vec![100]);
+                .is_some_and(|values| post_ids(posts_array(values)) == vec![100]);
             let bob_ok = by_name
                 .get("Bob")
-                .is_some_and(|values| post_numbers(posts_array(values)) == vec![200]);
+                .is_some_and(|values| post_ids(posts_array(values)) == vec![200]);
             (alice_ok && bob_ok).then_some(rows)
         },
     )
     .await;
 
     let by_name = rows_by_name(&rows);
-    assert_eq!(post_numbers(posts_array(by_name["Alice"])), vec![100]);
-    assert_eq!(post_numbers(posts_array(by_name["Bob"])), vec![200]);
+    assert_eq!(post_ids(posts_array(by_name["Alice"])), vec![100]);
+    assert_eq!(post_ids(posts_array(by_name["Bob"])), vec![200]);
 
     clients.shutdown().await;
 }
@@ -427,7 +420,7 @@ async fn array_subquery_subscription_changes_parent_when_inner_row_is_inserted()
     )
     .await;
     assert_eq!(
-        post_numbers(posts_array(find_row_by_id(&initial_rows, user_id))),
+        post_ids(posts_array(find_row_by_id(&initial_rows, user_id))),
         vec![100]
     );
 
@@ -465,7 +458,7 @@ async fn array_subquery_subscription_changes_parent_when_inner_row_is_inserted()
     )
     .await;
     assert_eq!(
-        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
+        post_ids(posts_array(find_row_by_id(&rows, user_id))),
         vec![100, 101]
     );
 
@@ -531,7 +524,7 @@ async fn array_subquery_preserves_parent_columns_when_inner_row_arrives() {
                     && values[0] == Value::Text("Alice".to_string())
                     && values[1]
                         .as_array()
-                        .is_some_and(|posts| post_numbers(posts) == vec![100])
+                        .is_some_and(|posts| post_ids(posts) == vec![100])
             });
             has_expected_row.then_some(rows)
         },
@@ -540,7 +533,7 @@ async fn array_subquery_preserves_parent_columns_when_inner_row_arrives() {
 
     let values = find_row_by_id(&rows, user_id);
     assert_eq!(values[0], Value::Text("Alice".to_string()));
-    assert_eq!(post_numbers(posts_array(values)), vec![100]);
+    assert_eq!(post_ids(posts_array(values)), vec![100]);
 
     clients.shutdown().await;
 }
@@ -594,7 +587,7 @@ async fn array_subquery_subscription_adds_parent_with_existing_inner_rows() {
     )
     .await;
     assert_eq!(
-        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
+        post_ids(posts_array(find_row_by_id(&rows, user_id))),
         vec![200]
     );
 
@@ -645,7 +638,7 @@ async fn array_subquery_require_result_hides_parent_until_inner_row_exists() {
     )
     .await;
     assert_eq!(
-        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
+        post_ids(posts_array(find_row_by_id(&rows, user_id))),
         vec![100]
     );
 
@@ -706,7 +699,7 @@ async fn array_subquery_requires_all_array_refs_to_resolve() {
         |rows| {
             let has_expected_row = rows.iter().any(|(id, values)| {
                 *id == group_id
-                    && values[3]
+                    && values[2]
                         .as_array()
                         .is_some_and(|members| members.len() == 2)
             });
@@ -716,13 +709,12 @@ async fn array_subquery_requires_all_array_refs_to_resolve() {
     .await;
 
     let values = find_row_by_id(&rows, group_id);
-    assert_eq!(values[0], Value::Integer(10));
-    assert_eq!(values[1], Value::Text("Maintainers".to_string()));
+    assert_eq!(values[0], Value::Text("Maintainers".to_string()));
     assert_eq!(
-        values[2],
+        values[1],
         Value::Array(vec![Value::Uuid(alice_id), Value::Uuid(bob_id)])
     );
-    assert_eq!(values[3].as_array().expect("members array").len(), 2);
+    assert_eq!(values[2].as_array().expect("members array").len(), 2);
 
     clients.shutdown().await;
 }
@@ -732,7 +724,7 @@ local_tokio_test! {
 /// Verifies that an array subquery can order its inner rows.
 ///
 /// Actors: alice writes posts out of order, bob reads Alice with posts ordered
-/// by post number descending.
+/// by row ID descending.
 async fn array_subquery_orders_inner_rows() {
     let clients = Clients::start().await;
 
@@ -743,7 +735,7 @@ async fn array_subquery_orders_inner_rows() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("posts", "posts", "author_id", "id")
-            .order_by("post_number", OrderDirection::Desc),
+            .order_by("id", OrderDirection::Desc),
     );
 
     let rows = wait_for_rows(
@@ -752,7 +744,7 @@ async fn array_subquery_orders_inner_rows() {
         "bob sees Alice's posts ordered descending",
         |rows| {
             let has_expected_row = rows.iter().any(|(id, values)| {
-                *id == user_id && post_numbers(posts_array(values)) == vec![102, 101, 100]
+                *id == user_id && post_ids(posts_array(values)) == vec![102, 101, 100]
             });
             has_expected_row.then_some(rows)
         },
@@ -760,7 +752,7 @@ async fn array_subquery_orders_inner_rows() {
     .await;
 
     assert_eq!(
-        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
+        post_ids(posts_array(find_row_by_id(&rows, user_id))),
         vec![102, 101, 100]
     );
 
@@ -771,7 +763,7 @@ async fn array_subquery_orders_inner_rows() {
 local_tokio_test! {
 /// Verifies that an array subquery can limit ordered inner rows.
 ///
-/// Actors: alice writes five posts, bob reads only the first two ordered by post number.
+/// Actors: alice writes five posts, bob reads only the first two ordered by row ID.
 async fn array_subquery_limits_ordered_inner_rows() {
     let clients = Clients::start().await;
 
@@ -782,17 +774,17 @@ async fn array_subquery_limits_ordered_inner_rows() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("posts", "posts", "author_id", "id")
-            .order_by("post_number", OrderDirection::Asc)
+            .order_by("id", OrderDirection::Asc)
             .limit(2),
     );
 
     let rows = wait_for_rows(
         &clients.bob,
         query,
-        "bob sees the first two posts by number",
+        "bob sees the first two posts by row ID",
         |rows| {
             let has_expected_row = rows.iter().any(|(id, values)| {
-                *id == user_id && post_numbers(posts_array(values)) == vec![100, 101]
+                *id == user_id && post_ids(posts_array(values)) == vec![100, 101]
             });
             has_expected_row.then_some(rows)
         },
@@ -800,7 +792,7 @@ async fn array_subquery_limits_ordered_inner_rows() {
     .await;
 
     assert_eq!(
-        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
+        post_ids(posts_array(find_row_by_id(&rows, user_id))),
         vec![100, 101]
     );
 
@@ -820,7 +812,7 @@ async fn array_subquery_selects_inner_columns() {
     create_post(&clients.alice, 100, "Post Title", user_id).await;
 
     let query = Query::from("users").array_subquery(
-        ArraySubquery::new("posts", "posts", "author_id", "id").select(["post_number", "title"]),
+        ArraySubquery::new("posts", "posts", "author_id", "id").select(["title"]),
     );
 
     let rows = wait_for_rows(
@@ -833,10 +825,10 @@ async fn array_subquery_selects_inner_columns() {
 
     let posts = posts_array(find_row_by_id(&rows, user_id));
     let post = row_values(&posts[0]);
-    assert_eq!(post.len(), 2);
+    assert_eq!(post.len(), 1);
     assert!(posts[0].row_id().is_some(), "post row should retain an id");
-    assert_eq!(post[0], Value::Integer(100));
-    assert_eq!(post[1], Value::Text("Post Title".to_string()));
+    assert_eq!(posts[0].row_id().unwrap().uuid(), &uuid::Uuid::from_u128(100));
+    assert_eq!(post[0], Value::Text("Post Title".to_string()));
 
     clients.shutdown().await;
 }
@@ -856,7 +848,6 @@ async fn array_subquery_selects_magic_timestamp_columns() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("posts", "posts", "author_id", "id").select([
-            "post_number",
             "title",
             "$createdAt",
             "$updatedAt",
@@ -873,11 +864,11 @@ async fn array_subquery_selects_magic_timestamp_columns() {
 
     let posts = posts_array(find_row_by_id(&rows, user_id));
     let post = row_values(&posts[0]);
-    assert_eq!(post.len(), 4);
-    assert_eq!(post[0], Value::Integer(100));
-    assert_eq!(post[1], Value::Text("Post Title".to_string()));
+    assert_eq!(post.len(), 3);
+    assert_eq!(posts[0].row_id().unwrap().uuid(), &uuid::Uuid::from_u128(100));
+    assert_eq!(post[0], Value::Text("Post Title".to_string()));
+    assert!(matches!(post[1], Value::Timestamp(_)));
     assert!(matches!(post[2], Value::Timestamp(_)));
-    assert!(matches!(post[3], Value::Timestamp(_)));
 
     clients.shutdown().await;
 }
@@ -916,12 +907,13 @@ async fn array_subquery_supports_nested_arrays() {
                 let posts = posts_array(values);
                 posts.len() == 2
                     && posts.iter().all(|post| {
+                        let id = post.row_id().unwrap().uuid().as_u128();
                         let post = row_values(post);
-                        match post[0] {
-                            Value::Integer(100) => post[3]
+                        match id {
+                            100 => post[2]
                                 .as_array()
                                 .is_some_and(|comments| comments.len() == 2),
-                            Value::Integer(101) => post[3]
+                            101 => post[2]
                                 .as_array()
                                 .is_some_and(|comments| comments.len() == 1),
                             _ => false,
@@ -936,13 +928,14 @@ async fn array_subquery_supports_nested_arrays() {
     let posts = posts_array(find_row_by_id(&rows, user_id));
     assert_eq!(posts.len(), 2);
     for post in posts {
+        let id = post.row_id().unwrap().uuid().as_u128();
         let post = row_values(post);
-        assert_eq!(post.len(), 4);
-        let comments = post[3].as_array().expect("comments should be an array");
-        match post[0] {
-            Value::Integer(100) => assert_eq!(comments.len(), 2),
-            Value::Integer(101) => assert_eq!(comments.len(), 1),
-            ref other => panic!("unexpected post number {other:?}"),
+        assert_eq!(post.len(), 3);
+        let comments = post[2].as_array().expect("comments should be an array");
+        match id {
+            100 => assert_eq!(comments.len(), 2),
+            101 => assert_eq!(comments.len(), 1),
+            ref other => panic!("unexpected post id {other:?}"),
         }
     }
 

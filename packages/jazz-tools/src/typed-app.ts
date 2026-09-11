@@ -16,7 +16,7 @@ import {
   PROVENANCE_MAGIC_COLUMNS,
   magicColumnType,
   type ProvenanceMagicColumn,
-  assertUserColumnNameAllowed,
+  assertUserTableColumnNameAllowed,
 } from "./magic-columns.js";
 import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
@@ -34,7 +34,9 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
     public readonly columns: TColumns,
     public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
     public readonly branchColumns?: readonly Extract<keyof TColumns, string>[],
-  ) {}
+  ) {
+    for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
+  }
 
   indexOnly<
     const TColumnsForIndex extends readonly [
@@ -1563,7 +1565,7 @@ function definitionToColumns(
   const columnsDefinition = unwrapTableDefinition(definition);
   const columns: Column[] = [];
   for (const [columnName, builder] of Object.entries(columnsDefinition)) {
-    assertUserColumnNameAllowed(columnName);
+    assertUserTableColumnNameAllowed(columnName);
     const column = builder._build(columnName);
     if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;
     columns.push(column);
@@ -1614,6 +1616,11 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
 export function defineSchema<const TSchema extends SchemaDefinition>(
   definition: TSchema & ValidateSchemaRefs<TSchema>,
 ): Schema<TSchema> {
+  for (const table of Object.values(definition)) {
+    for (const column of Object.keys(unwrapTableDefinition(table))) {
+      assertUserTableColumnNameAllowed(column);
+    }
+  }
   return definition as unknown as Schema<TSchema>;
 }
 

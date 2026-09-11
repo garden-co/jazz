@@ -32,21 +32,16 @@ fn test_user_id(subject: &str) -> String {
     Uuid::new_v5(&Uuid::NAMESPACE_URL, subject.as_bytes()).to_string()
 }
 
-fn user_values_v1(id: jazz::tools::ObjectId, name: &str) -> HashMap<String, Value> {
-    row_input!("id" => id, "name" => name)
+fn user_values_v1(name: &str) -> HashMap<String, Value> {
+    row_input!("name" => name)
 }
 
-fn user_values_v2(id: jazz::tools::ObjectId, name: &str, email: &str) -> HashMap<String, Value> {
-    row_input!("id" => id, "name" => name, "email" => email)
+fn user_values_v2(name: &str, email: &str) -> HashMap<String, Value> {
+    row_input!("name" => name, "email" => email)
 }
 
-fn user_values_v3(
-    id: jazz::tools::ObjectId,
-    name: &str,
-    email: &str,
-    role: &str,
-) -> HashMap<String, Value> {
-    row_input!("id" => id, "name" => name, "email" => email, "role" => role)
+fn user_values_v3(name: &str, email: &str, role: &str) -> HashMap<String, Value> {
+    row_input!("name" => name, "email" => email, "role" => role)
 }
 
 /// A cold old-schema reader can request one new-schema row by physical ID
@@ -159,11 +154,7 @@ async fn cold_old_schema_id_query_reads_new_array_column_row() {
 
 fn schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("name", ColumnType::Text),
-        )
+        .table(TableSchema::builder("users").column("name", ColumnType::Text))
         .build()
 }
 
@@ -171,7 +162,6 @@ fn schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
                 .column("name", ColumnType::Text)
                 .nullable_column("email", ColumnType::Text),
         )
@@ -182,7 +172,6 @@ fn schema_v3() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
                 .column("name", ColumnType::Text)
                 .nullable_column("email", ColumnType::Text)
                 .nullable_column("role", ColumnType::Text),
@@ -216,44 +205,29 @@ fn v2_to_v3_lens() -> Lens {
     )
 }
 
-fn rename_chain_values_v1(id: jazz::tools::ObjectId, email: &str) -> HashMap<String, Value> {
-    row_input!("id" => id, "email" => email)
+fn rename_chain_values_v1(email: &str) -> HashMap<String, Value> {
+    row_input!("email" => email)
 }
 
-fn rename_chain_values_v3(
-    id: jazz::tools::ObjectId,
-    contact_email: &str,
-) -> HashMap<String, Value> {
-    row_input!("id" => id, "contact_email" => contact_email)
+fn rename_chain_values_v3(contact_email: &str) -> HashMap<String, Value> {
+    row_input!("contact_email" => contact_email)
 }
 
 fn rename_chain_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("email", ColumnType::Text),
-        )
+        .table(TableSchema::builder("users").column("email", ColumnType::Text))
         .build()
 }
 
 fn rename_chain_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("email_address", ColumnType::Text),
-        )
+        .table(TableSchema::builder("users").column("email_address", ColumnType::Text))
         .build()
 }
 
 fn rename_chain_schema_v3() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("contact_email", ColumnType::Text),
-        )
+        .table(TableSchema::builder("users").column("contact_email", ColumnType::Text))
         .build()
 }
 
@@ -281,31 +255,23 @@ fn rename_chain_v2_to_v3_lens() -> Lens {
     )
 }
 
-fn table_rename_values_v1(id: jazz::tools::ObjectId, email: &str) -> HashMap<String, Value> {
-    row_input!("id" => id, "email" => email)
+fn table_rename_values_v1(email: &str) -> HashMap<String, Value> {
+    row_input!("email" => email)
 }
 
-fn table_rename_values_v2(id: jazz::tools::ObjectId, email: &str) -> HashMap<String, Value> {
-    row_input!("id" => id, "email" => email)
+fn table_rename_values_v2(email: &str) -> HashMap<String, Value> {
+    row_input!("email" => email)
 }
 
 fn table_rename_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("email", ColumnType::Text),
-        )
+        .table(TableSchema::builder("users").column("email", ColumnType::Text))
         .build()
 }
 
 fn table_rename_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("people")
-                .column("id", ColumnType::Uuid)
-                .column("email", ColumnType::Text),
-        )
+        .table(TableSchema::builder("people").column("email", ColumnType::Text))
         .build()
 }
 
@@ -327,7 +293,6 @@ fn table_rename_copy_on_write_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("people")
-                .column("id", ColumnType::Uuid)
                 .column("email", ColumnType::Text)
                 .column_with_default(
                     "v2_marker",
@@ -357,28 +322,22 @@ fn table_rename_copy_on_write_v1_to_v2_lens() -> Lens {
     )
 }
 
-fn table_rename_join_user_values(id: jazz::tools::ObjectId, name: &str) -> HashMap<String, Value> {
-    row_input!("id" => id, "name" => name)
+fn table_rename_join_user_values(name: &str) -> HashMap<String, Value> {
+    row_input!("name" => name)
 }
 
 fn table_rename_join_post_values(
-    id: jazz::tools::ObjectId,
     author_id: jazz::tools::ObjectId,
     title: &str,
 ) -> HashMap<String, Value> {
-    row_input!("id" => id, "author_id" => author_id, "title" => title)
+    row_input!("author_id" => author_id, "title" => title)
 }
 
 fn table_rename_join_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("name", ColumnType::Text),
-        )
+        .table(TableSchema::builder("users").column("name", ColumnType::Text))
         .table(
             TableSchema::builder("posts")
-                .column("id", ColumnType::Uuid)
                 .fk_column("author_id", "users")
                 .column("title", ColumnType::Text),
         )
@@ -387,14 +346,9 @@ fn table_rename_join_schema_v1() -> jazz::tools::Schema {
 
 fn table_rename_join_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("people")
-                .column("id", ColumnType::Uuid)
-                .column("name", ColumnType::Text),
-        )
+        .table(TableSchema::builder("people").column("name", ColumnType::Text))
         .table(
             TableSchema::builder("posts")
-                .column("id", ColumnType::Uuid)
                 .fk_column("author_id", "people")
                 .column("title", ColumnType::Text),
         )
@@ -476,54 +430,33 @@ fn legacy_join_provenance_to_current_permissions_lens() -> Lens {
     )
 }
 
-fn multi_hop_table_rename_values_v1(
-    id: jazz::tools::ObjectId,
-    email: &str,
-) -> HashMap<String, Value> {
-    row_input!("id" => id, "email" => email)
+fn multi_hop_table_rename_values_v1(email: &str) -> HashMap<String, Value> {
+    row_input!("email" => email)
 }
 
-fn multi_hop_table_rename_values_v2(
-    id: jazz::tools::ObjectId,
-    email: &str,
-) -> HashMap<String, Value> {
-    row_input!("id" => id, "email" => email)
+fn multi_hop_table_rename_values_v2(email: &str) -> HashMap<String, Value> {
+    row_input!("email" => email)
 }
 
-fn multi_hop_table_rename_values_v3(
-    id: jazz::tools::ObjectId,
-    email_address: &str,
-) -> HashMap<String, Value> {
-    row_input!("id" => id, "email_address" => email_address)
+fn multi_hop_table_rename_values_v3(email_address: &str) -> HashMap<String, Value> {
+    row_input!("email_address" => email_address)
 }
 
 fn multi_hop_table_rename_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("email", ColumnType::Text),
-        )
+        .table(TableSchema::builder("users").column("email", ColumnType::Text))
         .build()
 }
 
 fn multi_hop_table_rename_schema_v2() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("people")
-                .column("id", ColumnType::Uuid)
-                .column("email", ColumnType::Text),
-        )
+        .table(TableSchema::builder("people").column("email", ColumnType::Text))
         .build()
 }
 
 fn multi_hop_table_rename_schema_v3() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("members")
-                .column("id", ColumnType::Uuid)
-                .column("email_address", ColumnType::Text),
-        )
+        .table(TableSchema::builder("members").column("email_address", ColumnType::Text))
         .build()
 }
 
@@ -556,25 +489,17 @@ fn multi_hop_table_rename_v2_to_v3_lens() -> Lens {
     )
 }
 
-fn removed_readded_values_v1(id: jazz::tools::ObjectId, name: &str) -> HashMap<String, Value> {
-    row_input!("id" => id, "name" => name)
+fn removed_readded_values_v1(name: &str) -> HashMap<String, Value> {
+    row_input!("name" => name)
 }
 
-fn removed_readded_values_v3(
-    id: jazz::tools::ObjectId,
-    name: &str,
-    email: &str,
-) -> HashMap<String, Value> {
-    row_input!("id" => id, "name" => name, "email" => email)
+fn removed_readded_values_v3(name: &str, email: &str) -> HashMap<String, Value> {
+    row_input!("name" => name, "email" => email)
 }
 
 fn removed_readded_schema_v1() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
-                .column("name", ColumnType::Text),
-        )
+        .table(TableSchema::builder("users").column("name", ColumnType::Text))
         .build()
 }
 
@@ -586,7 +511,6 @@ fn removed_readded_schema_v3() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
                 .column("name", ColumnType::Text)
                 .nullable_column("email", ColumnType::Text),
         )
@@ -600,7 +524,6 @@ fn removed_readded_v1_to_v2_lens() -> Lens {
         LensTransform::with_ops(vec![LensOp::RemoveTable {
             table: "users".to_string(),
             schema: TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
                 .column("name", ColumnType::Text)
                 .build(),
         }]),
@@ -614,7 +537,6 @@ fn removed_readded_v2_to_v3_lens() -> Lens {
         LensTransform::with_ops(vec![LensOp::AddTable {
             table: "users".to_string(),
             schema: TableSchema::builder("users")
-                .column("id", ColumnType::Uuid)
                 .column("name", ColumnType::Text)
                 .nullable_column("email", ColumnType::Text)
                 .build(),
@@ -892,12 +814,8 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
         .connect_after_retry_later(Duration::from_secs(30))
         .await;
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, transaction_id) = alice
-        .insert(
-            "users",
-            user_values_v1(user_id, "visible through peer edge"),
-        )
+        .insert("users", user_values_v1("visible through peer edge"))
         .expect("peer-edge client writes after receiving the catalogue");
     alice
         .wait_for_transaction(
@@ -918,10 +836,7 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
     .await;
     assert_eq!(
         rows[0].1,
-        vec![
-            Value::Uuid(user_id),
-            Value::Text("visible through peer edge".to_string())
-        ]
+        vec![Value::Text("visible through peer edge".to_string())]
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -997,11 +912,10 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
         .connect_after_retry_later(Duration::from_secs(30))
         .await;
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, transaction_id) = alice_v2
         .insert(
             "users",
-            user_values_v2(user_id, "replayed before client work", "v2@example.test"),
+            user_values_v2("replayed before client work", "v2@example.test"),
         )
         .expect("v2 client writes through restarted edge");
     alice_v2
@@ -1023,7 +937,6 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
     assert_eq!(
         rows[0].1,
         vec![
-            Value::Uuid(user_id),
             Value::Text("replayed before client work".to_string()),
             Value::Text("v2@example.test".to_string()),
         ]
@@ -1195,12 +1108,8 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
     let mut alice_log = Vec::new();
     let mut bob_log = Vec::new();
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, transaction_id) = carol
-        .insert(
-            "users",
-            user_values_v1(user_id, "visible before retightening"),
-        )
+        .insert("users", user_values_v1("visible before retightening"))
         .expect("core writer inserts visible row");
     carol
         .wait_for_transaction(
@@ -1462,12 +1371,8 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
     .expect("connect admin");
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz::tools::ObjectId::new();
     let (user_obj_id, _, transaction_id) = admin
-        .insert(
-            "users",
-            user_values_v1(user_id_value, "visible after permissions"),
-        )
+        .insert("users", user_values_v1("visible after permissions"))
         .expect("admin creates user after permissions publish");
     support::wait_for_edge_txs(
         &admin,
@@ -1486,10 +1391,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
     .await;
     assert_eq!(
         rows_after_permissions[0].1,
-        vec![
-            Value::Uuid(user_id_value),
-            Value::Text("visible after permissions".to_string()),
-        ]
+        vec![Value::Text("visible after permissions".to_string()),]
     );
 
     admin.shutdown().await.expect("shutdown admin");
@@ -1523,13 +1425,12 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         .connect()
         .await;
 
-    let queued_user_id = jazz::tools::ObjectId::new();
     let queued_row_id = jazz::tools::ObjectId::new();
     let (_, _, transaction_id) = writer
         .insert_with_id(
             "users",
             *queued_row_id.uuid(),
-            user_values_v1(queued_user_id, "queued before permissions"),
+            user_values_v1("queued before permissions"),
         )
         .expect("pre-permissions create should stage locally");
     let queued_write_error = writer
@@ -1580,12 +1481,8 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     .await;
     assert!(rows_after_publish.is_empty());
 
-    let accepted_user_id = jazz::tools::ObjectId::new();
     let (accepted_row_id, _, transaction_id) = writer
-        .insert(
-            "users",
-            user_values_v1(accepted_user_id, "accepted after permissions"),
-        )
+        .insert("users", user_values_v1("accepted after permissions"))
         .expect("post-publish create should succeed");
     support::wait_for_edge_txs(
         &writer,
@@ -1602,11 +1499,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         |rows| {
             (rows.len() == 1
                 && rows[0].0 == accepted_row_id
-                && rows[0].1
-                    == vec![
-                        Value::Uuid(accepted_user_id),
-                        Value::Text("accepted after permissions".to_string()),
-                    ])
+                && rows[0].1 == vec![Value::Text("accepted after permissions".to_string())])
             .then_some(rows)
         },
     )
@@ -1641,11 +1534,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         |rows| {
             (rows.len() == 1
                 && rows[0].0 == accepted_row_id
-                && rows[0].1
-                    == vec![
-                        Value::Uuid(accepted_user_id),
-                        Value::Text("updated after permissions".to_string()),
-                    ])
+                && rows[0].1 == vec![Value::Text("updated after permissions".to_string())])
             .then_some(rows)
         },
     )
@@ -1703,12 +1592,8 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
         .connect()
         .await;
 
-    let denied_user_id = jazz::tools::ObjectId::new();
     let (denied_row_id, _, _) = writer
-        .insert(
-            "users",
-            user_values_v1(denied_user_id, "timed out before permissions"),
-        )
+        .insert("users", user_values_v1("timed out before permissions"))
         .expect("optimistic local create before timeout");
 
     tokio::time::sleep(Duration::from_secs(12)).await;
@@ -1731,12 +1616,8 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
     wait_for_edge_query_ready(&observer, "users", Duration::from_secs(30)).await;
     wait_for_edge_query_ready(&writer, "users", Duration::from_secs(30)).await;
 
-    let allowed_user_id = jazz::tools::ObjectId::new();
     let (allowed_row_id, _, transaction_id) = writer
-        .insert(
-            "users",
-            user_values_v1(allowed_user_id, "accepted after timeout window"),
-        )
+        .insert("users", user_values_v1("accepted after timeout window"))
         .expect("create should succeed after permissions publish");
     support::wait_for_edge_txs(
         &writer,
@@ -1761,10 +1642,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
     );
     assert_eq!(
         observer_rows[0].1,
-        vec![
-            Value::Uuid(allowed_user_id),
-            Value::Text("accepted after timeout window".to_string()),
-        ]
+        vec![Value::Text("accepted after timeout window".to_string()),]
     );
 
     observer.shutdown().await.expect("shutdown observer");
@@ -1815,12 +1693,8 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     .expect("connect admin");
     wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz::tools::ObjectId::new();
     let (user_obj_id, _, transaction_id) = admin
-        .insert(
-            "users",
-            user_values_v1(user_id_value, "subscription target"),
-        )
+        .insert("users", user_values_v1("subscription target"))
         .expect("admin creates user after permissions publish");
     support::wait_for_edge_txs(
         &admin,
@@ -1925,9 +1799,8 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
 
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz::tools::ObjectId::new();
     let (user_obj_id, _, transaction_id) = alice
-        .insert("users", user_values_v1(user_id_value, "Alice Smith"))
+        .insert("users", user_values_v1("Alice Smith"))
         .expect("alice creates user after permissions publish");
     support::wait_for_edge_txs(
         &alice,
@@ -1960,16 +1833,11 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
     let values = &bob_rows[0].1;
     assert_eq!(
         values[0],
-        Value::Uuid(user_id_value),
-        "id should match alice's user"
-    );
-    assert_eq!(
-        values[1],
         Value::Text("Alice Smith".to_string()),
         "name should match alice's user"
     );
     assert_eq!(
-        values[2],
+        values[1],
         Value::Null,
         "email should be null (default from lens transform)"
     );
@@ -2020,9 +1888,8 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, transaction_id) = alice
-        .insert("users", user_values_v1(user_id, "Alice Pending Lens"))
+        .insert("users", user_values_v1("Alice Pending Lens"))
         .expect("alice creates v1 user");
     support::wait_for_edge_txs(
         &alice,
@@ -2088,11 +1955,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
     .await;
     assert_eq!(
         rows[0].1,
-        vec![
-            Value::Uuid(user_id),
-            Value::Text("Alice Pending Lens".to_string()),
-            Value::Null,
-        ]
+        vec![Value::Text("Alice Pending Lens".to_string()), Value::Null,]
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -2149,9 +2012,9 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     .await
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
-    let alice_user_id = jazz::tools::ObjectId::new();
+
     let (alice_row_id, _, alice_tx_id) = alice
-        .insert("users", user_values_v1(alice_user_id, "Alice Multi-Hop"))
+        .insert("users", user_values_v1("Alice Multi-Hop"))
         .expect("alice creates v1 user");
     support::wait_for_edge_txs(
         &alice,
@@ -2165,12 +2028,9 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     .await
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
-    let bob_user_id = jazz::tools::ObjectId::new();
+
     let (bob_row_id, _, bob_tx_id) = bob
-        .insert(
-            "users",
-            user_values_v2(bob_user_id, "Bob Multi-Hop", "bob@example.com"),
-        )
+        .insert("users", user_values_v2("Bob Multi-Hop", "bob@example.com"))
         .expect("bob creates v2 user");
     support::wait_for_edge_txs(
         &bob,
@@ -2184,16 +2044,11 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     .await
     .expect("connect charlie");
     wait_for_edge_query_ready(&charlie, "users", Duration::from_secs(30)).await;
-    let charlie_user_id = jazz::tools::ObjectId::new();
+
     let (charlie_row_id, _, charlie_tx_id) = charlie
         .insert(
             "users",
-            user_values_v3(
-                charlie_user_id,
-                "Charlie Multi-Hop",
-                "charlie@example.com",
-                "admin",
-            ),
+            user_values_v3("Charlie Multi-Hop", "charlie@example.com", "admin"),
         )
         .expect("charlie creates v3 user");
     support::wait_for_edge_txs(
@@ -2225,7 +2080,6 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     assert_eq!(
         alice_row.1,
         vec![
-            Value::Uuid(alice_user_id),
             Value::Text("Alice Multi-Hop".to_string()),
             Value::Null,
             Value::Null,
@@ -2239,7 +2093,6 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     assert_eq!(
         bob_row.1,
         vec![
-            Value::Uuid(bob_user_id),
             Value::Text("Bob Multi-Hop".to_string()),
             Value::Text("bob@example.com".to_string()),
             Value::Null,
@@ -2253,7 +2106,6 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     assert_eq!(
         charlie_row.1,
         vec![
-            Value::Uuid(charlie_user_id),
             Value::Text("Charlie Multi-Hop".to_string()),
             Value::Text("charlie@example.com".to_string()),
             Value::Text("admin".to_string()),
@@ -2314,12 +2166,8 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, transaction_id) = alice
-        .insert(
-            "users",
-            rename_chain_values_v1(user_id, "alice@example.com"),
-        )
+        .insert("users", rename_chain_values_v1("alice@example.com"))
         .expect("alice creates v1 user");
     support::wait_for_edge_txs(
         &alice,
@@ -2346,10 +2194,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
 
     assert_eq!(
         rows[0].1,
-        vec![
-            Value::Uuid(user_id),
-            Value::Text("alice@example.com".to_string()),
-        ]
+        vec![Value::Text("alice@example.com".to_string()),]
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -2404,9 +2249,8 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, transaction_id) = bob
-        .insert("users", rename_chain_values_v3(user_id, "bob@example.com"))
+        .insert("users", rename_chain_values_v3("bob@example.com"))
         .expect("bob creates v3 user");
     support::wait_for_edge_txs(
         &bob,
@@ -2431,13 +2275,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     )
     .await;
 
-    assert_eq!(
-        rows[0].1,
-        vec![
-            Value::Uuid(user_id),
-            Value::Text("bob@example.com".to_string()),
-        ]
-    );
+    assert_eq!(rows[0].1, vec![Value::Text("bob@example.com".to_string()),]);
 
     bob.shutdown().await.expect("shutdown bob");
     alice.shutdown().await.expect("shutdown alice");
@@ -2490,12 +2328,8 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, transaction_id) = alice
-        .insert(
-            "users",
-            table_rename_values_v1(user_id, "alice@example.com"),
-        )
+        .insert("users", table_rename_values_v1("alice@example.com"))
         .expect("alice creates v1 user");
     support::wait_for_edge_txs(
         &alice,
@@ -2522,10 +2356,7 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
 
     assert_eq!(
         rows[0].1,
-        vec![
-            Value::Uuid(user_id),
-            Value::Text("alice@example.com".to_string()),
-        ]
+        vec![Value::Text("alice@example.com".to_string()),]
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -2598,12 +2429,8 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, _) = alice
-        .insert(
-            "users",
-            table_rename_values_v1(user_id, "alice@example.com"),
-        )
+        .insert("users", table_rename_values_v1("alice@example.com"))
         .expect("alice creates v1 user");
 
     wait_for_subscription_update(
@@ -2640,10 +2467,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     .await;
     assert_eq!(
         rows[0].1,
-        vec![
-            Value::Uuid(user_id),
-            Value::Text("alice@example.com".to_string()),
-        ]
+        vec![Value::Text("alice@example.com".to_string()),]
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -2737,9 +2561,8 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, transaction_id) = bob
-        .insert("people", table_rename_values_v2(user_id, "bob@example.com"))
+        .insert("people", table_rename_values_v2("bob@example.com"))
         .expect("bob creates v2 person");
     support::wait_for_edge_txs(
         &bob,
@@ -2765,13 +2588,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
     )
     .await;
-    assert_eq!(
-        rows[0].1,
-        vec![
-            Value::Uuid(user_id),
-            Value::Text("bob@example.com".to_string()),
-        ]
-    );
+    assert_eq!(rows[0].1, vec![Value::Text("bob@example.com".to_string()),]);
 
     bob.shutdown().await.expect("shutdown bob");
     alice.shutdown().await.expect("shutdown alice");
@@ -2815,12 +2632,8 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id = jazz::tools::ObjectId::new();
     let (row_id, _, transaction_id) = alice
-        .insert(
-            "users",
-            table_rename_values_v1(user_id, "alice@example.com"),
-        )
+        .insert("users", table_rename_values_v1("alice@example.com"))
         .expect("alice creates v1 user");
     support::wait_for_edge_txs(
         &alice,
@@ -2880,7 +2693,6 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
                 && rows[0].0 == row_id
                 && rows[0].1
                     == vec![
-                        Value::Uuid(user_id),
                         Value::Text("alice+updated@example.com".to_string()),
                         Value::Text("written-by-v2".to_string()),
                     ])
@@ -2958,7 +2770,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         .insert_with_id(
             "users",
             *author_id.uuid(),
-            table_rename_join_user_values(author_id, "Alice"),
+            table_rename_join_user_values("Alice"),
         )
         .expect("alice creates v1 user");
     let post_id = jazz::tools::ObjectId::new();
@@ -2966,7 +2778,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         .insert_with_id(
             "posts",
             *post_id.uuid(),
-            table_rename_join_post_values(post_id, author_id, "Hello from v1"),
+            table_rename_join_post_values(author_id, "Hello from v1"),
         )
         .expect("alice creates v1 post");
     support::wait_for_edge_txs(
@@ -3004,10 +2816,8 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
             .map(|field| field.value.clone())
             .collect::<Vec<_>>(),
         vec![
-            Value::Uuid(post_id),
             Value::Uuid(author_id),
             Value::Text("Hello from v1".to_string()),
-            Value::Uuid(author_id),
             Value::Text("Alice".to_string()),
         ]
     );
@@ -3067,14 +2877,14 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
         .insert_with_id(
             "users",
             *author_id.uuid(),
-            table_rename_join_user_values(author_id, "Alice"),
+            table_rename_join_user_values("Alice"),
         )
         .expect("alice creates v1 user");
-    let post_id = jazz::tools::ObjectId::new();
+
     let (_, _, post_tx) = alice
         .insert(
             "posts",
-            table_rename_join_post_values(post_id, author_id, "Alice post"),
+            table_rename_join_post_values(author_id, "Alice post"),
         )
         .expect("alice creates v1 post");
     support::wait_for_edge_txs(
@@ -3112,18 +2922,16 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     )
     .await;
 
-    assert_eq!(rows[0].1[0], Value::Uuid(author_id));
-    assert_eq!(rows[0].1[1], Value::Text("Alice".to_string()));
-    let posts = rows[0].1[2]
+    assert_eq!(rows[0].1[0], Value::Text("Alice".to_string()));
+    let posts = rows[0].1[1]
         .as_array()
-        .expect("third column should be posts array");
+        .expect("second column should be posts array");
     assert_eq!(posts.len(), 1);
     let first_post = posts[0]
         .as_row()
         .expect("post array element should be a row");
-    assert_eq!(first_post[0], Value::Uuid(post_id));
-    assert_eq!(first_post[1], Value::Uuid(author_id));
-    assert_eq!(first_post[2], Value::Text("Alice post".to_string()));
+    assert_eq!(first_post[0], Value::Uuid(author_id));
+    assert_eq!(first_post[1], Value::Text("Alice post".to_string()));
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
@@ -3360,11 +3168,11 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     .await
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
-    let alice_id = jazz::tools::ObjectId::new();
+
     let (alice_row_id, _, transaction_id) = alice
         .insert(
             "users",
-            multi_hop_table_rename_values_v1(alice_id, "alice@example.com"),
+            multi_hop_table_rename_values_v1("alice@example.com"),
         )
         .expect("alice creates v1 user");
     support::wait_for_edge_txs(
@@ -3386,11 +3194,11 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     .await
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
-    let bob_id = jazz::tools::ObjectId::new();
+
     let (bob_row_id, _, transaction_id) = bob
         .insert(
             "people",
-            multi_hop_table_rename_values_v2(bob_id, "bob@example.com"),
+            multi_hop_table_rename_values_v2("bob@example.com"),
         )
         .expect("bob creates v2 person");
     support::wait_for_edge_txs(
@@ -3414,11 +3222,11 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
         .await
         .expect("connect carol");
     wait_for_edge_query_ready(&carol, "members", Duration::from_secs(30)).await;
-    let carol_id = jazz::tools::ObjectId::new();
+
     let (carol_row_id, _, transaction_id) = carol
         .insert(
             "members",
-            multi_hop_table_rename_values_v3(carol_id, "carol@example.com"),
+            multi_hop_table_rename_values_v3("carol@example.com"),
         )
         .expect("carol creates v3 member");
     support::wait_for_edge_txs(
@@ -3443,25 +3251,15 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     )
     .await;
 
-    assert!(rows.iter().all(|(_, row)| row.len() == 2));
-    assert!(rows.iter().any(|(_, row)| {
-        row == &vec![
-            Value::Uuid(alice_id),
-            Value::Text("alice@example.com".to_string()),
-        ]
-    }));
-    assert!(rows.iter().any(|(_, row)| {
-        row == &vec![
-            Value::Uuid(bob_id),
-            Value::Text("bob@example.com".to_string()),
-        ]
-    }));
-    assert!(rows.iter().any(|(_, row)| {
-        row == &vec![
-            Value::Uuid(carol_id),
-            Value::Text("carol@example.com".to_string()),
-        ]
-    }));
+    for (expected_id, email) in [
+        (alice_row_id, "alice@example.com"),
+        (bob_row_id, "bob@example.com"),
+        (carol_row_id, "carol@example.com"),
+    ] {
+        assert!(rows.iter().any(|(id, values)| {
+            *id == expected_id && values == &vec![Value::Text(email.to_string())]
+        }));
+    }
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
@@ -3513,12 +3311,8 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     .expect("connect alice");
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let alice_id = jazz::tools::ObjectId::new();
     let (alice_row_id, _, transaction_id) = alice
-        .insert(
-            "users",
-            removed_readded_values_v1(alice_id, "Alice Old Lineage"),
-        )
+        .insert("users", removed_readded_values_v1("Alice Old Lineage"))
         .expect("alice creates v1 user");
     support::wait_for_edge_txs(
         &alice,
@@ -3541,11 +3335,10 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     .expect("connect bob");
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
-    let bob_id = jazz::tools::ObjectId::new();
     let (bob_row_id, _, transaction_id) = bob
         .insert(
             "users",
-            removed_readded_values_v3(bob_id, "Bob New Lineage", "bob@example.com"),
+            removed_readded_values_v3("Bob New Lineage", "bob@example.com"),
         )
         .expect("bob creates v3 user");
     support::wait_for_edge_txs(
@@ -3572,7 +3365,6 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     assert_eq!(
         rows[0].1,
         vec![
-            Value::Uuid(bob_id),
             Value::Text("Bob New Lineage".to_string()),
             Value::Text("bob@example.com".to_string()),
         ]
@@ -3634,13 +3426,9 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
 
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz::tools::ObjectId::new();
     let user_email = "bob@example.com";
     let (user_obj_id, _, _) = bob
-        .insert(
-            "users",
-            user_values_v2(user_id_value, "Bob Backward", user_email),
-        )
+        .insert("users", user_values_v2("Bob Backward", user_email))
         .expect("bob creates user");
 
     wait_for_query(
@@ -3678,16 +3466,11 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
     let values = &alice_rows[0].1;
     assert_eq!(
         values.len(),
-        2,
+        1,
         "v1 view should not include the email column"
     );
     assert_eq!(
         values[0],
-        Value::Uuid(user_id_value),
-        "id should match bob's user"
-    );
-    assert_eq!(
-        values[1],
         Value::Text("Bob Backward".to_string()),
         "name should match bob's user"
     );
@@ -3733,9 +3516,8 @@ async fn keeps_authorization_through_v1_head_impl() {
 
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let user_id_value = jazz::tools::ObjectId::new();
     let (user_obj_id, _, transaction_id) = alice
-        .insert("users", user_values_v1(user_id_value, "Alice Through Lens"))
+        .insert("users", user_values_v1("Alice Through Lens"))
         .expect("alice creates user after v1 permissions publish");
     support::wait_for_edge_txs(
         &alice,
@@ -3789,11 +3571,7 @@ async fn keeps_authorization_through_v1_head_impl() {
     .await;
     assert_eq!(
         bob_rows[0].1,
-        vec![
-            Value::Uuid(user_id_value),
-            Value::Text("Alice Through Lens".to_string()),
-            Value::Null,
-        ]
+        vec![Value::Text("Alice Through Lens".to_string()), Value::Null,]
     );
 
     alice.shutdown().await.expect("shutdown alice");

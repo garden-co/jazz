@@ -695,11 +695,7 @@ mod tests {
 
     fn shutdown_test_schema() -> Schema {
         SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build()
     }
 

@@ -19,7 +19,7 @@ import type {
   ScalarSqlType,
   TSTypeFromSqlType,
 } from "./schema.js";
-import { assertUserColumnNameAllowed } from "./magic-columns.js";
+import { assertUserColumnNameAllowed, assertUserTableColumnNameAllowed } from "./magic-columns.js";
 
 const MAX_ENUM_VARIANTS = 256;
 
@@ -1015,7 +1015,7 @@ export function table<const T extends Record<string, ColumnBuilder>>(
   const cols: Column[] = [];
   for (const [colName, builder] of Object.entries(columns as Record<string, ColumnBuilder>)) {
     validateReferenceColumnName(colName, builder);
-    assertUserColumnNameAllowed(colName);
+    assertUserTableColumnNameAllowed(colName);
     const column = builder._build(colName);
     if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;
     cols.push(column);

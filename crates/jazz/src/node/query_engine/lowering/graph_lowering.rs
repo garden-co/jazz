@@ -3009,25 +3009,6 @@ fn lower_join_key_ref(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<String, UnsupportedReason> {
-    if let NormalizedValueRef::SourceField {
-        source: value_source,
-        field,
-    } = value
-        && value_source == source_id
-        && field == "id"
-    {
-        let declared_id = user_column_field(field);
-        if source
-            .row_shape
-            .descriptor
-            .fields()
-            .iter()
-            .any(|candidate| candidate.name.as_deref() == Some(declared_id.as_str()))
-        {
-            return Ok(declared_id);
-        }
-        return require_source_field(source, &source.row_shape.row_uuid_field);
-    }
     match lower_value_ref(value, source_id, source, request)? {
         LoweredValueRef::Field(field) => Ok(field),
         LoweredValueRef::Literal(_) => Err(UnsupportedReason::Operator(

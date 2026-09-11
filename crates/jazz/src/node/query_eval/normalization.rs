@@ -196,7 +196,6 @@ fn join_lookup_source_id(lookup: &crate::query::JoinSourceLookup, path: &str) ->
 pub(super) fn current_query_output_request(
     output: CurrentQueryProgramOutput,
     query: &JazzQuery,
-    schema: &RuntimeSchema,
 ) -> RowSetOutputRequest {
     let facts = match output {
         CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::PolicyPredicate => {
@@ -249,7 +248,6 @@ pub(super) fn current_query_output_request(
             public_terminal: !matches!(output, CurrentQueryProgramOutput::PolicyPredicate),
             projection: app_row_payload_projection(
                 query,
-                schema,
                 matches!(output, CurrentQueryProgramOutput::MaintainedView)
                     || !query.array_subqueries.is_empty(),
             ),
@@ -296,18 +294,9 @@ pub(super) fn storage_backed_maintained_view_eligible(
         && normalized.reachable_contributions.is_empty()
 }
 
-fn app_row_payload_projection(
-    query: &JazzQuery,
-    schema: &RuntimeSchema,
-    collect_relations: bool,
-) -> PayloadProjection {
+fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> PayloadProjection {
     let paths = if collect_relations {
-        app_row_path_projections(
-            schema,
-            &root_source_id(&query.table),
-            &query.array_subqueries,
-            &[],
-        )
+        app_row_path_projections(&root_source_id(&query.table), &query.array_subqueries, &[])
     } else {
         Vec::new()
     };
@@ -320,7 +309,7 @@ fn app_row_payload_projection(
         .map(|select| {
             let mut fields = select
                 .iter()
-                .filter(|field| !is_implicit_row_id_alias(schema, &query.table, field))
+                .filter(|field| field.as_str() != "id")
                 .cloned()
                 .collect::<BTreeSet<_>>();
             for include in &query.includes {
@@ -335,7 +324,6 @@ fn app_row_payload_projection(
 }
 
 fn app_row_path_projections(
-    schema: &RuntimeSchema,
     owner: &SourceId,
     subqueries: &[ArraySubquery],
     path: &[usize],
@@ -354,7 +342,7 @@ fn app_row_path_projections(
                     FieldProjection::Fields(
                         select
                             .iter()
-                            .filter(|field| !is_implicit_row_id_alias(schema, &child.table, field))
+                            .filter(|field| field.as_str() != "id")
                             .cloned()
                             .collect(),
                     )
@@ -368,29 +356,11 @@ fn app_row_path_projections(
                 field: subquery.column_name.clone(),
                 cardinality: PathCardinality::Many,
                 fields,
-                children: app_row_path_projections(
-                    schema,
-                    &child,
-                    &subquery.nested_arrays,
-                    &child_path,
-                ),
+                children: app_row_path_projections(&child, &subquery.nested_arrays, &child_path),
                 hole_policy: PathHolePolicy::KeepParentWithHoles,
             }
         })
         .collect()
-}
-
-/// The legacy `id` spelling resolves to the physical row UUID only for a table
-/// that does not declare an application column by that name. Projection must
-/// use the same effective-column rule as predicate and ordering normalization:
-/// a declared application `id` remains in the payload, while the physical UUID
-/// is already carried separately by the row envelope.
-fn is_implicit_row_id_alias(schema: &RuntimeSchema, table: &str, field: &str) -> bool {
-    schema
-        .tables
-        .iter()
-        .find(|candidate| candidate.name == table)
-        .is_some_and(|table| crate::query::is_implicit_row_id_alias(table, field))
 }
 
 pub(super) fn required_field_idx(
@@ -536,8 +506,7 @@ pub(super) fn select_current_access_path(
     table: &TableSchema,
     equalities: &BTreeMap<String, Value>,
 ) -> Option<CurrentAccessPath> {
-    let has_declared_id = table.columns.iter().any(|column| column.name == "id");
-    if !has_declared_id && let Some(value) = equalities.get("id").cloned() {
+    if let Some(value) = equalities.get("id").cloned() {
         return Some(CurrentAccessPath::PrimaryKey(vec![value]));
     }
     let mut probes = Vec::new();
@@ -678,8 +647,7 @@ fn normalize_predicate(
             flat_join_physical_alias,
         )?,
         Predicate::In(value, options) => NormalizedPredicateExpr::In {
-            value: normalize_predicate_operand_for_schema(
-                schema,
+            value: normalize_operand_with_target_type_and_flat_join_alias(
                 source,
                 value,
                 None,
@@ -688,8 +656,7 @@ fn normalize_predicate(
             options: options
                 .iter()
                 .map(|operand| {
-                    normalize_predicate_operand_for_schema(
-                        schema,
+                    normalize_operand_with_target_type_and_flat_join_alias(
                         source,
                         operand,
                         predicate_operand_column_type(
@@ -705,15 +672,13 @@ fn normalize_predicate(
                 .collect::<Result<Vec<_>, Error>>()?,
         },
         Predicate::Contains(value, needle) => NormalizedPredicateExpr::ArrayContains {
-            value: normalize_predicate_operand_for_schema(
-                schema,
+            value: normalize_operand_with_target_type_and_flat_join_alias(
                 source,
                 value,
                 None,
                 flat_join_physical_alias,
             )?,
-            needle: normalize_predicate_operand_for_schema(
-                schema,
+            needle: normalize_operand_with_target_type_and_flat_join_alias(
                 source,
                 needle,
                 contains_needle_type(schema, source, value)?.as_ref(),
@@ -721,8 +686,7 @@ fn normalize_predicate(
             )?,
         },
         Predicate::IsNull(value) => {
-            NormalizedPredicateExpr::IsNull(normalize_predicate_operand_for_schema(
-                schema,
+            NormalizedPredicateExpr::IsNull(normalize_operand_with_target_type_and_flat_join_alias(
                 source,
                 value,
                 None,
@@ -975,16 +939,14 @@ fn normalize_compare(
     let right_type =
         predicate_operand_column_type(schema, source, right, flat_join_physical_alias)?;
     Ok(NormalizedPredicateExpr::Compare {
-        left: normalize_predicate_operand_for_schema(
-            schema,
+        left: normalize_operand_with_target_type_and_flat_join_alias(
             source,
             left,
             right_type.as_ref(),
             flat_join_physical_alias,
         )?,
         op,
-        right: normalize_predicate_operand_for_schema(
-            schema,
+        right: normalize_operand_with_target_type_and_flat_join_alias(
             source,
             right,
             left_type.as_ref(),
@@ -997,78 +959,25 @@ fn normalize_operand(source: &SourceId, operand: &Operand) -> Result<NormalizedV
     normalize_operand_with_target_type(source, operand, None)
 }
 
-fn source_has_declared_id(schema: &RuntimeSchema, source: &SourceId) -> bool {
-    schema
-        .tables
-        .iter()
-        .find(|candidate| candidate.name == source.table)
-        .is_some_and(|table| !crate::query::is_implicit_row_id_alias(table, "id"))
-}
-
-fn normalize_operand_for_schema(
-    schema: &RuntimeSchema,
-    source: &SourceId,
-    operand: &Operand,
-) -> Result<NormalizedValueRef, Error> {
-    normalize_operand_with_target_type_and_declared_id(
-        source,
-        operand,
-        None,
-        source_has_declared_id(schema, source),
-    )
-}
-
-fn normalize_predicate_operand_for_schema(
-    schema: &RuntimeSchema,
-    source: &SourceId,
-    operand: &Operand,
-    target_type: Option<&ColumnType>,
-    flat_join_physical_alias: bool,
-) -> Result<NormalizedValueRef, Error> {
-    normalize_operand_with_target_type_and_declared_id_and_flat_join_alias(
-        source,
-        operand,
-        target_type,
-        source_has_declared_id(schema, source),
-        flat_join_physical_alias,
-    )
-}
-
 fn normalize_operand_with_target_type(
     source: &SourceId,
     operand: &Operand,
     target_type: Option<&ColumnType>,
 ) -> Result<NormalizedValueRef, Error> {
-    normalize_operand_with_target_type_and_declared_id(source, operand, target_type, false)
+    normalize_operand_with_target_type_and_flat_join_alias(source, operand, target_type, false)
 }
 
-fn normalize_operand_with_target_type_and_declared_id(
+fn normalize_operand_with_target_type_and_flat_join_alias(
     source: &SourceId,
     operand: &Operand,
     target_type: Option<&ColumnType>,
-    has_declared_id: bool,
-) -> Result<NormalizedValueRef, Error> {
-    normalize_operand_with_target_type_and_declared_id_and_flat_join_alias(
-        source,
-        operand,
-        target_type,
-        has_declared_id,
-        false,
-    )
-}
-
-fn normalize_operand_with_target_type_and_declared_id_and_flat_join_alias(
-    source: &SourceId,
-    operand: &Operand,
-    target_type: Option<&ColumnType>,
-    has_declared_id: bool,
     flat_join_physical_alias: bool,
 ) -> Result<NormalizedValueRef, Error> {
     Ok(match operand {
         Operand::Column(column) if flat_join_physical_alias && column == "_id" => {
             NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
         }
-        Operand::Column(column) if column == "id" && !has_declared_id => {
+        Operand::Column(column) if column == "id" => {
             NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
         }
         Operand::Column(column) => match provenance_field(column) {
@@ -1124,23 +1033,14 @@ pub(super) fn operand_column_type(
             ProvenanceField::CreatedBy | ProvenanceField::UpdatedBy => RowAuthor::value_type(),
         }));
     }
-    let table = match table_schema(schema, &source.table) {
-        Ok(table) => table,
-        Err(_) if column == "id" => return Ok(Some(ColumnType::Uuid)),
-        Err(error) => return Err(error),
-    };
-    let declared = table
-        .columns
-        .iter()
-        .find(|candidate| candidate.name == *column)
-        .map(|column| column.column_type.clone());
-    if declared.is_some() {
-        return Ok(declared);
-    }
     if column == "id" {
         return Ok(Some(ColumnType::Uuid));
     }
-    Ok(None)
+    Ok(table_schema(schema, &source.table)?
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == *column)
+        .map(|column| column.column_type.clone()))
 }
 
 pub(super) fn contains_needle_type(
@@ -1203,16 +1103,11 @@ fn provenance_field(column: &str) -> Option<ProvenanceField> {
 }
 
 fn normalize_order_key(
-    schema: &RuntimeSchema,
     source: &SourceId,
     order: &crate::query::OrderBy,
 ) -> Result<NormalizedOrderKey, Error> {
     Ok(NormalizedOrderKey {
-        value: normalize_operand_for_schema(
-            schema,
-            source,
-            &Operand::Column(order.column.clone()),
-        )?,
+        value: normalize_operand(source, &Operand::Column(order.column.clone()))?,
         direction: match order.direction {
             OrderDirection::Asc => NormalizedSortDirection::Asc,
             OrderDirection::Desc => NormalizedSortDirection::Desc,
@@ -1221,21 +1116,17 @@ fn normalize_order_key(
 }
 
 fn normalized_aggregate_group_by(
-    schema: &RuntimeSchema,
     source: &SourceId,
     aggregate: &AggregateQuery,
 ) -> Result<Vec<NormalizedValueRef>, Error> {
     aggregate
         .group_by
         .iter()
-        .map(|column| {
-            normalize_operand_for_schema(schema, source, &Operand::Column(column.clone()))
-        })
+        .map(|column| normalize_operand(source, &Operand::Column(column.clone())))
         .collect()
 }
 
 fn normalized_aggregate_outputs(
-    schema: &RuntimeSchema,
     source: &SourceId,
     aggregate: &AggregateQuery,
 ) -> Result<Vec<NormalizedAggregateExpr>, Error> {
@@ -1252,13 +1143,7 @@ fn normalized_aggregate_outputs(
                 input: aggregate
                     .column
                     .as_ref()
-                    .map(|column| {
-                        normalize_operand_for_schema(
-                            schema,
-                            source,
-                            &Operand::Column(column.clone()),
-                        )
-                    })
+                    .map(|column| normalize_operand(source, &Operand::Column(column.clone())))
                     .transpose()?,
             })
         })
@@ -1464,7 +1349,7 @@ fn normalize_array_subquery(
                 keys: subquery
                     .order_by
                     .iter()
-                    .map(|order| normalize_order_key(schema, &child_source, order))
+                    .map(|order| normalize_order_key(&child_source, order))
                     .collect::<Result<Vec<_>, Error>>()
                     .map_err(|err| normalization_gap(err.to_string()))?,
             },
@@ -1479,7 +1364,6 @@ fn normalize_array_subquery(
             RowSetExpr::Slice {
                 input: child_current,
                 partition_by: vec![source_column_value(
-                    schema,
                     &child_source,
                     &subquery.inner_column,
                     JoinTarget::Column,
@@ -1509,13 +1393,13 @@ fn normalize_array_subquery(
                 child: child_source.clone(),
             },
             correlation: NormalizedPredicateExpr::Compare {
-                left: NormalizedValueRef::SourceField {
-                    source: child_source.clone(),
-                    field: subquery.inner_column.clone(),
-                },
+                left: source_column_value(
+                    &child_source,
+                    &subquery.inner_column,
+                    JoinTarget::Column,
+                ),
                 op: NormalizedComparisonOp::Eq,
-                right: normalize_operand_for_schema(
-                    schema,
+                right: normalize_operand(
                     owner_source,
                     &Operand::Column(subquery.outer_column.clone()),
                 )
@@ -1614,7 +1498,6 @@ fn normalize_reachable(
                 },
                 op: NormalizedComparisonOp::Eq,
                 right: source_column_value(
-                    schema,
                     &edge_source,
                     &reachable.edge_member_column,
                     JoinTarget::Column,
@@ -1633,10 +1516,11 @@ fn normalize_reachable(
         },
         RowProjection {
             output: typed_output_field("reachable_team", ColumnType::Uuid),
-            value: NormalizedValueRef::SourceField {
-                source: edge_source.clone(),
-                field: reachable.edge_parent_column.clone(),
-            },
+            value: source_column_value(
+                &edge_source,
+                &reachable.edge_parent_column,
+                JoinTarget::Column,
+            ),
         },
     ];
     step_columns.extend(
@@ -1711,7 +1595,6 @@ fn normalize_reachable(
             mode: NormalizedJoinMode::Inner,
             on: NormalizedPredicateExpr::Compare {
                 left: reachable_access_key(
-                    schema,
                     &access_source,
                     &reachable.access_team_column,
                     reachable.access_team_target,
@@ -1733,10 +1616,9 @@ fn normalize_reachable(
             right: access_join_node.clone(),
             mode: NormalizedJoinMode::Inner,
             on: NormalizedPredicateExpr::Compare {
-                left: source_column_value(schema, root_source, "id", JoinTarget::Column),
+                left: source_column_value(root_source, "id", JoinTarget::Column),
                 op: NormalizedComparisonOp::Eq,
                 right: reachable_access_key(
-                    schema,
                     &access_source,
                     &reachable.access_row_column,
                     JoinTarget::Column,
@@ -1757,12 +1639,11 @@ fn normalize_reachable(
 }
 
 pub(super) fn source_column_value(
-    schema: &RuntimeSchema,
     source: &SourceId,
     column: &str,
     target: JoinTarget,
 ) -> NormalizedValueRef {
-    if target == JoinTarget::RowId || (column == "id" && !source_has_declared_id(schema, source)) {
+    if target == JoinTarget::RowId || column == "id" {
         NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
     } else {
         NormalizedValueRef::SourceField {
@@ -1773,12 +1654,11 @@ pub(super) fn source_column_value(
 }
 
 fn reachable_access_key(
-    schema: &RuntimeSchema,
     access_source: &SourceId,
     column: &str,
     target: JoinTarget,
 ) -> NormalizedValueRef {
-    source_column_value(schema, access_source, column, target)
+    source_column_value(access_source, column, target)
 }
 
 fn normalize_join_via_right(
@@ -1834,7 +1714,6 @@ fn normalize_join_via_right(
                     left: join_via_target_key(&join_source, join),
                     op: NormalizedComparisonOp::Eq,
                     right: source_column_value(
-                        schema,
                         &lookup_source,
                         &lookup.value_column,
                         JoinTarget::Column,
@@ -1869,7 +1748,7 @@ fn normalize_join_via_right(
                 left: current,
                 right: nested_right,
                 mode: NormalizedJoinMode::Inner,
-                on: join_via_predicate(schema, &join_source, &nested_source, nested),
+                on: join_via_predicate(&join_source, &nested_source, nested),
             },
         );
         let project_node = RowSetNodeId(format!("{nested_path}:parent_project"));
@@ -1954,10 +1833,7 @@ fn normalize_reachable_seed(
                 RowSetExpr::Filter {
                     input: seed_current,
                     predicate: NormalizedPredicateExpr::Compare {
-                        left: NormalizedValueRef::SourceField {
-                            source: seed_source.clone(),
-                            field: user_column.clone(),
-                        },
+                        left: source_column_value(&seed_source, &user_column, JoinTarget::Column),
                         op: NormalizedComparisonOp::Eq,
                         right: NormalizedValueRef::Param(claim_field.clone()),
                     },
@@ -1978,7 +1854,7 @@ fn normalize_reachable_seed(
         }
         let seed_project_node = RowSetNodeId(format!("{reachable_id}:seed_project"));
         let seed_team_value =
-            source_column_value(schema, &seed_source, &seed.team_column, JoinTarget::Column);
+            source_column_value(&seed_source, &seed.team_column, JoinTarget::Column);
         let mut seed_columns = vec![
             RowProjection {
                 output: typed_output_field("team", ColumnType::Uuid),
@@ -2061,7 +1937,7 @@ fn reachable_seed_frontier_columns(
             seed.table, seed.team_column, team_column_ty
         )));
     }
-    let value = source_column_value(schema, source, &seed.team_column, JoinTarget::Column);
+    let value = source_column_value(source, &seed.team_column, JoinTarget::Column);
     let mut columns = vec![
         ValueSourceColumn {
             name: "team".to_owned(),
@@ -2194,21 +2070,21 @@ pub(super) fn table_schema<'a>(
         .ok_or_else(|| Error::QueryLowering(format!("unknown query table {table}")))
 }
 
-fn schema_column_type(
+pub(super) fn schema_column_type(
     schema: &RuntimeSchema,
     table: &str,
     column: &str,
 ) -> Result<ColumnType, Error> {
     let schema_table = table_schema(schema, table)?;
+    if column == "id" {
+        return Ok(ColumnType::Uuid);
+    }
     if let Some(column) = schema_table
         .columns
         .iter()
         .find(|candidate| candidate.name == column)
     {
         return Ok(column.column_type.clone());
-    }
-    if column == "id" {
-        return Ok(ColumnType::Uuid);
     }
     Err(Error::QueryLowering(format!(
         "unknown query column {table}.{column}"
@@ -2234,15 +2110,11 @@ fn source_public_field_projections(table: &TableSchema, source: &SourceId) -> Ve
     .collect()
 }
 
-fn join_via_root_key(
-    schema: &RuntimeSchema,
-    root_source: &SourceId,
-    join: &JoinVia,
-) -> NormalizedValueRef {
+fn join_via_root_key(root_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
     join.source_column
         .as_ref()
         .map(|field| {
-            if field == "id" && !source_has_declared_id(schema, root_source) {
+            if field == "id" {
                 NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone()))
             } else {
                 NormalizedValueRef::SourceField {
@@ -2255,17 +2127,10 @@ fn join_via_root_key(
 }
 
 fn join_via_target_key(join_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
-    match join.target {
-        JoinTarget::Column => NormalizedValueRef::SourceField {
-            source: join_source.clone(),
-            field: join.on_column.clone(),
-        },
-        JoinTarget::RowId => NormalizedValueRef::RowId(RowIdRef::Source(join_source.clone())),
-    }
+    source_column_value(join_source, &join.on_column, join.target)
 }
 
 fn join_via_predicate(
-    schema: &RuntimeSchema,
     left_source: &SourceId,
     right_source: &SourceId,
     join: &JoinVia,
@@ -2283,20 +2148,14 @@ fn join_via_predicate(
         )
     } else {
         (
-            join_via_root_key(schema, left_source, join),
+            join_via_root_key(left_source, join),
             join_via_target_key(right_source, join),
         )
     }];
     key_pairs.extend(join.correlated_filters.iter().map(|correlation| {
         (
-            NormalizedValueRef::SourceField {
-                source: left_source.clone(),
-                field: correlation.source_column.clone(),
-            },
-            NormalizedValueRef::SourceField {
-                source: right_source.clone(),
-                field: correlation.join_column.clone(),
-            },
+            source_column_value(&left_source, &correlation.source_column, JoinTarget::Column),
+            source_column_value(&right_source, &correlation.join_column, JoinTarget::Column),
         )
     }));
     if key_pairs.len() == 1 {
@@ -2476,7 +2335,7 @@ fn normalize_filter_join_chain(
         };
         let (right, join_source) =
             normalize_join_via_right(nodes, auxiliary_sources, schema, join, &path)?;
-        let join_predicate = join_via_predicate(schema, root_source, &join_source, join);
+        let join_predicate = join_via_predicate(root_source, &join_source, join);
         if record_join_contributions {
             join_contributions.push(JoinContribution {
                 id: path.clone(),
@@ -3192,7 +3051,7 @@ where
                     Ok(if column == "_id" {
                         NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
                     } else {
-                        source_column_value(schema, source, column, JoinTarget::Column)
+                        source_column_value(source, column, JoinTarget::Column)
                     })
                 };
                 let (_, right_column) = join.on.right.rsplit_once('.').ok_or_else(|| {
@@ -3208,7 +3067,7 @@ where
                     right: if right_column == "_id" {
                         NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
                     } else {
-                        source_column_value(schema, &source, right_column, JoinTarget::Column)
+                        source_column_value(&source, right_column, JoinTarget::Column)
                     },
                 };
                 nodes.insert(
@@ -3327,7 +3186,7 @@ where
                     keys: query
                         .order_by
                         .iter()
-                        .map(|order| normalize_order_key(schema, &root_source, order))
+                        .map(|order| normalize_order_key(&root_source, order))
                         .collect::<Result<Vec<_>, Error>>()?,
                 },
             );
@@ -3369,8 +3228,8 @@ where
                 aggregate_node.clone(),
                 RowSetExpr::Aggregate {
                     input: current,
-                    group_by: normalized_aggregate_group_by(schema, &root_source, aggregate)?,
-                    outputs: normalized_aggregate_outputs(schema, &root_source, aggregate)?,
+                    group_by: normalized_aggregate_group_by(&root_source, aggregate)?,
+                    outputs: normalized_aggregate_outputs(&root_source, aggregate)?,
                 },
             );
             current = aggregate_node;
@@ -3471,8 +3330,7 @@ where
                         .into_iter()
                         .map(|term| {
                             Ok(NormalizedOrderKey {
-                                value: normalize_operand_for_schema(
-                                    schema,
+                                value: normalize_operand(
                                     &root_source,
                                     &Operand::Column(term.column.column),
                                 )?,

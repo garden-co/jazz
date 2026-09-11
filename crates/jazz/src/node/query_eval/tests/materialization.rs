@@ -502,28 +502,18 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
 fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_provenance() {
     let v1 = public_query_eval_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("users")
-                    .column("id", PublicColumnType::Uuid)
-                    .column("name", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("posts")
-                    .column("id", PublicColumnType::Uuid)
                     .column("author_id", PublicColumnType::Uuid)
                     .column("title", PublicColumnType::Text),
             ),
     );
     let v2 = SchemaVersion::new(public_query_eval_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("people")
-                    .column("id", PublicColumnType::Uuid)
-                    .column("name", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("people").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("posts")
-                    .column("id", PublicColumnType::Uuid)
                     .column("author_id", PublicColumnType::Uuid)
                     .column("title", PublicColumnType::Text),
             ),
@@ -540,10 +530,10 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_p
         .commit_mergeable_settled(
             MergeableCommit::new("users", author, 1)
                 .made_by(created_by)
-                .cells(BTreeMap::from([
-                    ("id".to_owned(), Value::Uuid(author.0)),
-                    ("name".to_owned(), Value::String("alice".to_owned())),
-                ])),
+                .cells(BTreeMap::from([(
+                    "name".to_owned(),
+                    Value::String("alice".to_owned()),
+                )])),
         )
         .expect("commit v1 author");
     node.apply_fate_update(
@@ -556,7 +546,6 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_p
     let post_tx = node
         .commit_mergeable_settled(
             MergeableCommit::new("posts", post, 2).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(post.0)),
                 ("author_id".to_owned(), Value::Uuid(author.0)),
                 ("title".to_owned(), Value::String("hello".to_owned())),
             ])),
@@ -571,10 +560,10 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_p
     .expect("settle v1 post");
     let mismatched_author_tx = node
         .commit_mergeable_settled(
-            MergeableCommit::new("users", mismatched_author_row, 3).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(mismatched_author_id.0)),
-                ("name".to_owned(), Value::String("unmatched".to_owned())),
-            ])),
+            MergeableCommit::new("users", mismatched_author_row, 3).cells(BTreeMap::from([(
+                "name".to_owned(),
+                Value::String("unmatched".to_owned()),
+            )])),
         )
         .expect("commit v1 author with distinct row identity");
     node.apply_fate_update(
@@ -587,7 +576,6 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_p
     let mismatched_post_tx = node
         .commit_mergeable_settled(MergeableCommit::new("posts", mismatched_post, 4).cells(
             BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(mismatched_post.0)),
                 ("author_id".to_owned(), Value::Uuid(mismatched_author_id.0)),
                 (
                     "title".to_owned(),

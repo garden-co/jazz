@@ -426,6 +426,10 @@ impl RuntimeSchema {
     fn validated(self) -> Self {
         let mut branch_column_types = BTreeMap::new();
         for table in &self.tables {
+            assert!(
+                table.columns.iter().all(|column| column.name != "id"),
+                "column name \"id\" is reserved for the automatically generated UUID row ID"
+            );
             let mut bound_columns = BTreeSet::new();
             for column_name in &table.branch_by {
                 let column = table

@@ -1307,7 +1307,6 @@ fn m3_differential_schema() -> JazzSchema {
             )
             .table(
                 PublicTableSchemaBuilder::new("teams")
-                    .column("id", PublicColumnType::Uuid)
                     .column("name", PublicColumnType::Text)
                     .column("identity_key", PublicColumnType::Text)
                     .column("identity_key_text", PublicColumnType::Text)
@@ -1602,7 +1601,6 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
         accept_global(
             core,
             MergeableCommit::new("teams", team, 1).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(team.0)),
                 ("name".to_owned(), Value::String(name.to_owned())),
                 (
                     "identity_key".to_owned(),

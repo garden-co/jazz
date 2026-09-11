@@ -998,7 +998,6 @@ fn recursive_rls_capture_schema() -> JazzSchema {
             )
             .table(
                 PublicTableSchemaBuilder::new("teams")
-                    .column("id", PublicColumnType::Uuid)
                     .column("name", PublicColumnType::Text),
             )
             .table(
@@ -1035,9 +1034,8 @@ fn team_edge_cells(member: AuthorSubject, parent: AuthorSubject) -> BTreeMap<Str
     ])
 }
 
-fn team_cells(id: RowUuid, name: &str) -> BTreeMap<String, Value> {
+fn team_cells(name: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("id".to_owned(), Value::Uuid(id.0)),
         ("name".to_owned(), Value::String(name.to_owned())),
     ])
 }
@@ -1108,7 +1106,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         &mut parents,
         "teams",
         RowUuid(alice.test_uuid()),
-        team_cells(RowUuid(alice.test_uuid()), "alice"),
+        team_cells("alice"),
         900,
     );
     accept_recursive_row(
@@ -1116,7 +1114,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         &mut parents,
         "teams",
         RowUuid(parent_team.test_uuid()),
-        team_cells(RowUuid(parent_team.test_uuid()), "parent"),
+        team_cells("parent"),
         901,
     );
     accept_recursive_row(
@@ -1124,7 +1122,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         &mut parents,
         "teams",
         RowUuid(other_team.test_uuid()),
-        team_cells(RowUuid(other_team.test_uuid()), "other"),
+        team_cells("other"),
         902,
     );
     let direct_doc_tx = accept_recursive_row(

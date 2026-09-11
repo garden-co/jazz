@@ -77,6 +77,13 @@ export function isReservedMagicColumnName(column: string): boolean {
   return column.startsWith(RESERVED_MAGIC_COLUMN_PREFIX);
 }
 
+export function assertUserTableColumnNameAllowed(column: string): void {
+  if (column === "id") {
+    throw new Error('Column name "id" is reserved for the automatically generated UUID row ID.');
+  }
+  assertUserColumnNameAllowed(column);
+}
+
 export function assertUserColumnNameAllowed(column: string): void {
   if (isReservedMagicColumnName(column)) {
     throw new Error(

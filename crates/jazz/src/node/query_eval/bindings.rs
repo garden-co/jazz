@@ -827,26 +827,9 @@ pub(super) fn collect_reachable_seed_claim_params(
         let (Some(user_column), Some(user_claim)) = (&seed.user_column, &seed.user_claim) else {
             continue;
         };
-        let table = schema
-            .tables
-            .iter()
-            .find(|candidate| candidate.name == seed.table)
-            .ok_or_else(|| Error::TableNotFound(seed.table.clone()))?;
-        let column = table
-            .columns
-            .iter()
-            .find(|candidate| candidate.name == *user_column)
-            .ok_or(Error::InvalidStoredValue(
-                "reachable seed column is missing from schema",
-            ))?;
+        let ty = schema_column_type(schema, &seed.table, user_column)?;
         let path = ClaimPath(crate::query::operand_claim_path(user_claim));
-        params.insert(
-            claim_param_field(&path),
-            ProgramClaimParam {
-                path,
-                ty: column.column_type.clone(),
-            },
-        );
+        params.insert(claim_param_field(&path), ProgramClaimParam { path, ty });
     }
     Ok(())
 }

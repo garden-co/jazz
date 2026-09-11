@@ -538,32 +538,6 @@ mod tests {
         }
     }
 
-    /// Flat-join filters preserve declared `id` field types on every source,
-    /// while `_id` remains the UUID spelling for the physical row identity.
-    #[test]
-    fn flat_join_filters_distinguish_declared_id_from_physical_id() {
-        let source = PublicSchemaBuilder::new()
-            .table(PublicTableSchemaBuilder::new("parents").column("id", PublicColumnType::Text))
-            .table(
-                PublicTableSchemaBuilder::new("children")
-                    .column("id", PublicColumnType::Text)
-                    .fk_column("parent", "parents"),
-            )
-            .build();
-        let schema = JazzSchema::new(&source).expect("flat-join public schema compiles");
-
-        let query = Query::from(table("parents").alias("parent"))
-            .flat_join(table("children").alias("child"), "parent._id", "child.parent")
-            .filter(eq(col("parent.id"), lit("parent-key")))
-            .filter(eq(col("child.id"), lit("child-key")))
-            .filter(eq(
-                col("child._id"),
-                lit(uuid::Uuid::from_u128(0x1234)),
-            ));
-
-        assert!(query.validate(&schema).is_ok());
-    }
-
     #[test]
     fn flat_join_allows_array_element_keys() {
         let schema = RuntimeSchema::new([

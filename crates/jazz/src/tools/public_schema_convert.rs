@@ -501,6 +501,12 @@ fn convert_table(
     let mut merge_strategies = BTreeMap::new();
     let mut column_names = BTreeSet::new();
     for column in &table.columns.columns {
+        if column.name.as_str() == "id" {
+            return Err(err(
+                format!("$.{}.columns.id", name.as_str()),
+                "column name \"id\" is reserved for the automatically generated UUID row ID",
+            ));
+        }
         if column
             .name
             .as_str()

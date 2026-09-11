@@ -185,7 +185,6 @@ async fn admin_schema_api_accepts_public_schema_tables_wrapper() {
             SchemaBuilder::new()
                 .table(
                     TableSchema::builder("events")
-                        .column("id", ColumnType::Uuid)
                         .column("seenAt", ColumnType::Timestamp)
                         .column("score", ColumnType::Double),
                 )

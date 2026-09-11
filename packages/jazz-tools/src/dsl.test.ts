@@ -3,6 +3,7 @@ import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
 import { col, getCollectedSchema, resetCollectedState, table } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
+import { defineApp, defineSchema, defineTable } from "./typed-app.js";
 import type { AddOp } from "./schema.js";
 
 describe("enum DSL invariants", () => {
@@ -459,5 +460,22 @@ describe("reserved magic-column namespace", () => {
         $canRead: col.boolean(),
       }),
     ).toThrow(/reserved for magic columns/i);
+  });
+});
+
+describe("reserved table id", () => {
+  it.each([col.uuid(), col.string(), col.int(), col.uuid().optional()])(
+    "rejects explicit id columns in each table authoring API",
+    (id) => {
+      resetCollectedState();
+      expect(() => table("items", { id })).toThrow(/id.*reserved.*UUID row ID/);
+      expect(() => defineTable({ id })).toThrow(/id.*reserved.*UUID row ID/);
+      expect(() => defineSchema({ items: { id } })).toThrow(/id.*reserved.*UUID row ID/);
+      expect(() => defineApp({ items: { id } })).toThrow(/id.*reserved.*UUID row ID/);
+    },
+  );
+
+  it("allows id inside an enum payload", () => {
+    expect(() => defineTable({ payload: col.enum({ item: { id: col.string() } }) })).not.toThrow();
   });
 });

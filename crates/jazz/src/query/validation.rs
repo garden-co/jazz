@@ -495,19 +495,15 @@ fn flat_join_filter_schema(
 ) -> Result<TableSchema, QueryError> {
     let mut columns = Vec::new();
     for (scope, table) in sources {
-        // `id` retains its normal effective-column semantics: a declared
-        // field wins, and only legacy tables expose their physical row UUID
-        // through that spelling. `_id` is the explicit physical-row alias.
+        // Both public identity spellings resolve to the physical row UUID.
         columns.push(JazzColumnSchema::new(
             format!("{scope}._id"),
             ColumnType::Uuid,
         ));
-        if !has_declared_id(table) {
-            columns.push(JazzColumnSchema::new(
-                format!("{scope}.id"),
-                ColumnType::Uuid,
-            ));
-        }
+        columns.push(JazzColumnSchema::new(
+            format!("{scope}.id"),
+            ColumnType::Uuid,
+        ));
         for magic in ["$createdBy", "$updatedBy", "$createdAt", "$updatedAt"] {
             columns.push(JazzColumnSchema::new(
                 format!("{scope}.{magic}"),
@@ -768,13 +764,6 @@ fn validate_join(
             }
         }
         planner_column_type(&lookup_table, &lookup.value_column)?;
-        if lookup.value_column == "id"
-            && has_declared_id(&lookup_table)
-            && planner_column_type(&lookup_table, &lookup.value_column)?
-                != planner_column_type(&join_table, &join.on_column)?
-        {
-            return Err(QueryError::OperandTypeMismatch);
-        }
         if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: lookup.table.clone(),
@@ -797,12 +786,6 @@ fn validate_join(
         }
     } else if let Some(source_column) = &join.source_column {
         if source_column == "id" {
-            if has_declared_id(root)
-                && planner_column_type(root, source_column)?
-                    != planner_column_type(&join_table, &join.on_column)?
-            {
-                return Err(QueryError::OperandTypeMismatch);
-            }
             root_table.to_owned()
         } else {
             planner_column_type(root, source_column)?;
@@ -966,9 +949,6 @@ fn planner_column_type<'a>(
     table: &'a TableSchema,
     column: &str,
 ) -> Result<&'a ColumnType, QueryError> {
-    if let Ok(column_schema) = column_schema(table, column) {
-        return Ok(&column_schema.column_type);
-    }
     if column == "id" {
         return Ok(&ColumnType::Uuid);
     }
@@ -976,10 +956,6 @@ fn planner_column_type<'a>(
         return Ok(column_type);
     }
     Ok(&column_schema(table, column)?.column_type)
-}
-
-fn has_declared_id(table: &TableSchema) -> bool {
-    table.columns.iter().any(|column| column.name == "id")
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
@@ -1087,12 +1063,8 @@ fn validate_reachable(
     let access = schema_table(schema, &reachable.access_table)?;
     planner_column_type(&access, &reachable.access_row_column)?;
     planner_column_type(&access, &reachable.access_team_column)?;
-    let root_key_type = if has_declared_id(root) {
-        planner_column_type(root, "id")?
-    } else {
-        &ColumnType::Uuid
-    };
-    if reachable.access_row_column == "id" && !has_declared_id(&access) {
+    let root_key_type = &ColumnType::Uuid;
+    if reachable.access_row_column == "id" {
         if access.name != root.name {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
@@ -1150,7 +1122,7 @@ fn validate_reachable(
     let edge = schema_table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
         planner_column_type(&edge, column)?;
-        if *column == "id" && !has_declared_id(&edge) && edge.name == *team_table {
+        if *column == "id" && edge.name == *team_table {
             continue;
         }
         match edge.references.get(column) {

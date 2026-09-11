@@ -23,7 +23,7 @@ fn required_include_rls_schema() -> JazzSchema {
 }
 
 #[test]
-fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid() {
+fn parent_ref_join_matches_the_physical_row_uuid() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -31,24 +31,17 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
                     .fk_column("chat", "chats")
                     .column("label", PublicColumnType::Text),
             )
-            .table(
-                PublicTableSchemaBuilder::new("chats")
-                    .column("id", PublicColumnType::Uuid)
-                    .column("title", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("chats").column("title", PublicColumnType::Text)),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let physical_chat = row(0xc1);
-    let declared_chat_id = row(0xaa);
     let membership = row(0xd1);
     let tx = core
         .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("chats", physical_chat, 10).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(declared_chat_id.0)),
-                ("title".to_owned(), v("declared-id chat")),
-            ])),
+            MergeableCommit::new("chats", physical_chat, 10)
+                .cells(BTreeMap::from([("title".to_owned(), v("chat"))])),
             MergeableCommit::new("memberships", membership, 11).cells(BTreeMap::from([
-                ("chat".to_owned(), Value::Uuid(declared_chat_id.0)),
+                ("chat".to_owned(), Value::Uuid(physical_chat.0)),
                 ("label".to_owned(), v("membership")),
             ])),
         ])
@@ -56,7 +49,7 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
     core.accept_global_for_test(tx).unwrap();
 
     // This is the core query shape emitted by a binding-layer parent include:
-    // correlate the child's foreign-key value with the parent's declared `id`.
+    // correlate the child's foreign-key value with the parent's generated `id`.
     let shape = Query::from("memberships")
         .join_via_column("chats", "id", "chat", [])
         .validate(&core.catalogue.schema)
@@ -70,17 +63,15 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
     );
 }
 
-/// A serving authority's internal point-read authorization must select the
-/// physical target row even when `id` is declared user data. Alice owns the
-/// row, while its declared id deliberately differs from its storage identity.
+/// A serving authority authorizes the requested row without reusing another
+/// row's cached policy result. Alice owns both documents; Bob owns neither.
 #[test]
-fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
+fn point_read_authorization_selects_only_the_requested_row() {
     let alice = user(0xa1);
     let bob = user(0xa2);
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("documents")
-                .column("id", PublicColumnType::Uuid)
                 .column("owner", PublicColumnType::Uuid)
                 .policies(
                     PublicTablePolicies::new()
@@ -105,22 +96,18 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     );
     let physical_row = row(0xc1);
     let other_physical_row = row(0xc2);
-    let declared_id = row(0xd1);
     let tx = core
         .commit_mergeable_unit_settled(MergeableCommit::new("documents", physical_row, 10).cells(
-            BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(declared_id.0)),
-                ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
-            ]),
+            BTreeMap::from([("owner".to_owned(), Value::Uuid(alice.test_uuid()))]),
         ))
         .unwrap();
     core.accept_global_for_test(tx.0).unwrap();
     let other_tx = core
         .commit_mergeable_unit_settled(
-            MergeableCommit::new("documents", other_physical_row, 11).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(row(0xd2).0)),
-                ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
-            ])),
+            MergeableCommit::new("documents", other_physical_row, 11).cells(BTreeMap::from([(
+                "owner".to_owned(),
+                Value::Uuid(alice.test_uuid()),
+            )])),
         )
         .unwrap();
     core.accept_global_for_test(other_tx.0).unwrap();
