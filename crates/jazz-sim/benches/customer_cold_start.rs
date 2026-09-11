@@ -495,6 +495,10 @@ fn main() {
     );
     #[cfg(feature = "bench-perf-control")]
     eprintln!("scoped CPU attribution run: wall-clock timings are not clean receipts");
+    #[cfg(feature = "cold-settle-attribution")]
+    eprintln!(
+        "phase attribution enabled: compare elapsed time only with the same instrumentation; disable this feature for absolute latency"
+    );
     let config = Config::from_env();
     let schema = schema();
     let seeded = seed_core(&schema, &config);
@@ -2376,6 +2380,10 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         } else {
             None
         }),
+    );
+    fields.insert(
+        "phase_attribution_enabled".to_owned(),
+        json!(cfg!(feature = "cold-settle-attribution")),
     );
     fields.insert("phase".to_owned(), json!(phase));
     fields.insert("scale".to_owned(), json!(config.scale));
