@@ -13,6 +13,14 @@ pub struct ContaminatingInstrumentation {
 /// wall-clock or storage-counter benchmark and receipt measurements.
 pub const CONTAMINATING_INSTRUMENTATION: &[ContaminatingInstrumentation] = &[
     ContaminatingInstrumentation {
+        name: "JAZZ_PERF_CONTROL_FIFO",
+        reason: "it enables externally controlled CPU profiling during cold-load attribution",
+    },
+    ContaminatingInstrumentation {
+        name: "JAZZ_PERF_ACK_FIFO",
+        reason: "it configures CPU profiler acknowledgement during cold-load attribution",
+    },
+    ContaminatingInstrumentation {
         name: "JAZZ_REHYDRATE_TRACE",
         reason: "it resets storage-read metrics and adds timing plus formatted stderr output inside rehydration",
     },

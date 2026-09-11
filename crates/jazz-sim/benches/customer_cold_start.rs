@@ -425,18 +425,66 @@ const RESOURCE_SPECS: [ResourceSpec; 14] = [
     ResourceSpec::new("res_n", 1, 2, None),
 ];
 
+// External perf starts disabled. Acknowledged commands bound CPU sampling to
+// the same connect/subscribe/settle interval as allocation attribution.
+#[cfg(feature = "bench-perf-control")]
+struct PerfControl {
+    control: std::fs::File,
+    acknowledgements: std::io::BufReader<std::fs::File>,
+}
+
+#[cfg(feature = "bench-perf-control")]
+impl PerfControl {
+    fn start() -> Self {
+        let open = |name| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(std::env::var_os(name).expect("perf control requires control and ack FIFOs"))
+                .expect("open perf control FIFO")
+        };
+        let mut control = Self {
+            control: open("JAZZ_PERF_CONTROL_FIFO"),
+            acknowledgements: std::io::BufReader::new(open("JAZZ_PERF_ACK_FIFO")),
+        };
+        control.command("enable");
+        control
+    }
+
+    fn command(&mut self, command: &str) {
+        use std::io::{BufRead, Write};
+        writeln!(self.control, "{command}").expect("write perf command");
+        self.control.flush().expect("flush perf command");
+        let mut acknowledgement = String::new();
+        self.acknowledgements
+            .read_line(&mut acknowledgement)
+            .expect("read perf acknowledgement");
+        assert_eq!(
+            acknowledgement.trim(),
+            "ack",
+            "unexpected perf acknowledgement"
+        );
+    }
+}
+
 fn main() {
     #[cfg(feature = "cold-settle-attribution")]
     let _phase_subscriber =
         tracing::subscriber::set_default(jazz_sim::phase_attribution::Collector);
     // Allocation attribution deliberately instruments the workload. Its timing
     // is not a benchmark receipt, and sampler configuration must remain usable.
-    #[cfg(not(any(feature = "bench-alloc-sites", feature = "bench-alloc-metrics")))]
+    #[cfg(not(any(
+        feature = "bench-alloc-sites",
+        feature = "bench-alloc-metrics",
+        feature = "bench-perf-control"
+    )))]
     jazz_benchmark_guard::refuse_contaminated_measurement();
     #[cfg(any(feature = "bench-alloc-sites", feature = "bench-alloc-metrics"))]
     eprintln!(
         "allocation attribution run: wall-clock timings are not comparable to clean receipts"
     );
+    #[cfg(feature = "bench-perf-control")]
+    eprintln!("scoped CPU attribution run: wall-clock timings are not clean receipts");
     let config = Config::from_env();
     let schema = schema();
     let seeded = seed_core(&schema, &config);
@@ -1548,6 +1596,8 @@ fn run_connect_and_subscribe(
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
+    #[cfg(feature = "bench-perf-control")]
+    let mut perf_control = PerfControl::start();
     alloc_metrics::reset_and_start();
     #[cfg(feature = "cold-settle-attribution")]
     {
@@ -1702,6 +1752,8 @@ fn run_connect_and_subscribe(
         ticks += 1;
     }
     let settle_ms = settle_start.elapsed().as_millis();
+    #[cfg(feature = "bench-perf-control")]
+    perf_control.command("disable");
     // Match the readiness boundary: later one-shot verification and storage
     // sizing are diagnostics, not work needed to make subscriptions usable.
     let alloc_snapshot = alloc_metrics::stop();
@@ -2307,6 +2359,14 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         WireCompression::Lz4 => "lz4",
         WireCompression::Zstd => "zstd",
     };
+    fields.insert(
+        "cpu_profile_scope".to_owned(),
+        json!(if cfg!(feature = "bench-perf-control") {
+            Some("connect_subscribe_settle")
+        } else {
+            None
+        }),
+    );
     fields.insert("phase".to_owned(), json!(phase));
     fields.insert("scale".to_owned(), json!(config.scale));
     fields.insert("active_transport_codec".to_owned(), json!(transport_codec));
