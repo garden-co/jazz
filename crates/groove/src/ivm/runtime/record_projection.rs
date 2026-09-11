@@ -659,65 +659,86 @@ pub(super) fn project_record(
         )?);
     }
 
-    let input = BorrowedRecord::new(input_record, input_desc);
     let mut values = Vec::with_capacity(expressions.len());
     for (output_idx, expr) in expressions.iter().enumerate() {
-        let resolved = |field: &FieldRef| -> Result<Value, IvmRuntimeError> {
-            let source_idx = resolve_field_ref(input_desc, field)?;
-            input
-                .get_idx(source_idx)
-                .map_err(IvmRuntimeError::RecordEncoding)
-        };
-        values.push(match &expr.expression {
-            ProjectExpr::Field(field) => resolved(field)?,
-            ProjectExpr::RecordField { source, path } => {
-                let mut value = resolved(source)?;
-                for name in path {
-                    let Value::Record(record) = value else {
-                        return Err(IvmRuntimeError::UnsupportedOperator);
-                    };
-                    value = record.get(name)?;
-                }
-                value
-            }
-            ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
-                value.to_value()
-            }
-            ProjectExpr::Null(_) => Value::Nullable(None),
-            ProjectExpr::Nullable(field) => Value::Nullable(Some(Box::new(resolved(field)?))),
-            ProjectExpr::NullableFlat(field) => {
-                let value = resolved(field)?;
-                if matches!(value, Value::Nullable(_)) {
-                    value
-                } else {
-                    Value::Nullable(Some(Box::new(value)))
-                }
-            }
-            ProjectExpr::EnumTagRemap {
-                source: field,
-                tags,
-            } => remap_enum_tag(resolved(field)?, tags)?,
-            ProjectExpr::EnumRemap {
-                source: field,
-                tags,
-            } => remap_enum(resolved(field)?, tags)?,
-            ProjectExpr::RecursiveEnumRemap {
-                source: field,
-                remaps,
-                ..
-            } => {
-                let source_idx = resolve_field_ref(input_desc, field)?;
-                remap_recursive_enum_value(
-                    resolved(field)?,
-                    &input_desc.fields()[source_idx].value_type,
-                    &output_desc.fields()[output_idx].value_type,
-                    remaps,
-                    "root",
-                )?
-            }
-        });
+        values.push(project_field_value(
+            expr,
+            output_idx,
+            output_desc,
+            input_desc,
+            input_record,
+        )?);
     }
     Ok(output_desc.create(&values)?)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static PROJECT_VALUE_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn project_field_value(
+    expr: &ProjectionExpr,
+    output_idx: usize,
+    output_desc: RecordDescriptor,
+    input_desc: &RecordDescriptor,
+    input_record: &[u8],
+) -> Result<Value, IvmRuntimeError> {
+    #[cfg(test)]
+    PROJECT_VALUE_EVALUATIONS.with(|count| count.set(count.get() + 1));
+    let input = BorrowedRecord::new(input_record, input_desc);
+    let resolved = |field: &FieldRef| -> Result<Value, IvmRuntimeError> {
+        let source_idx = resolve_field_ref(input_desc, field)?;
+        input
+            .get_idx(source_idx)
+            .map_err(IvmRuntimeError::RecordEncoding)
+    };
+    Ok(match &expr.expression {
+        ProjectExpr::Field(field) => resolved(field)?,
+        ProjectExpr::RecordField { source, path } => {
+            let mut value = resolved(source)?;
+            for name in path {
+                let Value::Record(record) = value else {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                };
+                value = record.get(name)?;
+            }
+            value
+        }
+        ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => value.to_value(),
+        ProjectExpr::Null(_) => Value::Nullable(None),
+        ProjectExpr::Nullable(field) => Value::Nullable(Some(Box::new(resolved(field)?))),
+        ProjectExpr::NullableFlat(field) => {
+            let value = resolved(field)?;
+            if matches!(value, Value::Nullable(_)) {
+                value
+            } else {
+                Value::Nullable(Some(Box::new(value)))
+            }
+        }
+        ProjectExpr::EnumTagRemap {
+            source: field,
+            tags,
+        } => remap_enum_tag(resolved(field)?, tags)?,
+        ProjectExpr::EnumRemap {
+            source: field,
+            tags,
+        } => remap_enum(resolved(field)?, tags)?,
+        ProjectExpr::RecursiveEnumRemap {
+            source: field,
+            remaps,
+            ..
+        } => {
+            let source_idx = resolve_field_ref(input_desc, field)?;
+            remap_recursive_enum_value(
+                resolved(field)?,
+                &input_desc.fields()[source_idx].value_type,
+                &output_desc.fields()[output_idx].value_type,
+                remaps,
+                "root",
+            )?
+        }
+    })
 }
 
 pub(super) fn remap_enum_tag(value: Value, tags: &[Option<u8>]) -> Result<Value, IvmRuntimeError> {
@@ -963,48 +984,112 @@ pub(super) fn raw_projection_fields(
     input_desc: &RecordDescriptor,
     output_desc: RecordDescriptor,
 ) -> Result<Option<Vec<RawProjectionField>>, IvmRuntimeError> {
-    if project.expressions.is_empty() || project.expressions.len() != output_desc.fields().len() {
+    let validate_copy = |source_type: &ValueType, output_idx: usize| {
+        if source_type != &output_desc.fields()[output_idx].value_type {
+            return Err(IvmRuntimeError::RecordEncoding(
+                records::Error::TypeMismatch {
+                    expected: output_desc.fields()[output_idx].value_type.clone(),
+                },
+            ));
+        }
+        Ok(())
+    };
+    if project.expressions.is_empty() {
+        if project.mapping.len() != output_desc.fields().len() {
+            return Ok(None);
+        }
+        let fields = project
+            .mapping
+            .iter()
+            .enumerate()
+            .map(|(output_idx, &(source, source_idx))| {
+                if source != 0 {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                }
+                let field = input_desc
+                    .fields()
+                    .get(source_idx)
+                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(source_idx))?;
+                validate_copy(&field.value_type, output_idx)?;
+                Ok(RawProjectionField::Copy { source_idx })
+            })
+            .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+        return Ok(Some(fields));
+    }
+    if project.expressions.len() != output_desc.fields().len() {
         return Ok(None);
     }
-
     let fields = project
         .expressions
         .iter()
         .enumerate()
-        .map(|(output_idx, expr)| match &expr.expression {
-            ProjectExpr::Field(field) => resolve_field_ref(input_desc, field)
-                .ok()
-                .map(|source_idx| RawProjectionField::Copy { source_idx }),
-            ProjectExpr::Nullable(field) => resolve_field_ref(input_desc, field)
-                .ok()
-                .map(|source_idx| RawProjectionField::WrapNullable { source_idx }),
-            ProjectExpr::NullableFlat(field) => resolve_field_ref(input_desc, field)
-                .ok()
-                .map(|source_idx| RawProjectionField::FlattenNullable { source_idx }),
-            ProjectExpr::Null(_) => Some(RawProjectionField::Encoded {
-                bytes: encode_projection_field_value(
-                    output_desc,
-                    output_idx,
-                    Value::Nullable(None),
-                )
-                .ok()?,
-            }),
-            ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
-                Some(RawProjectionField::Encoded {
-                    bytes: encode_projection_field_value(output_desc, output_idx, value.to_value())
-                        .ok()?,
-                })
-            }
-            ProjectExpr::RecordField { .. }
-            | ProjectExpr::EnumTagRemap { .. }
-            | ProjectExpr::EnumRemap { .. }
-            | ProjectExpr::RecursiveEnumRemap { .. } => None,
+        .map(|(output_idx, expr)| {
+            Ok(match &expr.expression {
+                ProjectExpr::Field(field) => {
+                    let source_idx = resolve_field_ref(input_desc, field)?;
+                    validate_copy(&input_desc.fields()[source_idx].value_type, output_idx)?;
+                    RawProjectionField::Copy { source_idx }
+                }
+                ProjectExpr::Nullable(field) | ProjectExpr::NullableFlat(field) => {
+                    let source_idx = resolve_field_ref(input_desc, field)?;
+                    let source_type = &input_desc.fields()[source_idx].value_type;
+                    if matches!(expr.expression, ProjectExpr::NullableFlat(_))
+                        && matches!(source_type, ValueType::Nullable(_))
+                    {
+                        validate_copy(source_type, output_idx)?;
+                        RawProjectionField::Copy { source_idx }
+                    } else {
+                        validate_copy(
+                            &ValueType::Nullable(Box::new(source_type.clone())),
+                            output_idx,
+                        )?;
+                        RawProjectionField::WrapNullable { source_idx }
+                    }
+                }
+                ProjectExpr::RecordField { source, path } => {
+                    let source_idx = resolve_field_ref(input_desc, source)?;
+                    let mut steps = vec![(*input_desc, source_idx)];
+                    let mut value_type = &input_desc.fields()[source_idx].value_type;
+                    for name in path {
+                        let ValueType::Record(descriptor) = value_type else {
+                            return Err(IvmRuntimeError::UnsupportedOperator);
+                        };
+                        let index = descriptor
+                            .field_index(name)
+                            .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                        steps.push((**descriptor, index));
+                        value_type = &descriptor.fields()[index].value_type;
+                    }
+                    validate_copy(value_type, output_idx)?;
+                    RawProjectionField::Nested { path: steps }
+                }
+                ProjectExpr::Null(_) => {
+                    prepared_constant_field(output_desc, output_idx, Value::Nullable(None))
+                }
+                ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
+                    prepared_constant_field(output_desc, output_idx, value.to_value())
+                }
+                ProjectExpr::EnumTagRemap { .. }
+                | ProjectExpr::EnumRemap { .. }
+                | ProjectExpr::RecursiveEnumRemap { .. } => RawProjectionField::Evaluate,
+            })
         })
-        .collect::<Option<Vec<_>>>();
-    Ok(fields)
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+    Ok(Some(fields))
 }
 
-fn encode_projection_field_value(
+fn prepared_constant_field(
+    output: RecordDescriptor,
+    index: usize,
+    value: Value,
+) -> RawProjectionField {
+    match records::encode_single_field_value(&value, &output.fields()[index].value_type) {
+        Ok(bytes) => RawProjectionField::Encoded { bytes },
+        Err(error) => RawProjectionField::Error(error),
+    }
+}
+
+pub(super) fn encode_projection_field_value(
     output_desc: RecordDescriptor,
     field_idx: usize,
     value: Value,

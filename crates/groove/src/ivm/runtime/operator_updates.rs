@@ -601,18 +601,38 @@ impl NodeState {
             .sum::<usize>();
         let mut output = BytesMut::with_capacity(estimated_output_bytes);
         let mut spans = Vec::with_capacity(input.deltas.len());
-        let mut raw_projection_scratch = RawProjectionScratch::default();
         for delta in &input.deltas {
             let span = if let Some(fields) = raw_projection {
-                output_desc
-                    .project_raw_fields_into(
-                        &input.descriptor,
-                        delta.raw(),
-                        fields,
-                        &mut output,
-                        &mut raw_projection_scratch,
-                    )
-                    .map_err(IvmRuntimeError::RecordEncoding)?
+                let start = output.len();
+                let result = output_desc.project_raw_fields_into(
+                    &input.descriptor,
+                    delta.raw(),
+                    fields,
+                    &mut output,
+                    |index, output| {
+                        let value = project_field_value(
+                            &project.expressions[index],
+                            index,
+                            output_desc,
+                            &input.descriptor,
+                            delta.raw(),
+                        )?;
+                        let encoded = encode_projection_field_value(output_desc, index, value)?;
+                        output.extend_from_slice(&encoded);
+                        Ok::<_, IvmRuntimeError>(())
+                    },
+                );
+                match result {
+                    Ok(span) => span,
+                    Err(
+                        IvmRuntimeError::EnumTagProjectionAbsent { .. }
+                        | IvmRuntimeError::EnumProjectionAbsent { .. },
+                    ) if omit_unrepresentable_enum_rows => {
+                        output.truncate(start);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 let start = output.len();
                 let record = match project_record(

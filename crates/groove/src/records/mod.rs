@@ -664,10 +664,23 @@ pub struct RecordProjector {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RawProjectionField {
-    Copy { source_idx: usize },
-    WrapNullable { source_idx: usize },
-    FlattenNullable { source_idx: usize },
-    Encoded { bytes: Vec<u8> },
+    Copy {
+        source_idx: usize,
+    },
+    WrapNullable {
+        source_idx: usize,
+    },
+    Nested {
+        path: Vec<(RecordDescriptor, usize)>,
+    },
+    /// Constant preparation failed. Preserve lazy expression semantics:
+    /// an empty input does not evaluate the expression or raise its error.
+    Error(Error),
+    /// Only this field needs semantic evaluation by the caller.
+    Evaluate,
+    Encoded {
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -818,79 +831,54 @@ impl RecordProjector {
 }
 
 impl RecordDescriptor {
-    pub(crate) fn project_raw_fields_into(
+    /// Execute a descriptor-checked field plan. Inputs are borrowed; all fields
+    /// append directly into the batch allocation. Only Evaluate calls user logic.
+    pub(crate) fn project_raw_fields_into<E: From<Error>>(
         &self,
         source: &RecordDescriptor,
         source_record: &[u8],
         fields: &[RawProjectionField],
         output: &mut BytesMut,
-        scratch: &mut RawProjectionScratch,
-    ) -> Result<std::ops::Range<usize>, Error> {
-        if self.fields.len() != fields.len() {
-            return Err(Error::ArityMismatch {
-                expected: self.fields.len(),
-                actual: fields.len(),
-            });
-        }
-
-        scratch.variable_fields.clear();
-        scratch.generated.clear();
+        mut evaluate: impl FnMut(usize, &mut BytesMut) -> Result<(), E>,
+    ) -> Result<std::ops::Range<usize>, E> {
         let start = output.len();
         let fixed_size = self.fixed_size();
         let variable_count = self.variable_count();
         let offset_table_size = variable_count.saturating_sub(1) * 4;
-        output.reserve(fixed_size + offset_table_size);
-
+        // Reserve the offset table only once, after the fixed fields. Variable
+        // ends are patched as their bytes arrive: no per-row span/scratch vector.
         for target_idx in &self.layout.logical_by_physical {
-            let layout = self.layout.fields[*target_idx];
-            if matches!(layout, FieldLayout::Variable { .. }) {
-                let bytes = self.raw_projected_field_bytes(
+            if matches!(self.layout.fields[*target_idx], FieldLayout::Static { .. }) {
+                append_projected_field(
                     source,
                     source_record,
+                    &fields[*target_idx],
                     *target_idx,
-                    fields[*target_idx].clone(),
-                    scratch,
+                    output,
+                    &mut evaluate,
                 )?;
-                scratch.variable_fields.push(bytes);
-                continue;
             }
-
-            let bytes = self.raw_projected_field_bytes(
+        }
+        let offset_start = output.len();
+        output.resize(offset_start + offset_table_size, 0);
+        for target_idx in &self.layout.logical_by_physical {
+            let FieldLayout::Variable { variable_idx } = self.layout.fields[*target_idx] else {
+                continue;
+            };
+            append_projected_field(
                 source,
                 source_record,
+                &fields[*target_idx],
                 *target_idx,
-                fields[*target_idx].clone(),
-                scratch,
+                output,
+                &mut evaluate,
             )?;
-            match bytes {
-                RawProjectedBytes::Source(span) => output.extend_from_slice(&source_record[span]),
-                RawProjectedBytes::Generated(span) => {
-                    output.extend_from_slice(&scratch.generated[span])
-                }
+            if variable_idx + 1 < variable_count {
+                let end = usize_to_u32(output.len() - start)?;
+                let offset = start + fixed_size + variable_idx * 4;
+                output[offset..offset + 4].copy_from_slice(&end.to_le_bytes());
             }
         }
-
-        let variable_start = fixed_size + offset_table_size;
-        let mut next_offset = variable_start;
-        for bytes in scratch
-            .variable_fields
-            .iter()
-            .take(scratch.variable_fields.len().saturating_sub(1))
-        {
-            next_offset = checked_add(next_offset, bytes.len())?;
-            output.extend_from_slice(&usize_to_u32(next_offset)?.to_le_bytes());
-        }
-        for bytes in &scratch.variable_fields {
-            match bytes {
-                RawProjectedBytes::Source(span) => {
-                    output.extend_from_slice(&source_record[span.clone()])
-                }
-                RawProjectedBytes::Generated(span) => {
-                    output.extend_from_slice(&scratch.generated[span.clone()])
-                }
-            }
-        }
-
         Ok(start..output.len())
     }
 
@@ -1046,120 +1034,36 @@ impl RecordDescriptor {
 
         Ok(Some(start..output.len()))
     }
+}
 
-    fn raw_projected_field_bytes(
-        &self,
-        source: &RecordDescriptor,
-        source_record: &[u8],
-        target_idx: usize,
-        field: RawProjectionField,
-        scratch: &mut RawProjectionScratch,
-    ) -> Result<RawProjectedBytes, Error> {
-        let target_field = self
-            .fields
-            .get(target_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: target_idx,
-                len: self.fields.len(),
-            })?;
-        match field {
-            RawProjectionField::Copy { source_idx } => {
-                let source_field =
-                    source
-                        .fields
-                        .get(source_idx)
-                        .ok_or(Error::FieldIndexOutOfBounds {
-                            index: source_idx,
-                            len: source.fields.len(),
-                        })?;
-                if source_field.value_type != target_field.value_type {
-                    return Err(Error::TypeMismatch {
-                        expected: target_field.value_type.clone(),
-                    });
-                }
-                source
-                    .field_span(source_record, source_idx)
-                    .map(RawProjectedBytes::Source)
-            }
-            RawProjectionField::WrapNullable { source_idx } => self.wrap_nullable_field_bytes(
-                source,
-                source_record,
-                source_idx,
-                target_idx,
-                scratch,
-            ),
-            RawProjectionField::FlattenNullable { source_idx } => {
-                let source_field =
-                    source
-                        .fields
-                        .get(source_idx)
-                        .ok_or(Error::FieldIndexOutOfBounds {
-                            index: source_idx,
-                            len: source.fields.len(),
-                        })?;
-                if source_field.value_type == target_field.value_type
-                    && matches!(source_field.value_type, ValueType::Nullable(_))
-                {
-                    return source
-                        .field_span(source_record, source_idx)
-                        .map(RawProjectedBytes::Source);
-                }
-                self.wrap_nullable_field_bytes(
-                    source,
-                    source_record,
-                    source_idx,
-                    target_idx,
-                    scratch,
-                )
-            }
-            RawProjectionField::Encoded { bytes } => {
-                let start = scratch.generated.len();
-                scratch.generated.extend_from_slice(&bytes);
-                Ok(RawProjectedBytes::Generated(start..scratch.generated.len()))
-            }
+fn append_projected_field<E: From<Error>>(
+    source: &RecordDescriptor,
+    record: &[u8],
+    field: &RawProjectionField,
+    target_idx: usize,
+    output: &mut BytesMut,
+    evaluate: &mut impl FnMut(usize, &mut BytesMut) -> Result<(), E>,
+) -> Result<(), E> {
+    match field {
+        RawProjectionField::Copy { source_idx } => {
+            output.extend_from_slice(&record[source.field_span(record, *source_idx)?]);
         }
-    }
-
-    fn wrap_nullable_field_bytes(
-        &self,
-        source: &RecordDescriptor,
-        source_record: &[u8],
-        source_idx: usize,
-        target_idx: usize,
-        scratch: &mut RawProjectionScratch,
-    ) -> Result<RawProjectedBytes, Error> {
-        let source_field = source
-            .fields
-            .get(source_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: source_idx,
-                len: source.fields.len(),
-            })?;
-        let target_field = self
-            .fields
-            .get(target_idx)
-            .ok_or(Error::FieldIndexOutOfBounds {
-                index: target_idx,
-                len: self.fields.len(),
-            })?;
-        let ValueType::Nullable(inner) = &target_field.value_type else {
-            return Err(Error::TypeMismatch {
-                expected: ValueType::Nullable(Box::new(source_field.value_type.clone())),
-            });
-        };
-        if inner.as_ref() != &source_field.value_type {
-            return Err(Error::TypeMismatch {
-                expected: target_field.value_type.clone(),
-            });
+        RawProjectionField::WrapNullable { source_idx } => {
+            output.extend_from_slice(&[1]);
+            output.extend_from_slice(&record[source.field_span(record, *source_idx)?]);
         }
-        let source_span = source.field_span(source_record, source_idx)?;
-        let start = scratch.generated.len();
-        scratch.generated.extend_from_slice(&[1]);
-        scratch
-            .generated
-            .extend_from_slice(&source_record[source_span]);
-        Ok(RawProjectedBytes::Generated(start..scratch.generated.len()))
+        RawProjectionField::Nested { path } => {
+            let mut bytes = record;
+            for (descriptor, index) in path {
+                bytes = &bytes[descriptor.field_span(bytes, *index)?];
+            }
+            output.extend_from_slice(bytes);
+        }
+        RawProjectionField::Encoded { bytes } => output.extend_from_slice(bytes),
+        RawProjectionField::Evaluate => evaluate(target_idx, output)?,
+        RawProjectionField::Error(error) => return Err(error.clone().into()),
     }
+    Ok(())
 }
 
 impl RawProjectedBytes {

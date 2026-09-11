@@ -23,8 +23,8 @@ use super::{
     ArgByDirection, ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError,
     NodeState, RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta,
     VariantProjection, VariantProjectionKey, arg_by_candidate_replaces, consolidate_deltas,
-    encoded_record_key_part, plan_expr_names, project_binding_source_deltas, scan_bounds,
-    touched_join_keys,
+    encoded_record_key_part, plan_expr_names, project_binding_source_deltas, raw_projection_fields,
+    scan_bounds, touched_join_keys,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -1677,8 +1677,14 @@ impl HydrationEvaluator<'_> {
                 }
                 OpType::MapProject(project) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
-                    let result =
-                        NodeState::update_map_project(project, output_desc, &input, None, false);
+                    let fields = raw_projection_fields(project, &input.descriptor, output_desc)?;
+                    let result = NodeState::update_map_project(
+                        project,
+                        output_desc,
+                        &input,
+                        fields.as_deref(),
+                        false,
+                    );
                     #[cfg(feature = "cold-settle-attribution")]
                     if let Ok(output) = &result {
                         crate::cold_settle_attribution::record_map(
