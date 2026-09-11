@@ -655,7 +655,8 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core_impl() {
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .start()
-        .await.expect("start test server");
+        .await
+        .expect("start test server");
     let edge = JazzServer::builder()
         .with_app_id(app_id)
         .with_native_transport_connector(jazz_testkit::native_connector())
@@ -795,7 +796,8 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .start()
-        .await.expect("start test server");
+        .await
+        .expect("start test server");
     let edge_us = JazzServer::builder()
         .with_app_id(app_id)
         .with_native_transport_connector(jazz_testkit::native_connector())
@@ -881,7 +883,8 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .start()
-        .await.expect("start test server");
+        .await
+        .expect("start test server");
 
     seed_schema_catalogue(&core, &v1_schema).await;
     publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &v1_schema).await;
@@ -980,7 +983,8 @@ async fn persistent_dynamic_edge_reopens_catalogue_for_trusted_client_while_regi
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .start()
-        .await.expect("start test server");
+        .await
+        .expect("start test server");
     let unavailable_core_url = core.base_url();
     seed_schema_catalogue(&core, &schema).await;
     publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &schema).await;
@@ -1083,7 +1087,8 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .start()
-        .await.expect("start test server");
+        .await
+        .expect("start test server");
     seed_schema_catalogue(&core, &schema).await;
     let allow_head =
         publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &schema).await;
@@ -1236,7 +1241,8 @@ async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_ed
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .start()
-        .await.expect("start test server");
+        .await
+        .expect("start test server");
     let edge = JazzServer::builder()
         .with_app_id(app_id)
         .with_native_transport_connector(jazz_testkit::native_connector())
