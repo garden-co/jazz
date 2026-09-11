@@ -672,10 +672,18 @@ fn convert_default_for_column_type(
 ) -> Result<GrooveValue, SchemaConversionError> {
     match (column_type, value) {
         (ColumnType::Boolean, Value::Boolean(value)) => Ok(GrooveValue::Bool(*value)),
-        (
-            ColumnType::Text | ColumnType::Json { .. } | ColumnType::Enum { .. },
-            Value::Text(value),
-        ) => Ok(GrooveValue::String(value.clone())),
+        (ColumnType::Text | ColumnType::Json { .. }, Value::Text(value)) => {
+            Ok(GrooveValue::String(value.clone()))
+        }
+        (ColumnType::Enum { variants }, Value::Text(value)) => {
+            if !variants.contains(value) {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), column),
+                    format!("enum default value {value:?} is not declared"),
+                ));
+            }
+            Ok(GrooveValue::String(value.clone()))
+        }
         (
             ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
             Value::Enum { case, values },
