@@ -171,7 +171,7 @@ pub(crate) struct MaintainedSubscriptionView {
     /// publication diffs this set against its acknowledged predecessor so a
     /// +/− pair observed in one drain is never serialized as an ambiguous
     /// ordered operation.
-    source_fact_weights: BTreeMap<ProgramFactEntry, BTreeMap<SourceFactOrigin, i64>>,
+    source_fact_weights: BTreeMap<ProgramFactEntry, [i64; 3]>,
     selected_deletion_witnesses: BTreeMap<ProgramFactEntry, VersionRow>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
@@ -849,7 +849,7 @@ impl MaintainedSubscriptionView {
         self.source_fact_weights
             .iter()
             .filter(|(fact, weights)| {
-                weights.values().any(|weight| *weight > 0) && fact.is_peer_source_closure_fact()
+                weights.iter().any(|weight| *weight > 0) && fact.is_peer_source_closure_fact()
             })
             .map(|(fact, _)| fact.clone())
             .chain(self.selected_deletion_witnesses.keys().cloned())
@@ -886,25 +886,31 @@ impl MaintainedSubscriptionView {
         fact: ProgramFactEntry,
         weight: i64,
     ) -> Option<bool> {
-        let was_present = self
-            .source_fact_weights
-            .get(&fact)
-            .is_some_and(|weights| weights.values().any(|weight| *weight > 0));
-        let weights = self.source_fact_weights.entry(fact.clone()).or_default();
-        let next = weights.get(&origin).copied().unwrap_or(0) + weight;
-        if next == 0 {
-            weights.remove(&origin);
-        } else {
-            weights.insert(origin, next);
+        let slot = match origin {
+            SourceFactOrigin::Version => 0,
+            SourceFactOrigin::Replacement => 1,
+            SourceFactOrigin::ProgramFact => 2,
+        };
+        match self.source_fact_weights.entry(fact) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                if weight != 0 {
+                    let mut weights = [0; 3];
+                    weights[slot] = weight;
+                    entry.insert(weights);
+                }
+                (weight > 0).then_some(true)
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let weights = entry.get_mut();
+                let was_present = weights.iter().any(|weight| *weight > 0);
+                weights[slot] += weight;
+                let is_present = weights.iter().any(|weight| *weight > 0);
+                if weights.iter().all(|weight| *weight == 0) {
+                    entry.remove();
+                }
+                (was_present != is_present).then_some(is_present)
+            }
         }
-        if weights.is_empty() {
-            self.source_fact_weights.remove(&fact);
-        }
-        let is_present = self
-            .source_fact_weights
-            .get(&fact)
-            .is_some_and(|weights| weights.values().any(|weight| *weight > 0));
-        (was_present != is_present).then_some(is_present)
     }
 
     pub(crate) fn replacement_for(
@@ -4234,6 +4240,39 @@ mod tests {
             maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), -1),
             Some(false)
         );
+        assert!(maintained.source_fact_weights.is_empty());
+    }
+
+    // Internal: signed terminal weights can temporarily be negative, and
+    // only this boundary exposes each witness origin's independent presence.
+    #[test]
+    fn signed_source_weights_do_not_cancel_another_origins_presence() {
+        let row = version(row(0x53), 12, "signed source");
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(test_source(), &row, &aliases()).unwrap(),
+        );
+        let mut maintained = MaintainedSubscriptionView::default();
+        for (origin, weight, transition, visible) in [
+            (SourceFactOrigin::Version, 1, Some(true), true),
+            (SourceFactOrigin::Replacement, -1, None, true),
+            (SourceFactOrigin::Version, -1, Some(false), false),
+            (SourceFactOrigin::Replacement, 1, None, false),
+            (SourceFactOrigin::ProgramFact, 2, Some(true), true),
+            (SourceFactOrigin::Version, -2, None, true),
+            (SourceFactOrigin::ProgramFact, -2, Some(false), false),
+            (SourceFactOrigin::Version, 2, None, false),
+        ] {
+            assert_eq!(
+                maintained.apply_source_fact_delta(origin, fact.clone(), weight),
+                transition,
+            );
+            assert_eq!(
+                maintained
+                    .active_peer_source_closure_facts()
+                    .contains(&fact),
+                visible
+            );
+        }
         assert!(maintained.source_fact_weights.is_empty());
     }
 
