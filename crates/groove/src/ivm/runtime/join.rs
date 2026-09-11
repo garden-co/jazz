@@ -64,6 +64,7 @@ impl JoinBucket {
         self.iter().next().is_none()
     }
 
+    #[cfg(test)]
     fn commit_overlay(&mut self) {
         if self.overlay.is_empty() {
             return;
@@ -766,27 +767,23 @@ fn append_join_deltas(
     Ok(())
 }
 
-fn apply_join_delta_to_index(index: &mut JoinIndex, deltas: &[KeyedRecordDelta<'_>]) {
+fn build_join_delta_index(deltas: &[KeyedRecordDelta<'_>]) -> JoinIndex {
+    // This index is fresh and has no snapshots. Populate its base directly;
+    // the overlay is only needed when updating an existing shared bucket.
+    let mut index = JoinIndex::default();
     for delta in deltas {
         let bucket = index.entry(delta.key.clone()).or_default();
+        let base = Rc::make_mut(&mut bucket.base);
         let next_weight =
-            bucket.get(&delta.delta.record).copied().unwrap_or_default() + delta.delta.weight;
+            base.get(&delta.delta.record).copied().unwrap_or_default() + delta.delta.weight;
         if next_weight == 0 {
-            bucket.set(delta.delta.record.clone(), 0);
-            if bucket.is_empty() {
+            base.remove(&delta.delta.record);
+            if base.is_empty() {
                 index.remove(&delta.key);
             }
         } else {
-            bucket.set(delta.delta.record.clone(), next_weight);
+            base.insert(delta.delta.record.clone(), next_weight);
         }
-    }
-}
-
-fn build_join_delta_index(deltas: &[KeyedRecordDelta<'_>]) -> JoinIndex {
-    let mut index = HashMap::default();
-    apply_join_delta_to_index(&mut index, deltas);
-    for bucket in index.values_mut() {
-        bucket.commit_overlay();
     }
     index
 }
