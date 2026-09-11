@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// CLI for jazz-tools schema tooling
+// CLI for jazz-tools schema and data tooling
 
 import { existsSync, readFileSync, realpathSync } from "fs";
 import { readFile } from "fs/promises";
@@ -16,6 +16,7 @@ import {
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
+import { DATA_HELP, dataCommand } from "./data-cli/command.js";
 import type { StoredPermissionsHead } from "./runtime/schema-fetch.js";
 
 export interface BuildOptions {
@@ -546,6 +547,7 @@ function isMainModule(): boolean {
 function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
+  console.log("  data query            Read or write application rows using Jazz SQL");
   console.log("  validate              Validate root schema.ts and optional permissions.ts");
   console.log("  schema hash           Print the short hash of the current schema.ts");
   console.log("  schema export         Print the compiled structural schema as JSON");
@@ -603,7 +605,8 @@ function printHelp(): void {
 
 if (isMainModule()) {
   if (process.argv.slice(2).some((arg) => arg === "--help" || arg === "-h")) {
-    printHelp();
+    if (process.argv[2] === "data") console.log(DATA_HELP);
+    else printHelp();
     process.exit(0);
   }
   const envFiles = readEnvFiles(process.argv.slice(2));
@@ -616,7 +619,21 @@ if (isMainModule()) {
   }
   const command = process.argv[2] ?? "";
 
-  if (command === "validate") {
+  if (command === "data") {
+    const task =
+      process.argv[3] === "query"
+        ? dataCommand(process.argv.slice(4), {
+            appId: resolveEnvVar(APP_ID_ENV_VARS),
+            serverUrl: resolveEnvVar(SERVER_URL_ENV_VARS),
+          })
+        : Promise.reject(
+            new Error("Usage: jazz-tools data query [appId] --sql <statement> [options]"),
+          );
+    task.catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
+  } else if (command === "validate") {
     const { options } = parseArgs();
     validate(options).catch((err) => {
       console.error(err.message);

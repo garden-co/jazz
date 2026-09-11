@@ -107,3 +107,108 @@ this alpha: the default persistent configuration and the proposal-only
 `sqliteStorage` option both fail before opening a driver. Explicit memory mode
 has only been exercised by Node-based wiring tests, not Metro/Hermes or a device,
 and is not a supported persistence alternative.
+
+## Data CLI: Jazz SQL (draft)
+
+`jazz-tools data query` compiles a small SQL dialect into the existing Jazz SDK
+query and mutation APIs. It runs in Node with `jazz-napi`. SQL is never executed
+by the database engine.
+
+```sh
+# Reads are the default. Uses schema.ts from the current app directory.
+export JAZZ_APP_ID=my-app
+export JAZZ_SERVER_URL=https://your-jazz-server.example
+export JAZZ_BACKEND_SECRET=your-backend-secret
+jazz-tools data query --sql 'SELECT id, title FROM todos WHERE done = FALSE ORDER BY title ASC LIMIT 20'
+
+# Mutations always require --write. INSERT generates the row id.
+jazz-tools data query --write --sql "INSERT INTO todos (title, done) VALUES ('Review draft', FALSE)" --format json
+jazz-tools data query --write --sql "UPDATE todos SET done = TRUE WHERE id = '00000000-0000-0000-0000-000000000001'"
+jazz-tools data query --write --sql "DELETE FROM todos WHERE id = '00000000-0000-0000-0000-000000000001'"
+
+# Existing user JWT: ordinary row permissions remain enforced.
+jazz-tools data query --jwt "$USER_JWT" --sql 'SELECT * FROM todos'
+
+# A deployed catalogue schema instead of a local schema.ts. Use a full hash.
+# JAZZ_ADMIN_SECRET is used only to fetch this schema.
+jazz-tools data query --schema-hash "$SCHEMA_HASH" --sql 'SELECT * FROM todos' --format jsonl
+
+# One statement from a file or stdin. --env-file is also supported.
+printf '%s\n' 'SELECT title FROM todos;' | jazz-tools data query --file - --format json
+```
+
+An optional positional app ID overrides `JAZZ_APP_ID`; the existing framework
+prefixed app/server environment variables also work. `--server-url` overrides
+the server environment variable. `--schema-dir` chooses a local app directory;
+`--schema-hash` instead reads a deployed schema using `--admin-secret` or
+`JAZZ_ADMIN_SECRET`. These schema options are mutually exclusive. Loading a
+local schema executes its TypeScript, just like the schema CLI. It does not
+publish schema or permissions.
+
+Data access requires `--backend-secret` / `JAZZ_BACKEND_SECRET` for unrestricted
+access, or `--jwt` / `JAZZ_JWT_TOKEN` for an **already registered** user. Admin
+credentials never grant data access. Explicit `--jwt` selects user permissions
+even with an inherited backend secret; explicit `--backend-secret` selects
+backend access even with an inherited JWT. Supplying both flags, or both
+environment credentials without a flag selecting one, is an error. JWT login
+does not create accounts or fall back to backend authority.
+
+The supported grammar is:
+
+```sql
+SELECT * | column [, column ...] FROM table
+  [WHERE column operator literal [AND column operator literal ...]]
+  [ORDER BY column [ASC | DESC] [, column [ASC | DESC] ...]]
+  [LIMIT count] [OFFSET count];
+INSERT INTO table (column [, column ...]) VALUES (literal [, literal ...]);
+UPDATE table SET column = literal [, column = literal ...] WHERE id = 'uuid';
+DELETE FROM table WHERE id = 'uuid';
+```
+
+Keywords ignore case; table and column names are case-sensitive. Double quotes
+quote identifiers, single quotes quote strings, and doubling the quote escapes
+it (`'O''Brien'`). `--` and non-nested `/* */` comments are accepted. Only one
+statement, with an optional trailing semicolon, is accepted per invocation.
+
+- Comparisons: `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, plus `IS NULL` and
+  `IS NOT NULL`. Operators must be supported by the Jazz column type: for
+  example, numeric/timestamp ordering comparisons work, text ordering
+  comparisons do not. Use `IS NULL`, never `= NULL`. Null tests require a
+  nullable column. Predicates use Jazz's existing comparison/null semantics.
+- Literals: strings, `TRUE`, `FALSE`, `NULL`, signed 32-bit integers, exact
+  signed 64-bit BIGINTs, finite doubles, enum strings, and UUID strings.
+  Timestamps accept integer Unix milliseconds or UTC strings in
+  `YYYY-MM-DDTHH:mm:ss[.SSS]Z` form. There is no implicit string-to-number coercion.
+- Projection includes exactly the requested columns; `*` includes `id` and
+  ordinary non-sparse columns. No automatic `id` in explicit projections.
+  Use explicit `ORDER BY` with a unique tie-breaker for repeatable pagination.
+  LIMIT/OFFSET are nonnegative safe integers, including `LIMIT 0`.
+- INSERT accepts one row. Required fields must be supplied unless they have a
+  schema default. UPDATE/DELETE accept only an exact `WHERE id = 'uuid'` and
+  first read that row, so JWT callers need read permission as well as write
+  permission. A missing or invisible row returns `affectedRows: 0`.
+- Writes retain Jazz's merge/concurrency semantics. The initial row lookup and
+  mutation are separate operations, not a SQL transaction or compare-and-swap.
+  Success waits for **global** acknowledgement and returns `operation`,
+  `affectedRows`, `id`, and `txId`. The affected count describes this invocation,
+  not a guarantee against concurrent deletion or other edits.
+
+Reads require a remote response; there is no offline cache fallback. Sessions
+use temporary in-memory storage and close after each command. `--timeout`
+(default 30000 milliseconds) bounds the entire command, including input,
+connection, acknowledgement, and shutdown. Failure exits nonzero; diagnostics
+go to stderr. A timed-out or interrupted write may already have committed.
+The CLI never retries writes; inspect the data before retrying.
+
+`--format table` (default) shows column headers, escapes terminal control
+characters, truncates cells after 80 characters, and shows a row count.
+`--format json` emits an array; `--format jsonl` emits one object per row and
+nothing for an empty result. Both preserve full values. BIGINTs are decimal
+strings, timestamps are ISO strings, and bytes are number arrays. JSONL formats
+a materialized SDK result; it does not stream a server cursor.
+
+This first slice excludes joins, OR/parenthesized expressions, aliases,
+aggregates, functions, parameters, schema changes, multi-row writes, SQL
+transactions, branch-keyed tables, provenance paths, structured-value literals
+(JSON/arrays/bytes/payload enums), and an interactive shell. Use the SDK for
+these operations. Unsupported syntax fails before opening a data session.
