@@ -1248,7 +1248,7 @@ impl VersionRecord {
             WireRowRecord::FIELD_CREATED_BY_IDX,
             WireRowRecord::FIELD_UPDATED_BY_IDX,
         ] {
-            RowAuthor::from_value(borrowed.get_idx(index).map_err(|_| malformed())?)
+            RowAuthor::from_record(borrowed.get_record(index).map_err(|_| malformed())?)
                 .map_err(|_| malformed())?;
         }
         borrowed
@@ -1464,10 +1464,10 @@ impl VersionRecord {
 
     /// Original author for this logical row.
     pub fn created_by(&self) -> AuthorSubject {
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(WireRowRecord::FIELD_CREATED_BY_IDX)
+                .get_record(WireRowRecord::FIELD_CREATED_BY_IDX)
                 .expect("valid wire created_by"),
         )
         .expect("canonical wire created_by")
@@ -1484,10 +1484,10 @@ impl VersionRecord {
 
     /// Author of this row version.
     pub fn updated_by(&self) -> AuthorSubject {
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(WireRowRecord::FIELD_UPDATED_BY_IDX)
+                .get_record(WireRowRecord::FIELD_UPDATED_BY_IDX)
                 .expect("valid wire updated_by"),
         )
         .expect("canonical wire updated_by")

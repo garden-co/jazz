@@ -2017,9 +2017,10 @@ fn encode_nullable(
 
 /// Inspect only framing needed to find an indirect scalar. Admission owns
 /// validity of the record; this is not another canonical decoding pass.
-pub(super) fn encoded_contains_indirect_value(
+pub(super) fn visit_encoded_indirect_values(
     bytes: &[u8],
     value_type: &ValueType,
+    visitor: &mut impl FnMut(&[u8], &ValueType) -> Result<bool, Error>,
 ) -> Result<bool, Error> {
     match value_type {
         ValueType::String
@@ -2028,7 +2029,7 @@ pub(super) fn encoded_contains_indirect_value(
             let (tag, _) = super::split_variant_record(bytes)?;
             match tag {
                 2 => Ok(false),
-                3 => Ok(true),
+                3 => visitor(bytes, value_type),
                 _ => Err(Error::LargeValue(
                     crate::large_values::Error::MalformedScalar,
                 )),
@@ -2038,17 +2039,17 @@ pub(super) fn encoded_contains_indirect_value(
             let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
             match flag {
                 0 => Ok(false),
-                1 => encoded_contains_indirect_value(payload, inner),
+                1 => visit_encoded_indirect_values(payload, inner, visitor),
                 flag => Err(Error::InvalidNullFlag(flag)),
             }
         }
         ValueType::Record(descriptor) => {
-            descriptor.fields_contain_indirect_values(bytes, 0..descriptor.fields().len())
+            descriptor.visit_encoded_indirect_fields(bytes, 0..descriptor.fields().len(), visitor)
         }
         ValueType::Enum(schema) => {
             let (tag, payload) = super::split_variant_record(bytes)?;
             let descriptor = schema.case(tag)?.payload;
-            descriptor.fields_contain_indirect_values(payload, 0..descriptor.fields().len())
+            descriptor.visit_encoded_indirect_fields(payload, 0..descriptor.fields().len(), visitor)
         }
         ValueType::Array(inner) if inner.may_contain_stored_scalar() => {
             // Indirect-capable array elements are variable-width. Bounds-check
@@ -2071,7 +2072,7 @@ pub(super) fn encoded_contains_indirect_value(
                     u32_to_usize(read_u32_at(bytes, 4 + index * 4)?)?
                 };
                 let item = bytes.get(start..end).ok_or(Error::InvalidOffset)?;
-                if encoded_contains_indirect_value(item, inner)? {
+                if visit_encoded_indirect_values(item, inner, visitor)? {
                     return Ok(true);
                 }
                 start = end;

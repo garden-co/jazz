@@ -179,12 +179,94 @@ impl RowUuid {
 
 /// Whole-structure interned author identity. The cached portable spelling is
 /// derived once; equality and field access never repeatedly parse JSON.
-#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct InternedAuthor {
     account: Option<crate::account_registry::AccountId>,
     issuer: String,
     subject: String,
     canonical: String,
+    row_record: std::sync::OnceLock<crate::groove::records::OwnedRecord>,
+    session_record: std::sync::OnceLock<crate::groove::records::OwnedRecord>,
+}
+
+// Derived caches must not change diagnostic identity as they initialize.
+impl std::fmt::Debug for InternedAuthor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InternedAuthor")
+            .field("account", &self.account)
+            .field("issuer", &self.issuer)
+            .field("subject", &self.subject)
+            .field("canonical", &self.canonical)
+            .finish()
+    }
+}
+
+// Borrowed composite lookup uses the existing intern pool. Derived encodings
+// do not participate in identity; construct them only after a lookup misses.
+trait AuthorIdentity {
+    fn identity(&self) -> (Option<crate::account_registry::AccountId>, &str, &str);
+}
+impl AuthorIdentity for InternedAuthor {
+    fn identity(&self) -> (Option<crate::account_registry::AccountId>, &str, &str) {
+        (self.account, &self.issuer, &self.subject)
+    }
+}
+impl PartialEq for InternedAuthor {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+}
+impl Eq for InternedAuthor {}
+impl std::hash::Hash for InternedAuthor {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.identity(), state);
+    }
+}
+impl PartialEq for dyn AuthorIdentity + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+}
+impl Eq for dyn AuthorIdentity + '_ {}
+impl std::hash::Hash for dyn AuthorIdentity + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.identity(), state);
+    }
+}
+impl<'a> std::borrow::Borrow<dyn AuthorIdentity + 'a> for InternedAuthor {
+    fn borrow(&self) -> &(dyn AuthorIdentity + 'a) {
+        self
+    }
+}
+impl<'a> From<&(dyn AuthorIdentity + 'a)> for InternedAuthor {
+    fn from(value: &(dyn AuthorIdentity + 'a)) -> Self {
+        let (account, issuer, subject) = value.identity();
+        let canonical = match account {
+            Some(account) => serde_json::to_string(&(account.0.to_string(), issuer, subject)),
+            None => serde_json::to_string(&(issuer, subject)),
+        }
+        .expect("author components have a canonical JSON spelling");
+        Self {
+            account,
+            issuer: issuer.to_owned(),
+            subject: subject.to_owned(),
+            canonical,
+            row_record: std::sync::OnceLock::new(),
+            session_record: std::sync::OnceLock::new(),
+        }
+    }
+}
+struct BorrowedAuthor<'a>(Option<crate::account_registry::AccountId>, &'a str, &'a str);
+impl AuthorIdentity for BorrowedAuthor<'_> {
+    fn identity(&self) -> (Option<crate::account_registry::AccountId>, &str, &str) {
+        (self.0, self.1, self.2)
+    }
+}
+fn intern_author(
+    account: Option<crate::account_registry::AccountId>,
+    issuer: &str,
+    subject: &str,
+) -> internment::Intern<InternedAuthor> {
+    internment::Intern::from_ref(&BorrowedAuthor(account, issuer, subject) as &dyn AuthorIdentity)
 }
 
 /// Authenticated subject recorded on transactions and row provenance.
@@ -382,6 +464,17 @@ impl RowAuthor {
 
     /// Structured durable attribution value.
     pub fn to_value(self) -> crate::groove::records::Value {
+        crate::groove::records::Value::Record(self.encoded_record().clone())
+    }
+
+    pub(crate) fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
+        let author = match self.0 {
+            RowAuthorKind::SystemAt(author) | RowAuthorKind::Account(author) => author.as_ref(),
+        };
+        author.row_record.get_or_init(|| self.build_record())
+    }
+
+    fn build_record(self) -> crate::groove::records::OwnedRecord {
         use crate::groove::records::{OwnedRecord, Value};
         let (issuer, subject) = self.principal_parts();
         let identity = author_identity_descriptor();
@@ -393,7 +486,7 @@ impl RowAuthor {
         let raw = descriptor
             .create(&[Value::Uuid(self.account_id().0), identity])
             .expect("row author record");
-        Value::Record(OwnedRecord::new(raw, descriptor))
+        OwnedRecord::new(raw, descriptor)
     }
 
     /// Decode durable metadata without granting the system capability.
@@ -403,11 +496,18 @@ impl RowAuthor {
         let Value::Record(record) = value else {
             return Err(bad());
         };
+        Self::from_record(record.borrowed())
+    }
+
+    pub(crate) fn from_record(
+        record: crate::groove::records::BorrowedRecord<'_>,
+    ) -> Result<Self, AuthorSubjectError> {
+        let bad = || AuthorSubjectError::InvalidCanonical("invalid row author record".into());
         let expected = Self::record_descriptor();
-        if record.descriptor() != &expected {
+        if record.descriptor() != expected {
             return Err(bad());
         }
-        let borrowed = record.borrowed();
+        let borrowed = record;
         let account = crate::account_registry::AccountId(borrowed.get_uuid(0).map_err(|_| bad())?);
         let span = record
             .descriptor()
@@ -430,23 +530,27 @@ impl RowAuthor {
             let node = uuid::Uuid::parse_str(subject)
                 .map(NodeUuid)
                 .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
-            if node.0.to_string() != subject {
+            if &*node
+                .0
+                .hyphenated()
+                .encode_lower(&mut uuid::Uuid::encode_buffer())
+                != subject
+            {
                 return Err(AuthorSubjectError::InvalidSystemOrigin);
             }
-            return Ok(Self::system_at(node));
+            return Ok(Self(RowAuthorKind::SystemAt(intern_author(
+                Some(account),
+                issuer,
+                subject,
+            ))));
         }
         if account.is_system() {
             return Err(AuthorSubjectError::ReservedAccount);
         }
-        let canonical =
-            serde_json::to_string(&(account.0.to_string(), issuer, subject)).map_err(|_| bad())?;
-        Ok(Self(RowAuthorKind::Account(internment::Intern::new(
-            InternedAuthor {
-                account: Some(account),
-                issuer: issuer.to_owned(),
-                subject: subject.to_owned(),
-                canonical,
-            },
+        Ok(Self(RowAuthorKind::Account(intern_author(
+            Some(account),
+            issuer,
+            subject,
         ))))
     }
 
@@ -503,30 +607,16 @@ impl AuthorSubject {
     }
 
     fn intern(issuer: &str, subject: &str) -> Self {
-        let canonical = serde_json::to_string(&(issuer, subject))
-            .expect("two strings always have a canonical JSON encoding");
-        Self::Authenticated(internment::Intern::new(InternedAuthor {
-            account: None,
-            issuer: issuer.to_owned(),
-            subject: subject.to_owned(),
-            canonical,
-        }))
+        Self::Authenticated(intern_author(None, issuer, subject))
     }
 
-    /// Attribute a durable system write to its originating node without
-    /// manufacturing the internal `System` capability.
+    /// Attribute a durable system write to its originating node.
     pub fn system_at(node: NodeUuid) -> Self {
-        let account = crate::account_registry::SYSTEM_ACCOUNT_ID;
-        let issuer = Self::SYSTEM_ISSUER.to_owned();
-        let subject = node.0.to_string();
-        let canonical = serde_json::to_string(&(account.0.to_string(), &issuer, &subject))
-            .expect("system author is serializable");
-        Self::SystemAt(internment::Intern::new(InternedAuthor {
-            account: Some(account),
-            issuer,
-            subject,
-            canonical,
-        }))
+        Self::SystemAt(intern_author(
+            Some(crate::account_registry::SYSTEM_ACCOUNT_ID),
+            Self::SYSTEM_ISSUER,
+            &node.0.to_string(),
+        ))
     }
 
     fn is_reserved_issuer(issuer: &str) -> bool {
@@ -573,15 +663,14 @@ impl AuthorSubject {
             "system is not an account principal"
         );
         assert!(!account.is_system(), "system account is not user-owned");
-        let (issuer, subject) = self.principal_parts();
-        let canonical = serde_json::to_string(&(account.0.to_string(), &issuer, &subject))
-            .expect("account author is serializable");
-        Self::Authenticated(internment::Intern::new(InternedAuthor {
-            account: Some(account),
-            issuer,
-            subject,
-            canonical,
-        }))
+        let Self::Authenticated(author) = self else {
+            unreachable!()
+        };
+        Self::Authenticated(intern_author(
+            Some(account),
+            &author.issuer,
+            &author.subject,
+        ))
     }
 
     /// Exact authenticating principal, independent of account ownership.
@@ -658,6 +747,24 @@ impl AuthorSubject {
 
     /// Structured native author value; intern handles are never serialized.
     pub fn to_value(self) -> crate::groove::records::Value {
+        crate::groove::records::Value::Record(self.encoded_record().clone())
+    }
+
+    pub(crate) fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
+        match self {
+            Self::System => {
+                static RECORD: std::sync::OnceLock<crate::groove::records::OwnedRecord> =
+                    std::sync::OnceLock::new();
+                RECORD.get_or_init(|| self.build_record())
+            }
+            Self::SystemAt(author) | Self::Authenticated(author) => author
+                .as_ref()
+                .session_record
+                .get_or_init(|| self.build_record()),
+        }
+    }
+
+    fn build_record(self) -> crate::groove::records::OwnedRecord {
         use crate::groove::records::{OwnedRecord, Value};
         let (issuer, subject) = self.principal_parts();
         let identity = author_identity_descriptor();
@@ -673,7 +780,7 @@ impl AuthorSubject {
         let raw = descriptor
             .create(&[account, identity])
             .expect("author record");
-        Value::Record(OwnedRecord::new(raw, descriptor))
+        OwnedRecord::new(raw, descriptor)
     }
 
     /// Decode structured provenance using its exact native descriptor.
@@ -720,18 +827,34 @@ impl AuthorSubject {
             let node = uuid::Uuid::parse_str(subject)
                 .map(NodeUuid)
                 .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
-            if node.0.to_string() != subject {
+            if &*node
+                .0
+                .hyphenated()
+                .encode_lower(&mut uuid::Uuid::encode_buffer())
+                != subject
+            {
                 return Err(AuthorSubjectError::InvalidSystemOrigin);
             }
-            return Ok(Self::system_at(node));
+            return Ok(Self::SystemAt(intern_author(
+                Some(crate::account_registry::AccountId(account)),
+                issuer,
+                subject,
+            )));
         }
-        let canonical = if let Some(account) = account {
-            serde_json::to_string(&(account.to_string(), issuer, subject))
-        } else {
-            serde_json::to_string(&(issuer, subject))
+        if account.is_some_and(|account| account == crate::account_registry::SYSTEM_ACCOUNT_ID.0) {
+            return Err(AuthorSubjectError::ReservedAccount);
         }
-        .map_err(|_| bad())?;
-        Self::from_canonical(&canonical)
+        if !principal_is_nonempty(issuer) {
+            return Err(AuthorSubjectError::MissingIssuer);
+        }
+        if !principal_is_nonempty(subject) {
+            return Err(AuthorSubjectError::MissingSubject);
+        }
+        Ok(Self::Authenticated(intern_author(
+            account.map(crate::account_registry::AccountId),
+            issuer,
+            subject,
+        )))
     }
 
     /// Ownership value exposed by account policies and row owner metadata.
@@ -776,7 +899,12 @@ impl AuthorSubject {
             let node = uuid::Uuid::parse_str(&subject)
                 .map(NodeUuid)
                 .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
-            if node.0.to_string() != subject {
+            if &*node
+                .0
+                .hyphenated()
+                .encode_lower(&mut uuid::Uuid::encode_buffer())
+                != subject.as_str()
+            {
                 return Err(AuthorSubjectError::InvalidSystemOrigin);
             }
             let author = Self::system_at(node);
@@ -980,6 +1108,29 @@ mod tests {
             AuthorSubject::SYSTEM,
         ] {
             assert_eq!(AuthorSubject::from_value(value.to_value()).unwrap(), value);
+        }
+    }
+
+    // Internal: allocation reuse is a process-local representation property.
+    #[test]
+    fn author_encoded_records_are_reused_without_changing_identity_or_bytes() {
+        let principal = AuthorSubject::authenticated("https://cache.example", "subject").unwrap();
+        let account = crate::account_registry::AccountId(uuid::Uuid::from_bytes([47; 16]));
+        let subject = principal.with_account(account);
+        let row = RowAuthor::from_persisted_subject(subject).unwrap();
+        let session_record = subject.encoded_record();
+        let row_record = row.encoded_record();
+        assert_eq!(session_record, &subject.build_record());
+        assert_eq!(row_record, &row.build_record());
+        for _ in 0..10 {
+            let same = AuthorSubject::authenticated("https://cache.example", "subject")
+                .unwrap()
+                .with_account(account);
+            assert_eq!(same, subject);
+            assert!(std::ptr::eq(same.encoded_record(), session_record));
+            let decoded = RowAuthor::from_record(row_record.borrowed()).unwrap();
+            assert_eq!(decoded, row);
+            assert!(std::ptr::eq(decoded.encoded_record(), row_record));
         }
     }
 

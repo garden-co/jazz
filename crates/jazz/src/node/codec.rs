@@ -202,14 +202,18 @@ impl records::RecordField for AuthorSubject {
 
 impl records::RecordField for RowAuthor {
     fn read_raw(bytes: &[u8], value_type: &records::ValueType) -> Result<Self, records::Error> {
-        RowAuthor::from_value(<Value as records::RecordField>::read_raw(
-            bytes, value_type,
-        )?)
-        .map_err(|_| records::Error::NonCanonicalRecord)
+        let records::ValueType::Record(descriptor) = value_type else {
+            return Err(records::Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        };
+        RowAuthor::from_record(descriptor.bind(bytes))
+            .map_err(|_| records::Error::NonCanonicalRecord)
     }
 
     fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
-        RowAuthor::from_value(record.get_idx(idx)?).map_err(|_| records::Error::NonCanonicalRecord)
+        RowAuthor::from_record(record.get_record(idx)?)
+            .map_err(|_| records::Error::NonCanonicalRecord)
     }
 
     fn to_value(&self) -> Value {
@@ -2210,34 +2214,115 @@ impl VersionRow {
                 "row version parents must be sorted and unique",
             ));
         }
-        let (descriptor, values) = if let Some(deletion) = version.deletion() {
-            (
-                register_record_descriptor(table),
+        let deletion = version.deletion();
+        let descriptor = if deletion.is_some() {
+            register_record_descriptor(table)
+        } else {
+            history_record_descriptor(table)
+        };
+        let source = version.record().borrowed();
+        let source_descriptor = source.descriptor();
+        // Admission still requires an account-bearing row author, including the
+        // reserved SYSTEM identity. Preserve that check without rebuilding Values.
+        RowAuthor::from_persisted_subject(version.created_by())
+            .map_err(|_| Error::UnadmittedWriteAuthor)?;
+        RowAuthor::from_persisted_subject(version.updated_by())
+            .map_err(|_| Error::UnadmittedWriteAuthor)?;
+        let created_at = TxTime::from_physical_ms(version.created_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
+            .0;
+        let updated_at = TxTime::from_physical_ms(version.updated_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
+            .0;
+        let raw = descriptor.create_with_encoded_fields::<Error>(
+            source.raw().len() + 128,
+            |index, output| {
+                let source_index = match index {
+                    1 => Some(0),
+                    5 => Some(1),
+                    6 => Some(2),
+                    8 => Some(4),
+                    i if deletion.is_none() && i >= 10 && i < 10 + table.columns.len() => {
+                        Some(i - 10 + 7)
+                    }
+                    _ => None,
+                };
+                if let Some(source_index) = source_index {
+                    if source_descriptor
+                        .fields()
+                        .get(source_index)
+                        .is_some_and(|field| {
+                            field.value_type == descriptor.fields()[index].value_type
+                        })
+                    {
+                        let span = source_descriptor.field_span(source.raw(), source_index)?;
+                        output.extend_from_slice(&source.raw()[span]);
+                        return Ok(());
+                    }
+                }
+                let value = match index {
+                    0 => Value::Bytes(version.branch_key().canonical_bytes()),
+                    1 => Value::Uuid(version.row_uuid().0),
+                    2 => Value::U64(tx_time.0),
+                    3 => Value::U64(tx_node_alias.0),
+                    4 => Value::U64(schema_version_alias.0),
+                    5 => Value::Array(
+                        version
+                            .parents()
+                            .iter()
+                            .map(|parent| tx_id_value(*parent))
+                            .collect(),
+                    ),
+                    6 => row_author_value(version.created_by())?,
+                    7 => Value::U64(created_at),
+                    8 => row_author_value(version.updated_by())?,
+                    9 => Value::U64(updated_at),
+                    _ if deletion.is_some() => deletion_event_value(deletion.unwrap()),
+                    i if i < 10 + table.columns.len() => {
+                        let value = version.optional_cell_at(i - 10);
+                        if let Some(value) = value.as_ref() {
+                            validate_cell_value(&table.columns[i - 10], value)?;
+                        }
+                        Value::Nullable(value.map(Box::new))
+                    }
+                    _ => authored_column_ids_value(authored_columns.as_ref()),
+                };
+                descriptor.encode_field_into(index, &value, output)?;
+                Ok(())
+            },
+        )?;
+        #[cfg(test)]
+        {
+            // Compare the optimized representation boundary with the previous
+            // Value-based encoder across every ingress fixture in the unit suite.
+            let values = if let Some(deletion) = deletion {
                 register_values_from_wire(
                     version,
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
                     deletion,
-                )?,
-            )
-        } else {
-            (
-                history_record_descriptor(table),
+                )?
+            } else {
                 history_values_from_wire(
                     table,
                     version,
-                    authored_columns,
+                    authored_columns.clone(),
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
-                )?,
-            )
-        };
+                )?
+            };
+            assert_eq!(
+                raw,
+                descriptor.create(&values)?,
+                "borrowed wire ingest changed storage bytes"
+            );
+        }
         Ok(Self {
             table: groove::Intern::new(version.table().to_owned()),
             branch_key: version.branch_key().clone(),
-            record: owned_record_from_storage_values_with_descriptor(descriptor, values)?,
+            record: OwnedRecord::new(raw, descriptor),
         })
     }
 
@@ -2310,10 +2395,10 @@ impl VersionRow {
         } else {
             HistoryRowRecord::FIELD_CREATED_BY_IDX
         };
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(idx)
+                .get_record(idx)
                 .expect("valid created_by"),
         )
         .expect("canonical created_by")
@@ -2340,10 +2425,10 @@ impl VersionRow {
         } else {
             HistoryRowRecord::FIELD_UPDATED_BY_IDX
         };
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(idx)
+                .get_record(idx)
                 .expect("valid updated_by"),
         )
         .expect("canonical updated_by")
@@ -4140,6 +4225,7 @@ pub(super) fn history_values_from_parts(
     Ok(values)
 }
 
+#[cfg(test)]
 fn history_values_from_wire(
     table: &TableSchema,
     version: &VersionRecord,
@@ -4211,6 +4297,7 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
     ])
 }
 
+#[cfg(test)]
 fn register_values_from_wire(
     version: &VersionRecord,
     tx_node_alias: NodeAlias,

@@ -1120,8 +1120,8 @@ where
                 record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?,
             )?,
             n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
-            made_by: RowAuthor::from_value(
-                record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            made_by: RowAuthor::from_record(
+                record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
             )
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject(),

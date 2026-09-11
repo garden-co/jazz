@@ -1896,7 +1896,7 @@ impl CurrentRow {
         };
         let record = self.record.borrowed();
         Ok(Some(match column {
-            "$createdBy" | "$updatedBy" => RowAuthor::from_value(record.get_idx(index)?)
+            "$createdBy" | "$updatedBy" => RowAuthor::from_record(record.get_record(index)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .to_value(),
             "$createdAt" | "$updatedAt" => Value::U64(record.get_u64(index)?),
@@ -1921,11 +1921,11 @@ impl CurrentRow {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
-            created_by: RowAuthor::from_value(borrowed.get_idx(created_by_idx)?)
+            created_by: RowAuthor::from_record(borrowed.get_record(created_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .as_author_subject(),
             created_at: borrowed.get_u64(created_at_idx)?,
-            updated_by: RowAuthor::from_value(borrowed.get_idx(updated_by_idx)?)
+            updated_by: RowAuthor::from_record(borrowed.get_record(updated_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .as_author_subject(),
             updated_at: borrowed.get_u64(updated_at_idx)?,

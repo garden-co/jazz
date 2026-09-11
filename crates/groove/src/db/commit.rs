@@ -151,12 +151,8 @@ impl Database {
                 else {
                     continue;
                 };
-                for value in descriptor.bind(record).to_values()? {
-                    if value_contains_large_ref(&value, &staged.value_ref) {
-                        found = true;
-                        break;
-                    }
-                }
+                found = descriptor
+                    .visit_large_value_refs(record, |reference| reference == &staged.value_ref)?;
                 if found {
                     break;
                 }
@@ -189,9 +185,14 @@ impl Database {
         let mut durable_root_deltas = BTreeMap::<crate::large_values::NodeRef, i64>::new();
         for table_delta in &table_deltas {
             for delta in &table_delta.deltas {
-                for value in table_delta.descriptor.bind(&delta.record).to_values()? {
-                    collect_large_root_deltas(&value, delta.weight, &mut durable_root_deltas);
-                }
+                table_delta
+                    .descriptor
+                    .visit_large_value_refs(&delta.record, |reference| {
+                        *durable_root_deltas
+                            .entry(reference.root.clone())
+                            .or_default() += delta.weight;
+                        false
+                    })?;
             }
         }
         let mut staged_operations = pending_writes
@@ -748,59 +749,5 @@ impl Database {
         } else {
             Ok(())
         }
-    }
-}
-
-fn value_contains_large_ref(value: &Value, expected: &crate::large_values::LargeValueRef) -> bool {
-    match value {
-        Value::Large(value_ref) => value_ref == expected,
-        Value::Tuple(values) | Value::Array(values) => values
-            .iter()
-            .any(|value| value_contains_large_ref(value, expected)),
-        Value::Nullable(Some(value)) => value_contains_large_ref(value, expected),
-        Value::Record(record) => record.to_values().is_ok_and(|values| {
-            values
-                .iter()
-                .any(|value| value_contains_large_ref(value, expected))
-        }),
-        Value::Enum(value) => value.record().to_values().is_ok_and(|values| {
-            values
-                .iter()
-                .any(|value| value_contains_large_ref(value, expected))
-        }),
-        _ => false,
-    }
-}
-
-fn collect_large_root_deltas(
-    value: &Value,
-    weight: i64,
-    deltas: &mut BTreeMap<crate::large_values::NodeRef, i64>,
-) {
-    match value {
-        Value::Large(value_ref) => {
-            *deltas.entry(value_ref.root.clone()).or_default() += weight;
-        }
-        Value::Tuple(values) | Value::Array(values) => {
-            for value in values {
-                collect_large_root_deltas(value, weight, deltas);
-            }
-        }
-        Value::Nullable(Some(value)) => collect_large_root_deltas(value, weight, deltas),
-        Value::Record(record) => {
-            if let Ok(values) = record.to_values() {
-                for value in values {
-                    collect_large_root_deltas(&value, weight, deltas);
-                }
-            }
-        }
-        Value::Enum(value) => {
-            if let Ok(values) = value.record().to_values() {
-                for value in values {
-                    collect_large_root_deltas(&value, weight, deltas);
-                }
-            }
-        }
-        _ => {}
     }
 }

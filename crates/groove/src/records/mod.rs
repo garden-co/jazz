@@ -473,6 +473,30 @@ impl RecordDescriptor {
         record: &[u8],
         indices: impl IntoIterator<Item = usize>,
     ) -> Result<bool, Error> {
+        self.visit_encoded_indirect_fields(record, indices, &mut |_, _| Ok(true))
+    }
+
+    /// Visit stored indirect references without materializing inline contents or
+    /// unrelated fields. Return true from the visitor to stop early.
+    pub(crate) fn visit_large_value_refs(
+        &self,
+        record: &[u8],
+        mut visitor: impl FnMut(&crate::large_values::LargeValueRef) -> bool,
+    ) -> Result<bool, Error> {
+        self.visit_encoded_indirect_fields(record, 0..self.fields.len(), &mut |bytes, ty| {
+            let Value::Large(reference) = values::decode_value(bytes, ty)? else {
+                unreachable!("indirect traversal visits only the indirect scalar arm")
+            };
+            Ok(visitor(&reference))
+        })
+    }
+
+    fn visit_encoded_indirect_fields(
+        &self,
+        record: &[u8],
+        indices: impl IntoIterator<Item = usize>,
+        visitor: &mut impl FnMut(&[u8], &ValueType) -> Result<bool, Error>,
+    ) -> Result<bool, Error> {
         for index in indices {
             let field = self.fields.get(index).ok_or(Error::FieldIndexOutOfBounds {
                 index,
@@ -480,12 +504,66 @@ impl RecordDescriptor {
             })?;
             if field.value_type.may_contain_stored_scalar() {
                 let span = self.field_span(record, index)?;
-                if values::encoded_contains_indirect_value(&record[span], &field.value_type)? {
+                if values::visit_encoded_indirect_values(&record[span], &field.value_type, visitor)?
+                {
                     return Ok(true);
                 }
             }
         }
         Ok(false)
+    }
+
+    /// Assemble a record in one output allocation. The callback must append the
+    /// exact field encoding for this descriptor; offsets are owned by this method.
+    pub fn create_with_encoded_fields<E: From<Error>>(
+        &self,
+        capacity: usize,
+        mut append: impl FnMut(usize, &mut Vec<u8>) -> Result<(), E>,
+    ) -> Result<Vec<u8>, E> {
+        let mut output = Vec::with_capacity(capacity);
+        for &index in &self.layout.logical_by_physical {
+            if matches!(self.layout.fields[index], FieldLayout::Static { .. }) {
+                append(index, &mut output)?;
+            }
+        }
+        let fixed_size = self.fixed_size();
+        let variable_count = self.variable_count();
+        output.resize(
+            checked_add(fixed_size, variable_count.saturating_sub(1) * 4)?,
+            0,
+        );
+        for &index in &self.layout.logical_by_physical {
+            let FieldLayout::Variable { variable_idx } = self.layout.fields[index] else {
+                continue;
+            };
+            append(index, &mut output)?;
+            if variable_idx + 1 < variable_count {
+                let end = usize_to_u32(output.len())?;
+                let offset = fixed_size + variable_idx * 4;
+                output[offset..offset + 4].copy_from_slice(&end.to_le_bytes());
+            }
+        }
+        Ok(output)
+    }
+
+    /// Append a generated field alongside fields copied from encoded records.
+    pub fn encode_field_into(
+        &self,
+        index: usize,
+        value: &Value,
+        output: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let field = self.fields.get(index).ok_or(Error::FieldIndexOutOfBounds {
+            index,
+            len: self.fields.len(),
+        })?;
+        ensure_value_type(value, &field.value_type)?;
+        if field.value_type.is_fixed_size() {
+            encode_fixed_value(output, value, &field.value_type)
+        } else {
+            output.extend_from_slice(&encode_value(value, &field.value_type)?);
+            Ok(())
+        }
     }
 
     pub fn patch_field(
@@ -1159,6 +1237,28 @@ impl<'a> BorrowedRecord<'a> {
 
     pub fn get_idx(&self, field_idx: usize) -> Result<Value, Error> {
         self.descriptor.get_idx(self.raw, field_idx)
+    }
+
+    /// Borrow a nested record directly from its encoded field.
+    pub fn get_record(&self, field_idx: usize) -> Result<BorrowedRecord<'a>, Error> {
+        let field =
+            self.descriptor
+                .fields()
+                .get(field_idx)
+                .ok_or(Error::FieldIndexOutOfBounds {
+                    index: field_idx,
+                    len: self.descriptor.fields().len(),
+                })?;
+        let ValueType::Record(descriptor) = &field.value_type else {
+            return Err(Error::TypeMismatch {
+                expected: field.value_type.clone(),
+            });
+        };
+        let span = self.descriptor.field_span(self.raw, field_idx)?;
+        Ok(BorrowedRecord {
+            raw: &self.raw[span],
+            descriptor: **descriptor,
+        })
     }
 
     pub fn to_values(&self) -> Result<Vec<Value>, Error> {

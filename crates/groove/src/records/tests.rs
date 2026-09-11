@@ -2547,3 +2547,100 @@ fn nested_record_read_does_not_reencode_descendants() {
     assert_eq!(record.get_idx(0).unwrap(), Value::Record(leaf_record));
     assert_eq!(RECORD_ENCODE_COUNT.with(|count| count.get()), 0);
 }
+
+// Internal representation tests: byte identity and borrowed storage cannot be
+// observed through a database query, which deliberately hides record layouts.
+#[test]
+fn encoded_field_assembly_matches_value_encoder_and_borrows_nested_record() {
+    let nested = descriptor([ValueType::String, ValueType::U64]);
+    let child = OwnedRecord::new(
+        nested
+            .create(&[Value::String("nested".into()), Value::U64(19)])
+            .unwrap(),
+        nested,
+    );
+    let d = descriptor([
+        ValueType::String,
+        ValueType::U64,
+        ValueType::Record(Box::new(nested)),
+        ValueType::Nullable(Box::new(ValueType::U64)),
+        ValueType::Bytes,
+    ]);
+    let values = [
+        Value::String("first".into()),
+        Value::U64(7),
+        Value::Record(child),
+        Value::Nullable(None),
+        Value::Bytes(vec![1, 2, 3]),
+    ];
+    let expected = d.create(&values).unwrap();
+    let actual = d
+        .create_with_encoded_fields::<Error>(expected.len(), |index, out| {
+            if index == 1 {
+                d.encode_field_into(index, &values[index], out)
+            } else {
+                out.extend_from_slice(&expected[d.field_span(&expected, index)?]);
+                Ok(())
+            }
+        })
+        .unwrap();
+    assert_eq!(actual, expected);
+    let borrowed = d.bind(&actual).get_record(2).unwrap();
+    assert_eq!(borrowed.get_str(0).unwrap(), "nested");
+    assert_eq!(borrowed.get_u64(1).unwrap(), 19);
+    assert_eq!(
+        borrowed.raw().as_ptr(),
+        actual[d.field_span(&actual, 2).unwrap()].as_ptr()
+    );
+    assert!(d.bind(&actual).get_record(0).is_err());
+    assert!(d.bind(&actual).get_record(99).is_err());
+}
+
+#[test]
+fn indirect_reference_visitor_preserves_nested_multiplicity_and_early_stop() {
+    use crate::large_values::{LargeValueKind, prepare};
+    let reference = prepare(LargeValueKind::String, b"indirect contents")
+        .unwrap()
+        .value_ref;
+    let nested = descriptor([ValueType::String]);
+    let child = OwnedRecord::new(
+        nested.create(&[Value::Large(reference.clone())]).unwrap(),
+        nested,
+    );
+    let d = descriptor([
+        ValueType::String,
+        ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ValueType::Record(Box::new(nested)),
+    ]);
+    let raw = d
+        .create(&[
+            Value::String("inline contents".repeat(100)),
+            Value::Array(vec![
+                Value::Nullable(None),
+                Value::Nullable(Some(Box::new(Value::Large(reference.clone())))),
+                Value::Nullable(Some(Box::new(Value::String("inline".into())))),
+                Value::Nullable(Some(Box::new(Value::Large(reference.clone())))),
+            ]),
+            Value::Record(child),
+        ])
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(
+        !d.visit_large_value_refs(&raw, |r| {
+            seen.push(r.clone());
+            false
+        })
+        .unwrap()
+    );
+    assert_eq!(seen, vec![reference.clone(); 3]);
+    let mut count = 0;
+    assert!(
+        d.visit_large_value_refs(&raw, |r| {
+            assert_eq!(r, &reference);
+            count += 1;
+            true
+        })
+        .unwrap()
+    );
+    assert_eq!(count, 1);
+}

@@ -1,0 +1,4 @@
+# Author identity is immutable. Only derived encoded-record caches use OnceLock;
+# manual Eq/Hash and stable Debug exclude them. Initializing these caches cannot
+# change an author or any containing query/authorization key.
+ignore-interior-mutability = ["jazz::ids::InternedAuthor"]

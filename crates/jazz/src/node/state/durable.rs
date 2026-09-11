@@ -542,8 +542,8 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            let made_by = RowAuthor::from_value(
-                record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            let made_by = RowAuthor::from_record(
+                record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
             )
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject();
@@ -611,8 +611,8 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || RowAuthor::from_value(
-                    record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+                || RowAuthor::from_record(
+                    record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
                 )
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .as_author_subject()
