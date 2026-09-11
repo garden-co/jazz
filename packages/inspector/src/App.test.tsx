@@ -6,6 +6,42 @@ import { useStandaloneContext } from "./contexts/standalone-context.js";
 
 const STORAGE_KEY = "jazz-inspector-standalone-config";
 
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: Deferred<T>["resolve"];
+  let reject!: Deferred<T>["reject"];
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+function storeActiveConnection() {
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      version: 2,
+      activeConnectionId: "local",
+      connections: [
+        {
+          id: "local",
+          name: "Local dev",
+          serverUrl: "http://localhost:19879",
+          appId: "local-app-id",
+          adminSecret: "local-admin-secret",
+          env: "dev",
+          schemaHash: "hash-a",
+        },
+      ],
+    }),
+  );
+}
+
 const createJazzClientMock = vi.fn();
 const fetchSchemaHashesMock = vi.fn();
 const fetchStoredPermissionsMock = vi.fn();
@@ -124,6 +160,116 @@ describe("App", () => {
         }),
       );
     });
+  });
+
+  it("shuts down a client resolved before required schema setup fails", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    const client = { shutdown };
+    const pendingClient = deferred<typeof client>();
+    const pendingSchema = deferred<{ schema: object }>();
+    const setupError = new Error("Stored schema fetch failed");
+
+    createJazzClientMock.mockReturnValueOnce(pendingClient.promise);
+    fetchStoredWasmSchemaMock.mockReturnValueOnce(pendingSchema.promise);
+
+    render(<App />);
+
+    await act(async () => {
+      pendingClient.resolve(client);
+      await pendingClient.promise;
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pendingSchema.reject(setupError);
+      await expect(pendingSchema.promise).rejects.toBe(setupError);
+    });
+
+    expect((await screen.findByRole("alert")).textContent).toBe(setupError.message);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("shuts down a client that resolves after required schema-hash setup fails", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    const client = { shutdown };
+    const pendingClient = deferred<typeof client>();
+    const setupError = new Error("Schema hash fetch failed");
+
+    createJazzClientMock.mockReturnValueOnce(pendingClient.promise);
+    fetchSchemaHashesMock.mockRejectedValueOnce(setupError);
+
+    render(<App />);
+
+    expect((await screen.findByRole("alert")).textContent).toBe(setupError.message);
+
+    await act(async () => {
+      pendingClient.resolve(client);
+      await pendingClient.promise;
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(shutdown).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("alert").textContent).toBe(setupError.message);
+  });
+
+  it("shuts down a resolved client when setup is disposed while still pending", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    const client = { shutdown };
+    const pendingClient = deferred<typeof client>();
+    const pendingSchema = deferred<{ schema: object }>();
+
+    createJazzClientMock.mockReturnValueOnce(pendingClient.promise);
+    fetchStoredWasmSchemaMock.mockReturnValueOnce(pendingSchema.promise);
+
+    const view = render(<App />);
+
+    await act(async () => {
+      pendingClient.resolve(client);
+      await pendingClient.promise;
+      await Promise.resolve();
+    });
+    view.unmount();
+
+    expect(shutdown).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pendingSchema.resolve({ schema: {} });
+      await pendingSchema.promise;
+      await Promise.resolve();
+    });
+    expect(shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the setup error visible when client shutdown rejects without an unhandled rejection", async () => {
+    storeActiveConnection();
+    const setupError = new Error("Schema hash fetch failed");
+    const shutdownError = new Error("Client shutdown failed");
+    const unhandledRejections: unknown[] = [];
+    const recordUnhandledRejection = (event: PromiseRejectionEvent) => {
+      event.preventDefault();
+      unhandledRejections.push(event.reason);
+    };
+    const shutdown = vi.fn().mockRejectedValue(shutdownError);
+    const client = { shutdown };
+
+    globalThis.addEventListener("unhandledrejection", recordUnhandledRejection);
+    try {
+      createJazzClientMock.mockResolvedValueOnce(client);
+      fetchSchemaHashesMock.mockRejectedValueOnce(setupError);
+
+      render(<App />);
+
+      expect((await screen.findByRole("alert")).textContent).toBe(setupError.message);
+      await waitFor(() => expect(shutdown).toHaveBeenCalledTimes(1));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(screen.getByRole("alert").textContent).toBe(setupError.message);
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      globalThis.removeEventListener("unhandledrejection", recordUnhandledRejection);
+    }
   });
 
   it("lets you manage and switch between named stored connections", async () => {
