@@ -95,3 +95,30 @@ The inner loop required no WASM build. The first new byte test used a tuple
 with variable-width members, which Groove correctly rejects; its final fixture
 uses a nested record. Native timing and profile collection ran after builds
 and tests completed.
+
+## Second target for this iteration: permissioned graph loads
+
+Alongside `local_batch_phases`, track `jazz-sim`'s `customer_cold_start` at
+`JAZZ_CUSTOMER_SCALE=1.0`: the anonymized large-load
+workload historically described as approximately 20.5k rows with recursive group membership, resource access edges and inherited
+child permissions. The fixture subscribes across 39 tables. Use the emitted
+`expected_rows`/`rows_materialized` for exact counts rather than treating the
+historical headline size as a fixed assertion.
+
+Track member `cold` and `warm` separately. Cold starts with an empty relay;
+warm primes, closes and reopens its RocksDB state, then connects a fresh
+client. Warm therefore measures persisted relay reuse, not a retained browser
+foreground. Keep admin cold and unauthorized (`spy`) cold as permission
+controls. Preserve exact visibility assertions and compare phase, per-table
+readiness, transport and memory metrics alongside total time.
+
+Build the native benchmark once under `--profile perf`, then invoke its
+executable directly with `JAZZ_CUSTOMER_IDENTITY=member`,
+`JAZZ_CUSTOMER_PHASES=cold,warm`, `JAZZ_CUSTOMER_SCALE=1.0` and
+`JAZZ_CUSTOMER_MAX_TICKS=200000`. The existing `repro-customer.sh` identifies the
+historical matrix, but its output pipeline suppresses command failures; use
+direct commands and inspect exit status for new receipts. Do not reuse old
+seed databases across storage revisions without checking their compatibility.
+
+This section selects the additional workload; a current-tip timing baseline
+has not yet been collected.
