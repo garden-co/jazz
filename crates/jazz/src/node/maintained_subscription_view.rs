@@ -456,6 +456,7 @@ impl MaintainedSubscriptionView {
         let requires_authoritative_membership_reconcile =
             !deltas.is_empty() && kind.requires_authoritative_membership_reconcile();
         let mut decode_plan_cache = VersionDecodePlanCache::new();
+        let mut payload_plans = std::collections::HashMap::new();
         let decoded = deltas
             .iter()
             .map(|(record, weight)| {
@@ -465,6 +466,7 @@ impl MaintainedSubscriptionView {
                     tables,
                     node_aliases,
                     &mut decode_plan_cache,
+                    &mut payload_plans,
                     self.read_view,
                 )
                 .map(|event| (event, weight))
@@ -2049,6 +2051,10 @@ fn decode_typed_terminal_record(
     tables: &TableSchemas,
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     decode_plan_cache: &mut VersionDecodePlanCache,
+    payload_plans: &mut std::collections::HashMap<
+        RecordDescriptor,
+        super::descriptor_roles::CurrentPayloadEncodePlan,
+    >,
     read_view: crate::protocol::ReadViewKey,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
@@ -2187,8 +2193,16 @@ fn decode_typed_terminal_record(
                 None => member,
             }
             .into();
-            let (descriptor, row_bytes) =
-                super::descriptor_roles::encode_current_payload_record(record, schema)?;
+            let plan = match payload_plans.entry(record.descriptor()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(super::descriptor_roles::CurrentPayloadEncodePlan::new(
+                        record.descriptor(),
+                        schema,
+                    )?)
+                }
+            };
+            let (descriptor, row_bytes) = plan.encode(record)?;
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),
                 descriptor,

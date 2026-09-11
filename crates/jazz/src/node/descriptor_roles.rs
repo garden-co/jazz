@@ -316,78 +316,98 @@ fn current_role_schema(
     )?)
 }
 
+/// One compiled field mapping per source descriptor and publication schema.
+/// The caller scopes reuse to a single terminal's delta batch.
+pub(super) struct CurrentPayloadEncodePlan {
+    projector: records::RecordProjector,
+    descriptor: Vec<u8>,
+}
+
+impl CurrentPayloadEncodePlan {
+    pub(super) fn new(
+        descriptor: RecordDescriptor,
+        schema: &super::query_engine::ResultMembershipSchema,
+    ) -> Result<Self, Error> {
+        let selected = std::iter::once(schema.row_field.as_str())
+            .chain(
+                schema
+                    .payload_fields
+                    .iter()
+                    .filter(|field| field.name != schema.row_field)
+                    .map(|field| field.name.as_str()),
+            )
+            .chain(
+                schema
+                    .occurrence_id_fields
+                    .iter()
+                    .skip(1)
+                    .map(String::as_str),
+            )
+            .chain(
+                schema
+                    .occurrence_union_arm_fields
+                    .values()
+                    .map(String::as_str),
+            );
+        let mut mapping = Vec::new();
+        let mut runtime_fields = Vec::new();
+        for name in selected {
+            let index = descriptor
+                .fields()
+                .iter()
+                .position(|field| field.name.as_deref() == Some(name))
+                .ok_or(Error::InvalidStoredValue(
+                    "result payload is missing its declared carrier",
+                ))?;
+            if descriptor.fields()[index + 1..]
+                .iter()
+                .any(|field| field.name.as_deref() == Some(name))
+            {
+                return Err(Error::InvalidStoredValue(
+                    "result payload carrier binding is ambiguous",
+                ));
+            }
+            mapping.push((index, mapping.len()));
+            runtime_fields.push(descriptor.fields()[index].clone());
+        }
+        let runtime = RecordDescriptor::new_with_fields(runtime_fields);
+        let canonical = current_role_schema(schema)?;
+        // A complete named/type tree comparison precedes any byte-layout reuse.
+        for (source, target) in runtime.fields().iter().zip(canonical.fields()) {
+            let source_type = RecordDescriptor::new([("value", source.value_type.clone())]);
+            let target_type = RecordDescriptor::new([("value", target.value_type.clone())]);
+            if records::encode_persisted_record_descriptor(&source_type)?
+                != records::encode_persisted_record_descriptor(&target_type)?
+            {
+                return Err(Error::InvalidStoredValue(
+                    "result payload type differs from its publication schema",
+                ));
+            }
+        }
+        let projector =
+            records::RecordProjector::new_registry_rebound(descriptor, canonical, mapping)?;
+        Ok(Self {
+            projector,
+            descriptor: encode_result_descriptor(ResultDescriptorRole::Current, &canonical)?,
+        })
+    }
+
+    pub(super) fn encode(&self, record: BorrowedRecord<'_>) -> Result<(Vec<u8>, Vec<u8>), Error> {
+        // Both descriptors are trusted compiled schemas. Copy the selected
+        // encoded fields; do not decode and re-encode our own encoder's output.
+        Ok((
+            self.descriptor.clone(),
+            self.projector.project(record)?.into_raw(),
+        ))
+    }
+}
+
+#[cfg(test)]
 pub(super) fn encode_current_payload_record(
     record: BorrowedRecord<'_>,
     schema: &super::query_engine::ResultMembershipSchema,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    let descriptor = record.descriptor();
-    let selected = std::iter::once(schema.row_field.as_str())
-        .chain(
-            schema
-                .payload_fields
-                .iter()
-                .filter(|field| field.name != schema.row_field)
-                .map(|field| field.name.as_str()),
-        )
-        .chain(
-            schema
-                .occurrence_id_fields
-                .iter()
-                .skip(1)
-                .map(String::as_str),
-        )
-        .chain(
-            schema
-                .occurrence_union_arm_fields
-                .values()
-                .map(String::as_str),
-        );
-    let mut values = Vec::new();
-    let mut runtime_fields = Vec::new();
-    for name in selected {
-        let index = descriptor
-            .fields()
-            .iter()
-            .position(|field| field.name.as_deref() == Some(name))
-            .ok_or(Error::InvalidStoredValue(
-                "result payload is missing its declared carrier",
-            ))?;
-        if descriptor.fields()[index + 1..]
-            .iter()
-            .any(|field| field.name.as_deref() == Some(name))
-        {
-            return Err(Error::InvalidStoredValue(
-                "result payload carrier binding is ambiguous",
-            ));
-        }
-        values.push(record.get_idx(index)?);
-        runtime_fields.push(descriptor.fields()[index].clone());
-    }
-    let runtime = RecordDescriptor::new_with_fields(runtime_fields);
-    let raw = runtime.create(&values)?;
-    let canonical = current_role_schema(schema)?;
-    // A complete named/type tree comparison precedes any byte-layout reuse.
-    for (source, target) in runtime.fields().iter().zip(canonical.fields()) {
-        let source_type = RecordDescriptor::new([("value", source.value_type.clone())]);
-        let target_type = RecordDescriptor::new([("value", target.value_type.clone())]);
-        if records::encode_persisted_record_descriptor(&source_type)?
-            != records::encode_persisted_record_descriptor(&target_type)?
-        {
-            return Err(Error::InvalidStoredValue(
-                "result payload type differs from its publication schema",
-            ));
-        }
-    }
-    let values = canonical.bind(&raw).to_values()?;
-    if canonical.create(&values)? != raw {
-        return Err(Error::InvalidStoredValue(
-            "result payload row is not canonical",
-        ));
-    }
-    Ok((
-        encode_result_descriptor(ResultDescriptorRole::Current, &canonical)?,
-        raw,
-    ))
+    CurrentPayloadEncodePlan::new(record.descriptor(), schema)?.encode(record)
 }
 
 pub(super) fn decode_current_payload_record(
@@ -582,6 +602,83 @@ mod tests {
             settle_position_field: None,
             routing_param_fields: BTreeSet::new(),
         }
+    }
+
+    // Internal byte-compatibility test: the public API exposes values, not
+    // runtime publication bytes or descriptor rebinding. Compare projection
+    // against independently encoding the selected fields, including nested
+    // enum payloads, nullable values, arrays and reordered source fields.
+    #[test]
+    fn current_payload_plan_preserves_encoded_fields_across_reuse() {
+        use groove::records::{EnumCase, EnumSchema, EnumValue};
+        let child = RecordDescriptor::new([("code", ValueType::U64), ("label", ValueType::String)]);
+        let event = EnumSchema::new("event", [EnumCase::new("value", child)])
+            .unwrap()
+            .with_registry_id(987);
+        let nested = RecordDescriptor::new([
+            ("words", ValueType::Array(Box::new(ValueType::String))),
+            (
+                "event",
+                ValueType::Nullable(Box::new(ValueType::Enum(Box::new(event)))),
+            ),
+        ]);
+        let ty = ValueType::Record(Box::new(nested));
+        let mut schema = current_schema(1, "payload");
+        schema.payload_fields[0].ty = ty.clone();
+        let source = RecordDescriptor::new([
+            ("ignored", ty.clone()),
+            ("payload", ty.clone()),
+            ("row_uuid", ValueType::Uuid),
+        ]);
+        let selected = RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("payload", ty)]);
+        let plan = CurrentPayloadEncodePlan::new(source, &schema).unwrap();
+        let canonical = current_role_schema(&schema).unwrap();
+        for i in 0..32 {
+            let value = Value::Record(OwnedRecord::new(
+                nested
+                    .create(&[
+                        Value::Array(vec![
+                            Value::String(format!("row-{i}")),
+                            Value::String("longer value".repeat(i)),
+                        ]),
+                        Value::Nullable(if i % 2 == 0 {
+                            Some(Box::new(Value::Enum(
+                                EnumValue::create(
+                                    0,
+                                    child,
+                                    &[Value::U64(i as u64), Value::String("nested".to_owned())],
+                                )
+                                .unwrap(),
+                            )))
+                        } else {
+                            None
+                        }),
+                    ])
+                    .unwrap(),
+                nested,
+            ));
+            let ignored = Value::Record(OwnedRecord::new(
+                nested
+                    .create(&[Value::Array(vec![]), Value::Nullable(None)])
+                    .unwrap(),
+                nested,
+            ));
+            let id = Value::Uuid(uuid::Uuid::from_u128(i as u128 + 1));
+            let raw = source
+                .create(&[ignored, value.clone(), id.clone()])
+                .unwrap();
+            let (descriptor, projected) = plan.encode(source.bind(&raw)).unwrap();
+            assert_eq!(projected, selected.create(&[id, value]).unwrap());
+            assert_eq!(
+                descriptor,
+                encode_result_descriptor(ResultDescriptorRole::Current, &canonical).unwrap()
+            );
+        }
+        let wrong_source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("payload", ValueType::String),
+        ]);
+        assert!(plan.encode(wrong_source.bind(&[])).is_err());
     }
 
     // Malformed member/schema pairings cannot be authored through the public
