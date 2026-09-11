@@ -703,7 +703,8 @@ impl MaintainedSubscriptionView {
     ) -> Result<ResultTransitions, super::Error> {
         // Decode into the net-change accumulator directly. No retained state
         // changes until the complete input has decoded successfully.
-        let mut net = BTreeMap::<EventIdentity, (NetEvent, i64)>::new();
+        let rows = rows.into_iter();
+        let mut net = Vec::with_capacity(rows.size_hint().0);
         for row in rows {
             let (event, weight) = row?;
             let net_event = match event {
@@ -747,13 +748,22 @@ impl MaintainedSubscriptionView {
                 }
             };
             let identity = net_event.identity();
-            net.entry(identity)
-                .and_modify(|(_, net_weight)| *net_weight += weight)
-                .or_insert((net_event, weight));
+            net.push((identity, net_event, weight));
         }
+        // Stable sorting preserves the first event for equal identities, as
+        // the previous tree entry did, and retains sorted application order.
+        net.sort_by(|(left, ..), (right, ..)| left.cmp(right));
+        net.dedup_by(|(key, _, weight), (previous_key, _, previous_weight)| {
+            if key == previous_key {
+                *previous_weight += *weight;
+                true
+            } else {
+                false
+            }
+        });
 
         let mut transitions = ResultTransitions::default();
-        for (_, (event, weight)) in net {
+        for (_, event, weight) in net {
             if weight == 0 {
                 continue;
             }
@@ -4607,6 +4617,52 @@ mod tests {
 
         assert_eq!(transitions.adds, vec![member]);
         assert!(transitions.removes.is_empty());
+    }
+
+    // Internal batching boundary: inject repeated identities with different
+    // opaque payloads before witness promotion to pin representative selection.
+    #[test]
+    fn net_batch_preserves_first_payload_sorted_order_and_signed_weights() {
+        let a = ResultMemberEntry::from(
+            RealRowMemberEntry::current_content(result(row(1), 10)).with_row_digest(vec![1]),
+        );
+        let b = ResultMemberEntry::from(
+            RealRowMemberEntry::current_content(result(row(2), 10)).with_row_digest(vec![2]),
+        );
+        let payload = |member: &ResultMemberEntry, marker| ResultMemberPayloadEntry {
+            member: member.clone(),
+            descriptor: vec![0x01],
+            record: vec![marker],
+        };
+        let event = |member: &ResultMemberEntry, marker| DecodedMaintainedEvent::ResultCurrent {
+            member: member.clone(),
+            payload: payload(member, marker),
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+        let transitions = maintained
+            .apply_decoded_deltas(
+                [
+                    (event(&b, 11), 1),
+                    (event(&a, 21), 2),
+                    (event(&b, 12), 1),
+                    (event(&a, 22), -1),
+                ],
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(transitions.adds, vec![a.clone(), b.clone()]);
+        assert_eq!(
+            transitions.result_payload_adds,
+            vec![(a.clone(), payload(&a, 21)), (b.clone(), payload(&b, 11)),]
+        );
+        let removed = maintained
+            .apply_decoded_deltas([(event(&b, 13), -1), (event(&a, 23), -1)], &aliases())
+            .unwrap();
+        assert_eq!(removed.removes, vec![a]);
+        let removed = maintained
+            .apply_decoded_deltas([(event(&b, 14), -1)], &aliases())
+            .unwrap();
+        assert_eq!(removed.removes, vec![b]);
     }
 
     #[test]
