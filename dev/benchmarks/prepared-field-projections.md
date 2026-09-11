@@ -37,6 +37,55 @@ incompatible plans before processing rows, and exercise omission after a prior
 variable payload has already been written. Internal mechanism checks are needed
 because correct row values alone cannot detect the allocation regression.
 
+## Verification and timing
+
+All 738 Groove and 2,002 Jazz library tests pass (2 ignored in each). Forcing
+whole-row semantic evaluation fails the mixed-field test with 96 evaluations
+instead of 12. Removing partial-row rollback also fails. These temporary
+mutations were restored. Full CI, browser acceptance and independent review
+remain outstanding for the draft PR.
+
+The full native fixture preserves all 27,518 expected rows:
+
+| Run                           | Readiness | Settle loop | Harness wall |
+| ----------------------------- | --------: | ----------: | -----------: |
+| Prior inline-probe slice      |  35.863 s |    35.365 s |     37.634 s |
+| Prepared fields, first run    |  35.423 s |    34.930 s |     37.151 s |
+| Prepared fields, final repeat |  35.254 s |    34.757 s |     36.985 s |
+
+These are individual optimized native measurements, not a statistically powered
+comparison. The observed improvement is small (about 1.7% for the comparable
+repeat); this is not evidence of a major end-to-end gain. The first run rebuilt
+its seed cache outside the timed phase; the final repeat and prior run both used
+the cache. The current total remains far above the 5 s goal.
+
+Reclassifying the prior trace by expression kind explains the modest effect:
+
+| Projection expressions                               | Input visits during settle | Share |
+| ---------------------------------------------------- | -------------------------: | ----: |
+| Pure field selection/reordering                      |                  1,457,536 | 70.7% |
+| Constants or nullability, otherwise supported fields |                    600,189 | 29.1% |
+| Nested/enum expressions that disabled the old plan   |                      3,314 | 0.16% |
+
+This categorizes expression eligibility, not time or allocations. The old
+hydration evaluator still used its separate fallback even for otherwise
+eligible expressions. The expanded expression coverage matters for general
+queries, but almost all visits in this fixture were already simple field work.
+
+The complete-run Rust allocator totals move from 485,556,773 requests and
+295,662,073,344 cumulative requested bytes to 483,481,285 requests and
+295,523,063,958 bytes. That saves about 2.08M requests (0.43%) and 139MB (0.047%).
+These are allocation churn, not peak memory, and include final verification and
+diagnostics, not seeding. The new stack sampler uses the original capped
+configuration; use its complete totals here, not capped stack shares. The prior
+uncapped repeat confirmed the baseline totals.
+
+This is a real simplification but not the dominant allocation fix for this
+fixture. The prior profile's schema/descriptor construction, author conversion
+and supporting-version reconstruction remain separate targets. Projection fusion
+addresses redundant passes/copies; it should not be assumed to remove those
+other allocation sources automatically.
+
 ## Why there are so many projection stages
 
 The prior per-operator trace counts 2,061,039 input visits during settlement.
