@@ -414,20 +414,19 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution_inne
     server.shutdown().await;
 }
 
-/// Verifies that `$createdBy = "jazz:system"` can be used as an explicit
-/// allowlist branch when ordinary users should read server-generated rows.
+/// Verifies that the system issuer in structured `$createdBy` metadata can
+/// explicitly allow ordinary users to read server-generated rows.
 ///
 /// Actors: a backend client writes one system-authored row without a session,
 /// and `alice` writes one user-authored row through her session.
 ///
 /// ```text
-/// backend client ─create(no session)──► server ──$createdBy = jazz:system
+/// backend client ─create(no session)──► server ──system issuer + originating node
 /// alice client ──create(as alice)─────► server ──$createdBy = alice
 /// alice query ────────────────────────► sees system row + alice row
 /// bob query ──────────────────────────► sees only system row
 /// ```
 #[tokio::test]
-#[ignore = "#1758: server schema conversion rejects `$createdBy = \"jazz:system\"` with OperandTypeMismatch"]
 async fn created_by_policies_can_allow_reads_from_system_author() {
     tokio::task::LocalSet::new()
         .run_until(created_by_policies_can_allow_reads_from_system_author_inner())
@@ -436,7 +435,7 @@ async fn created_by_policies_can_allow_reads_from_system_author() {
 
 async fn created_by_policies_can_allow_reads_from_system_author_inner() {
     let created_by_policy = pe::eq("$createdBy", pe::session("user"));
-    let system_author_policy = pe::eq("$createdBy", "jazz:system");
+    let system_author_policy = pe::eq("$createdBy.identity.issuer", "urn:jazz:system");
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
@@ -460,7 +459,30 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
         .expect("start test server");
     let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
     let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
-    let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
+    let backend_node = uuid::Uuid::new_v4();
+    let backend = connect_ready_client(
+        &server,
+        &schema,
+        &backend_node.to_string(),
+        "notes",
+        READY_TIMEOUT,
+    )
+    .await;
+    let system_author = Value::Row {
+        id: None,
+        values: vec![
+            Value::Uuid(ObjectId::from_uuid(
+                jazz::account_registry::SYSTEM_ACCOUNT_ID.0,
+            )),
+            Value::Row {
+                id: None,
+                values: vec![
+                    Value::Text("urn:jazz:system".into()),
+                    Value::Text(backend_node.to_string()),
+                ],
+            },
+        ],
+    };
 
     let system_note = create_note_without_session(&backend, "server-generated").await;
     let alice_note = create_note_as(&alice, "alice note").await;
@@ -494,7 +516,7 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
         .expect("system-authored row should be visible");
     assert_eq!(
         system_owned.1,
-        vec![Value::from("server-generated"), "jazz:system".into()]
+        vec![Value::from("server-generated"), system_author.clone()]
     );
 
     let bob_rows = wait_for_rows(
@@ -506,7 +528,7 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
     .await;
     assert_eq!(
         bob_rows[0].1,
-        vec![Value::from("server-generated"), "jazz:system".into()]
+        vec![Value::from("server-generated"), system_author]
     );
 
     backend.shutdown().await.expect("shutdown backend");
