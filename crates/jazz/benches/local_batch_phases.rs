@@ -2,6 +2,8 @@
 //! Direct nodes intentionally expose phase boundaries that the public Db owner
 //! loop combines. This excludes JS, IndexedDB, scheduling and auth bootstrap.
 use std::{collections::BTreeMap, time::Instant};
+#[path = "support/perf_control.rs"]
+mod perf_control;
 mod schema_fixture;
 mod support;
 use jazz::{
@@ -40,14 +42,17 @@ fn clock_ns() -> u64 {
 }
 #[inline(never)]
 fn phase<T>(backend: &str, count: usize, name: &str, f: impl FnOnce() -> T) -> T {
+    let profile = perf_control::PerfControl::selected(backend, name);
+    let cpu_profiled = profile.is_some();
     let start_ns = clock_ns();
     let start = Instant::now();
     let result = f();
     let elapsed = start.elapsed();
     let end_ns = clock_ns();
+    drop(profile);
     println!(
         "{}",
-        json!({"backend":backend,"rows":count,"phase":name,"wall_us":elapsed.as_micros(),"start_ns":start_ns,"end_ns":end_ns})
+        json!({"backend":backend,"rows":count,"phase":name,"wall_us":elapsed.as_micros(),"start_ns":start_ns,"end_ns":end_ns,"cpu_profiled":cpu_profiled})
     );
     result
 }
@@ -361,7 +366,11 @@ pub(crate) fn correctness_smoke() {
 }
 
 fn main() {
-    jazz_benchmark_guard::refuse_contaminated_measurement();
+    if std::env::var_os("JAZZ_PERF_PHASE").is_some() {
+        eprintln!("scoped CPU attribution run: timings are not clean latency receipts");
+    } else {
+        jazz_benchmark_guard::refuse_contaminated_measurement();
+    }
     let percent = support::env_usize("JAZZ_BATCH_UPDATE_PERCENT", 90);
     for count in support::csv_usizes("JAZZ_BATCH_ROWS", "1500") {
         run_fixture(count, percent);
