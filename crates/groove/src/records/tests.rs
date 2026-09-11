@@ -2769,3 +2769,21 @@ fn compact_large_value_preserves_native_and_serde_encodings() {
         serde_json::json!({"Large": reference})
     );
 }
+
+// Internal ownership guard: byte sharing is not observable through query results,
+// but copying every immutable record clone is a material allocation regression.
+#[test]
+fn immutable_record_clones_share_bytes_and_owned_extraction_stays_independent() {
+    let d = descriptor([ValueType::U64, ValueType::String]);
+    let values = [Value::U64(42), Value::String("shared payload".repeat(100))];
+    let original = OwnedRecord::new(d.create(&values).unwrap(), d);
+    let clone = original.clone();
+    assert_eq!(original.raw().as_ptr(), clone.raw().as_ptr());
+    let mut extracted = clone.into_raw();
+    extracted[0] ^= 1;
+    assert_eq!(original.to_values().unwrap(), values);
+    let pointer = original.raw().as_ptr();
+    let extracted = original.into_raw();
+    assert_eq!(pointer, extracted.as_ptr());
+    assert_eq!(d.bind(&extracted).to_values().unwrap(), values);
+}

@@ -1798,10 +1798,10 @@ pub struct Record<'a> {
     descriptor: &'a RecordDescriptor,
 }
 
-/// Owned encoded record tied to an owned descriptor.
+/// Immutable encoded record tied to an owned descriptor. Clones share bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OwnedRecord {
-    raw: Vec<u8>,
+    raw: bytes::Bytes,
     descriptor: RecordDescriptor,
 }
 
@@ -1982,7 +1982,10 @@ fn read_canonical_u32_varint(input: &[u8]) -> Result<(u32, usize), Error> {
 
 impl OwnedRecord {
     pub fn new(raw: Vec<u8>, descriptor: RecordDescriptor) -> Self {
-        Self { raw, descriptor }
+        Self {
+            raw: raw.into(),
+            descriptor,
+        }
     }
 
     pub fn descriptor(&self) -> &RecordDescriptor {
@@ -1994,7 +1997,7 @@ impl OwnedRecord {
     }
 
     pub fn into_raw(self) -> Vec<u8> {
-        self.raw
+        self.raw.into()
     }
 
     pub fn borrowed(&self) -> BorrowedRecord<'_> {
