@@ -799,15 +799,18 @@ fn keyed_join_deltas<'a>(
 ) -> Result<Vec<KeyedRecordDelta<'a>>, IvmRuntimeError> {
     if let Some(field_indices) = scalar_join_field_indices(descriptor, fields)? {
         let mut keyed = Vec::with_capacity(deltas.len());
+        // Short keys are retained inline by JoinKey. Reuse the temporary encoder
+        // buffer instead of allocating and discarding it for every input row.
+        let mut key = Vec::new();
         for delta in deltas {
-            let mut key = Vec::new();
+            key.clear();
             for field_idx in &field_indices {
                 let value = descriptor.get_idx(delta.raw(), *field_idx)?;
                 encode_join_key_part(&mut key, &value, comparison)?;
             }
             keyed.push(KeyedRecordDelta {
                 delta,
-                key: JoinKey::from_vec(key),
+                key: JoinKey::from_slice(&key),
             });
         }
         return Ok(keyed);
