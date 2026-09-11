@@ -11,8 +11,8 @@ use groove::records::{
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
     deletion_event_from_value, history_values_from_parts, nullable_value,
-    owned_record_from_storage_values_with_descriptor, register_values_from_parts,
-    runtime_result_identity_bytes, tx_ids_from_value, version_tx_id_from_aliases,
+    register_values_from_parts, runtime_result_identity_bytes, tx_ids_from_value,
+    version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
@@ -1547,6 +1547,10 @@ fn covered_input_for_version(
 /// present nullable cell. Nested edits address named collections and stable
 /// keys. An unrelated root field may tighten without changing those edits,
 /// but the addressed collection's complete subtree layout must agree exactly.
+#[cfg_attr(
+    feature = "cold-settle-attribution",
+    tracing::instrument(skip_all, name = "cold.phase.rebind_terminal_output")
+)]
 fn rebind_terminal_operation_to_layout(
     operation: &TerminalOperation,
     layout: &TerminalRootLayout,
@@ -2677,6 +2681,10 @@ fn validate_witness_event_kind(
     }
 }
 
+#[cfg_attr(
+    feature = "cold-settle-attribution",
+    tracing::instrument(skip_all, name = "cold.phase.decode_version_witness")
+)]
 fn decode_typed_version_witness(
     record: BorrowedRecord<'_>,
     schema: &VersionWitnessSchema,
@@ -2729,14 +2737,6 @@ fn decode_typed_version_witness(
         },
         None => BranchKey::default(),
     };
-    let mut cells = BTreeMap::new();
-    if layer == VersionLayer::Content {
-        for column in &table.columns {
-            if let Some(value) = nullable_value(record.get_idx(plan.user_indices[&column.name])?)? {
-                cells.insert(column.name.clone(), value);
-            }
-        }
-    }
     let authored_columns = if layer == VersionLayer::Content {
         nullable_value(record.get_idx(plan.authored_columns_idx)?)?
             .map(authored_column_ids_from_value)
@@ -2776,7 +2776,7 @@ fn decode_typed_version_witness(
                     "maintained witness updated_at_ms exceeds packed HLC range",
                 )
             })?,
-        cells,
+        cells: BTreeMap::new(),
         authored_columns,
         deletion,
     };
@@ -2785,10 +2785,59 @@ fn decode_typed_version_witness(
     } else {
         register_values_from_parts(&parts)?
     };
+    // Query witnesses already contain encoded nullable user cells. Copy those
+    // fields into the history layout instead of allocating a cells map, cloning
+    // its values, and encoding them again. Metadata still follows the existing
+    // normalization path (in particular author admission and packed timestamps).
+    let raw = plan.descriptor.create_with_encoded_fields::<super::Error>(
+        record.raw().len(),
+        |index, output| {
+            if layer == VersionLayer::Content && index >= 10 && index < 10 + table.columns.len() {
+                let source_index = plan.user_indices[&table.columns[index - 10].name];
+                if record.descriptor().fields()[source_index].value_type
+                    == plan.descriptor.fields()[index].value_type
+                {
+                    let span = record.descriptor().field_span(record.raw(), source_index)?;
+                    output.extend_from_slice(&record.raw()[span]);
+                    return Ok(());
+                }
+                let value = record.get_idx(source_index)?;
+                nullable_value(value.clone())?;
+                plan.descriptor.encode_field_into(index, &value, output)?;
+            } else {
+                plan.descriptor
+                    .encode_field_into(index, &values[index], output)?;
+            }
+            Ok(())
+        },
+    )?;
+    #[cfg(test)]
+    let mut parts = parts;
+    #[cfg(test)]
+    {
+        // Internal byte-equivalence oracle: public query equality would not
+        // detect a change to the immutable history record's exact encoding.
+        let reference_parts = &mut parts;
+        if layer == VersionLayer::Content {
+            for column in &table.columns {
+                if let Some(value) =
+                    nullable_value(record.get_idx(plan.user_indices[&column.name])?)?
+                {
+                    reference_parts.cells.insert(column.name.clone(), value);
+                }
+            }
+        }
+        let reference_values = if layer == VersionLayer::Content {
+            history_values_from_parts(table, reference_parts)?
+        } else {
+            register_values_from_parts(reference_parts)?
+        };
+        assert_eq!(raw, plan.descriptor.create(&reference_values)?);
+    }
     let version = VersionRow {
         table: groove::Intern::new(parts.table),
         branch_key: parts.branch_key,
-        record: owned_record_from_storage_values_with_descriptor(plan.descriptor, values)?,
+        record: OwnedRecord::new(raw, plan.descriptor),
     };
     version.validate_canonical()?;
     Ok(version)

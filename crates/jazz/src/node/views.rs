@@ -2906,6 +2906,10 @@ where
     /// version under its authored schema. This producer-side normalization is
     /// deliberately before serialization; receivers reject non-identical
     /// duplicate row versions rather than repairing them.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.canonical_supporting_version")
+    )]
     pub(super) async fn canonical_history_version_for_maintained_witness(
         &mut self,
         version: &VersionRow,
@@ -2952,8 +2956,8 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "maintained witness schema version alias must exist",
             ))?;
-        let authored_table = match self.table_in_schema(version.table(), authored_schema) {
-            Ok(table) => table.clone(),
+        match self.table_in_schema(version.table(), authored_schema) {
+            Ok(_) => {}
             Err(Error::TableNotFound(_)) => {
                 // A current-query source may have been projected through a
                 // later schema, so its logical name need not exist under the
@@ -2983,12 +2987,6 @@ where
             }
             Err(error) => return Err(error),
         };
-        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
-            authored_table.register_storage_table().record_schema()
-        } else {
-            authored_table.history_storage_table().record_schema()
-        };
-        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
 
         // A maintained witness is decoded from the current-query graph. Its
         // descriptor can be identical to history storage while selected-out
@@ -3024,6 +3022,15 @@ where
         // their authored descriptor is complete. `authored_columns` lets us
         // distinguish such a row from a query projection whose selected-out
         // authored cells were replaced by typed nulls.
+        // Only synthetic rows need a reconstructed descriptor. Ordinary rows
+        // returned above already carry the immutable store's authored layout.
+        let authored_table = self.table_in_schema(version.table(), authored_schema)?;
+        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
+            authored_table.register_storage_table().record_schema()
+        } else {
+            authored_table.history_storage_table().record_schema()
+        };
+        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
         let has_complete_authored_payload = has_authored_layout
             && (version.layer() == VersionLayer::Deletion
                 || match self.authored_columns_for_version(version)? {
