@@ -2969,3 +2969,29 @@ fn partial_parent_misses_do_not_materialize_retained_siblings() {
         }
     }
 }
+
+#[test]
+fn completed_parents_without_waiting_children_do_not_reload_history() {
+    // Internal mechanism test: visible results cannot expose unnecessary
+    // transaction-wide history probes after a successful batch admission.
+    let (_dir, mut node) = open_node_with_uuid(node(0xb1));
+    let mut parents = BTreeSet::new();
+    for i in 1..=32 {
+        parents.insert(node.commit_mergeable_settled(
+            MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(i)), i as u64)
+                .cells(title_cells("parent without waiting children")),
+        ).unwrap());
+    }
+    let unrelated_child = node.commit_mergeable_settled(
+        MergeableCommit::new("todos", RowUuid(uuid::Uuid::from_u128(99)), 110)
+            .parents(vec![TxId::new(TxTime::from(100), NodeUuid(uuid::Uuid::from_u128(0xb2)))])
+            .cells(title_cells("unrelated waiting child")),
+    ).unwrap();
+    node.reset_storage_read_metrics();
+    super::super::reset_query_versions_for_tx_call_count();
+    node.settle_completed_parent_batch(&parents).resolve().unwrap();
+    assert_eq!(super::super::query_versions_for_tx_call_count(), 0,
+        "completed parents without constraints must not reload their history");
+    assert_eq!(node.storage_read_metrics().history_indexes.reads, 0);
+    assert_eq!(node.transaction_record(unrelated_child).unwrap().fate, Fate::Pending);
+}

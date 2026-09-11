@@ -234,10 +234,9 @@ where
     ) -> Result<(), Error> {
         for parent in complete_parents {
             self.invalidate_tx_version_tables_cache(*parent);
-            self.reject_mismatched_pending_children_for_parent(*parent)
-                .await?;
         }
-        Ok(())
+        self.reject_mismatched_pending_children_for_parents(complete_parents)
+            .await
     }
 
     /// Resolve durable constraints left by children that referenced a parent
@@ -247,74 +246,97 @@ where
         &mut self,
         parent: TxId,
     ) -> Result<(), Error> {
-        let Some(parent_tx) = self.query_transaction(parent).await? else {
-            return Ok(());
-        };
-        if matches!(parent_tx.fate, Fate::Rejected(_)) {
-            return Ok(());
-        }
-        let parent_versions = self.query_versions_for_tx(parent).await?;
-        if parent_versions.is_empty() {
-            return Ok(());
-        }
+        self.reject_mismatched_pending_children_for_parents(&BTreeSet::from([parent]))
+            .await
+    }
 
-        let mut invalid_children = BTreeSet::new();
+    async fn reject_mismatched_pending_children_for_parents(
+        &mut self,
+        parents: &BTreeSet<TxId>,
+    ) -> Result<(), Error> {
+        if parents.is_empty() {
+            return Ok(());
+        }
+        // Discover the constraints once for the entire admitted batch. Most
+        // downloaded transactions have no waiting children; loading their
+        // history first would probe every history table for no useful work.
+        let mut constraints = BTreeMap::<TxId, Vec<(TxId, ParentCoordinate)>>::new();
         for raw in self
             .database
             .primary_key_scan_raw("jazz_pending_edges", &[])
             .await?
         {
             let record = raw.record();
-            let parent_alias = NodeAlias(record.get_u64(
-                PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX,
-            )?);
-            let stored_parent = TxId::new(
+            let parent_alias =
+                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
+            let parent = TxId::new(
                 TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                self.node_for_alias(parent_alias).ok_or(Error::InvalidStoredValue(
-                    "pending edge parent alias must exist",
-                ))?,
+                self.node_for_alias(parent_alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "pending edge parent alias must exist",
+                    ))?,
             );
-            if stored_parent != parent {
+            if !parents.contains(&parent) {
                 continue;
             }
-            let coordinate = pending_edge_coordinate_from_record(record)?;
-            let mut exact = false;
-            for candidate in &parent_versions {
-                if self.version_row_matches_parent_coordinate(candidate, &coordinate)? {
-                    exact = true;
-                    break;
-                }
-            }
-            let parent_is_complete = !parent_tx.view_scoped_cardinality
-                && usize::try_from(parent_tx.tx.n_total_writes)
-                    .is_ok_and(|expected| parent_versions.len() >= expected);
-            if !exact && parent_is_complete {
-                let child_alias = NodeAlias(record.get_u64(
-                    PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX,
-                )?);
-                let child = TxId::new(
-                    TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
-                    self.node_for_alias(child_alias).ok_or(Error::InvalidStoredValue(
+            let child_alias =
+                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?);
+            let child = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
+                self.node_for_alias(child_alias)
+                    .ok_or(Error::InvalidStoredValue(
                         "pending edge child alias must exist",
                     ))?,
-                );
-                invalid_children.insert(child);
-            }
+            );
+            constraints
+                .entry(parent)
+                .or_default()
+                .push((child, pending_edge_coordinate_from_record(record)?));
         }
 
-        for child in invalid_children {
-            if self
-                .query_transaction(child)
-                .await?
-                .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
-            {
-                Box::pin(self.apply_fate_update(
-                    child,
-                    Fate::Rejected(RejectionReason::CausalityViolation),
-                    None,
-                    None,
-                ))
-                .await?;
+        for (parent, children) in constraints {
+            let mut invalid_children = BTreeSet::new();
+            let Some(parent_tx) = self.query_transaction(parent).await? else {
+                continue;
+            };
+            if matches!(parent_tx.fate, Fate::Rejected(_)) {
+                continue;
+            }
+            let parent_versions = self.query_versions_for_tx(parent).await?;
+            let parent_is_complete = !parent_tx.view_scoped_cardinality
+                && !parent_versions.is_empty()
+                && usize::try_from(parent_tx.tx.n_total_writes)
+                    .is_ok_and(|expected| parent_versions.len() >= expected);
+            if !parent_is_complete {
+                continue;
+            }
+            for (child, coordinate) in children {
+                let mut exact = false;
+                for candidate in &parent_versions {
+                    if self.version_row_matches_parent_coordinate(candidate, &coordinate)? {
+                        exact = true;
+                        break;
+                    }
+                }
+                if !exact {
+                    invalid_children.insert(child);
+                }
+            }
+
+            for child in invalid_children {
+                if self
+                    .query_transaction(child)
+                    .await?
+                    .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
+                {
+                    Box::pin(self.apply_fate_update(
+                        child,
+                        Fate::Rejected(RejectionReason::CausalityViolation),
+                        None,
+                        None,
+                    ))
+                    .await?;
+                }
             }
         }
         Ok(())
