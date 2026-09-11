@@ -5895,3 +5895,67 @@ async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
         Err(Error::UnknownTableVariant { version: 3, .. })
     ));
 }
+
+#[futures_test::test]
+async fn direct_store_key_reads_validate_without_encoding_throwaway_records() {
+    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+        "checked_keys",
+        RecordDescriptor::new([
+            ("scope", ValueType::String),
+            (
+                "coordinate",
+                ValueType::Tuple(vec![ValueType::U16, ValueType::Bool]),
+            ),
+        ]),
+        RecordDescriptor::new([("value", ValueType::U64)]),
+    ));
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let db = Database::new(schema, storage).await.unwrap();
+    let store = db.direct_record_store("checked_keys").unwrap();
+    let key = [
+        "scope".into(),
+        Value::Tuple(vec![Value::U16(3), Value::Bool(true)]),
+    ];
+    store.set(&key, &[Value::U64(42)]).await.unwrap();
+    // Internal work counter supplements public behavior: key validation must
+    // not reconstruct a record just to discard its bytes.
+    crate::records::RECORD_ENCODE_COUNT.with(|count| count.set(0));
+    assert_eq!(
+        store
+            .get(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .get("value")
+            .unwrap(),
+        Value::U64(42)
+    );
+    assert_eq!(store.prefix(&key[..1]).await.unwrap().len(), 1);
+    assert_eq!(store.prefix(&[]).await.unwrap().len(), 1);
+    assert_eq!(
+        crate::records::RECORD_ENCODE_COUNT.with(|count| count.get()),
+        0
+    );
+    for invalid in [
+        vec![Value::U64(3)],
+        vec![
+            "scope".into(),
+            Value::Tuple(vec![Value::Bool(true), Value::U16(3)]),
+        ],
+        vec!["scope".into(), Value::Tuple(vec![Value::U16(3)])],
+        vec!["scope".into(), key[1].clone(), Value::U8(0)],
+    ] {
+        assert!(store.prefix(&invalid).await.is_err());
+    }
+    assert!(store.get(&key[..1]).await.is_err());
+    assert_eq!(
+        store
+            .get(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .get("value")
+            .unwrap(),
+        Value::U64(42)
+    );
+}

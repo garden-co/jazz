@@ -2201,7 +2201,7 @@ fn decode_array(bytes: &[u8], element_type: &ValueType) -> Result<Value, Error> 
     Ok(Value::Array(values))
 }
 
-pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result<(), Error> {
+pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result<(), Error> {
     match (value, value_type) {
         (Value::U8(_), ValueType::U8)
         | (Value::U16(_), ValueType::U16)

@@ -181,16 +181,9 @@ impl DirectRecordStore<'_> {
             }
             .into());
         }
-        let prefix_descriptor =
-            RecordDescriptor::new(self.key.fields().iter().take(values.len()).map(|field| {
-                (
-                    field.name.clone().expect("direct store fields are named"),
-                    field.value_type.clone(),
-                )
-            }));
-        let _ = prefix_descriptor.create(values)?;
         let mut bytes = Vec::new();
-        for value in values {
+        for (value, field) in values.iter().zip(self.key.fields()) {
+            records::ensure_value_type(value, &field.value_type)?;
             encode_primary_key_part(&mut bytes, value)?;
         }
         Ok(bytes)

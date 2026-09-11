@@ -98,6 +98,7 @@ use thiserror::Error;
 
 pub use macros::{FieldKind, RecordField, assert_record_field_layout};
 pub use values::collect_by_ordered_scalar;
+pub(crate) use values::ensure_value_type;
 pub use values::{
     EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
     VariantRegistry, decode_persisted_record_descriptor, decode_record_descriptor,
@@ -111,7 +112,7 @@ pub use values::{
 pub const MAX_VARIANT_TAG_LEN: usize = 5;
 
 use values::{
-    checked_add, decode_value, encode_fixed_value, encode_value, ensure_value_type, usize_to_u32,
+    checked_add, decode_value, encode_fixed_value, encode_value, usize_to_u32,
     validate_schema_value_type, write_u32,
 };
 
