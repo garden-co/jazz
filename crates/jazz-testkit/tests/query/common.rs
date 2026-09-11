@@ -36,13 +36,13 @@ pub(crate) fn subscription_schema() -> Schema {
         )
         .table(
             TableSchema::builder("posts")
-                .column("id", ColumnType::Integer)
+                .column("post_number", ColumnType::Integer)
                 .column("title", ColumnType::Text)
                 .column("author_name", ColumnType::Text),
         )
         .table(
             TableSchema::builder("comments")
-                .column("id", ColumnType::Integer)
+                .column("comment_number", ColumnType::Integer)
                 .column("text", ColumnType::Text)
                 .column("post_id", ColumnType::Integer),
         )
@@ -210,7 +210,7 @@ pub(crate) async fn create_post(
     client
         .insert(
             "posts",
-            row_input!("id" => id, "title" => title, "author_name" => author_name),
+            row_input!("post_number" => id, "title" => title, "author_name" => author_name),
         )
         .expect("create post")
         .0

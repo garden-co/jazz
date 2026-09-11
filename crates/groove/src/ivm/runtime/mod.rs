@@ -65,7 +65,9 @@ use state::{
     HydrationMode, NodeInputSignature, OperatorStateKey, ScopeId, SubTick, Tick,
 };
 pub use state::{RuntimeStats, TickMetrics};
-pub use terminal::{TerminalDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment};
+pub use terminal::{
+    TerminalDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment, terminal_occurrence_key,
+};
 use terminal::{order_terminal_snapshot, terminal_deltas_from_record_deltas};
 
 const DEFAULT_SINK: &str = "__default";

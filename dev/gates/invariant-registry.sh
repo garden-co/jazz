@@ -93,24 +93,7 @@ PERL
 
 index_test_functions() {
     local output status function source_path
-    output="$(perl - <<'PERL'
-use strict;
-use warnings;
-for my $file (grep { chomp; /\.rs\z/ } `git ls-files -- crates`) {
-    open my $fh, '<', $file or die "cannot read $file: $!\n";
-    my @lines = <$fh>;
-    close $fh;
-    for my $index (0 .. $#lines) {
-        my $line = $lines[$index];
-        next unless $line =~ /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/;
-        my $name = $1;
-        my $attrs = join '', @lines[($index > 4 ? $index - 4 : 0) .. $index - 1];
-        next unless $attrs =~ /#\[\s*(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?:\s*\([^]]*\))?\s*\]/;
-        print "$name\x1f$file\n";
-    }
-}
-PERL
-)"
+    output="$(git ls-files -- crates | perl dev/gates/rust-test-index.pl)"
     status=$?
     if (( status != 0 )); then
         fail "could not build the Rust test-item index (exit $status)"

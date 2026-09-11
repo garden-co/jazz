@@ -30,20 +30,20 @@ fn subquery_schema() -> Schema {
         .table(TableSchema::builder("users").column("name", ColumnType::Text))
         .table(
             TableSchema::builder("posts")
-                .column("id", ColumnType::Integer)
+                .column("post_number", ColumnType::Integer)
                 .column("title", ColumnType::Text)
                 .fk_column("author_id", "users"),
         )
         .table(
             TableSchema::builder("comments")
-                .column("id", ColumnType::Integer)
+                .column("comment_number", ColumnType::Integer)
                 .column("text", ColumnType::Text)
                 .fk_column("post_id", "posts")
                 .fk_column("author_id", "users"),
         )
         .table(
             TableSchema::builder("groups")
-                .column("id", ColumnType::Integer)
+                .column("group_number", ColumnType::Integer)
                 .column("name", ColumnType::Text)
                 .array_fk_column("member_ids", "users"),
         )
@@ -105,11 +105,16 @@ async fn create_user_with_id(client: &JazzClient, object_id: ObjectId, name: &st
         .0
 }
 
-async fn create_post(client: &JazzClient, id: i32, title: &str, author_id: ObjectId) -> ObjectId {
+async fn create_post(
+    client: &JazzClient,
+    post_number: i32,
+    title: &str,
+    author_id: ObjectId,
+) -> ObjectId {
     client
         .insert(
             "posts",
-            row_input!("id" => id, "title" => title, "author_id" => author_id),
+            row_input!("post_number" => post_number, "title" => title, "author_id" => author_id),
         )
         .expect("create post")
         .0
@@ -117,7 +122,7 @@ async fn create_post(client: &JazzClient, id: i32, title: &str, author_id: Objec
 
 async fn create_comment(
     client: &JazzClient,
-    id: i32,
+    comment_number: i32,
     text: &str,
     post_id: ObjectId,
     author_id: ObjectId,
@@ -126,7 +131,7 @@ async fn create_comment(
         .insert(
             "comments",
             row_input!(
-                "id" => id,
+                "comment_number" => comment_number,
                 "text" => text,
                 "post_id" => post_id,
                 "author_id" => author_id,
@@ -138,7 +143,7 @@ async fn create_comment(
 
 async fn create_group(
     client: &JazzClient,
-    id: i32,
+    group_number: i32,
     name: &str,
     member_ids: &[ObjectId],
 ) -> ObjectId {
@@ -146,7 +151,7 @@ async fn create_group(
         .insert(
             "groups",
             row_input!(
-                "id" => id,
+                "group_number" => group_number,
                 "name" => name,
                 "member_ids" => Value::Array(
                     member_ids.iter().copied().map(Value::Uuid).collect(),
@@ -189,12 +194,12 @@ fn row_values(value: &Value) -> &[Value] {
     value.as_row().expect("included element should be a row")
 }
 
-fn post_ids(posts: &[Value]) -> Vec<i32> {
+fn post_numbers(posts: &[Value]) -> Vec<i32> {
     posts
         .iter()
         .map(|post| match row_values(post)[0] {
             Value::Integer(id) => id,
-            ref other => panic!("post id should be an integer, got {other:?}"),
+            ref other => panic!("post number should be an integer, got {other:?}"),
         })
         .collect()
 }
@@ -230,7 +235,6 @@ local_tokio_test! {
 ///
 /// Actors: alice writes one user with no posts, bob subscribes to users with
 /// included posts and sees an empty array for that include.
-#[ignore = "#1765: maintained array subscriptions emit no add delta for a parent inserted after subscribe"]
 async fn array_subquery_subscription_adds_parent_with_empty_array() {
     let clients = Clients::start().await;
     let query = users_with_posts_query();
@@ -273,7 +277,7 @@ local_tokio_test! {
 ///
 /// Actors: alice writes one user, two posts, and comments on each post; bob
 /// reads the user with an array of joined post/comment tuples.
-#[ignore = "#1765: array relations reject joined subqueries as unsupported"]
+#[ignore = "#1765: array builder lacks flat joins; the nested query returns two posts but this test expects three post/comment pairs"]
 async fn array_subquery_with_join_returns_joined_elements() {
     let clients = Clients::start().await;
 
@@ -320,12 +324,12 @@ async fn array_subquery_with_join_returns_joined_elements() {
         assert_eq!(values.len(), 7);
         assert!(pair.row_id().is_some(), "joined row should retain an id");
         let Value::Integer(post_number) = values[0] else {
-            panic!("joined post id should be an integer");
+            panic!("joined post number should be an integer");
         };
         let expected_post_id = match post_number {
             100 => post_a,
             101 => post_b,
-            other => panic!("unexpected joined post id: {other}"),
+            other => panic!("unexpected joined post number: {other}"),
         };
         assert_eq!(values[5], Value::Uuid(expected_post_id));
     }
@@ -356,7 +360,7 @@ async fn array_subquery_returns_related_rows_for_single_parent() {
 
     let values = find_row_by_id(&rows, user_id);
     assert_eq!(values[0], Value::Text("Alice".to_string()));
-    assert_eq!(post_ids(posts_array(values)), vec![100, 101]);
+    assert_eq!(post_numbers(posts_array(values)), vec![100, 101]);
 
     clients.shutdown().await;
 }
@@ -383,18 +387,18 @@ async fn array_subquery_correlates_rows_per_parent() {
             let by_name = rows_by_name(&rows);
             let alice_ok = by_name
                 .get("Alice")
-                .is_some_and(|values| post_ids(posts_array(values)) == vec![100]);
+                .is_some_and(|values| post_numbers(posts_array(values)) == vec![100]);
             let bob_ok = by_name
                 .get("Bob")
-                .is_some_and(|values| post_ids(posts_array(values)) == vec![200]);
+                .is_some_and(|values| post_numbers(posts_array(values)) == vec![200]);
             (alice_ok && bob_ok).then_some(rows)
         },
     )
     .await;
 
     let by_name = rows_by_name(&rows);
-    assert_eq!(post_ids(posts_array(by_name["Alice"])), vec![100]);
-    assert_eq!(post_ids(posts_array(by_name["Bob"])), vec![200]);
+    assert_eq!(post_numbers(posts_array(by_name["Alice"])), vec![100]);
+    assert_eq!(post_numbers(posts_array(by_name["Bob"])), vec![200]);
 
     clients.shutdown().await;
 }
@@ -423,7 +427,7 @@ async fn array_subquery_subscription_changes_parent_when_inner_row_is_inserted()
     )
     .await;
     assert_eq!(
-        post_ids(posts_array(find_row_by_id(&initial_rows, user_id))),
+        post_numbers(posts_array(find_row_by_id(&initial_rows, user_id))),
         vec![100]
     );
 
@@ -461,7 +465,7 @@ async fn array_subquery_subscription_changes_parent_when_inner_row_is_inserted()
     )
     .await;
     assert_eq!(
-        post_ids(posts_array(find_row_by_id(&rows, user_id))),
+        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
         vec![100, 101]
     );
 
@@ -477,7 +481,6 @@ local_tokio_test! {
 ///
 /// bob subscribes -> alice inserts Alice without posts -> bob sees empty array
 /// alice inserts post -> bob sees Alice unchanged with one included post
-#[ignore = "#1765: maintained array subscriptions emit no add delta for a parent inserted after subscribe"]
 async fn array_subquery_preserves_parent_columns_when_inner_row_arrives() {
     let clients = Clients::start().await;
 
@@ -528,7 +531,7 @@ async fn array_subquery_preserves_parent_columns_when_inner_row_arrives() {
                     && values[0] == Value::Text("Alice".to_string())
                     && values[1]
                         .as_array()
-                        .is_some_and(|posts| post_ids(posts) == vec![100])
+                        .is_some_and(|posts| post_numbers(posts) == vec![100])
             });
             has_expected_row.then_some(rows)
         },
@@ -537,7 +540,7 @@ async fn array_subquery_preserves_parent_columns_when_inner_row_arrives() {
 
     let values = find_row_by_id(&rows, user_id);
     assert_eq!(values[0], Value::Text("Alice".to_string()));
-    assert_eq!(post_ids(posts_array(values)), vec![100]);
+    assert_eq!(post_numbers(posts_array(values)), vec![100]);
 
     clients.shutdown().await;
 }
@@ -551,7 +554,6 @@ local_tokio_test! {
 ///
 /// alice -> insert Bob's post -> server -> bob subscribes
 /// alice -> insert Bob -> server -> bob receives Bob with that post included
-#[ignore = "#1765: maintained array subscriptions emit no add delta for a late parent with existing children"]
 async fn array_subquery_subscription_adds_parent_with_existing_inner_rows() {
     let clients = Clients::start().await;
 
@@ -592,7 +594,7 @@ async fn array_subquery_subscription_adds_parent_with_existing_inner_rows() {
     )
     .await;
     assert_eq!(
-        post_ids(posts_array(find_row_by_id(&rows, user_id))),
+        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
         vec![200]
     );
 
@@ -643,7 +645,7 @@ async fn array_subquery_require_result_hides_parent_until_inner_row_exists() {
     )
     .await;
     assert_eq!(
-        post_ids(posts_array(find_row_by_id(&rows, user_id))),
+        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
         vec![100]
     );
 
@@ -730,7 +732,7 @@ local_tokio_test! {
 /// Verifies that an array subquery can order its inner rows.
 ///
 /// Actors: alice writes posts out of order, bob reads Alice with posts ordered
-/// by id descending.
+/// by post number descending.
 async fn array_subquery_orders_inner_rows() {
     let clients = Clients::start().await;
 
@@ -741,7 +743,7 @@ async fn array_subquery_orders_inner_rows() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("posts", "posts", "author_id", "id")
-            .order_by("id", OrderDirection::Desc),
+            .order_by("post_number", OrderDirection::Desc),
     );
 
     let rows = wait_for_rows(
@@ -750,7 +752,7 @@ async fn array_subquery_orders_inner_rows() {
         "bob sees Alice's posts ordered descending",
         |rows| {
             let has_expected_row = rows.iter().any(|(id, values)| {
-                *id == user_id && post_ids(posts_array(values)) == vec![102, 101, 100]
+                *id == user_id && post_numbers(posts_array(values)) == vec![102, 101, 100]
             });
             has_expected_row.then_some(rows)
         },
@@ -758,7 +760,7 @@ async fn array_subquery_orders_inner_rows() {
     .await;
 
     assert_eq!(
-        post_ids(posts_array(find_row_by_id(&rows, user_id))),
+        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
         vec![102, 101, 100]
     );
 
@@ -769,8 +771,7 @@ async fn array_subquery_orders_inner_rows() {
 local_tokio_test! {
 /// Verifies that an array subquery can limit ordered inner rows.
 ///
-/// Actors: alice writes five posts, bob reads only the first two ordered by id.
-#[ignore = "#1765: bounded array subqueries materialize an empty child array regardless of sort column"]
+/// Actors: alice writes five posts, bob reads only the first two ordered by post number.
 async fn array_subquery_limits_ordered_inner_rows() {
     let clients = Clients::start().await;
 
@@ -781,17 +782,17 @@ async fn array_subquery_limits_ordered_inner_rows() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("posts", "posts", "author_id", "id")
-            .order_by("id", OrderDirection::Asc)
+            .order_by("post_number", OrderDirection::Asc)
             .limit(2),
     );
 
     let rows = wait_for_rows(
         &clients.bob,
         query,
-        "bob sees the first two posts by id",
+        "bob sees the first two posts by number",
         |rows| {
             let has_expected_row = rows.iter().any(|(id, values)| {
-                *id == user_id && post_ids(posts_array(values)) == vec![100, 101]
+                *id == user_id && post_numbers(posts_array(values)) == vec![100, 101]
             });
             has_expected_row.then_some(rows)
         },
@@ -799,7 +800,7 @@ async fn array_subquery_limits_ordered_inner_rows() {
     .await;
 
     assert_eq!(
-        post_ids(posts_array(find_row_by_id(&rows, user_id))),
+        post_numbers(posts_array(find_row_by_id(&rows, user_id))),
         vec![100, 101]
     );
 
@@ -819,7 +820,7 @@ async fn array_subquery_selects_inner_columns() {
     create_post(&clients.alice, 100, "Post Title", user_id).await;
 
     let query = Query::from("users").array_subquery(
-        ArraySubquery::new("posts", "posts", "author_id", "id").select(["id", "title"]),
+        ArraySubquery::new("posts", "posts", "author_id", "id").select(["post_number", "title"]),
     );
 
     let rows = wait_for_rows(
@@ -855,7 +856,7 @@ async fn array_subquery_selects_magic_timestamp_columns() {
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("posts", "posts", "author_id", "id").select([
-            "id",
+            "post_number",
             "title",
             "$createdAt",
             "$updatedAt",
@@ -887,7 +888,6 @@ local_tokio_test! {
 ///
 /// Actors: alice writes a user, posts, and comments; bob reads the user with
 /// posts, and each included post has its own comments array.
-#[ignore = "#1765: nested array subquery materialization hangs without settling the reader query"]
 async fn array_subquery_supports_nested_arrays() {
     let clients = Clients::start().await;
 
@@ -942,7 +942,7 @@ async fn array_subquery_supports_nested_arrays() {
         match post[0] {
             Value::Integer(100) => assert_eq!(comments.len(), 2),
             Value::Integer(101) => assert_eq!(comments.len(), 1),
-            ref other => panic!("unexpected post id {other:?}"),
+            ref other => panic!("unexpected post number {other:?}"),
         }
     }
 
@@ -1052,7 +1052,6 @@ local_tokio_test! {
 ///
 /// Actors: alice writes file parts and a file, bob reads the file with resolved
 /// part rows.
-#[ignore = "#1765: UUID-array correlation deduplicates repeated references instead of preserving outer-array multiplicity"]
 async fn array_subquery_materializes_uuid_array_refs_in_order_with_duplicates() {
     let clients = Clients::start().await;
 
@@ -1117,7 +1116,6 @@ local_tokio_test! {
 ///
 /// alice -> insert parts A/B and file [A, B, B] -> server -> bob sees both
 /// alice -> update file to [B] -> server -> bob sees only B linked to file
-#[ignore = "#1765: reverse UUID-array correlation fails query validation with operand type mismatch"]
 async fn array_subquery_reverse_uuid_array_membership_updates_when_array_changes() {
     let clients = Clients::start().await;
 
@@ -1184,4 +1182,84 @@ fn file_counts_by_part_label(rows: &QueryRows) -> BTreeMap<String, usize> {
             (label, file_count)
         })
         .collect()
+}
+
+fn included_part_labels(value: &Value) -> Vec<&str> {
+    value
+        .as_array()
+        .expect("included parts")
+        .iter()
+        .map(|part| match &row_values(part)[0] {
+            Value::Text(label) => label.as_str(),
+            other => panic!("expected part label, got {other:?}"),
+        })
+        .collect()
+}
+
+local_tokio_test! {
+/// Alice creates [B, A, B], changes B, then reorders, removes, and adds references.
+/// Bob's live includes must preserve every occurrence and agree with fresh reads.
+async fn array_fk_subscription_preserves_occurrences_through_updates_and_reorders() {
+    let clients = Clients::start().await;
+    let a = create_file_part(&clients.alice, "A").await;
+    let b = create_file_part(&clients.alice, "B").await;
+    let file = create_file(&clients.alice, "bundle", &[b, a, b]).await;
+    let query = Query::from("files").array_subquery(
+        ArraySubquery::new("part_rows", "file_parts", "id", "parts")
+            .nested(ArraySubquery::new("files", "files", "parts", "id")),
+    );
+    let mut stream = clients.bob.subscribe(query.clone()).await.expect("subscribe");
+    let mut log = Vec::new();
+    wait_for_subscription_update(&mut stream, &mut log, QUERY_TIMEOUT, "initial repeated parts", |log| {
+        log.iter().flat_map(|delta| &delta.added).any(|added|
+            added.row.get("part_rows").is_some_and(|value| included_part_labels(value) == ["B", "A", "B"]))
+    }).await;
+
+    for (id, fields, expected) in [
+        (b, vec![("label".to_owned(), Value::Text("B2".to_owned()))], vec!["B2", "A", "B2"]),
+        (file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(a), Value::Uuid(b), Value::Uuid(b)]))], vec!["A", "B2", "B2"]),
+        (file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(b), Value::Uuid(a)]))], vec!["B2", "A"]),
+        (file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(b), Value::Uuid(b), Value::Uuid(a)]))], vec!["B2", "B2", "A"]),
+        (file, vec![("parts".to_owned(), Value::Array(vec![]))], vec![]),
+    ] {
+        log.clear();
+        clients.alice.update(id, fields).expect("update reference or child");
+        wait_for_subscription_update(&mut stream, &mut log, QUERY_TIMEOUT, format!("ordered occurrence update: {expected:?}"), |log| {
+            log.iter().flat_map(|delta| &delta.updated).filter_map(|updated| updated.row.as_ref()).any(|row|
+                row.get("part_rows").is_some_and(|value| included_part_labels(value) == expected))
+        }).await;
+        let rows = wait_for_rows(&clients.bob, query.clone(), "snapshot agrees with subscription", |rows| {
+            rows.iter().any(|(id, values)| *id == file && included_part_labels(&values[2]) == expected).then_some(rows)
+        }).await;
+        assert_eq!(included_part_labels(&find_row_by_id(&rows, file)[2]), expected);
+    }
+    clients.shutdown().await;
+}
+}
+
+local_tokio_test! {
+/// Bob hydrates Alice's [B, missing, A, B] with child filters, ordering and windows.
+/// Missing children are omitted and limits count occurrences; stored IDs stay intact.
+async fn array_fk_filters_and_windows_apply_to_reference_occurrences() {
+    let clients = Clients::start().await;
+    let a = create_file_part(&clients.alice, "A").await;
+    let b = create_file_part(&clients.alice, "B").await;
+    let missing = ObjectId::new();
+    let file = create_file(&clients.alice, "bundle", &[b, missing, a, b]).await;
+    for (include, expected) in [
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").limit(2), vec!["B", "A"]),
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").offset(1).limit(2), vec!["A", "B"]),
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").filter(eq(col("label"), lit("B"))), vec!["B", "B"]),
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").order_by("label", OrderDirection::Asc).limit(2), vec!["A", "B"]),
+        (ArraySubquery::new("part_rows", "file_parts", "id", "parts").order_by("label", OrderDirection::Desc).limit(2), vec!["B", "B"]),
+    ] {
+        let query = Query::from("files").array_subquery(include);
+        let rows = wait_for_rows(&clients.bob, query, "filtered and bounded reference occurrences", |rows| {
+            rows.iter().any(|(id, values)| *id == file && included_part_labels(&values[2]) == expected).then_some(rows)
+        }).await;
+        assert_eq!(included_part_labels(&find_row_by_id(&rows, file)[2]), expected);
+        assert_eq!(find_row_by_id(&rows, file)[1].as_array().unwrap(), &[Value::Uuid(b), Value::Uuid(missing), Value::Uuid(a), Value::Uuid(b)]);
+    }
+    clients.shutdown().await;
+}
 }

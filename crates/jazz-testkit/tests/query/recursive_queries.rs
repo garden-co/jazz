@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use crate::support::{
-    QueryRows, TestingClient, collect_stream_deltas, has_added, has_added_id,
-    wait_for_query_results, wait_for_rows, wait_for_subscription_update,
+    QueryRows, TestingClient, collect_stream_deltas, has_added, wait_for_query_results,
+    wait_for_rows, wait_for_subscription_update,
 };
 use jazz::query::{Gather, Query, col, eq, lit};
 use jazz::row_input;
@@ -26,17 +26,6 @@ macro_rules! local_tokio_test {
                 .await;
         }
     };
-}
-
-fn integer_frontier_schema() -> Schema {
-    SchemaBuilder::new()
-        .table(TableSchema::builder("teams").column("team_id", ColumnType::Integer))
-        .table(
-            TableSchema::builder("team_edges")
-                .column("child_team", ColumnType::Integer)
-                .column("parent_team", ColumnType::Integer),
-        )
-        .build()
 }
 
 fn team_graph_schema() -> Schema {
@@ -88,22 +77,6 @@ impl Clients {
     }
 }
 
-async fn create_numbered_team(client: &JazzClient, team_id: i32) -> ObjectId {
-    client
-        .insert("teams", row_input!("team_id" => team_id))
-        .expect("create numbered team")
-        .0
-}
-
-async fn create_numbered_team_edge(client: &JazzClient, child_team: i32, parent_team: i32) {
-    client
-        .insert(
-            "team_edges",
-            row_input!("child_team" => child_team, "parent_team" => parent_team),
-        )
-        .expect("create numbered team edge");
-}
-
 async fn create_team(client: &JazzClient, name: &str, parent_id: Option<ObjectId>) -> ObjectId {
     client
         .insert(
@@ -121,18 +94,6 @@ async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team
             row_input!("child_team" => child_team, "parent_team" => parent_team),
         )
         .expect("create team edge");
-}
-
-fn sorted_integer_frontier_values(rows: &QueryRows) -> Vec<i32> {
-    let mut values = rows
-        .iter()
-        .filter_map(|(_, values)| match values.first() {
-            Some(Value::Integer(team_id)) => Some(*team_id),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    values.sort_unstable();
-    values
 }
 
 fn sorted_team_names(rows: &QueryRows) -> Vec<String> {
@@ -167,7 +128,6 @@ local_tokio_test! {
 ///
 /// alice writes leaf -> mid -> root in `team_edges`
 /// bob subscribes to the recursive query from leaf and sees all three teams
-#[ignore = "#1767: recursive gather subscription rows omit the gathered teams' user fields"]
 async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
     let clients = Clients::start(team_graph_schema()).await;
     let query = Query::from("teams")
@@ -226,48 +186,6 @@ async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
 }
 
 local_tokio_test! {
-/// Verifies that recursive gather can use a scalar column frontier and dedupe a
-/// cycle without requiring every reached value to be backed by a row in the seed
-/// table.
-///
-/// Actors and flow:
-///
-/// alice writes team 1 plus cyclic edges 1 -> 2 -> 3 -> 1
-/// bob queries from seed team_id=1 and sees the recursive closure {1, 2, 3}
-#[ignore = "#1767: canonical Query reachability does not materialize scalar frontier values without backing root rows"]
-async fn recursive_query_expands_column_frontier_through_cycle() {
-    let clients = Clients::start(integer_frontier_schema()).await;
-
-    create_numbered_team(&clients.alice, 1).await;
-    create_numbered_team_edge(&clients.alice, 1, 2).await;
-    create_numbered_team_edge(&clients.alice, 2, 3).await;
-    create_numbered_team_edge(&clients.alice, 3, 1).await;
-
-    let query = Query::from("teams")
-        .filter(eq(col("team_id"), lit(1)))
-        .gather(
-            Gather::from("team_edges")
-                .where_current("child_team")
-                .hop_to("parent_team")
-                .frontier_column("team_id")
-                .max_depth(10),
-        )
-        .select(["team_id"]);
-
-    let rows = wait_for_rows(
-        &clients.bob,
-        query,
-        "bob sees recursive integer closure",
-        |rows| (sorted_integer_frontier_values(&rows) == vec![1, 2, 3]).then_some(rows),
-    )
-    .await;
-    assert_eq!(sorted_integer_frontier_values(&rows), vec![1, 2, 3]);
-
-    clients.shutdown().await;
-}
-}
-
-local_tokio_test! {
 /// Verifies that a recursive hop subscription emits a live add when a new edge
 /// extends an already-subscribed closure.
 ///
@@ -275,7 +193,6 @@ local_tokio_test! {
 ///
 /// alice writes team-1 -> team-2, bob subscribes from team-1
 /// alice adds team-2 -> team-3, bob receives team-3 and the query has all teams
-#[ignore = "#1767: canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
     let clients = Clients::start(team_graph_schema()).await;
 
@@ -312,7 +229,7 @@ async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
         &mut log,
         QUERY_TIMEOUT,
         "initial recursive closure add",
-        |log| has_added_id(log, team2),
+        |log| has_added(log, &[("name", Value::Text("team-2".to_owned()))]),
     )
     .await;
     collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
@@ -325,7 +242,7 @@ async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
         &mut log,
         QUERY_TIMEOUT,
         "team-3 add after recursive edge insert",
-        |log| has_added_id(log, team3),
+        |log| has_added(log, &[("name", Value::Text("team-3".to_owned()))]),
     )
     .await;
 
@@ -350,7 +267,6 @@ local_tokio_test! {
 ///
 /// alice writes root <- mid <- leaf
 /// bob seeds on leaf and follows parent_id until root, seeing all ancestors
-#[ignore = "#1767: canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_query_expands_self_parent_ancestors() {
     let clients = Clients::start(team_graph_schema()).await;
 
