@@ -2149,7 +2149,7 @@ fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     })
 }
 
-fn register_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+pub(super) fn register_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     // Every table uses the same fixed deletion-register record fields.
     static DESCRIPTOR: std::sync::OnceLock<records::RecordDescriptor> = std::sync::OnceLock::new();
     *DESCRIPTOR.get_or_init(|| table.register_storage_table().record_schema())
@@ -5128,6 +5128,33 @@ mod authority_storage_codec_tests {
             history_record_descriptor(&text),
             text.authored_history_storage_table().record_schema()
         );
+    }
+
+    // Internal: these names are engine-owned lookup keys, not an application API.
+    #[test]
+    fn physical_version_name_resolution_preserves_exact_constructor_spelling() {
+        for id in [0, 1, 10, 1000, u64::MAX] {
+            let id = PhysicalTableId(id);
+            for (name, deletion) in [
+                (physical_history_table_name(id), false),
+                (physical_register_table_name(id), true),
+            ] {
+                assert_eq!(physical_version_table_id(&name, deletion), Some(id));
+                assert_eq!(physical_version_table_id(&name, !deletion), None);
+            }
+        }
+        for name in [
+            "jazz_physical__history",
+            "jazz_physical_01_history",
+            "jazz_physical_+1_history",
+            "jazz_physical_-1_history",
+            "jazz_physical_18446744073709551616_history",
+            "jazz_physical_1_history_extra",
+            "jazz_physical_1a_history",
+            "jazz_deletion_history",
+        ] {
+            assert_eq!(physical_version_table_id(name, false), None, "{name}");
+        }
     }
 
     fn tx(time: u64, node: u8) -> TxId {

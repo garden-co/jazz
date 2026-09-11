@@ -833,7 +833,10 @@ where
                 stored_table.clone()
             } else {
                 let requested_schema = if self
-                    .table_in_schema(requested_table, self.catalogue.current_write_schema.schema)
+                    .table_in_schema_ref(
+                        requested_table,
+                        self.catalogue.current_write_schema.schema,
+                    )
                     .is_ok()
                 {
                     self.catalogue.current_write_schema.schema
@@ -846,10 +849,10 @@ where
                         "shared deletion row escaped requested physical-table prefix",
                     ))?
             };
-            let logical_table = self.table_in_schema(&stored_table, schema_version)?;
-            let descriptor = logical_table.register_storage_table().record_schema();
+            let logical_table = self.table_in_schema_ref(&stored_table, schema_version)?;
+            let descriptor = register_record_descriptor(logical_table);
             let branch_key = RuntimeSchema::decode_persisted_branch_key(
-                &logical_table,
+                logical_table,
                 record
                     .borrowed()
                     .get_bytes(SharedDeletionHistoryRowRecord::FIELD_BRANCH_KEY_IDX)?,
@@ -882,29 +885,27 @@ where
         let table = if !storage_table.starts_with("jazz_physical_") {
             requested_table.to_owned()
         } else {
+            let table_id = physical_version_table_id(storage_table, is_deletion).ok_or(
+                Error::InvalidStoredValue("physical version storage logical table mapping missing"),
+            )?;
             self.catalogue
                 .physical_mappings
                 .get(&schema_version)
                 .and_then(|mapping| {
                     mapping.tables.iter().find_map(|(logical_table, mapping)| {
-                        let root = if is_deletion {
-                            physical_register_table_name(mapping.table_id)
-                        } else {
-                            physical_history_table_name(mapping.table_id)
-                        };
-                        (root == storage_table).then(|| logical_table.clone())
+                        (mapping.table_id == table_id).then(|| logical_table.clone())
                     })
                 })
                 .ok_or(Error::InvalidStoredValue(
                     "physical version storage logical table mapping missing",
                 ))?
         };
-        let table_schema = self.table_in_schema(&table, schema_version)?;
-        let record = record.borrowed();
+        let table_schema = self.table_in_schema_ref(&table, schema_version)?;
+        let record_view = record.borrowed();
         let tx_node_alias = if is_deletion {
-            NodeAlias(record.get_u64(RegisterRowRecord::FIELD_TX_NODE_ID_IDX)?)
+            NodeAlias(record_view.get_u64(RegisterRowRecord::FIELD_TX_NODE_ID_IDX)?)
         } else {
-            NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?)
+            NodeAlias(record_view.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?)
         };
         let tx_node = self
             .node_aliases
@@ -914,23 +915,23 @@ where
                 "history tx node alias must exist",
             ))?;
         let tx_time = if is_deletion {
-            TxTime(record.get_u64(RegisterRowRecord::FIELD_TX_TIME_IDX)?)
+            TxTime(record_view.get_u64(RegisterRowRecord::FIELD_TX_TIME_IDX)?)
         } else {
-            TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?)
+            TxTime(record_view.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?)
         };
         let _ = TxId::new(tx_time, tx_node);
         let version = VersionRow {
             table: groove::Intern::new(table),
             branch_key: RuntimeSchema::decode_persisted_branch_key(
-                &table_schema,
-                record.get_bytes(if is_deletion {
+                table_schema,
+                record_view.get_bytes(if is_deletion {
                     RegisterRowRecord::FIELD_BRANCH_KEY_IDX
                 } else {
                     HistoryRowRecord::FIELD_BRANCH_KEY_IDX
                 })?,
             )
             .map_err(|_| Error::InvalidStoredValue("invalid stored branch key"))?,
-            record: OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
+            record,
         };
         version.validate_canonical()?;
         Ok(version)

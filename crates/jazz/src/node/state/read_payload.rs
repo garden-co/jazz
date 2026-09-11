@@ -27,6 +27,14 @@ where
         table: &str,
         schema_version: SchemaVersionId,
     ) -> Result<TableSchema, Error> {
+        self.table_in_schema_ref(table, schema_version).cloned()
+    }
+
+    pub(super) fn table_in_schema_ref(
+        &self,
+        table: &str,
+        schema_version: SchemaVersionId,
+    ) -> Result<&TableSchema, Error> {
         self.catalogue
             .catalogue_schemas
             .get(&schema_version)
@@ -36,11 +44,10 @@ where
                     .tables
                     .iter()
                     .find(|candidate| candidate.name == table)
-                    .cloned()
             })
             .or_else(|| {
                 (schema_version == self.catalogue.current_schema_version_id)
-                    .then(|| self.table(table).ok().cloned())
+                    .then(|| self.table(table).ok())
                     .flatten()
             })
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))
