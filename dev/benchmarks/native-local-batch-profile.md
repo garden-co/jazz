@@ -35,7 +35,7 @@ rejects that size up front. Larger logical workloads require multiple batches.
 ```sh
 cargo build -p jazz --bench local_batch_phases --profile perf \
   --features testing,transport-compression-zstd
-# Cargo prints the executable path; use that exact binary below.
+# Use the executable (not the .d/.o files) under target/perf/deps below.
 JAZZ_BATCH_ROWS=150,750,1500,3000 target/perf/deps/local_batch_phases-<hash>
 JAZZ_BATCH_ROWS=1500 JAZZ_BATCH_UPDATE_PERCENT=50 \
   target/perf/deps/local_batch_phases-<hash>
