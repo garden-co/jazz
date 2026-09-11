@@ -3464,6 +3464,129 @@ mod tests {
     }
 
     #[test]
+    fn rejects_undeclared_scalar_enum_text_default_at_table_column_path() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("items").column_with_default(
+                "status",
+                ColumnType::Enum {
+                    variants: vec!["draft".to_owned(), "published".to_owned()],
+                },
+                Value::Text("archived".to_owned()),
+            ))
+            .build();
+
+        let error = convert_public_schema(&schema)
+            .expect_err("an undeclared scalar enum default must fail conversion");
+        let rendered = error.to_string();
+        assert!(
+            rendered.starts_with("$.items.status: "),
+            "expected the table/column error path, got {rendered}"
+        );
+        assert!(
+            rendered.contains("enum default") && rendered.contains("not declared"),
+            "expected an undeclared enum default error, got {rendered}"
+        );
+    }
+
+    #[test]
+    fn converts_declared_scalar_enum_text_default_as_groove_string() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("items").column_with_default(
+                "status",
+                ColumnType::Enum {
+                    variants: vec!["draft".to_owned(), "published".to_owned()],
+                },
+                Value::Text("published".to_owned()),
+            ))
+            .build();
+
+        let table = convert_public_schema(&schema)
+            .expect("a declared scalar enum default must compile")
+            .into_runtime()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "items")
+            .expect("items table must be present");
+        let status = table
+            .columns
+            .iter()
+            .find(|column| column.name == "status")
+            .expect("status column must be present");
+
+        assert_eq!(status.column_type, GrooveColumnType::String);
+        assert_eq!(
+            status.default,
+            Some(GrooveValue::String("published".to_owned()))
+        );
+    }
+
+    #[test]
+    fn retains_generic_mismatch_for_wrong_typed_scalar_enum_default() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("items").column_with_default(
+                "status",
+                ColumnType::Enum {
+                    variants: vec!["draft".to_owned(), "published".to_owned()],
+                },
+                Value::Integer(1),
+            ))
+            .build();
+
+        let error = convert_public_schema(&schema)
+            .expect_err("a wrong-typed scalar enum default must fail conversion");
+        let rendered = error.to_string();
+        assert!(
+            rendered.starts_with("$.items.status: "),
+            "expected the table/column error path, got {rendered}"
+        );
+        assert!(
+            rendered.contains("does not match column type Enum"),
+            "expected the generic default mismatch, got {rendered}"
+        );
+    }
+
+    #[test]
+    fn preserves_nullable_and_raw_non_nullable_null_enum_defaults() {
+        let schema = Schema::from([(
+            TableName::new("items"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new(
+                    "nullable_status",
+                    ColumnType::Enum {
+                        variants: vec!["draft".to_owned(), "published".to_owned()],
+                    },
+                )
+                .nullable()
+                .default(Value::Null),
+                ColumnDescriptor::new(
+                    "required_status",
+                    ColumnType::Enum {
+                        variants: vec!["draft".to_owned(), "published".to_owned()],
+                    },
+                )
+                .default(Value::Null),
+            ])),
+        )]);
+
+        let table = convert_public_schema(&schema)
+            .expect("null enum defaults retain current conversion behavior")
+            .into_runtime()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "items")
+            .expect("items table must be present");
+
+        for column_name in ["nullable_status", "required_status"] {
+            let column = table
+                .columns
+                .iter()
+                .find(|column| column.name == column_name)
+                .expect("enum column must be present");
+            assert_eq!(column.default, Some(GrooveValue::Nullable(None)));
+        }
+    }
+
+    #[test]
     fn converts_payload_enum_default_to_tagged_record() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("events").column_with_default(
