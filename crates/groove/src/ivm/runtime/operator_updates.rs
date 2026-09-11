@@ -137,6 +137,41 @@ impl NodeState {
         )
     }
 
+    // Resolve each variant layout once for the batch, before projecting rows.
+    // A descriptor is interned, but constructing its fields is not free.
+    pub(super) fn group_source_rows<'a>(
+        table: &crate::schema::TableSchema,
+        rows: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
+        let mut grouped = HashMap::<u32, TableDelta>::default();
+        for stored in rows {
+            let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
+            let group = match grouped.entry(variant_tag) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let descriptor =
+                        table
+                            .record_schema_for_variant(variant_tag)
+                            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                                table: table.name.clone(),
+                                version: u64::from(variant_tag),
+                            })?;
+                    entry.insert(TableDelta {
+                        table: table.name.clone(),
+                        variant_tag,
+                        descriptor,
+                        deltas: Vec::new(),
+                    })
+                }
+            };
+            group.deltas.push(RecordDelta {
+                record: Bytes::copy_from_slice(payload),
+                weight: 1,
+            });
+        }
+        Ok(grouped.into_values().collect())
+    }
+
     pub(super) fn update_table_source_from_inputs(
         input: &TableSourceOp,
         schema: &DatabaseSchema,
@@ -150,32 +185,13 @@ impl NodeState {
         let table_schema = schema
             .table(&input.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
-        let mut grouped = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-        for (_, stored) in inputs.rows(request)? {
-            let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                    table: input.table.clone(),
-                    version: u64::from(variant_tag),
-                })?;
-            grouped
-                .entry((variant_tag, descriptor))
-                .or_default()
-                .push(RecordDelta {
-                    record: Bytes::copy_from_slice(payload),
-                    weight: 1,
-                });
-        }
-        let table_deltas = grouped
-            .into_iter()
-            .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                table: input.table.clone(),
-                variant_tag,
-                descriptor,
-                deltas,
-            })
-            .collect::<Vec<_>>();
+        let table_deltas = Self::group_source_rows(
+            table_schema,
+            inputs
+                .rows(request)?
+                .iter()
+                .map(|(_, stored)| stored.as_slice()),
+        )?;
         Self::update_table_source(
             input,
             schema,
@@ -200,32 +216,10 @@ impl NodeState {
             let table_schema = schema
                 .table(&input.table)
                 .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
-            let mut grouped = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-            for (_, stored) in rows {
-                let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
-                let descriptor = table_schema
-                    .record_schema_for_variant(variant_tag)
-                    .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                        table: input.table.clone(),
-                        version: u64::from(variant_tag),
-                    })?;
-                grouped
-                    .entry((variant_tag, descriptor))
-                    .or_default()
-                    .push(RecordDelta {
-                        record: Bytes::copy_from_slice(payload),
-                        weight: 1,
-                    });
-            }
-            let table_deltas = grouped
-                .into_iter()
-                .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                    table: input.table.clone(),
-                    variant_tag,
-                    descriptor,
-                    deltas,
-                })
-                .collect::<Vec<_>>();
+            let table_deltas = Self::group_source_rows(
+                table_schema,
+                rows.iter().map(|(_, stored)| stored.as_slice()),
+            )?;
             return Self::update_table_source(
                 &TableSourceOp {
                     table: input.table.clone(),

@@ -2081,6 +2081,80 @@ pub(super) struct VersionRowParts {
     pub(super) deletion: Option<DeletionEvent>,
 }
 
+// Record layout depends on the table name (enum registry binding) and ordered
+// physical column shape, not defaults, indices, or policies. Compare the shape
+// itself: schema objects are mutable and a table name alone is insufficient.
+struct HistoryDescriptorCacheEntry {
+    table_name: String,
+    columns: Vec<(
+        String,
+        groove::schema::ColumnType,
+        crate::schema::LargeValueSemanticKind,
+    )>,
+    descriptor: records::RecordDescriptor,
+}
+
+#[cfg(test)]
+thread_local! {
+    static HISTORY_DESCRIPTOR_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<HistoryDescriptorCacheEntry>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(entry) = cache.iter().find(|entry| {
+            entry.table_name == table.name
+                && entry.columns.len() == table.columns.len()
+                && entry
+                    .columns
+                    .iter()
+                    .zip(&table.columns)
+                    .all(|((name, ty, kind), column)| {
+                        name == &column.name
+                            && ty == &column.column_type
+                            && kind == &column.large_value_kind
+                    })
+        }) {
+            return entry.descriptor;
+        }
+        #[cfg(test)]
+        HISTORY_DESCRIPTOR_BUILDS.with(|count| count.set(count.get() + 1));
+        let descriptor = table.authored_history_storage_table().record_schema();
+        // Bound retained preparation data even for applications with continual
+        // schema changes. Eviction affects preparation cost only, never bytes.
+        if cache.len() == 128 {
+            cache.remove(0);
+        }
+        cache.push(HistoryDescriptorCacheEntry {
+            table_name: table.name.clone(),
+            columns: table
+                .columns
+                .iter()
+                .map(|column| {
+                    (
+                        column.name.clone(),
+                        column.column_type.clone(),
+                        column.large_value_kind,
+                    )
+                })
+                .collect(),
+            descriptor,
+        });
+        descriptor
+    })
+}
+
+fn register_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    // Every table uses the same fixed deletion-register record fields.
+    static DESCRIPTOR: std::sync::OnceLock<records::RecordDescriptor> = std::sync::OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| table.register_storage_table().record_schema())
+}
+
 impl VersionRow {
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
@@ -2095,14 +2169,17 @@ impl VersionRow {
             history_values_from_parts(table, &parts)?
         };
         let record = if is_deletion {
-            owned_record_from_storage_values(&table.register_storage_table(), values)?
+            owned_record_from_storage_values_with_descriptor(
+                register_record_descriptor(table),
+                values,
+            )?
         } else {
             match history_descriptor {
                 Some(descriptor) => {
                     owned_record_from_storage_values_with_descriptor(descriptor, values)?
                 }
-                None => owned_record_from_storage_values(
-                    &table.authored_history_storage_table(),
+                None => owned_record_from_storage_values_with_descriptor(
+                    history_record_descriptor(table),
                     values,
                 )?,
             }
@@ -2133,9 +2210,9 @@ impl VersionRow {
                 "row version parents must be sorted and unique",
             ));
         }
-        let (storage_table, values) = if let Some(deletion) = version.deletion() {
+        let (descriptor, values) = if let Some(deletion) = version.deletion() {
             (
-                table.register_storage_table(),
+                register_record_descriptor(table),
                 register_values_from_wire(
                     version,
                     tx_node_alias,
@@ -2146,7 +2223,7 @@ impl VersionRow {
             )
         } else {
             (
-                table.authored_history_storage_table(),
+                history_record_descriptor(table),
                 history_values_from_wire(
                     table,
                     version,
@@ -2160,7 +2237,7 @@ impl VersionRow {
         Ok(Self {
             table: groove::Intern::new(version.table().to_owned()),
             branch_key: version.branch_key().clone(),
-            record: owned_record_from_storage_values(&storage_table, values)?,
+            record: owned_record_from_storage_values_with_descriptor(descriptor, values)?,
         })
     }
 
@@ -4991,6 +5068,67 @@ pub(super) fn version_layer_string(layer: VersionLayer) -> String {
 #[cfg(test)]
 mod authority_storage_codec_tests {
     use super::*;
+
+    // Internal because application values cannot reveal descriptor construction
+    // frequency or accidental reuse of a different physical enum registry.
+    #[test]
+    fn version_descriptor_preparation_tracks_exact_schema_shape() {
+        use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+        let table = |name: &str, ty: ColumnType| {
+            JazzSchema::new(
+                &SchemaBuilder::new()
+                    .table(TableSchemaBuilder::new(name).column("payload", ty))
+                    .build(),
+            )
+            .unwrap()
+            .tables()[0]
+                .clone()
+        };
+        let text = table("descriptor_cache_test", ColumnType::Text);
+        let json = table("descriptor_cache_test", ColumnType::Json { schema: None });
+        let integer = table("descriptor_cache_test", ColumnType::Integer);
+        let enum_type = || ColumnType::ScalarEnum {
+            name: "state".into(),
+            variants: vec!["a".into(), "b".into()],
+        };
+        let enum_a = table("descriptor_cache_enum_a", enum_type());
+        let enum_b = table("descriptor_cache_enum_b", enum_type());
+        HISTORY_DESCRIPTOR_BUILDS.with(|count| count.set(0));
+        for table in [&text, &json, &integer, &enum_a, &enum_b] {
+            let expected = table.authored_history_storage_table().record_schema();
+            for _ in 0..100 {
+                assert_eq!(history_record_descriptor(table), expected);
+                assert_eq!(
+                    register_record_descriptor(table),
+                    table.register_storage_table().record_schema()
+                );
+            }
+        }
+        assert_eq!(HISTORY_DESCRIPTOR_BUILDS.with(|count| count.get()), 5);
+        assert_ne!(
+            history_record_descriptor(&text),
+            history_record_descriptor(&json)
+        );
+        assert_ne!(
+            history_record_descriptor(&enum_a),
+            history_record_descriptor(&enum_b)
+        );
+        // Eviction must change only cost, not the selected record layout.
+        for index in 0..140 {
+            let other = table(
+                &format!("descriptor_cache_eviction_{index}"),
+                ColumnType::Text,
+            );
+            assert_eq!(
+                history_record_descriptor(&other),
+                other.authored_history_storage_table().record_schema()
+            );
+        }
+        assert_eq!(
+            history_record_descriptor(&text),
+            text.authored_history_storage_table().record_schema()
+        );
+    }
 
     fn tx(time: u64, node: u8) -> TxId {
         TxId::new(TxTime(time), NodeUuid::from_bytes([node; 16]))

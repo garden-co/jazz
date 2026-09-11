@@ -251,6 +251,17 @@ pub enum AuthorSubjectError {
     InvalidSystemOrigin,
 }
 
+fn author_identity_descriptor() -> crate::groove::records::RecordDescriptor {
+    use crate::groove::records::{RecordDescriptor, ValueType};
+    static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("issuer", ValueType::String),
+            ("subject", ValueType::String),
+        ])
+    })
+}
+
 impl RowAuthor {
     /// Create durable system attribution for work originating at `node`.
     pub fn system_at(node: NodeUuid) -> Self {
@@ -352,59 +363,58 @@ impl RowAuthor {
 
     /// Native record type exposed for persisted row and transaction metadata.
     pub fn value_type() -> crate::groove::records::ValueType {
+        crate::groove::records::ValueType::Record(Box::new(Self::record_descriptor()))
+    }
+
+    fn record_descriptor() -> crate::groove::records::RecordDescriptor {
         use crate::groove::records::{RecordDescriptor, ValueType};
-        ValueType::Record(Box::new(RecordDescriptor::new([
-            ("account", ValueType::Uuid),
-            (
-                "identity",
-                ValueType::Record(Box::new(RecordDescriptor::new([
-                    ("issuer", ValueType::String),
-                    ("subject", ValueType::String),
-                ]))),
-            ),
-        ])))
+        static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
+        *DESCRIPTOR.get_or_init(|| {
+            RecordDescriptor::new([
+                ("account", ValueType::Uuid),
+                (
+                    "identity",
+                    ValueType::Record(Box::new(author_identity_descriptor())),
+                ),
+            ])
+        })
     }
 
     /// Structured durable attribution value.
     pub fn to_value(self) -> crate::groove::records::Value {
-        use crate::groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+        use crate::groove::records::{OwnedRecord, Value};
         let (issuer, subject) = self.principal_parts();
-        let identity = RecordDescriptor::new([
-            ("issuer", ValueType::String),
-            ("subject", ValueType::String),
-        ]);
+        let identity = author_identity_descriptor();
         let raw = identity
             .create(&[Value::String(issuer), Value::String(subject)])
             .expect("row author identity record");
         let identity = Value::Record(OwnedRecord::new(raw, identity));
-        let ValueType::Record(descriptor) = Self::value_type() else {
-            unreachable!()
-        };
+        let descriptor = Self::record_descriptor();
         let raw = descriptor
             .create(&[Value::Uuid(self.account_id().0), identity])
             .expect("row author record");
-        Value::Record(OwnedRecord::new(raw, *descriptor))
+        Value::Record(OwnedRecord::new(raw, descriptor))
     }
 
     /// Decode durable metadata without granting the system capability.
     pub fn from_value(value: crate::groove::records::Value) -> Result<Self, AuthorSubjectError> {
-        use crate::groove::records::{Value, ValueType};
+        use crate::groove::records::Value;
         let bad = || AuthorSubjectError::InvalidCanonical("invalid row author record".into());
         let Value::Record(record) = value else {
             return Err(bad());
         };
-        let ValueType::Record(expected) = Self::value_type() else {
-            unreachable!()
-        };
-        if record.descriptor() != expected.as_ref() {
+        let expected = Self::record_descriptor();
+        if record.descriptor() != &expected {
             return Err(bad());
         }
         let borrowed = record.borrowed();
         let account = crate::account_registry::AccountId(borrowed.get_uuid(0).map_err(|_| bad())?);
-        let Value::Record(identity) = borrowed.get_idx(1).map_err(|_| bad())? else {
-            return Err(bad());
-        };
-        let identity = identity.borrowed();
+        let span = record
+            .descriptor()
+            .field_span(record.raw(), 1)
+            .map_err(|_| bad())?;
+        let identity_descriptor = author_identity_descriptor();
+        let identity = identity_descriptor.bind(&record.raw()[span]);
         let issuer = identity.get_str(0).map_err(|_| bad())?;
         let subject = identity.get_str(1).map_err(|_| bad())?;
         if !principal_is_nonempty(issuer) {
@@ -594,17 +604,21 @@ impl AuthorSubject {
 
     /// Native record type exposed for structured author metadata.
     pub fn value_type() -> crate::groove::records::ValueType {
+        crate::groove::records::ValueType::Record(Box::new(Self::record_descriptor()))
+    }
+
+    fn record_descriptor() -> crate::groove::records::RecordDescriptor {
         use crate::groove::records::{RecordDescriptor, ValueType};
-        ValueType::Record(Box::new(RecordDescriptor::new([
-            ("account", ValueType::Nullable(Box::new(ValueType::Uuid))),
-            (
-                "identity",
-                ValueType::Record(Box::new(RecordDescriptor::new([
-                    ("issuer", ValueType::String),
-                    ("subject", ValueType::String),
-                ]))),
-            ),
-        ])))
+        static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
+        *DESCRIPTOR.get_or_init(|| {
+            RecordDescriptor::new([
+                ("account", ValueType::Nullable(Box::new(ValueType::Uuid))),
+                (
+                    "identity",
+                    ValueType::Record(Box::new(author_identity_descriptor())),
+                ),
+            ])
+        })
     }
 
     /// Valid nested author metadata paths. Field names are never interpreted
@@ -644,19 +658,14 @@ impl AuthorSubject {
 
     /// Structured native author value; intern handles are never serialized.
     pub fn to_value(self) -> crate::groove::records::Value {
-        use crate::groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+        use crate::groove::records::{OwnedRecord, Value};
         let (issuer, subject) = self.principal_parts();
-        let identity = RecordDescriptor::new([
-            ("issuer", ValueType::String),
-            ("subject", ValueType::String),
-        ]);
+        let identity = author_identity_descriptor();
         let raw = identity
             .create(&[Value::String(issuer), Value::String(subject)])
             .expect("author identity record");
         let identity = Value::Record(OwnedRecord::new(raw, identity));
-        let ValueType::Record(descriptor) = Self::value_type() else {
-            unreachable!()
-        };
+        let descriptor = Self::record_descriptor();
         let account = Value::Nullable(
             self.account_id()
                 .map(|account| Box::new(Value::Uuid(account.0))),
@@ -664,24 +673,20 @@ impl AuthorSubject {
         let raw = descriptor
             .create(&[account, identity])
             .expect("author record");
-        Value::Record(OwnedRecord::new(raw, *descriptor))
+        Value::Record(OwnedRecord::new(raw, descriptor))
     }
 
     /// Decode structured provenance using its exact native descriptor.
     pub fn from_value(value: crate::groove::records::Value) -> Result<Self, AuthorSubjectError> {
-        use crate::groove::records::{Value, ValueType};
+        use crate::groove::records::Value;
         let bad = || AuthorSubjectError::InvalidCanonical("invalid author record".into());
         let Value::Record(record) = value else {
             return Err(bad());
         };
-        let ValueType::Record(session_descriptor) = Self::value_type() else {
-            unreachable!()
-        };
-        let ValueType::Record(row_descriptor) = RowAuthor::value_type() else {
-            unreachable!()
-        };
-        let row_author = record.descriptor() == row_descriptor.as_ref();
-        if !row_author && record.descriptor() != session_descriptor.as_ref() {
+        let session_descriptor = Self::record_descriptor();
+        let row_descriptor = RowAuthor::record_descriptor();
+        let row_author = record.descriptor() == &row_descriptor;
+        if !row_author && record.descriptor() != &session_descriptor {
             return Err(bad());
         }
         let borrowed = record.borrowed();
@@ -690,10 +695,12 @@ impl AuthorSubject {
         } else {
             borrowed.get_nullable_uuid(0).map_err(|_| bad())?
         };
-        let Value::Record(identity) = borrowed.get_idx(1).map_err(|_| bad())? else {
-            return Err(bad());
-        };
-        let identity = identity.borrowed();
+        let span = record
+            .descriptor()
+            .field_span(record.raw(), 1)
+            .map_err(|_| bad())?;
+        let identity_descriptor = author_identity_descriptor();
+        let identity = identity_descriptor.bind(&record.raw()[span]);
         let issuer = identity.get_str(0).map_err(|_| bad())?;
         let subject = identity.get_str(1).map_err(|_| bad())?;
         if issuer == Self::SYSTEM_ISSUER {

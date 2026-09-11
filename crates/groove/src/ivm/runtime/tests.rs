@@ -3194,3 +3194,55 @@ fn projection_composition_skips_only_adjacent_total_selections() {
         "discarding an output must not discard its fallible computation"
     );
 }
+
+// Internal because row equality cannot prove batch-amortized descriptor setup.
+#[test]
+fn source_batch_prepares_one_descriptor_per_variant() {
+    let table = crate::schema::TableSchema::new(
+        "source_batch",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("label", ColumnType::String),
+        ],
+    )
+    .with_variant(1, ["id"])
+    .with_variant(2, ["id", "label"]);
+    let a = table.record_schema_for_variant(1).unwrap();
+    let b = table.record_schema_for_variant(2).unwrap();
+    let mut rows = Vec::new();
+    for id in 0..1000 {
+        let (tag, payload) = if id % 2 == 0 {
+            (1, a.create(&[Value::U64(id)]).unwrap())
+        } else {
+            (
+                2,
+                b.create(&[Value::U64(id), Value::String("value".into())])
+                    .unwrap(),
+            )
+        };
+        rows.push(crate::records::encode_variant_record(tag, &payload));
+    }
+    crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
+    let groups = NodeState::group_source_rows(&table, rows.iter().map(Vec::as_slice)).unwrap();
+    assert_eq!(
+        crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.get()),
+        2
+    );
+    assert_eq!(groups.len(), 2);
+    for group in groups {
+        assert_eq!(group.deltas.len(), 500);
+        assert_eq!(group.descriptor, if group.variant_tag == 1 { a } else { b });
+        for (index, delta) in group.deltas.iter().enumerate() {
+            assert_eq!(delta.weight, 1);
+            assert_eq!(
+                group.descriptor.bind(&delta.record).get_u64(0).unwrap(),
+                index as u64 * 2 + u64::from(group.variant_tag - 1)
+            );
+        }
+    }
+    let unknown = crate::records::encode_variant_record(3, &[]);
+    assert!(matches!(
+        NodeState::group_source_rows(&table, [unknown.as_slice()]),
+        Err(IvmRuntimeError::UnknownTableVariant { version: 3, .. })
+    ));
+}
