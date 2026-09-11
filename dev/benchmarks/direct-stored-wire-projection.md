@@ -43,3 +43,13 @@ interval, and the local phase gain must not be advertised as an end-to-end gain.
 
 All 2,005 Jazz library tests passed (2 ignored), including wire/history exact
 roundtrips and provenance boundary cases. Clippy and formatting passed.
+
+The 1,500-row todo fixture, updating 1,350 rows, measured a 281.629ms
+batch roundtrip versus the preceding 319.211ms receipt (about 12% faster;
+that comparison also includes the small nullable-buffer change). Initial
+publication was 94.742ms, receiver ingest 44.999ms, and initial query 17.696ms.
+These native phases exclude browser/IndexedDB and real network overhead.
+
+Replacing the created-at millisecond conversion with the packed HLC value
+makes `wire_record_round_trips_through_history_bytes` fail at the new byte
+oracle. Exact source restoration passes the test again.
