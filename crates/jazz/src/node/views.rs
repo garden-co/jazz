@@ -1731,6 +1731,7 @@ where
     /// Validate all row bundles carried by a receiver frame without changing
     /// storage or in-memory receiver state.
     fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {
+        let mut descriptors = BTreeMap::new();
         for update in updates {
             // An opening-pending marker makes no source or body claim. It
             // must not mutate a prior closure while withholding settlement.
@@ -1798,7 +1799,7 @@ where
                 // shared transaction boundary keeps view payloads from being
                 // a durable-ingress bypass for operation provenance.
                 self.admit_contribution_merge_for_storage(bundle.tx)?;
-                self.validate_view_payload_versions(bundle.versions)?;
+                self.validate_view_payload_versions_prepared(bundle.versions, &mut descriptors)?;
             }
         }
         Ok(())

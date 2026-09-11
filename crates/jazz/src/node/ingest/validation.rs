@@ -921,8 +921,17 @@ where
         &self,
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
+        self.validate_view_payload_versions_prepared(versions, &mut BTreeMap::new())
+    }
+
+    pub(super) fn validate_view_payload_versions_prepared<'a>(
+        &self,
+        versions: &'a [VersionRecord],
+        descriptors: &mut BTreeMap<(SchemaVersionId, &'a str), groove::records::RecordDescriptor>,
+    ) -> Result<(), Error> {
         // View/repair bodies come from an admitted authority encoder. Check
         // semantic catalogue compatibility below, not their byte representation.
+        // Catalogue state cannot change during this shared-borrow preflight.
         for version in versions {
             let schema = self
                 .catalogue
@@ -939,7 +948,10 @@ where
                 .ok_or(Error::MalformedViewUpdate(
                     "row version table is absent from its authored schema",
                 ))?;
-            if version.record().descriptor() != &table.wire_record_descriptor() {
+            let descriptor = descriptors
+                .entry((version.schema_version(), version.table()))
+                .or_insert_with(|| table.wire_record_descriptor());
+            if version.record().descriptor() != descriptor {
                 return Err(Error::MalformedViewUpdate(
                     "row version does not carry the complete descriptor of its authored schema",
                 ));
