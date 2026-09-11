@@ -487,7 +487,7 @@ where
             false,
         )?;
         // Retain the established, guarded primary-key paths. In particular a
-        // policy-scoped or declared-`id` root must stay a complete current
+        // policy-scoped root must stay a complete current
         // source: a point cap there can strand a deletion-driven membership
         // transition. The new selector contributes only secondary equality
         // indexes for concrete maintained roots; it must not widen that
@@ -564,8 +564,7 @@ where
         identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
-        let query_schema = self
-            .catalogue
+        self.catalogue
             .catalogue_schemas
             .get(&shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
@@ -588,7 +587,7 @@ where
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query(), &query_schema.schema),
+            output: current_query_output_request(output, shape.query()),
         };
         self.compile_query_program_request(request).await
     }
@@ -601,8 +600,7 @@ where
         identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
-        let query_schema = self
-            .catalogue
+        self.catalogue
             .catalogue_schemas
             .get(&shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
@@ -625,7 +623,7 @@ where
             reads: snapshot_query_read_set(&input.shape, shape.schema_version(), snapshot.clone()),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query(), &query_schema.schema),
+            output: current_query_output_request(output, shape.query()),
         };
         self.compile_query_program_request(request).await
     }
@@ -640,8 +638,7 @@ where
         read_view: &ReadViewSpec,
         physical_row: Option<RowUuid>,
     ) -> Result<QueryProgram, Error> {
-        let query_schema = self
-            .catalogue
+        self.catalogue
             .catalogue_schemas
             .get(&shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
@@ -677,11 +674,7 @@ where
             )?,
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(
-                CurrentQueryProgramOutput::AppRows,
-                shape.query(),
-                &query_schema.schema,
-            ),
+            output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
         };
         // This one-shot include-deleted source has no deletion anti-join after
         // it. The proof remains deliberately narrower than ordinary visible
@@ -717,8 +710,7 @@ where
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let binding = lowered_shape.bind(BTreeMap::new())?;
-        let query_schema = self
-            .catalogue
+        self.catalogue
             .catalogue_schemas
             .get(&lowered_shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
@@ -750,11 +742,7 @@ where
             ),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(
-                output,
-                lowered_shape.query(),
-                &query_schema.schema,
-            ),
+            output: current_query_output_request(output, lowered_shape.query()),
         };
         self.compile_query_program_request(request).await
     }
@@ -1036,8 +1024,7 @@ where
             )?,
             shape: input_shape,
         };
-        let mut output_request =
-            current_query_output_request(output, shape.query(), &query_schema.schema);
+        let mut output_request = current_query_output_request(output, shape.query());
         if storage_backed_result_materialization {
             // A simple current root query carries the exact visible content
             // transaction in its result-member terminal.  Keeping every
@@ -2651,8 +2638,7 @@ where
     }
 
     /// Execute a serving query with its root constrained to a physical row
-    /// UUID. This is for internal authorization probes: public `id` may be a
-    /// declared user column and must not be used as the storage-row selector.
+    /// UUID for internal authorization probes.
     pub(crate) async fn query_rows_for_link_physical_row(
         &mut self,
         shape: &ValidatedQuery,
@@ -4444,7 +4430,7 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
 }
 
 fn query_order_value(row: &CurrentRow, table: &TableSchema, column: &str) -> Option<Value> {
-    if column == "id" && !table.columns.iter().any(|candidate| candidate.name == "id") {
+    if column == "id" {
         return Some(Value::Uuid(row.row_uuid().0));
     }
     if is_magic_current_column(column) {

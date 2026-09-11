@@ -669,3 +669,28 @@ fn cloned_row_descriptor_recomputes_content_hash_after_mutation() {
         "A cloned descriptor must not reuse a stale cached hash after its columns change"
     );
 }
+
+/// Alice's schema cannot replace the generated row UUID with any explicit id type.
+#[test]
+fn explicit_table_id_columns_are_rejected() {
+    for column_type in [ColumnType::Uuid, ColumnType::Text, ColumnType::Integer] {
+        let source = SchemaBuilder::new()
+            .table(TableSchema::builder("items").column("id", column_type))
+            .build();
+        let error =
+            crate::schema::JazzSchema::new(&source).expect_err("explicit id must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "$.items.columns.id: column name \"id\" is reserved for the automatically generated UUID row ID"
+        );
+    }
+    let source = SchemaBuilder::new()
+        .table(TableSchema::builder("items").nullable_column("id", ColumnType::Uuid))
+        .build();
+    assert!(
+        crate::schema::JazzSchema::new(&source)
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+}

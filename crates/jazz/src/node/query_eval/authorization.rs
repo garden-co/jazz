@@ -265,7 +265,6 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-                &policy_schema,
             ),
         };
         let access_paths = BTreeMap::from([(
@@ -491,7 +490,6 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-                &self.catalogue.schema,
             ),
         };
         // A primary-key access path addresses the physical row UUID without
@@ -734,7 +732,6 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-                &self.catalogue.schema,
             ),
         };
         let candidate = current_row_from_cells_with_explicit_provenance(
@@ -1101,7 +1098,6 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::AuthorizedRows,
                 policy_shape.query(),
-                policy_schema,
             ),
         })
     }
@@ -1295,7 +1291,6 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::AuthorizedRows,
                 policy_shape.query(),
-                policy_schema,
             ),
         };
         self.query

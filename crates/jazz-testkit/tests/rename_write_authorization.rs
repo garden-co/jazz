@@ -37,7 +37,6 @@ fn v1_schema() -> JazzSchema {
     compile_public_schema(
         SchemaBuilder::new().table(
             TableSchemaBuilder::new("users")
-                .column("id", ColumnType::Uuid)
                 .column("email", ColumnType::Text)
                 .column("owner", ColumnType::Text)
                 .policies(owner_write_policies(PolicyExpr::True)),
@@ -50,7 +49,6 @@ fn v2_schema() -> JazzSchema {
     compile_public_schema(
         SchemaBuilder::new().table(
             TableSchemaBuilder::new("people")
-                .column("id", ColumnType::Uuid)
                 .column("email", ColumnType::Text)
                 .column("owner", ColumnType::Text)
                 .policies(
@@ -119,9 +117,8 @@ fn rename_lens(v1: &SchemaVersion, v2: &SchemaVersion) -> MigrationLens {
     .expect("rename fixture lens is valid")
 }
 
-fn cells(id: RowUuid, email: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
+fn cells(email: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("id".to_string(), Value::Uuid(id.0)),
         ("email".to_string(), Value::String(email.to_string())),
         (
             "owner".to_string(),
@@ -130,30 +127,19 @@ fn cells(id: RowUuid, email: &str, owner: AuthorSubject) -> BTreeMap<String, Val
     ])
 }
 
-fn client_person_values(
-    id: jazz::tools::ObjectId,
-    email: &str,
-) -> HashMap<String, jazz::tools::Value> {
-    row_input!("id" => id, "email" => email)
+fn client_person_values(email: &str) -> HashMap<String, jazz::tools::Value> {
+    row_input!("email" => email)
 }
 
 fn client_v1_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchemaBuilder::new("users")
-                .column("id", jazz::tools::ColumnType::Uuid)
-                .column("email", jazz::tools::ColumnType::Text),
-        )
+        .table(TableSchemaBuilder::new("users").column("email", jazz::tools::ColumnType::Text))
         .build()
 }
 
 fn client_v2_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
-        .table(
-            TableSchemaBuilder::new("people")
-                .column("id", jazz::tools::ColumnType::Uuid)
-                .column("email", jazz::tools::ColumnType::Text),
-        )
+        .table(TableSchemaBuilder::new("people").column("email", jazz::tools::ColumnType::Text))
         .build()
 }
 
@@ -194,7 +180,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
             .commit_mergeable_unit(
                 MergeableCommit::new("users", user_row, 1_000)
                     .made_by(alice)
-                    .cells(cells(user_row, "alice@example.com", alice)),
+                    .cells(cells("alice@example.com", alice)),
             )
             .await?;
         let tx_id = writer_v1.persist_and_settle_transaction(published).await?;
@@ -273,7 +259,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
                 MergeableCommit::new("people", user_row, 2_000)
                     .made_by(mallory)
                     .parents(vec![insert_tx])
-                    .cells(cells(user_row, "mallory+renamed@example.com", alice)),
+                    .cells(cells("mallory+renamed@example.com", alice)),
             )
             .await?;
         let tx_id = non_owner_writer_v2
@@ -316,7 +302,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
                 MergeableCommit::new("people", user_row, 2_000)
                     .made_by(alice)
                     .parents(vec![insert_tx])
-                    .cells(cells(user_row, "alice+renamed@example.com", alice)),
+                    .cells(cells("alice+renamed@example.com", alice)),
             )
             .await?;
         let tx_id = writer_v2.persist_and_settle_transaction(published).await?;
@@ -410,9 +396,8 @@ async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
             .expect("connect bob");
             wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
-            let user_id = jazz::tools::ObjectId::new();
             let (_, _, transaction_id) = bob
-                .insert("people", client_person_values(user_id, "bob@example.com"))
+                .insert("people", client_person_values("bob@example.com"))
                 .expect("bob creates v2 person");
             support::wait_for_edge_txs(
                 &bob,

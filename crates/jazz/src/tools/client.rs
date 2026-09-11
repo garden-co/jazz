@@ -3248,6 +3248,9 @@ impl PublicQueryDecoder {
                 let values = columns
                     .iter()
                     .map(|column| {
+                        if column == "id" {
+                            return Ok(Value::Uuid(row_id));
+                        }
                         if let Some(value) = self.core_magic_value(table, &row, column)? {
                             return Ok(value);
                         }
@@ -6286,6 +6289,55 @@ mod tests {
                 Some(&Value::Text(expected.to_owned()))
             );
         }
+    }
+
+    /// Alice filters, orders, and projects the generated UUID with explicitly assigned row IDs.
+    #[tokio::test]
+    async fn generated_id_queries_use_the_row_uuid() {
+        use crate::query::{OrderDirection, Query, col, eq, lit};
+        let alice = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(TableSchema::builder("items").column("label", ColumnType::Text))
+                .build(),
+        )
+        .await;
+        for (id, label) in [(1, "z"), (2, "a")] {
+            alice
+                .insert_with_id(
+                    "items",
+                    Uuid::from_u128(id),
+                    crate::row_input!("label" => label),
+                )
+                .expect("insert with explicit row UUID");
+        }
+        let rows = alice
+            .query_results_with_read_tier(
+                Query::from("items")
+                    .order_by("id", OrderDirection::Desc)
+                    .select(["id", "label"]),
+                ReadTier::LocalFirst,
+            )
+            .await
+            .expect("order by generated UUID");
+        assert_eq!(rows.len(), 2);
+        for (row, id) in rows.iter().zip([2, 1]) {
+            assert_eq!(
+                row.get("id"),
+                Some(&Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(id))))
+            );
+        }
+        assert_eq!(rows[0].get("label"), Some(&Value::Text("a".to_owned())));
+        assert_eq!(rows[1].get("label"), Some(&Value::Text("z".to_owned())));
+        let selected = alice
+            .query_results_with_read_tier(
+                Query::from("items")
+                    .filter(eq(col("id"), lit(Uuid::from_u128(1))))
+                    .select(["id", "label"]),
+                ReadTier::LocalFirst,
+            )
+            .await
+            .expect("filter by generated UUID");
+        assert_eq!(selected, vec![rows[1].clone()]);
     }
 
     #[tokio::test]

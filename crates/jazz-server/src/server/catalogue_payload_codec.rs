@@ -3014,11 +3014,7 @@ mod tests {
     #[test]
     fn schema_roundtrip_simple() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
 
         let encoded = encode_schema(&schema);
@@ -3026,7 +3022,7 @@ mod tests {
 
         // Check table exists
         let users = decoded.get(&TableName::new("users")).unwrap();
-        assert_eq!(users.columns.columns.len(), 2);
+        assert_eq!(users.columns.columns.len(), 1);
     }
 
     #[test]
@@ -3035,7 +3031,7 @@ mod tests {
             .table(
                 TableSchema::builder("users")
                     .column("name", ColumnType::Text)
-                    .column("id", ColumnType::Uuid)
+                    .column("token", ColumnType::Uuid)
                     .nullable_column("email", ColumnType::Text),
             )
             .build();
@@ -3050,7 +3046,7 @@ mod tests {
             .map(|column| column.name.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(column_names, vec!["name", "id", "email"]);
+        assert_eq!(column_names, vec!["name", "token", "email"]);
     }
 
     #[test]
@@ -3058,16 +3054,11 @@ mod tests {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
                     .nullable_column("email", ColumnType::Text)
                     .column("score", ColumnType::Integer)
                     .fk_column("org_id", "orgs"),
             )
-            .table(
-                TableSchema::builder("orgs")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("orgs").column("name", ColumnType::Text))
             .build();
 
         let encoded = encode_schema(&schema);
@@ -3076,7 +3067,7 @@ mod tests {
         assert_eq!(decoded.len(), 2);
 
         let users = decoded.get(&TableName::new("users")).unwrap();
-        assert_eq!(users.columns.columns.len(), 4);
+        assert_eq!(users.columns.columns.len(), 3);
 
         // Find nullable email column
         let email_col = users.columns.column("email").unwrap();
@@ -3091,16 +3082,12 @@ mod tests {
     #[test]
     fn schema_roundtrip_with_arrays() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("posts")
-                    .column("id", ColumnType::Uuid)
-                    .column(
-                        "tags",
-                        ColumnType::Array {
-                            element: Box::new(ColumnType::Text),
-                        },
-                    ),
-            )
+            .table(TableSchema::builder("posts").column(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            ))
             .build();
 
         let encoded = encode_schema(&schema);
@@ -3117,11 +3104,7 @@ mod tests {
     #[test]
     fn schema_roundtrip_with_bytea() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("chunks")
-                    .column("id", ColumnType::Uuid)
-                    .column("payload", ColumnType::Bytea),
-            )
+            .table(TableSchema::builder("chunks").column("payload", ColumnType::Bytea))
             .build();
 
         let encoded = encode_schema(&schema);
@@ -3564,7 +3547,6 @@ mod tests {
             SchemaBuilder::new()
                 .table(
                     TableSchema::builder("todos")
-                        .column("id", ColumnType::Uuid)
                         .column("owner_id", ColumnType::Uuid)
                         .column("title", ColumnType::Text)
                         .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
@@ -3596,7 +3578,6 @@ mod tests {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("todos")
-                    .column("id", ColumnType::Uuid)
                     .column("workspace_id", ColumnType::Uuid)
                     .branch_by("workspace_id"),
             )
@@ -4041,7 +4022,6 @@ mod tests {
             LensOp::AddTable {
                 table: "todos".to_string(),
                 schema: TableSchema::builder("todos")
-                    .column("id", ColumnType::Uuid)
                     .policies(TablePolicies::new().with_select(PolicyExpr::True))
                     .build(),
             },
@@ -4273,7 +4253,7 @@ mod tests {
                     .column("z_col", ColumnType::Integer)
                     .column("a_col", ColumnType::Text),
             )
-            .table(TableSchema::builder("a_table").column("id", ColumnType::Uuid))
+            .table(TableSchema::builder("a_table"))
             .build();
 
         let encoded1 = encode_schema(&schema);

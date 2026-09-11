@@ -5,7 +5,7 @@ import type {
   ColumnBuilderSqlType,
 } from "./dsl.js";
 import { hasExternalProvenanceNameAllowance } from "./dsl.js";
-import { assertUserColumnNameAllowed } from "./magic-columns.js";
+import { assertUserTableColumnNameAllowed } from "./magic-columns.js";
 import type {
   AddOp,
   DropOp,
@@ -538,7 +538,7 @@ function tableDefinitionToAst(
   return {
     name: tableName,
     columns: Object.entries(columnsDefinition).map(([columnName, builder]) => {
-      assertUserColumnNameAllowed(columnName);
+      assertUserTableColumnNameAllowed(columnName);
       const column = builder._build(columnName);
       if (hasExternalProvenanceNameAllowance(builder)) {
         column.allowExternalProvenanceName = true;
@@ -850,7 +850,7 @@ function buildForwardLenses<
     for (const [columnName, operation] of operationEntries) {
       switch (operation._type) {
         case "rename": {
-          assertUserColumnNameAllowed(columnName);
+          assertUserTableColumnNameAllowed(columnName);
           if (renamedSources.has(operation.oldName)) {
             throw new Error(
               `Migration for ${tableName} renames ${operation.oldName} more than once.`,
@@ -870,7 +870,7 @@ function buildForwardLenses<
           break;
         }
         case "add": {
-          assertUserColumnNameAllowed(columnName);
+          assertUserTableColumnNameAllowed(columnName);
           const builder = targetTables[tableName]?.[columnName];
           if (!builder) {
             throw new Error(
