@@ -1682,7 +1682,7 @@ impl HydrationEvaluator<'_> {
                         project,
                         output_desc,
                         &input,
-                        fields.as_deref(),
+                        fields.as_ref(),
                         false,
                     );
                     #[cfg(feature = "cold-settle-attribution")]

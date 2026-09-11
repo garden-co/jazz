@@ -983,7 +983,7 @@ pub(super) fn raw_projection_fields(
     project: &MapProjectOp,
     input_desc: &RecordDescriptor,
     output_desc: RecordDescriptor,
-) -> Result<Option<Vec<RawProjectionField>>, IvmRuntimeError> {
+) -> Result<Option<PreparedProjection>, IvmRuntimeError> {
     let validate_copy = |source_type: &ValueType, output_idx: usize| {
         if source_type != &output_desc.fields()[output_idx].value_type {
             return Err(IvmRuntimeError::RecordEncoding(
@@ -1014,7 +1014,11 @@ pub(super) fn raw_projection_fields(
                 Ok(RawProjectionField::Copy { source_idx })
             })
             .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-        return Ok(Some(fields));
+        return Ok(Some(PreparedProjection::new(
+            *input_desc,
+            output_desc,
+            fields,
+        )));
     }
     if project.expressions.len() != output_desc.fields().len() {
         return Ok(None);
@@ -1075,7 +1079,11 @@ pub(super) fn raw_projection_fields(
             })
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-    Ok(Some(fields))
+    Ok(Some(PreparedProjection::new(
+        *input_desc,
+        output_desc,
+        fields,
+    )))
 }
 
 fn prepared_constant_field(

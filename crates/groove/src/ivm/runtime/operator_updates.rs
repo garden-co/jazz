@@ -9,7 +9,7 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) depends_on_context: Option<bool>,
     pub(super) input_signature: Option<Arc<NodeInputSignature>>,
     pub(super) input_generation: u64,
-    pub(super) raw_projection_fields: Option<Option<Arc<[RawProjectionField]>>>,
+    pub(super) raw_projection_fields: Option<Option<Arc<PreparedProjection>>>,
     pub(super) join_left_fields: Option<Arc<[String]>>,
     pub(super) join_right_fields: Option<Arc<[String]>>,
     pub(super) join_output_mapping: Option<Arc<[(usize, usize)]>>,
@@ -581,9 +581,15 @@ impl NodeState {
         project: &MapProjectOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
-        raw_projection: Option<&[RawProjectionField]>,
+        raw_projection: Option<&PreparedProjection>,
         omit_unrepresentable_enum_rows: bool,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        if raw_projection.is_some_and(|plan| plan.reuses_input) {
+            return Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas: input.deltas.clone(),
+            });
+        }
         let omit_unrepresentable_enum_rows = omit_unrepresentable_enum_rows
             || project.expressions.iter().any(|expression| {
                 matches!(
@@ -607,7 +613,7 @@ impl NodeState {
                 let result = output_desc.project_raw_fields_into(
                     &input.descriptor,
                     delta.raw(),
-                    fields,
+                    &fields.fields,
                     &mut output,
                     |index, output| {
                         let value = project_field_value(
@@ -674,7 +680,7 @@ impl NodeState {
         project: &MapProjectOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
-        raw_projection: Option<&[RawProjectionField]>,
+        raw_projection: Option<&PreparedProjection>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let payloads =
             Self::update_map_project(project, payload_desc, input, raw_projection, false)?;

@@ -3069,3 +3069,128 @@ fn prepared_constant_error_is_evaluated_only_for_present_rows() {
     .unwrap_err();
     assert_eq!(format!("{prepared:?}"), format!("{semantic:?}"));
 }
+
+// Internal pointer/graph checks are needed: public values alone cannot reveal
+// redundant copying or a projection node still executing between two aliases.
+#[test]
+fn projection_reuse_checks_physical_slots_not_names_or_logical_order() {
+    let source = RecordDescriptor::new([
+        ("text", ValueType::String),
+        ("n", ValueType::U64),
+        ("other", ValueType::String),
+    ]);
+    let target = RecordDescriptor::new([
+        ("renamed_n", ValueType::U64),
+        ("renamed_text", ValueType::String),
+        ("renamed_other", ValueType::String),
+    ]);
+    let project = MapProjectOp {
+        expressions: Vec::new(),
+        mapping: vec![(0, 1), (0, 0), (0, 2)],
+    };
+    let plan = raw_projection_fields(&project, &source, target)
+        .unwrap()
+        .unwrap();
+    let input = RecordDeltas {
+        descriptor: source,
+        deltas: vec![RecordDelta {
+            record: Bytes::from(
+                source
+                    .create(&[
+                        Value::String("first".into()),
+                        Value::U64(42),
+                        Value::String("second".into()),
+                    ])
+                    .unwrap(),
+            ),
+            weight: -2,
+        }],
+    };
+    let output =
+        NodeState::update_map_project(&project, target, &input, Some(&plan), false).unwrap();
+    assert_eq!(
+        output.deltas[0].record.as_ptr(),
+        input.deltas[0].record.as_ptr()
+    );
+    assert_eq!(output.deltas[0].weight, -2);
+    assert_eq!(
+        output.deltas[0].borrowed(&target).to_values().unwrap(),
+        vec![
+            Value::U64(42),
+            Value::String("first".into()),
+            Value::String("second".into())
+        ]
+    );
+    let swapped = MapProjectOp {
+        expressions: Vec::new(),
+        mapping: vec![(0, 1), (0, 2), (0, 0)],
+    };
+    let plan = raw_projection_fields(&swapped, &source, target)
+        .unwrap()
+        .unwrap();
+    let output =
+        NodeState::update_map_project(&swapped, target, &input, Some(&plan), false).unwrap();
+    assert_ne!(
+        output.deltas[0].record.as_ptr(),
+        input.deltas[0].record.as_ptr()
+    );
+    assert_eq!(
+        output.deltas[0].borrowed(&target).get_idx(1).unwrap(),
+        Value::String("second".into())
+    );
+}
+
+#[test]
+fn projection_composition_skips_only_adjacent_total_selections() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let source = GraphBuilder::table("albums");
+    let alias = source.clone().project_fields([
+        ProjectField::renamed("id", "key"),
+        ProjectField::renamed("title", "label"),
+    ]);
+    let inner = runtime.add_dedup_graph(&alias).unwrap();
+    let outer = runtime
+        .add_dedup_graph(&alias.project_fields([ProjectField::renamed("label", "name")]))
+        .unwrap();
+    let base = runtime.add_dedup_graph(&source).unwrap();
+    assert_eq!(
+        runtime.graph.node(outer.node).unwrap().descriptor.inputs,
+        vec![base.node]
+    );
+    assert_ne!(inner.node, outer.node); // The independently used inner alias survives.
+    let OpType::MapProject(op) = &runtime.graph.node(outer.node).unwrap().descriptor.operator
+    else {
+        panic!("projection expected")
+    };
+    let descriptor = base.output;
+    let raw = descriptor
+        .create(&[Value::U64(1), Value::String("album".into())])
+        .unwrap();
+    let output = project_record(
+        &op.expressions,
+        &op.mapping,
+        outer.output,
+        &descriptor,
+        &raw,
+    )
+    .unwrap();
+    assert_eq!(
+        outer.output.bind(&output).get_idx(0).unwrap(),
+        Value::String("album".into())
+    );
+    let partial = source.project_fields([
+        ProjectField::named("id"),
+        ProjectField::literal_typed(
+            "bad",
+            LiteralValue::String("not a number".into()),
+            ValueType::U64,
+        ),
+    ]);
+    let partial_node = runtime.add_dedup_graph(&partial).unwrap();
+    let narrowed = runtime.add_dedup_graph(&partial.project(["id"])).unwrap();
+    assert_eq!(
+        runtime.graph.node(narrowed.node).unwrap().descriptor.inputs,
+        vec![partial_node.node],
+        "discarding an output must not discard its fallible computation"
+    );
+}

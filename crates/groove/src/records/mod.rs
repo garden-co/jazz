@@ -683,6 +683,40 @@ pub(crate) enum RawProjectionField {
     },
 }
 
+/// Field plan with a once-proven byte-preserving case. Names and logical
+/// identities may differ; every physical field must occupy the same slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedProjection {
+    pub(crate) fields: Vec<RawProjectionField>,
+    pub(crate) reuses_input: bool,
+}
+
+impl PreparedProjection {
+    pub(crate) fn new(
+        source: RecordDescriptor,
+        target: RecordDescriptor,
+        fields: Vec<RawProjectionField>,
+    ) -> Self {
+        let reuses_input = source.fields.len() == target.fields.len()
+            && fields.len() == target.fields.len()
+            && source.fixed_size() == target.fixed_size()
+            && source.variable_count() == target.variable_count()
+            && fields.iter().enumerate().all(|(target_idx, field)| {
+                let RawProjectionField::Copy { source_idx } = field else {
+                    return false;
+                };
+                source.fields.get(*source_idx).is_some_and(|source_field| {
+                    source_field.value_type == target.fields[target_idx].value_type
+                        && source.layout.fields[*source_idx] == target.layout.fields[target_idx]
+                })
+            });
+        Self {
+            fields,
+            reuses_input,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct RawProjectionScratch {
     variable_fields: Vec<RawProjectedBytes>,

@@ -1597,7 +1597,7 @@ impl TickEvaluator<'_> {
         project: &MapProjectOp,
         input_desc: &RecordDescriptor,
         output_desc: RecordDescriptor,
-    ) -> Result<Option<Arc<[RawProjectionField]>>, IvmRuntimeError> {
+    ) -> Result<Option<Arc<PreparedProjection>>, IvmRuntimeError> {
         if let Some(cached) = self
             .node_meta
             .get(&node)

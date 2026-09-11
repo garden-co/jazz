@@ -38,8 +38,9 @@ use crate::ivm::{
     ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
-    self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, RawProjectionField,
-    RawProjectionScratch, RecordDescriptor, Value, ValueType, collect_by_ordered_scalar,
+    self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, PreparedProjection,
+    RawProjectionField, RawProjectionScratch, RecordDescriptor, Value, ValueType,
+    collect_by_ordered_scalar,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
 use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, ScanRequest};
@@ -89,7 +90,7 @@ enum VariantProjectionCase {
     Project {
         source: RecordDescriptor,
         project: MapProjectOp,
-        raw_projection: Option<Arc<[RawProjectionField]>>,
+        raw_projection: Option<Arc<PreparedProjection>>,
         /// A Jazz schema-read boundary may exclude rows containing a case the
         /// target schema cannot represent. This is deliberately narrower than
         /// a general projection error: malformed values still fail loudly.
@@ -103,7 +104,7 @@ enum VariantProjectionCase {
         tag: u32,
         payload: RecordDescriptor,
         project: MapProjectOp,
-        raw_projection: Option<Arc<[RawProjectionField]>>,
+        raw_projection: Option<Arc<PreparedProjection>>,
     },
 }
 

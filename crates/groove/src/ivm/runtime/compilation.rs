@@ -744,32 +744,71 @@ impl IvmRuntime {
             GraphBuilder::Project { input, fields } => {
                 let compiled_input =
                     self.add_dedup_graph_cached(input, output_memo, compiled_memo)?;
-                let input_node = compiled_input.node;
+                let mut input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let output = inferred_output;
-                let mapping = fields
+                let mut expressions = fields
                     .iter()
-                    .filter_map(|field| {
-                        field.source().map(|source| {
-                            resolve_field_ref(&input_output, source).map(|idx| (0, idx))
+                    .map(|field| {
+                        project_field_expr(&input_output, field).map(|expression| ProjectionExpr {
+                            expression,
+                            output_name: Some(field.output_name.clone()),
+                            output_identity: field.output_identity.clone(),
                         })
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                // Compose only total field selections. Dropping an unselected
+                // enum conversion or constant expression could change whether
+                // a row is omitted or an error is raised. Never cross those,
+                // filters, joins, winner selection or other semantic operators.
+                while expressions
+                    .iter()
+                    .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
+                {
+                    let parent = self
+                        .graph
+                        .node(input_node)
+                        .ok_or(IvmRuntimeError::GraphNodeNotFound(input_node))?;
+                    let OpType::MapProject(parent_project) = &parent.descriptor.operator else {
+                        break;
+                    };
+                    if parent_project.expressions.is_empty()
+                        || !parent_project
+                            .expressions
+                            .iter()
+                            .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
+                    {
+                        break;
+                    }
+                    for expr in &mut expressions {
+                        let ProjectExpr::Field(field) = &expr.expression else {
+                            unreachable!();
+                        };
+                        let index = resolve_field_ref(&parent.descriptor.output.records(), field)?;
+                        expr.expression = parent_project.expressions[index].expression.clone();
+                    }
+                    input_node = parent.descriptor.inputs[0];
+                }
+                let source_output = self
+                    .graph
+                    .node(input_node)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(input_node))?
+                    .descriptor
+                    .output
+                    .records();
+                let mapping = expressions
+                    .iter()
+                    .filter_map(|expr| match &expr.expression {
+                        ProjectExpr::Field(field) => {
+                            Some(resolve_field_ref(&source_output, field).map(|idx| (0, idx)))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::MapProject(MapProjectOp {
-                            expressions: fields
-                                .iter()
-                                .map(|field| {
-                                    project_field_expr(&input_output, field).map(|expression| {
-                                        ProjectionExpr {
-                                            expression,
-                                            output_name: Some(field.output_name.clone()),
-                                            output_identity: field.output_identity.clone(),
-                                        }
-                                    })
-                                })
-                                .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+                            expressions,
                             mapping,
                         }),
                         [input_node],
