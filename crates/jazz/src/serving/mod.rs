@@ -2469,6 +2469,117 @@ mod tests {
             schema_id
         );
     }
+    #[test]
+    fn closed_session_slot_reuse_rejects_stale_different_identity_handles() {
+        let identity = DbIdentity {
+            node: crate::ids::NodeUuid::from_bytes([0x5e; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let mut shell =
+            InMemoryServerShell::start(InMemoryServerShellConfig::new(simple_schema(), identity))
+                .expect("session shell starts");
+        let first_identity = AuthorSubject::for_test_bytes([0x71; 16]);
+        let second_identity = AuthorSubject::for_test_bytes([0x72; 16]);
+
+        let first = shell
+            .accept_subscriber_session(first_identity)
+            .expect("first session is admitted");
+        assert_eq!(
+            (
+                shell.metrics_snapshot().active_sessions,
+                shell.metrics_snapshot().total_sessions
+            ),
+            (1, 1)
+        );
+        let first_diagnostics = shell
+            .session_diagnostics(first)
+            .expect("first diagnostics are available");
+
+        shell.close_session(first).expect("first session closes");
+        assert_eq!(
+            (
+                shell.metrics_snapshot().active_sessions,
+                shell.metrics_snapshot().total_sessions
+            ),
+            (0, 1)
+        );
+
+        let second = shell
+            .accept_subscriber_session(second_identity)
+            .expect("second session is admitted");
+        let second_diagnostics = shell
+            .session_diagnostics(second)
+            .expect("second diagnostics are available");
+        assert_eq!(second_diagnostics.session_id, first_diagnostics.session_id);
+        assert_ne!(second_diagnostics.epoch, first_diagnostics.epoch);
+
+        let metrics_before_stale = shell.metrics_snapshot();
+        assert_eq!(shell.close_session(first), Err(ShellError::InvalidSession));
+        assert_eq!(
+            shell.session_diagnostics(first),
+            Err(ShellError::InvalidSession)
+        );
+        assert_eq!(shell.metrics_snapshot(), metrics_before_stale);
+        assert_eq!(
+            shell
+                .session_diagnostics(second)
+                .expect("stale operations leave second session live"),
+            second_diagnostics
+        );
+
+        shell.close_session(second).expect("current session closes");
+        let metrics = shell.metrics_snapshot();
+        assert_eq!(metrics.active_sessions, 0);
+        assert_eq!(metrics.total_sessions, 2);
+    }
+
+    #[test]
+    fn reused_session_slot_rejects_stale_same_identity_aba_handles() {
+        let identity = DbIdentity {
+            node: crate::ids::NodeUuid::from_bytes([0x5e; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let mut shell =
+            InMemoryServerShell::start(InMemoryServerShellConfig::new(simple_schema(), identity))
+                .expect("session shell starts");
+        let session_identity = AuthorSubject::for_test_bytes([0x73; 16]);
+
+        let first = shell
+            .accept_subscriber_session(session_identity)
+            .expect("first session is admitted");
+        let first_diagnostics = shell
+            .session_diagnostics(first)
+            .expect("first diagnostics are available");
+        shell.close_session(first).expect("first session closes");
+
+        let second = shell
+            .accept_subscriber_session(session_identity)
+            .expect("second session is admitted");
+        let second_diagnostics = shell
+            .session_diagnostics(second)
+            .expect("second diagnostics are available");
+        assert_eq!(second_diagnostics.session_id, first_diagnostics.session_id);
+        assert_ne!(second_diagnostics.epoch, first_diagnostics.epoch);
+
+        let metrics_before_stale = shell.metrics_snapshot();
+        assert_eq!(shell.close_session(first), Err(ShellError::InvalidSession));
+        assert_eq!(
+            shell.session_diagnostics(first),
+            Err(ShellError::InvalidSession)
+        );
+        assert_eq!(shell.metrics_snapshot(), metrics_before_stale);
+        assert_eq!(
+            shell
+                .session_diagnostics(second)
+                .expect("stale ABA operations leave second session live"),
+            second_diagnostics
+        );
+
+        shell.close_session(second).expect("current session closes");
+        let metrics = shell.metrics_snapshot();
+        assert_eq!(metrics.active_sessions, 0);
+        assert_eq!(metrics.total_sessions, 2);
+    }
 
     #[test]
     fn validates_local_default_config() {
