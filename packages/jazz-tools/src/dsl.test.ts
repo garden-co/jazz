@@ -468,9 +468,13 @@ describe("reserved table id", () => {
     "rejects explicit id columns in each table authoring API",
     (id) => {
       resetCollectedState();
+      // @ts-expect-error Exercise the runtime guard for untyped callers.
       expect(() => table("items", { id })).toThrow(/id.*reserved.*UUID row ID/);
+      // @ts-expect-error Exercise the runtime guard for untyped callers.
       expect(() => defineTable({ id })).toThrow(/id.*reserved.*UUID row ID/);
+      // @ts-expect-error Exercise the runtime guard for untyped callers.
       expect(() => defineSchema({ items: { id } })).toThrow(/id.*reserved.*UUID row ID/);
+      // @ts-expect-error Exercise the runtime guard for untyped callers.
       expect(() => defineApp({ items: { id } })).toThrow(/id.*reserved.*UUID row ID/);
     },
   );

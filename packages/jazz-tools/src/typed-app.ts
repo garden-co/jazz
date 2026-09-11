@@ -16,6 +16,7 @@ import {
   PROVENANCE_MAGIC_COLUMNS,
   magicColumnType,
   type ProvenanceMagicColumn,
+  type NoExplicitIdColumn,
   assertUserTableColumnNameAllowed,
 } from "./magic-columns.js";
 import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
@@ -23,7 +24,7 @@ import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "
 import type { StreamingValueSource } from "./runtime/client.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
-export type TableDefinition = Record<string, AnyTypedColumnBuilder>;
+export type TableDefinition = Record<string, AnyTypedColumnBuilder> & NoExplicitIdColumn;
 
 // Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
 // without changing the column-level schema representation the runtime uses today.
@@ -113,6 +114,10 @@ type NormalizeTableDefinition<TTable extends TableSource> =
       : never;
 
 export type SchemaDefinition = Record<string, TableSource>;
+
+type ValidateSchemaColumnNames<TSchema extends SchemaDefinition> = {
+  [TTable in keyof TSchema]: TSchema[TTable] extends DefinedTable ? unknown : NoExplicitIdColumn;
+};
 export type Simplify<T> = { [K in keyof T]: T[K] } & {};
 export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
   [TTable in keyof TSchema]: NormalizeTableDefinition<TSchema[TTable]>;
@@ -1614,7 +1619,7 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
 }
 
 export function defineSchema<const TSchema extends SchemaDefinition>(
-  definition: TSchema & ValidateSchemaRefs<TSchema>,
+  definition: TSchema & ValidateSchemaRefs<TSchema> & ValidateSchemaColumnNames<TSchema>,
 ): Schema<TSchema> {
   for (const table of Object.values(definition)) {
     for (const column of Object.keys(unwrapTableDefinition(table))) {
@@ -1641,7 +1646,7 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
  */
 export function defineApp<const TSchema extends Schema<any>>(definition: TSchema): App<TSchema>;
 export function defineApp<const TSchema extends SchemaDefinition>(
-  definition: TSchema & ValidateSchemaRefs<TSchema>,
+  definition: TSchema & ValidateSchemaRefs<TSchema> & ValidateSchemaColumnNames<TSchema>,
 ): App<Schema<TSchema>>;
 export function defineApp(
   definition: SchemaDefinition | Schema<any>,
@@ -1674,7 +1679,7 @@ export function defineSliceableApp<const TSchema extends Schema<any>>(
   definition: TSchema,
 ): SliceableApp<TSchema>;
 export function defineSliceableApp<const TSchema extends SchemaDefinition>(
-  definition: TSchema,
+  definition: TSchema & ValidateSchemaColumnNames<TSchema>,
 ): SliceableApp<Schema<TSchema>>;
 export function defineSliceableApp(
   definition: SchemaDefinition | Schema<any>,

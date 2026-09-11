@@ -19,7 +19,11 @@ import type {
   ScalarSqlType,
   TSTypeFromSqlType,
 } from "./schema.js";
-import { assertUserColumnNameAllowed, assertUserTableColumnNameAllowed } from "./magic-columns.js";
+import {
+  assertUserColumnNameAllowed,
+  assertUserTableColumnNameAllowed,
+  type NoExplicitIdColumn,
+} from "./magic-columns.js";
 
 const MAX_ENUM_VARIANTS = 256;
 
@@ -1003,7 +1007,7 @@ type EnforceReferenceColumnNames<T extends Record<string, ColumnBuilder>> = {
 
 export function table<const T extends Record<string, ColumnBuilder>>(
   name: string,
-  columns: EnforceReferenceColumnNames<T>,
+  columns: EnforceReferenceColumnNames<T> & NoExplicitIdColumn,
 ): void {
   if (arguments.length > 2) {
     throw new Error(
