@@ -238,13 +238,13 @@ pub(super) fn collect_by_output_value(output_type: &ValueType, value: Value) -> 
 }
 
 fn collect_by_projected_value(
-    values: &[Value],
+    record: &BorrowedRecord<'_>,
     field: &CollectByProjection,
 ) -> Result<Value, IvmRuntimeError> {
-    let value = values
-        .get(field.field_idx)
-        .cloned()
-        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))?;
+    if field.field_idx >= record.descriptor().fields().len() {
+        return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx));
+    }
+    let value = record.get_idx(field.field_idx)?;
     if !field.unwrap_nullable {
         return Ok(value);
     }
@@ -388,9 +388,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
         if !emit || (before_weight > 0) == (after_weight > 0) {
             continue;
         }
-        let source_values = BorrowedRecord::new(delta.raw(), &input_desc)
-            .to_values()
-            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let source_input = BorrowedRecord::new(delta.raw(), &input_desc);
         let child_fields = direct_tree_slot
             .map(|slot| slot.child_fields.as_slice())
             .unwrap_or(collect_by.child_fields.as_slice());
@@ -406,7 +404,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             .map(|(index, field)| {
                 Ok::<Value, IvmRuntimeError>(collect_by_output_value(
                     &child_descriptor.fields()[index].value_type,
-                    collect_by_projected_value(&source_values, field)?,
+                    collect_by_projected_value(&source_input, field)?,
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -845,17 +843,13 @@ pub(super) fn collect_by_root_from_records(
     let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
         return Ok(None);
     };
-    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
-        .to_values()
-        .map_err(|error| {
-            IvmRuntimeError::InvalidCollectBy(format!("root input decode failed: {error}"))
-        })?;
+    let parent_input = BorrowedRecord::new(parent_record, &input_desc);
     let values = collect_by
         .parent_fields
         .iter()
         .enumerate()
         .map(|(index, field)| {
-            let value = collect_by_projected_value(&parent_values, field)?;
+            let value = collect_by_projected_value(&parent_input, field)?;
             let output_type = &output_desc.fields()[index].value_type;
             Ok::<Value, IvmRuntimeError>(collect_by_output_value(output_type, value))
         })
@@ -875,15 +869,13 @@ pub(super) fn collect_by_parent_from_records(
     let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
         return Ok(None);
     };
-    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
-        .to_values()
-        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let parent_input = BorrowedRecord::new(parent_record, &input_desc);
     let mut values = collect_by
         .parent_fields
         .iter()
         .enumerate()
         .map(|(index, field)| {
-            let value = collect_by_projected_value(&parent_values, field)?;
+            let value = collect_by_projected_value(&parent_input, field)?;
             let output_type = &output_desc.fields()[index].value_type;
             Ok::<Value, IvmRuntimeError>(collect_by_output_value(output_type, value))
         })
@@ -891,9 +883,7 @@ pub(super) fn collect_by_parent_from_records(
     let window = collect_by_window_from_records(input_desc, records, collect_by)?;
     let mut children = Vec::new();
     for (record, copies) in window {
-        let source_values = BorrowedRecord::new(&record, &input_desc)
-            .to_values()
-            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let source_input = BorrowedRecord::new(&record, &input_desc);
         let child_values = collect_by
             .child_fields
             .iter()
@@ -901,7 +891,7 @@ pub(super) fn collect_by_parent_from_records(
             .map(|(index, field)| {
                 Ok::<Value, IvmRuntimeError>(collect_by_output_value(
                     &collect_by.child_descriptor.fields()[index].value_type,
-                    collect_by_projected_value(&source_values, field)?,
+                    collect_by_projected_value(&source_input, field)?,
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -926,9 +916,7 @@ pub(super) fn collect_by_tree_parent_from_records(
     let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
         return Ok(None);
     };
-    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
-        .to_values()
-        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let parent_input = BorrowedRecord::new(parent_record, &input_desc);
     let mut values = collect_by
         .parent_fields
         .iter()
@@ -936,7 +924,7 @@ pub(super) fn collect_by_tree_parent_from_records(
         .map(|(index, field)| {
             Ok::<Value, IvmRuntimeError>(collect_by_output_value(
                 &output_desc.fields()[index].value_type,
-                collect_by_projected_value(&parent_values, field)?,
+                collect_by_projected_value(&parent_input, field)?,
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -990,13 +978,11 @@ fn render_collect_by_slots(
                 {
                     continue;
                 }
-                let source_values = BorrowedRecord::new(record, &input_desc)
-                    .to_values()
-                    .map_err(IvmRuntimeError::RecordEncoding)?;
+                let source_input = BorrowedRecord::new(record, &input_desc);
                 let child_values = slot
                     .child_fields
                     .iter()
-                    .map(|field| collect_by_projected_value(&source_values, field))
+                    .map(|field| collect_by_projected_value(&source_input, field))
                     .collect::<Result<Vec<_>, _>>()?;
                 candidates
                     .entry(child_key_descriptor.create(&child_values)?.into())
@@ -1009,9 +995,7 @@ fn render_collect_by_slots(
             )?;
             let mut children = Vec::with_capacity(selected.len());
             for record in selected {
-                let source_values = BorrowedRecord::new(&record, &input_desc)
-                    .to_values()
-                    .map_err(IvmRuntimeError::RecordEncoding)?;
+                let source_input = BorrowedRecord::new(&record, &input_desc);
                 let mut child_values = slot
                     .child_fields
                     .iter()
@@ -1019,7 +1003,7 @@ fn render_collect_by_slots(
                     .map(|(index, field)| {
                         Ok::<Value, IvmRuntimeError>(collect_by_output_value(
                             &slot.child_descriptor.fields()[index].value_type,
-                            collect_by_projected_value(&source_values, field)?,
+                            collect_by_projected_value(&source_input, field)?,
                         ))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1093,13 +1077,11 @@ pub(super) fn collect_by_expanded_window(
         if copies != 1 || expanded.contains_key(&occurrence) {
             return Err(IvmRuntimeError::DuplicateCollectByOccurrenceId);
         }
-        let values = BorrowedRecord::new(&record, &input_desc)
-            .to_values()
-            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let input = BorrowedRecord::new(&record, &input_desc);
         let tuple = collect_by
             .tuple_fields
             .iter()
-            .map(|field| collect_by_projected_value(&values, field))
+            .map(|field| collect_by_projected_value(&input, field))
             .collect::<Result<Vec<_>, _>>()?;
         expanded.insert(occurrence, output_desc.create(&tuple)?.into());
     }
@@ -1168,9 +1150,7 @@ fn collect_by_sort_key_for_fields(
     sort_field_indices: &[usize],
     sort_directions: &[TopByDirection],
 ) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
-    let values = BorrowedRecord::new(record, &descriptor)
-        .to_values()
-        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let input = BorrowedRecord::new(record, &descriptor);
     sort_field_indices
         .iter()
         .zip(sort_directions)
@@ -1179,10 +1159,7 @@ fn collect_by_sort_key_for_fields(
                 .fields()
                 .get(*field_idx)
                 .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?;
-            let value = values
-                .get(*field_idx)
-                .cloned()
-                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?;
+            let value = input.get_idx(*field_idx)?;
             Ok(TopBySortPart {
                 key: top_by_sort_value(&field.value_type, value)?,
                 direction: *direction,
