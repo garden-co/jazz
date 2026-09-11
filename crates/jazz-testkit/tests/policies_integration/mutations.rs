@@ -25,10 +25,13 @@ async fn wait_for_protected_rows(
     .await
 }
 
-/// Verifies that UPDATE evaluates the USING/old-row policy, not only the
-/// WITH CHECK/new-row policy, so invisible rows cannot be edited.
+/// Verifies that UPDATE USING rejects a change even when WITH CHECK passes.
+/// Bob observes Alice's publicly readable document, then tries to claim it by
+/// setting himself as owner. The server rejects the update because the old
+/// row belongs to Alice, and Alice still sees the original owner and content.
+///
+/// alice-owned row ──read──► bob ──change owner to bob──► server ──USING denies
 #[tokio::test]
-#[ignore = "#1762: the public client refuses updates to policy-hidden rows as unobserved before UPDATE USING can be exercised"]
 async fn rebac_update_denied_by_using_policy() {
     tokio::task::LocalSet::new()
         .run_until(rebac_update_denied_by_using_policy_inner())
@@ -45,7 +48,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
     // This means: you can only update rows you own, and the result must still be owned by you
     let owner_is_session = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let docs_policies = permissions(|p| {
-        p.allow_read().where_(owner_is_session.clone());
+        p.allow_read().always();
         p.allow_update()
             .where_old(owner_is_session.clone()) // USING
             .where_new(owner_is_session); // WITH CHECK
@@ -83,7 +86,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
     let (obj_id, _, transaction_id) = admin
         .insert(
             "documents",
-            crate::row_input!("owner_id" => super::ALICE_ID, "content" => "Alice's secret"),
+            crate::row_input!("owner_id" => super::ALICE_ID, "content" => "Alice's document"),
         )
         .expect("seed alice document");
     wait_for_edge_txs(
@@ -92,31 +95,56 @@ async fn rebac_update_denied_by_using_policy_inner() {
     )
     .await;
 
-    // Bob tries to update Alice's document (keeping owner as alice to pass WITH CHECK,
-    // but USING should still deny because Bob can't see Alice's row).
-    let err = bob
+    let document_query = Query::from("documents")
+        .filter(eq(col("id"), lit(*obj_id.uuid())))
+        .select(["owner_id", "content"]);
+    let original_row = vec![(
+        obj_id,
+        vec![
+            Value::Text(super::ALICE_ID.into()),
+            Value::Text("Alice's document".into()),
+        ],
+    )];
+    wait_for_query(
+        &bob,
+        document_query.clone(),
+        Some(jazz::tools::DurabilityTier::EdgeServer),
+        Duration::from_secs(5),
+        "Bob observes Alice's document before attempting the update",
+        |rows| (rows == original_row).then_some(rows),
+    )
+    .await;
+
+    // The new owner matches Bob, so WITH CHECK passes. Only the old-row
+    // ownership check (USING) can reject this otherwise readable update.
+    let transaction_id = bob
         .update(
             obj_id,
             vec![
-                ("owner_id".into(), Value::Text(super::ALICE_ID.into())),
-                ("content".into(), Value::Text("Hacked by Bob".into())),
+                ("owner_id".into(), Value::Text(super::BOB_ID.into())),
+                ("content".into(), Value::Text("Claimed by Bob".into())),
             ],
         )
-        .expect_err("Bob's update of Alice's document should be denied by USING policy");
-    assert_client_policy_denied(err, "documents", Operation::Update);
+        .expect("Bob can stage an optimistic update to an observed row")
+        .expect("ordinary update commits immediately");
+    let error = bob
+        .wait_for_transaction(transaction_id, jazz::tools::DurabilityTier::EdgeServer)
+        .await
+        .expect_err("the server must reject Bob's update under UPDATE USING");
+    assert!(
+        error.to_string().ends_with("authorization_denied"),
+        "expected an authority policy rejection, got {error}"
+    );
 
     let alice_rows = alice
         .query(
-            Query::from("documents")
-                .filter(eq(col("id"), lit(*obj_id.uuid())))
-                .select(["content"]),
+            document_query,
             Some(jazz::tools::DurabilityTier::EdgeServer),
         )
         .await
         .expect("query alice document");
     assert_eq!(
-        alice_rows,
-        vec![(obj_id, vec![Value::Text("Alice's secret".into())])],
+        alice_rows, original_row,
         "Bob's denied update should not change Alice's document"
     );
 
