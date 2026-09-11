@@ -1564,16 +1564,16 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
     let mut bytes = Vec::new();
     match (value, value_type) {
         (Value::String(value), ValueType::String) => {
-            bytes.extend(crate::large_values::encode_stored_scalar(
+            return Ok(crate::large_values::encode_primitive_stored_scalar(
                 crate::large_values::LargeValueKind::String,
-                &crate::large_values::StoredScalar::Primitive(value.as_bytes().to_vec()),
-            )?)
+                value.as_bytes(),
+            )?);
         }
         (Value::Bytes(value), ValueType::Bytes) => {
-            bytes.extend(crate::large_values::encode_stored_scalar(
+            return Ok(crate::large_values::encode_primitive_stored_scalar(
                 crate::large_values::LargeValueKind::Bytes,
-                &crate::large_values::StoredScalar::Primitive(value.clone()),
-            )?)
+                value,
+            )?);
         }
         (
             Value::String(value),
@@ -1588,20 +1588,24 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
                 crate::large_values::LargeValueKind::Bytes,
             ))),
-        ) => bytes.extend(crate::large_values::encode_stored_scalar(
-            crate::large_values::LargeValueKind::Bytes,
-            &crate::large_values::StoredScalar::Primitive(value.clone()),
-        )?),
+        ) => {
+            return Ok(crate::large_values::encode_primitive_stored_scalar(
+                crate::large_values::LargeValueKind::Bytes,
+                value,
+            )?);
+        }
         (
             Value::String(value),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
                 kind @ (crate::large_values::LargeValueKind::String
                 | crate::large_values::LargeValueKind::Json),
             ))),
-        ) => bytes.extend(crate::large_values::encode_stored_scalar(
-            *kind,
-            &crate::large_values::StoredScalar::Primitive(value.as_bytes().to_vec()),
-        )?),
+        ) => {
+            return Ok(crate::large_values::encode_primitive_stored_scalar(
+                *kind,
+                value.as_bytes(),
+            )?);
+        }
         (
             Value::Large(value),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))),

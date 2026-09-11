@@ -2226,6 +2226,26 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
     encode_stored_scalar_canonical(kind, value)
 }
 
+/// Encode the primitive arm from borrowed logical bytes. Its sole raw payload
+/// field is the complete record payload, so only ordinary variant framing is
+/// needed; no Value, field map, or intermediate record is required.
+pub(crate) fn encode_primitive_stored_scalar(
+    kind: LargeValueKind,
+    bytes: &[u8],
+) -> Result<Vec<u8>, Error> {
+    #[cfg(test)]
+    {
+        STORED_SCALAR_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
+        STORED_SCALAR_CANONICAL_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+    encode_primitive_payload(kind, bytes)
+}
+
+fn encode_primitive_payload(kind: LargeValueKind, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    validate_logical(kind, bytes)?;
+    Ok(crate::records::encode_variant_record(2, bytes))
+}
+
 /// The physical scalar encoder shared by public writes and raw canonicality
 /// checks. The test-only public-write counter intentionally lives in the
 /// wrapper above: decoding an already-inline row must not look like a write
@@ -2238,17 +2258,7 @@ fn encode_stored_scalar_canonical(
     STORED_SCALAR_CANONICAL_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let schema = stored_scalar_schema(kind);
     let enum_value = match value {
-        StoredScalar::Primitive(bytes) => {
-            validate_logical(kind, bytes)?;
-            let fields = primitive_payload_schema(kind)
-                .ordered_values([(PRIMITIVE_VALUE_FIELD, primitive_value(kind, bytes.clone()))])?;
-            EnumValue::create(
-                2,
-                schema.case(2).map_err(|_| Error::MalformedScalar)?.payload,
-                &fields,
-            )
-            .map_err(|_| Error::MalformedScalar)?
-        }
+        StoredScalar::Primitive(bytes) => return encode_primitive_payload(kind, bytes),
         StoredScalar::Chunked(value) => {
             if value.kind != kind {
                 return Err(Error::DescriptorMismatch);
@@ -2301,11 +2311,9 @@ pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<Stor
         crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
     let decoded = match tag {
         2 => {
-            // split_variant_record has checked every tag byte for canonical
-            // framing. The primitive decoder reconstructs the complete payload
-            // exactly, checks reserved slots and validates the declared logical
-            // kind. Together those checks cover the entire envelope; rebuilding
-            // that same envelope would repeat payload decoding and allocation.
+            // The primitive arm is one raw field. After ordinary tag framing,
+            // logical validation covers the payload without reconstructing or
+            // re-encoding a record to recover those same bytes.
             return decode_primitive_payload(kind, payload).map(StoredScalar::Primitive);
         }
         3 => {
@@ -2778,6 +2786,7 @@ pub(crate) fn decode_large_value_ref(encoded: &[u8]) -> Result<LargeValueRef, Er
     Ok(decoded)
 }
 
+#[cfg(test)]
 fn primitive_value(kind: LargeValueKind, bytes: Vec<u8>) -> Value {
     match kind {
         LargeValueKind::Bytes => Value::Bytes(bytes),
@@ -2787,6 +2796,7 @@ fn primitive_value(kind: LargeValueKind, bytes: Vec<u8>) -> Value {
     }
 }
 
+#[cfg(test)]
 fn primitive_bytes(kind: LargeValueKind, value: &Value) -> Result<Vec<u8>, Error> {
     let bytes = match (kind, value) {
         (LargeValueKind::Bytes, Value::Bytes(bytes)) => Ok(bytes.clone()),
@@ -2800,26 +2810,11 @@ fn primitive_bytes(kind: LargeValueKind, value: &Value) -> Result<Vec<u8>, Error
 }
 
 fn decode_primitive_payload(kind: LargeValueKind, payload: &[u8]) -> Result<Vec<u8>, Error> {
-    let schema = primitive_payload_schema(kind);
-    let values = schema
-        .descriptor
-        .bind(payload)
-        .to_values()
-        .map_err(|error| match error {
-            crate::records::Error::InvalidUtf8 => Error::InvalidUtf8,
-            _ => Error::MalformedScalar,
-        })?;
-    if schema
-        .descriptor
-        .create(&values)
-        .map_err(|_| Error::MalformedScalar)?
-        != payload
-    {
-        return Err(Error::MalformedScalar);
-    }
-    let mut fields = schema.decode_values(&values)?;
-    let value = take_durable_large_value_field(&mut fields, PRIMITIVE_VALUE_FIELD)?;
-    primitive_bytes(kind, &value)
+    // Slot 1 is the only field and is raw string/bytes: the record encoding is
+    // exactly its payload. Match borrowed inline access without reconstructing
+    // and re-encoding an owned record merely to recover those same bytes.
+    validate_logical(kind, payload)?;
+    Ok(payload.to_vec())
 }
 
 /// Read precisely the V1-independent selector: the descriptor payload starts
@@ -8039,6 +8034,49 @@ mod tests {
                     "a byte-identical node must retain its exact locator"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn primitive_scalar_fast_codec_matches_generic_record_codec() {
+        // Internal byte contract: public value equality cannot detect a changed
+        // durable envelope. Build the reference through the ordinary enum/record
+        // codecs, independently of the specialized scalar encoder.
+        for (kind, payload) in [
+            (LargeValueKind::Bytes, b"".as_slice()),
+            (LargeValueKind::Bytes, b"\0\xffbytes".as_slice()),
+            (LargeValueKind::String, "".as_bytes()),
+            (LargeValueKind::String, "text 🙂".as_bytes()),
+            (LargeValueKind::Json, b"null".as_slice()),
+            (LargeValueKind::Json, br#" {"a":1,"a":2} "#.as_slice()),
+        ] {
+            let fields = primitive_payload_schema(kind)
+                .ordered_values([(
+                    PRIMITIVE_VALUE_FIELD,
+                    primitive_value(kind, payload.to_vec()),
+                )])
+                .unwrap();
+            let value = EnumValue::create(
+                2,
+                stored_scalar_schema(kind).case(2).unwrap().payload,
+                &fields,
+            )
+            .unwrap();
+            let reference = crate::records::encode_single_field_value(
+                &Value::Enum(value),
+                stored_scalar_value_type(kind),
+            )
+            .unwrap();
+            let encoded = encode_primitive_stored_scalar(kind, payload).unwrap();
+            assert_eq!(encoded, reference);
+            assert_eq!(
+                encode_stored_scalar(kind, &StoredScalar::Primitive(payload.to_vec())).unwrap(),
+                reference
+            );
+            assert_eq!(
+                decode_stored_scalar(kind, &encoded).unwrap(),
+                StoredScalar::Primitive(payload.to_vec())
+            );
         }
     }
 
