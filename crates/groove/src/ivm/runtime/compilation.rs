@@ -757,10 +757,10 @@ impl IvmRuntime {
                         })
                     })
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-                // Compose only total field selections. Dropping an unselected
-                // enum conversion or constant expression could change whether
-                // a row is omitted or an error is raised. Never cross those,
-                // filters, joins, winner selection or other semantic operators.
+                // A selection may bypass a parent only if every parent field
+                // is total for its declared input layout. Reuse preparation to
+                // prove this, including nullable wrappers and valid constants.
+                // Fallible constants and semantic conversions remain barriers.
                 while expressions
                     .iter()
                     .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
@@ -772,12 +772,34 @@ impl IvmRuntime {
                     let OpType::MapProject(parent_project) = &parent.descriptor.operator else {
                         break;
                     };
-                    if parent_project.expressions.is_empty()
-                        || !parent_project
-                            .expressions
-                            .iter()
-                            .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
-                    {
+                    if parent_project.expressions.is_empty() {
+                        break;
+                    }
+                    let parent_input = self
+                        .graph
+                        .node(parent.descriptor.inputs[0])
+                        .ok_or(IvmRuntimeError::GraphNodeNotFound(
+                            parent.descriptor.inputs[0],
+                        ))?
+                        .descriptor
+                        .output
+                        .records();
+                    let total = raw_projection_fields(
+                        parent_project,
+                        &parent_input,
+                        parent.descriptor.output.records(),
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some_and(|plan| {
+                        plan.fields.iter().all(|field| {
+                            !matches!(
+                                field,
+                                RawProjectionField::Error(_) | RawProjectionField::Evaluate
+                            )
+                        })
+                    });
+                    if !total {
                         break;
                     }
                     for expr in &mut expressions {

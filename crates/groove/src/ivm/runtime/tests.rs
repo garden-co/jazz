@@ -3178,6 +3178,39 @@ fn projection_composition_skips_only_adjacent_total_selections() {
         outer.output.bind(&output).get_idx(0).unwrap(),
         Value::String("album".into())
     );
+    // Internal: inspect the graph to prove a whole operator was removed, then
+    // verify the composed nullable/constant output through record evaluation.
+    let decorated = source.clone().project_fields([
+        ProjectField::nullable("title", "label"),
+        ProjectField::literal("kind", LiteralValue::String("album".into())),
+    ]);
+    let decorated_selection = runtime
+        .add_dedup_graph(&decorated.project(["label", "kind"]))
+        .unwrap();
+    let decorated_node = runtime.graph.node(decorated_selection.node).unwrap();
+    assert_eq!(decorated_node.descriptor.inputs, vec![base.node]);
+    let OpType::MapProject(decorated_op) = &decorated_node.descriptor.operator else {
+        panic!("projection expected")
+    };
+    let decorated_raw = project_record(
+        &decorated_op.expressions,
+        &decorated_op.mapping,
+        decorated_selection.output,
+        &descriptor,
+        &raw,
+    )
+    .unwrap();
+    assert_eq!(
+        decorated_selection
+            .output
+            .bind(&decorated_raw)
+            .to_values()
+            .unwrap(),
+        vec![
+            Value::Nullable(Some(Box::new(Value::String("album".into())))),
+            Value::String("album".into()),
+        ]
+    );
     let partial = source.project_fields([
         ProjectField::named("id"),
         ProjectField::literal_typed(
