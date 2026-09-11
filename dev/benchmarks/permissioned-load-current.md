@@ -71,3 +71,31 @@ No production query, permission, sync or storage-format behavior is changed.
 The benchmark's visibility assertions are preserved. The original account and
 seed implementations failed those assertions/execution; the repaired cold
 phase reaches exact expected counts. The remaining reopen failure is separate.
+
+## Client durability experiment
+
+The benchmark uses RocksDB `WalNoSync`; the client configures a durability
+boundary every 512 initial-sync writes, followed by a final flush. Test whether
+periodic client fsync explains the load time by setting
+`JAZZ_CUSTOMER_INITIAL_SYNC_FLUSH_CADENCE=1000000000` (effectively final-only
+for this workload). Core and relay settings stay unchanged.
+
+| Configuration                           | Subscription readiness | Harness wall |
+| --------------------------------------- | ---------------------: | -----------: |
+| Current 512-write cadence               |               51.914 s |     53.772 s |
+| Effectively unlimited cadence           |               51.963 s |     53.858 s |
+| Unlimited, activated before bulk ingest |               52.875 s |     54.760 s |
+
+Each run reaches exactly 27,518 rows. These are individual runs, not confidence
+intervals; none shows a useful improvement. The third run temporarily moves
+`begin_initial_sync_flush_cadence` ahead of
+`ingest_reset_view_bundle_refs_in_bulk`, after the existing outer admission
+checks, because the current code activates it after that bulk work. The
+experiment was reverted and is not part of the PR's production runtime changes.
+
+This does not test disabling the WAL, bypassing persistence, or relaxing
+IndexedDB transactions. It specifically finds no benefit from reducing periodic
+client flushes here. Retain the CPU-profile plan to separate Jazz/Groove
+representation and permission work from storage indexing/WAL work. Future
+cache-durability experiments must keep recoverable row data and sync progress
+consistent, while preserving durability of user-authored pending writes.
