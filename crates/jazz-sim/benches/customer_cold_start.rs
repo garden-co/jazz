@@ -100,6 +100,7 @@ mod alloc_metrics {
         len: usize,
         count_sample: bool,
         byte_weight: u64,
+        phase: (&'static str, &'static str),
     }
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -201,6 +202,16 @@ mod alloc_metrics {
             len: 0,
             count_sample,
             byte_weight,
+            phase: {
+                #[cfg(feature = "cold-settle-attribution")]
+                {
+                    jazz_sim::phase_attribution::current_allocation_phase()
+                }
+                #[cfg(not(feature = "cold-settle-attribution"))]
+                {
+                    ("unscoped", "unscoped")
+                }
+            },
         };
         unsafe {
             backtrace::trace_unsynchronized(|frame| {
@@ -227,7 +238,13 @@ mod alloc_metrics {
             .clone();
         let sampled_stacks = samples.len();
         let mut counts: HashMap<Vec<usize>, (u64, u64)> = HashMap::new();
+        let mut phase_counts: HashMap<_, (u64, u64)> = HashMap::new();
         for sample in samples {
+            let totals = phase_counts
+                .entry((sample.phase, sample.frames[..sample.len].to_vec()))
+                .or_default();
+            totals.0 += u64::from(sample.count_sample);
+            totals.1 += sample.byte_weight;
             let totals = counts
                 .entry(sample.frames[..sample.len].to_vec())
                 .or_default();
@@ -289,6 +306,26 @@ mod alloc_metrics {
                     break;
                 }
             }
+        }
+        // Attribute every sampled stack exactly once, including unresolved
+        // callers, within the phase captured at allocation time.
+        let mut phase_callers: HashMap<_, (u64, u64)> = HashMap::new();
+        for ((phase, frames), totals) in phase_counts {
+            let caller = frames
+                .iter()
+                .find_map(|ip| resolved.get(ip).and_then(Option::as_deref))
+                .unwrap_or("unresolved");
+            let entry = phase_callers.entry((phase, caller.to_owned())).or_default();
+            entry.0 += totals.0;
+            entry.1 += totals.1;
+        }
+        let mut phase_callers = phase_callers.into_iter().collect::<Vec<_>>();
+        phase_callers.sort_by(|a, b| a.0.cmp(&b.0));
+        for (((role, phase), caller), (count, bytes)) in phase_callers {
+            eprintln!(
+                "ALLOC_PHASE_CALLER role={role} phase={phase} estimated_allocs={} estimated_bytes={bytes} caller={caller}",
+                count * sample_rate
+            );
         }
         let mut callers = callers.into_iter().collect::<Vec<_>>();
         for metric in ["count", "bytes"] {

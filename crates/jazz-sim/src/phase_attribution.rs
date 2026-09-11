@@ -158,6 +158,16 @@ mod allocations {
             current.set(frame.map_or(UNSCOPED, |(role, phase)| role * PHASES.len() + phase))
         });
     }
+    /// Allocation-free identity of the innermost phase on this thread.
+    /// Sampled allocation stacks can retain these static labels after span exit.
+    pub fn current_allocation_phase() -> (&'static str, &'static str) {
+        let index = CURRENT.try_with(Cell::get).unwrap_or(UNSCOPED);
+        if index == UNSCOPED {
+            ("unscoped", "unscoped")
+        } else {
+            (ROLES[index / PHASES.len()], PHASES[index % PHASES.len()])
+        }
+    }
     pub fn record_allocation(bytes: usize) {
         let phase = CURRENT.try_with(Cell::get).unwrap_or(UNSCOPED);
         COUNTS[phase].fetch_add(1, Ordering::Relaxed);
@@ -190,7 +200,9 @@ mod allocations {
     }
 }
 #[cfg(feature = "bench-alloc-sites")]
-pub use allocations::{allocation_totals, record_allocation, reset_allocation_counts};
+pub use allocations::{
+    allocation_totals, current_allocation_phase, record_allocation, reset_allocation_counts,
+};
 
 /// Minimal subscriber: unrelated spans and events stay disabled.
 pub struct Collector;
@@ -365,6 +377,29 @@ mod tests {
         assert_eq!(find("core", "ingest")["requested_bytes"], 13);
         assert_eq!(find("relay", "relay")["requested_bytes"], 19);
         assert_eq!(find("unscoped", "unscoped")["requested_bytes"], 5);
+    }
+
+    #[cfg(feature = "bench-alloc-sites")]
+    #[test]
+    fn allocation_sample_labels_follow_thread_local_nested_spans() {
+        // Internal profiler contract: labels must survive exit and never leak
+        // onto a thread that did not enter the originating node's spans.
+        allocations::set_current(None);
+        assert_eq!(current_allocation_phase(), ("unscoped", "unscoped"));
+        let mut state = State::default();
+        state.enter(1, 0);
+        state.enter(4, 1);
+        let captured = current_allocation_phase();
+        assert_eq!(captured, ("relay", "ingest"));
+        assert_eq!(
+            std::thread::spawn(current_allocation_phase).join().unwrap(),
+            ("unscoped", "unscoped")
+        );
+        state.exit(4, 2);
+        assert_eq!(current_allocation_phase(), ("relay", "relay"));
+        state.exit(1, 3);
+        assert_eq!(current_allocation_phase(), ("unscoped", "unscoped"));
+        assert_eq!(captured, ("relay", "ingest"));
     }
 
     // Internal instrumentation invariants need deterministic clock values rather
