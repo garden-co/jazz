@@ -2149,6 +2149,10 @@ thread_local! {
     static HISTORY_DESCRIPTOR_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+pub(super) fn prepared_wire_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    version_record_descriptors(table).1
+}
+
 fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     version_record_descriptors(table).0
 }

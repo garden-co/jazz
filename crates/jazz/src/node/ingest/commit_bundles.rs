@@ -1226,7 +1226,6 @@ where
             .flat_map(|(tx_bundles, _, _)| {
                 tx_bundles.iter().flat_map(|bundle| bundle.versions)
             })
-            .cloned()
             .collect::<Vec<_>>();
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
 
@@ -1234,7 +1233,7 @@ where
         for (tx_bundles, tx, _) in &eligible {
             let versions = tx_bundles
                 .iter()
-                .flat_map(|bundle| bundle.versions.iter().cloned())
+                .flat_map(|bundle| bundle.versions.iter())
                 .collect::<Vec<_>>();
             if let Some(versions) = self.complete_parent_versions(tx, &versions).await? {
                 complete_parents.push((tx.tx_id, versions));
@@ -1316,15 +1315,16 @@ where
             versions.sort();
             for version in versions {
                 let author_schema = version.schema_version();
-                let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
+                self.table_in_schema_ref(version.table(), author_schema)?;
                 let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
+                let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
                 let authored_column_ids = self.authored_column_ids_for_names(
                     author_schema,
                     version.table(),
                     version.authored_columns(),
                 )?;
                 let stored = VersionRow::from_wire_with_schema_version(
-                    &source_table_schema,
+                    source_table_schema,
                     version,
                     authored_column_ids,
                     tx_node_alias,

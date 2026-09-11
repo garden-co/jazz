@@ -102,10 +102,10 @@ where
     }
 
     #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.parent_completion"))]
-    async fn complete_parent_versions(
+    async fn complete_parent_versions<V: std::borrow::Borrow<VersionRecord>>(
         &mut self,
         tx: &Transaction,
-        incoming: &[VersionRecord],
+        incoming: &[V],
     ) -> Result<Option<Vec<VersionRecord>>, Error> {
         let mut assembled = BTreeMap::new();
         if self.query_transaction(tx.tx_id).await?.is_some() {
@@ -115,6 +115,7 @@ where
             }
         }
         for version in incoming {
+            let version = version.borrow();
             match assembled.get(&view_version_key_for_ingest(version)) {
                 Some(existing) if existing != version => {
                     return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -823,8 +824,9 @@ where
     /// but a known schema must never accept a descriptor borrowed from another
     /// version: that would make the omitted trailing columns indistinguishable
     /// from an authored value and reintroduce partial-row sync semantics.
-    fn malformed_authored_version_reason(&self, versions: &[VersionRecord]) -> Option<String> {
+    fn malformed_authored_version_reason<V: std::borrow::Borrow<VersionRecord>>(&self, versions: &[V]) -> Option<String> {
         for version in versions {
+            let version = version.borrow();
             for (field, physical_ms) in [
                 ("created_at_ms", version.created_at_ms()),
                 ("updated_at_ms", version.updated_at_ms()),
@@ -859,7 +861,7 @@ where
                     version.table()
                 ));
             };
-            if version.record().descriptor() != &table.wire_record_descriptor() {
+            if version.record().descriptor() != &prepared_wire_record_descriptor(table) {
                 return Some(format!(
                     "row version for table '{}' does not carry the complete descriptor of its authored schema",
                     version.table()
@@ -1001,9 +1003,9 @@ where
     /// Ensure every known authored schema named by an arriving commit has a
     /// local alias and registered shared-storage variant. Unknown schemas stay
     /// parked until their catalogue lineage arrives and re-enters this path.
-    async fn prepare_authored_schema_variants_for_commit(
+    async fn prepare_authored_schema_variants_for_commit<V: std::borrow::Borrow<VersionRecord>>(
         &mut self,
-        versions: &[VersionRecord],
+        versions: &[V],
     ) -> Result<(), Error> {
         if self.malformed_authored_version_reason(versions).is_some() {
             return Err(Error::InvalidStoredValue(
@@ -1011,6 +1013,7 @@ where
             ));
         }
         if versions.iter().any(|version| {
+            let version = version.borrow();
             !self
                 .catalogue
                 .catalogue_schemas
@@ -1021,11 +1024,11 @@ where
 
         let authored_variants = versions
             .iter()
-            .map(|version| (version.table().to_owned(), version.schema_version()))
+            .map(|version| { let version = version.borrow(); (version.table().to_owned(), version.schema_version()) })
             .collect::<BTreeSet<_>>();
         let mut registered_mapping = false;
         for (table, schema_version) in authored_variants {
-            self.table_in_schema(&table, schema_version)?;
+            self.table_in_schema_ref(&table, schema_version)?;
             registered_mapping |= !self
                 .catalogue
                 .schema_version_aliases
