@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
+use std::sync::Arc;
 
 use groove::ivm::{
     MultisinkDeltas, RecordDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment,
@@ -246,7 +247,7 @@ struct ReplacementIndex {
 struct VersionIdentity {
     table: groove::Intern<String>,
     layer: VersionLayer,
-    raw_record: Vec<u8>,
+    raw_record: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -254,7 +255,7 @@ struct VersionSortKey {
     table: groove::Intern<String>,
     row_uuid: RowUuid,
     layer: VersionLayer,
-    raw_record: Vec<u8>,
+    raw_record: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -3014,7 +3015,7 @@ impl WeightedVersionIndex {
         let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
             super::Error::InvalidStoredValue("history tx node alias must exist"),
         )?;
-        let sort_key = VersionSortKey::for_row(&row);
+        let sort_key = VersionSortKey::for_row(&row, &identity);
         let new = old + weight;
 
         if old <= 0 && new > 0 {
@@ -3098,10 +3099,11 @@ impl ReplacementIndex {
             let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
                 super::Error::InvalidStoredValue("history tx node alias must exist"),
             )?;
+            let sort_key = VersionSortKey::for_row(&row, &identity);
             row_versions.insert(
                 identity,
                 WeightedVersion {
-                    sort_key: VersionSortKey::for_row(&row),
+                    sort_key,
                     row,
                     tx_id,
                     weight: new,
@@ -3221,15 +3223,11 @@ fn result_member_payload_entry_bytes(payload: &ResultMemberPayloadEntry) -> usiz
 }
 
 fn version_identity_bytes(identity: &VersionIdentity) -> usize {
-    mem::size_of_val(identity)
-        + intern_string_bytes(&identity.table)
-        + vec_bytes(&identity.raw_record)
+    mem::size_of_val(identity) + intern_string_bytes(&identity.table) + identity.raw_record.len()
 }
 
 fn version_sort_key_bytes(sort_key: &VersionSortKey) -> usize {
-    mem::size_of_val(sort_key)
-        + intern_string_bytes(&sort_key.table)
-        + vec_bytes(&sort_key.raw_record)
+    mem::size_of_val(sort_key) + intern_string_bytes(&sort_key.table) + sort_key.raw_record.len()
 }
 
 fn replacement_key_bytes(key: &ReplacementKey) -> usize {
@@ -3251,18 +3249,18 @@ impl VersionIdentity {
         Self {
             table: row.table,
             layer: row.layer(),
-            raw_record: row.record.raw().to_vec(),
+            raw_record: Arc::from(row.record.raw()),
         }
     }
 }
 
 impl VersionSortKey {
-    fn for_row(row: &VersionRow) -> Self {
+    fn for_row(row: &VersionRow, identity: &VersionIdentity) -> Self {
         Self {
             table: row.table,
             row_uuid: row.row_uuid(),
             layer: row.layer(),
-            raw_record: row.record.raw().to_vec(),
+            raw_record: Arc::clone(&identity.raw_record),
         }
     }
 }
