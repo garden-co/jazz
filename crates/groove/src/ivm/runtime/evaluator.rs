@@ -1168,6 +1168,8 @@ impl TickEvaluator<'_> {
                 }
                 OpType::MapProject(project) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    #[cfg(feature = "cold-settle-attribution")]
+                    let projection_started = std::time::Instant::now();
                     let raw_projection =
                         self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
                     let result = NodeState::update_map_project(
@@ -1179,6 +1181,19 @@ impl TickEvaluator<'_> {
                     );
                     #[cfg(feature = "cold-settle-attribution")]
                     if let Ok(output) = &result {
+                        crate::cold_settle_attribution::record_map_node(
+                            node.0,
+                            self.context.eval_mode == EvalMode::Hydrate,
+                            input.deltas.len(),
+                            output.deltas.len(),
+                            projection_started.elapsed().as_nanos() as u64,
+                            || {
+                                format!(
+                                    "inputs={:?} projection={project:?}",
+                                    graph_node.descriptor.inputs
+                                )
+                            },
+                        );
                         crate::cold_settle_attribution::record_map(
                             self.context.eval_mode == EvalMode::Hydrate,
                             input.deltas.len(),

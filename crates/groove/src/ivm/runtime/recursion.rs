@@ -1677,6 +1677,8 @@ impl HydrationEvaluator<'_> {
                 }
                 OpType::MapProject(project) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
+                    #[cfg(feature = "cold-settle-attribution")]
+                    let projection_started = std::time::Instant::now();
                     let fields = raw_projection_fields(project, &input.descriptor, output_desc)?;
                     let result = NodeState::update_map_project(
                         project,
@@ -1687,6 +1689,19 @@ impl HydrationEvaluator<'_> {
                     );
                     #[cfg(feature = "cold-settle-attribution")]
                     if let Ok(output) = &result {
+                        crate::cold_settle_attribution::record_map_node(
+                            node.0,
+                            true,
+                            input.deltas.len(),
+                            output.deltas.len(),
+                            projection_started.elapsed().as_nanos() as u64,
+                            || {
+                                format!(
+                                    "inputs={:?} projection={project:?}",
+                                    graph_node.descriptor.inputs
+                                )
+                            },
+                        );
                         crate::cold_settle_attribution::record_map(
                             true,
                             input.deltas.len(),

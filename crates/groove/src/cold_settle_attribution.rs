@@ -2,6 +2,8 @@
 
 #![allow(missing_docs)]
 
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const BUCKETS: usize = 2;
@@ -35,6 +37,7 @@ fn bucket(hydrate: bool) -> usize {
 }
 
 pub fn reset() {
+    MAP_NODES.lock().unwrap().clear();
     MAP_BUFFER_CAPACITY.store(0, Ordering::Relaxed);
     MAP_BUFFER_USED.store(0, Ordering::Relaxed);
     for counters in [
@@ -94,4 +97,43 @@ pub fn record_join(
 pub fn record_map_buffer(capacity: usize, used: usize) {
     MAP_BUFFER_CAPACITY.fetch_add(capacity as u64, Ordering::Relaxed);
     MAP_BUFFER_USED.fetch_add(used as u64, Ordering::Relaxed);
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MapNodeWork {
+    pub node: u64,
+    pub hydrate: bool,
+    pub calls: u64,
+    pub input_records: u64,
+    pub output_records: u64,
+    /// Projection preparation and execution only, excluding upstream evaluation.
+    pub elapsed_ns: u64,
+    pub plan: String,
+}
+
+static MAP_NODES: Mutex<BTreeMap<(u64, bool), MapNodeWork>> = Mutex::new(BTreeMap::new());
+
+pub fn record_map_node(
+    node: u64,
+    hydrate: bool,
+    input_records: usize,
+    output_records: usize,
+    elapsed_ns: u64,
+    plan: impl FnOnce() -> String,
+) {
+    let mut nodes = MAP_NODES.lock().unwrap();
+    let entry = nodes.entry((node, hydrate)).or_insert_with(|| MapNodeWork {
+        node,
+        hydrate,
+        plan: plan(),
+        ..MapNodeWork::default()
+    });
+    entry.calls += 1;
+    entry.input_records += input_records as u64;
+    entry.output_records += output_records as u64;
+    entry.elapsed_ns += elapsed_ns;
+}
+
+pub fn map_node_work() -> Vec<MapNodeWork> {
+    MAP_NODES.lock().unwrap().values().cloned().collect()
 }

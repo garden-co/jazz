@@ -1841,6 +1841,8 @@ fn run_connect_and_subscribe(
     // sizing are diagnostics, not work needed to make subscriptions usable.
     let alloc_snapshot = alloc_metrics::stop();
     #[cfg(feature = "cold-settle-attribution")]
+    let projection_nodes_at_readiness = jazz::groove::cold_settle_attribution::map_node_work();
+    #[cfg(feature = "cold-settle-attribution")]
     {
         attribution.phase_timing = jazz_sim::phase_attribution::snapshot();
         if let Some(mut path) = std::env::var_os("JAZZ_PHASE_TIMELINE") {
@@ -1989,6 +1991,20 @@ fn run_connect_and_subscribe(
         attribution.probe_core_to_relay_total_ns = core_to_relay_probe.total_ns;
         attribution.probe_relay_to_client_calls = relay_to_client_probe.calls;
         attribution.probe_relay_to_client_total_ns = relay_to_client_probe.total_ns;
+        for node in projection_nodes_at_readiness {
+            eprintln!(
+                "PROJECT_NODE {}",
+                json!({
+                    "node": node.node,
+                    "hydrate": node.hydrate,
+                    "calls": node.calls,
+                    "input_records": node.input_records,
+                    "output_records": node.output_records,
+                    "elapsed_ns": node.elapsed_ns,
+                    "plan": node.plan,
+                })
+            );
+        }
         let counters = jazz::cold_settle_attribution::snapshot();
         attribution.preflight_payload_encodes = counters.preflight_payload_encodes;
         attribution.preflight_payload_encode_ns = counters.preflight_payload_encode_ns;
