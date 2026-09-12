@@ -461,6 +461,7 @@ type ServerConnectionAttempt = {
   outcome: Error | null;
   transport: Transport | null;
   retirement: Promise<void> | null;
+  admission: Promise<Transport> | null;
   recovery?: Promise<WebSocketCarrier>;
 };
 type ServerReplacementIntent = {
@@ -2119,6 +2120,7 @@ export class NativeRuntimeAdapter implements Runtime {
       outcome: null,
       transport: null,
       retirement: null,
+      admission: null,
     };
     this.serverConnectionAttempt = attempt;
     this.serverCarrier = carrier;
@@ -2155,20 +2157,15 @@ export class NativeRuntimeAdapter implements Runtime {
         const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
           throw contextualError("connecting the negotiated upstream transport", error);
         });
+        attempt.admission = admission;
         const outcome = await Promise.race([
           admission.then((transport) => ({ type: "admitted" as const, transport })),
           attempt.terminal.then((error) => ({ type: "terminal" as const, error })),
         ]);
         if (outcome.type === "terminal") {
-          admission.then(
-            (transport) =>
-              this.retirePeerTransport(transport).catch((error) => {
-                this.handleServerTransportError(error);
-              }),
-            () => undefined,
-          );
           throw outcome.error;
         }
+        attempt.admission = null;
         const transport = outcome.transport;
         if (
           this.closed ||
@@ -2177,7 +2174,8 @@ export class NativeRuntimeAdapter implements Runtime {
           attempt !== this.serverConnectionAttempt
         ) {
           carrier.close();
-          await this.retirePeerTransport(transport);
+          if (attempt.finished) await attempt.retirement;
+          else await this.retirePeerTransport(transport);
           return carrier;
         }
         this.networkRetryCount = 0;
@@ -3580,6 +3578,27 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.closed) this.handleServerTransportError(error);
         });
       }
+    }
+    if (attempt.admission) {
+      const admission = attempt.admission;
+      attempt.admission = null;
+      attempt.retirement = admission.then(
+        (transport) => this.retirePeerTransport(transport),
+        () => undefined,
+      );
+      attempt.retirement.catch((retirementError) => {
+        if (!this.closed) this.handleServerTransportError(retirementError);
+      });
+    }
+    // Keep retirement reachable after retry or terminal cleanup detaches the
+    // attempt, including an admission that has not returned its transport yet.
+    if (attempt.retirement) {
+      this.serverReplacementRetirement = joinServerTransportRetirements(
+        this.serverReplacementRetirement,
+        attempt.retirement,
+      );
+      // Retry may own this barrier before any replacement consumes it.
+      this.serverReplacementRetirement.catch(() => undefined);
     }
     if (isCurrent) {
       if (publishError) this.handleServerTransportError(error);

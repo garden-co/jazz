@@ -545,6 +545,155 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("explicit replacement joins retirement owned by network retry", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const oldTick = deferred<number>();
+    let oldTickStarted = false;
+    let oldRawClosed = false;
+    const oldTransport = new FakeTransport([]);
+    oldTransport.tick = (() => {
+      oldTickStarted = true;
+      return oldTick.promise;
+    }) as never;
+    oldTransport.close = () => {
+      oldRawClosed = true;
+      oldTransport.closed = true;
+      return true;
+    };
+    const nextTransport = new FakeTransport([]);
+    const admitted: FakeTransport[] = [];
+    const transports = [oldTransport, nextTransport];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = transports.shift();
+              if (!transport) throw new Error("unexpected extra upstream admission");
+              admitted.push(transport);
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    const progress = runtime.progressPeerTransport();
+    try {
+      await vi.waitFor(() => expect(oldTickStarted).toBe(true));
+
+      sockets[0]!.emitServerClose();
+      runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+      await waitForServerPumpTimer();
+
+      expect(oldRawClosed).toBe(false);
+      expect(admitted).toHaveLength(1);
+      expect(sockets).toHaveLength(1);
+
+      oldTick.resolve(0);
+      await progress;
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      await runtime.waitForUpstreamServerConnection();
+
+      expect(oldRawClosed).toBe(true);
+      expect(sockets[1]!.url).toBe("ws://127.0.0.1:4200/apps/app-b/ws");
+      expect(admitted).toHaveLength(2);
+      expect(admitted[1]).toBe(nextTransport);
+    } finally {
+      oldTick.resolve(0);
+      await progress.catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
+  it("retry retirement failure blocks successor admission", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const oldTick = deferred<number>();
+    let oldTickStarted = false;
+    let oldRawClosed = false;
+    const oldTransport = new FakeTransport([]);
+    oldTransport.tick = (() => {
+      oldTickStarted = true;
+      return oldTick.promise;
+    }) as never;
+    oldTransport.close = () => {
+      oldRawClosed = true;
+      oldTransport.closed = true;
+      throw new Error("predecessor retirement failure");
+    };
+    const nextTransport = new FakeTransport([]);
+    const admitted: FakeTransport[] = [];
+    const transports = [oldTransport, nextTransport];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = transports.shift();
+              if (!transport) throw new Error("unexpected extra upstream admission");
+              admitted.push(transport);
+              return transport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    const progress = runtime.progressPeerTransport();
+    try {
+      await vi.waitFor(() => expect(oldTickStarted).toBe(true));
+
+      sockets[0]!.emitServerClose();
+      runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+      await waitForFakeWebSocketNegotiation();
+
+      oldTick.resolve(0);
+      await progress;
+      await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow(
+        "predecessor retirement failure",
+      );
+      await waitForServerPumpTimer();
+      expect(oldRawClosed).toBe(true);
+      expect(admitted).toHaveLength(1);
+    } finally {
+      oldTick.resolve(0);
+      await progress.catch(() => undefined);
+      await runtime.close();
+    }
+  });
+
   it.each(["latest replacement", "disconnect"] as const)(
     "supersedes a successor intent before predecessor retirement (%s)",
     async (action) => {
@@ -710,6 +859,87 @@ describe("NativeRuntimeAdapter server transport", () => {
       expect(supersededTransport.closed).toBe(true);
       expect(replacementTransport.closed).toBe(false);
     } finally {
+      await runtime.close();
+    }
+  });
+
+  it("waits for unresolved superseded admission before successor", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const oldTransport = new FakeTransport([]);
+    const replacementTransport = new FakeTransport([]);
+    const supersededTransport = new FakeTransport([]);
+    const replacementAdmissionStarted = deferred<void>();
+    const admitted: FakeTransport[] = [];
+    let connectCalls = 0;
+    const replacementAdmission = deferred<Transport>();
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              connectCalls += 1;
+              if (connectCalls === 1) {
+                admitted.push(oldTransport);
+                return oldTransport;
+              }
+              if (connectCalls === 2) {
+                replacementAdmissionStarted.resolve();
+                return replacementAdmission.promise.then((transport) => {
+                  admitted.push(transport as FakeTransport);
+                  return transport;
+                });
+              }
+              if (connectCalls === 3) {
+                admitted.push(replacementTransport);
+                return replacementTransport;
+              }
+              throw new Error("unexpected extra upstream admission");
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    runtime.connect("ws://127.0.0.1:4200/apps/app-b/ws", "{}");
+    await replacementAdmissionStarted.promise;
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-c/ws", "{}");
+    try {
+      await waitForServerPumpTimer();
+      expect(connectCalls).toBe(2);
+      expect(sockets).toHaveLength(2);
+      replacementAdmission.resolve(supersededTransport);
+      await runtime.waitForUpstreamServerConnection();
+
+      expect(sockets.map((socket) => socket.url)).toEqual([
+        "ws://127.0.0.1:4200/apps/app-a/ws",
+        "ws://127.0.0.1:4200/apps/app-b/ws",
+        "ws://127.0.0.1:4200/apps/app-c/ws",
+      ]);
+      expect(sockets[1]!.closed).toBe(true);
+      expect(sockets[2]!.closed).toBe(false);
+      expect(connectCalls).toBe(3);
+      expect(admitted).toEqual([oldTransport, supersededTransport, replacementTransport]);
+      expect(supersededTransport.closed).toBe(true);
+      expect(replacementTransport.closed).toBe(false);
+    } finally {
+      replacementAdmission.resolve(supersededTransport);
       await runtime.close();
     }
   });
