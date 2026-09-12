@@ -84,14 +84,14 @@ The temporary counters remain behind the disabled Cargo feature
 do not compile them.
 
 ```text
-cargo check -p jazz-sim --bench customer_cold_start --features cold-settle-attribution
-cargo check -p jazz-sim --bench customer_cold_start
-cargo bench -p jazz-sim --bench customer_cold_start --features cold-settle-attribution -j 2 --no-run
+cargo check -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --features cold-settle-attribution
+cargo check -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile
+cargo build -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --release --features cold-settle-attribution -j 2
 JAZZ_CUSTOMER_PHASES=cold target/release/deps/customer_cold_start-ff3423cf4a91a036
 ```
 
 The final executable suffix is Cargo-artifact-specific; the run used the one
-emitted by the preceding `--no-run` command. Measurements used the anonymized
+emitted by the preceding build command. Measurements used the anonymized
 in-repo fixture with a warm seed cache. `-j 2` was selected because this is a
 shared box. Counter equality across the two accepted runs is the evidence for
 counts; timing conclusions use the 12.626 s run and exclude the contended

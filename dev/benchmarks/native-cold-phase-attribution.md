@@ -107,7 +107,7 @@ No independent review or full canonical CI result is claimed.
 Build with:
 
 ```sh
-cargo build -p jazz-sim --bench customer_cold_start --profile perf --features cold-settle-attribution
+cargo build -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --profile perf --features cold-settle-attribution
 ```
 
 Run the resulting executable from the repository root with

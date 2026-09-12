@@ -2,9 +2,7 @@
 //! Direct nodes intentionally expose phase boundaries that the public Db owner
 //! loop combines. This excludes JS, IndexedDB, scheduling and auth bootstrap.
 use std::{collections::BTreeMap, time::Instant};
-#[path = "support/perf_control.rs"]
 mod perf_control;
-mod schema_fixture;
 mod support;
 use jazz::{
     block_on,
@@ -22,6 +20,7 @@ use jazz::{
 };
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::json;
+thread_local! { static REPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 #[cfg(unix)]
 fn clock_ns() -> u64 {
@@ -42,6 +41,9 @@ fn clock_ns() -> u64 {
 }
 #[inline(never)]
 fn phase<T>(backend: &str, count: usize, name: &str, f: impl FnOnce() -> T) -> T {
+    if !REPORT.get() {
+        return f();
+    }
     let profile = perf_control::PerfControl::selected(backend, name);
     let cpu_profiled = profile.is_some();
     let start_ns = clock_ns();
@@ -57,13 +59,14 @@ fn phase<T>(backend: &str, count: usize, name: &str, f: impl FnOnce() -> T) -> T
     result
 }
 fn schema() -> JazzSchema {
-    schema_fixture::compile(
-        SchemaBuilder::new().table(
+    let schema = SchemaBuilder::new()
+        .table(
             TableSchemaBuilder::new("tasks")
                 .column("title", ColumnType::Text)
                 .column("done", ColumnType::Boolean),
-        ),
-    )
+        )
+        .build();
+    JazzSchema::new(&schema).unwrap()
 }
 fn row(i: usize) -> RowUuid {
     RowUuid::from_bytes((i as u128 + 1).to_be_bytes())
@@ -153,10 +156,12 @@ fn deliver(
     let bytes = phase(backend, count, &format!("{name}_encode"), || {
         jazz::wire::encode_sync_message(&message).unwrap()
     });
-    println!(
-        "{}",
-        json!({"phase":format!("{name}_payload"),"backend":backend,"rows":count,"bytes":bytes.len()})
-    );
+    if REPORT.get() {
+        println!(
+            "{}",
+            json!({"phase":format!("{name}_payload"),"backend":backend,"rows":count,"bytes":bytes.len()})
+        );
+    }
     let message = phase(backend, count, &format!("{name}_decode"), || {
         jazz::wire::decode_sync_message_trusted(&bytes).unwrap()
     });
@@ -194,113 +199,168 @@ fn deliver(
         (0..expected).map(row).collect()
     );
 }
+/// Prepared native worker/foreground workload. Receiver/body delivery and
+/// worker WAL completion are included; JS facade staging and fsync are not.
+pub struct Fixture<S: OrderedKvStorage + ReopenableStorage + 'static> {
+    backend: &'static str,
+    count: usize,
+    schema: JazzSchema,
+    storage: Box<dyn FnMut() -> S>,
+    seed: jazz::tx::TxId,
+    worker: Option<NodeState<S>>,
+    foreground: Option<NodeState<MemoryStorage>>,
+    peer: PeerState,
+    changed: usize,
+}
+impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
+    fn seeded(
+        backend: &'static str,
+        count: usize,
+        mut storage: impl FnMut() -> S + 'static,
+    ) -> Self {
+        assert!((2..=4096).contains(&count));
+        let schema = schema();
+        let mut worker = open(&schema, storage(), 1);
+        let commits = (0..count)
+            .map(|i| MergeableCommit::new("tasks", row(i), 1000).cells(cells(i, false)))
+            .collect();
+        let publication = phase(backend, count, "seed_author", || {
+            block_on(worker.commit_mergeable_many(commits)).unwrap()
+        });
+        let seed = publication.tx_id();
+        phase(backend, count, "seed_persist", || {
+            support::settle_transaction(&mut worker, publication)
+        });
+        drop(worker);
+        Self {
+            backend,
+            count,
+            schema,
+            storage: Box::new(storage),
+            seed,
+            worker: None,
+            foreground: None,
+            peer: PeerState::new(),
+            changed: 0,
+        }
+    }
+    #[inline(never)]
+    pub fn reopen(&mut self) {
+        self.foreground = None;
+        self.worker = None;
+        self.peer = PeerState::new();
+        let mut worker = phase(self.backend, self.count, "reopen", || {
+            open(&self.schema, (self.storage)(), 1)
+        });
+        let mut foreground = receiver(&self.schema, &self.peer);
+        let message = phase(self.backend, self.count, "publish", || {
+            publish(&mut worker, &mut self.peer, &self.schema, true)
+        });
+        deliver(
+            self.backend,
+            self.count,
+            if self.changed == 0 { "initial" } else { "post" },
+            message,
+            &mut foreground,
+            &self.schema,
+            &self.peer,
+            self.changed,
+        );
+        self.worker = Some(worker);
+        self.foreground = Some(foreground);
+    }
+    #[inline(never)]
+    pub fn batch_update(&mut self, changed: usize) {
+        assert!(self.changed == 0 && changed <= self.count);
+        self.update_range(0..changed);
+        self.changed = changed;
+    }
+    #[inline(never)]
+    pub fn sequential_update(&mut self, changed: usize) {
+        assert!(self.changed == 0 && changed <= self.count);
+        for i in 0..changed {
+            self.update_range(i..i + 1);
+        }
+        self.changed = changed;
+    }
+    fn update_range(&mut self, range: std::ops::Range<usize>) {
+        let backend = self.backend;
+        let count = self.count;
+        let schema = &self.schema;
+        let seed = self.seed;
+        let worker = self.worker.as_mut().expect("reopen before updates");
+        let foreground = self.foreground.as_mut().expect("reopen before updates");
+        let peer = &mut self.peer;
+        foreground.reset_storage_read_metrics();
+        let commits = range
+            .clone()
+            .map(|i| {
+                MergeableCommit::new("tasks", row(i), 2000)
+                    .parents(vec![seed])
+                    .cells(cells(i, true))
+            })
+            .collect();
+        let publication = phase(backend, count, "batch_author", || {
+            block_on(foreground.commit_mergeable_many(commits)).unwrap()
+        });
+        let update_tx = publication.tx_id();
+        phase(backend, count, "batch_persist", || {
+            support::settle_transaction(foreground, publication)
+        });
+        emit_node_metrics(&foreground, backend, count, "batch_author_metrics");
+        let unit = phase(backend, count, "batch_upload_build", || {
+            block_on(foreground.commit_unit_for(update_tx)).unwrap()
+        });
+        let bytes = phase(backend, count, "batch_upload_encode", || {
+            jazz::wire::encode_sync_message(&unit).unwrap()
+        });
+        let unit = phase(backend, count, "batch_upload_decode", || {
+            jazz::wire::decode_sync_message(&bytes).unwrap()
+        });
+        let SyncMessage::CommitUnit { tx, versions } = unit else {
+            panic!("commit unit")
+        };
+        worker.reset_storage_read_metrics();
+        phase(backend, count, "batch_worker_ingest", || {
+            block_on(worker.ingest_relay_commit_unit(tx, versions)).unwrap()
+        });
+        emit_node_metrics(&worker, backend, count, "batch_worker_ingest_metrics");
+        worker.reset_storage_read_metrics();
+        let message = phase(backend, count, "batch_publish", || {
+            publish(worker, peer, schema, false)
+        });
+        emit_node_metrics(&worker, backend, count, "batch_publish_metrics");
+        deliver(
+            backend, count, "batch", message, foreground, schema, peer, range.end,
+        );
+    }
+}
+impl Fixture<RocksDbStorage> {
+    pub fn rocksdb(count: usize) -> Self {
+        jazz_benchmark_guard::refuse_contaminated_measurement();
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema().column_families();
+        Self::seeded("rocksdb_wal", count, move || {
+            let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap()
+        })
+    }
+    pub fn loaded(count: usize) -> Self {
+        let mut fixture = Self::rocksdb(count);
+        fixture.reopen();
+        fixture
+    }
+}
 fn run<S: OrderedKvStorage + ReopenableStorage + 'static>(
-    backend: &str,
+    backend: &'static str,
     count: usize,
     percent: usize,
-    mut storage: impl FnMut() -> S,
+    storage: impl FnMut() -> S + 'static,
 ) {
-    let schema = schema();
-    let mut worker = open(&schema, storage(), 1);
-    let commits = (0..count)
-        .map(|i| MergeableCommit::new("tasks", row(i), 1000).cells(cells(i, false)))
-        .collect();
-    let publication = phase(backend, count, "seed_author", || {
-        block_on(worker.commit_mergeable_many(commits)).unwrap()
-    });
-    let seed = publication.tx_id();
-    phase(backend, count, "seed_persist", || {
-        support::settle_transaction(&mut worker, publication)
-    });
-    drop(worker);
-    let mut worker = phase(backend, count, "reopen", || open(&schema, storage(), 1));
-    let mut peer = PeerState::new();
-    let mut foreground = receiver(&schema, &peer);
-    worker.reset_storage_read_metrics();
-    let message = phase(backend, count, "initial_publish", || {
-        publish(&mut worker, &mut peer, &schema, true)
-    });
-    emit_node_metrics(&worker, backend, count, "initial_publish_metrics");
-    deliver(
-        backend,
-        count,
-        "initial",
-        message,
-        &mut foreground,
-        &schema,
-        &peer,
-        count,
-    );
-    assert!((1..=100).contains(&percent));
-    let changed = count * percent / 100;
-    foreground.reset_storage_read_metrics();
-    let commits = (0..changed)
-        .map(|i| {
-            MergeableCommit::new("tasks", row(i), 2000)
-                .parents(vec![seed])
-                .cells(cells(i, true))
-        })
-        .collect();
-    let publication = phase(backend, count, "batch_author", || {
-        block_on(foreground.commit_mergeable_many(commits)).unwrap()
-    });
-    let update_tx = publication.tx_id();
-    phase(backend, count, "batch_persist", || {
-        support::settle_transaction(&mut foreground, publication)
-    });
-    emit_node_metrics(&foreground, backend, count, "batch_author_metrics");
-    let unit = phase(backend, count, "batch_upload_build", || {
-        block_on(foreground.commit_unit_for(update_tx)).unwrap()
-    });
-    let bytes = phase(backend, count, "batch_upload_encode", || {
-        jazz::wire::encode_sync_message(&unit).unwrap()
-    });
-    let unit = phase(backend, count, "batch_upload_decode", || {
-        jazz::wire::decode_sync_message(&bytes).unwrap()
-    });
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("commit unit")
-    };
-    worker.reset_storage_read_metrics();
-    phase(backend, count, "batch_worker_ingest", || {
-        block_on(worker.ingest_relay_commit_unit(tx, versions)).unwrap()
-    });
-    emit_node_metrics(&worker, backend, count, "batch_worker_ingest_metrics");
-    worker.reset_storage_read_metrics();
-    let message = phase(backend, count, "batch_publish", || {
-        publish(&mut worker, &mut peer, &schema, false)
-    });
-    emit_node_metrics(&worker, backend, count, "batch_publish_metrics");
-    deliver(
-        backend,
-        count,
-        "batch",
-        message,
-        &mut foreground,
-        &schema,
-        &peer,
-        changed,
-    );
-    drop(foreground);
-    drop(worker);
-    let mut worker = phase(backend, count, "post_reopen", || {
-        open(&schema, storage(), 1)
-    });
-    let mut peer = PeerState::new();
-    let mut foreground = receiver(&schema, &peer);
-    let message = phase(backend, count, "post_publish", || {
-        publish(&mut worker, &mut peer, &schema, true)
-    });
-    deliver(
-        backend,
-        count,
-        "post",
-        message,
-        &mut foreground,
-        &schema,
-        &peer,
-        changed,
-    );
+    let mut fixture = Fixture::seeded(backend, count, storage);
+    fixture.reopen();
+    fixture.batch_update(count * percent / 100);
+    fixture.reopen();
 }
 fn emit_node_metrics<S: OrderedKvStorage>(
     node: &NodeState<S>,
@@ -308,6 +368,9 @@ fn emit_node_metrics<S: OrderedKvStorage>(
     count: usize,
     name: &str,
 ) {
+    if !REPORT.get() {
+        return;
+    }
     let mut fields = support::phase_fields(name, 0);
     fields.insert("backend".into(), json!(backend));
     fields.insert("rows".into(), json!(count));
@@ -352,20 +415,22 @@ fn run_fixture(count: usize, percent: usize) {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let memory = MemoryStorage::new(&refs).unwrap();
-    run("memory", count, percent, || memory.clone());
+    run("memory", count, percent, move || memory.clone());
     let dir = tempfile::tempdir().unwrap();
-    run("rocksdb_wal", count, percent, || {
+    run("rocksdb_wal", count, percent, move || {
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap()
     });
 }
 
 /// Internal protocol fixture: phase counters and direct publication are not
 /// exposed by the public Db API. Assertions still check exact visible rows.
-pub(crate) fn correctness_smoke() {
+pub fn correctness_smoke() {
     run_fixture(10, 50);
 }
 
-pub(crate) fn main() {
+pub fn profile_main() {
+    REPORT.set(true);
     if std::env::var_os("JAZZ_PERF_PHASE").is_some() {
         eprintln!("scoped CPU attribution run: timings are not clean latency receipts");
     } else {
@@ -374,5 +439,25 @@ pub(crate) fn main() {
     let percent = support::env_usize("JAZZ_BATCH_UPDATE_PERCENT", 90);
     for count in support::csv_usizes("JAZZ_BATCH_ROWS", "1500") {
         run_fixture(count, percent);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn batch_reopen_preserves_exact_rows() {
+        correctness_smoke();
+    }
+    #[test]
+    fn sequential_reopen_preserves_exact_rows() {
+        let schema = schema();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let memory = MemoryStorage::new(&refs).unwrap();
+        let mut f = Fixture::seeded("memory", 10, move || memory.clone());
+        f.reopen();
+        f.sequential_update(9);
+        f.reopen();
     }
 }

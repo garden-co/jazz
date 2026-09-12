@@ -7,7 +7,7 @@ are excluded. JSON reports `cpu_profile_scope: connect_subscribe_settle`.
 Ordinary benchmark builds reject the control variables. Profiling timings are
 not clean performance receipts.
 
-Build with `cargo build -p jazz-sim --bench customer_cold_start --profile perf
+Build with `cargo build -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --profile perf
 --features cold-settle-attribution,bench-perf-control`. Use the emitted benchmark
 executable under `target/perf/deps/` in this shell pattern:
 

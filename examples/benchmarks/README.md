@@ -33,3 +33,13 @@ app workload and must not become a place for shared application fixtures.
 CodSpeed's compatibility crate is intentionally named `divan` at the workspace
 level. This keeps the Rust benchmark source identical for local `cargo bench`
 and hosted CodSpeed instrumentation.
+
+## Native performance workloads
+
+- [Todo](../todo-client-localfirst-ts/benchmarks/README.md): 1,500-task reopen,
+  1,350-task batch update and sequential update.
+- [Permissioned resources](../permissioned-resources/benchmarks/README.md):
+  benchmark-only example, 27,518-row first sync with deep permissions.
+
+These packages completely replace their former crate-local benchmark targets.
+Their profiling binaries and CodSpeed suites use the same workload code.

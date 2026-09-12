@@ -24,6 +24,8 @@ members = [
   # gates until they are rebuilt around the new server boundary.
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
+  "examples/todo-client-localfirst-ts/benchmarks",
+  "examples/permissioned-resources/benchmarks",
   "examples/big-label/benchmarks",
   "examples/epic-drop/benchmarks",
   "examples/band-chat/benchmarks",

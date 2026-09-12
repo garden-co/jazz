@@ -4,15 +4,15 @@
 # full permission fidelity, real seeded-membership + inherited child policies)
 # across the identity matrix, and prints a summary table.
 #
-# Usage:            dev/benchmarks/repro-customer.sh
-# Quick variant:    JAZZ_REPRO_SCALE=0.10 dev/benchmarks/repro-customer.sh
-# Fresh seed:       JAZZ_CUSTOMER_FRESH_SEED=1 dev/benchmarks/repro-customer.sh
+# Usage:            examples/permissioned-resources/benchmarks/repro.sh
+# Quick variant:    JAZZ_REPRO_SCALE=0.10 examples/permissioned-resources/benchmarks/repro.sh
+# Fresh seed:       JAZZ_CUSTOMER_FRESH_SEED=1 examples/permissioned-resources/benchmarks/repro.sh
 #
 # Each run emits full JSON on stdout (per-subscription timelines, allocation
 # and memory-amplification metrics); this script extracts the headline row.
 # Expect ~1-2 min per cell warm-cached; first run pays a one-time release build.
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
 
 SCALE="${JAZZ_REPRO_SCALE:-1.0}"
 OUT_DIR="${JAZZ_REPRO_OUT:-target/customer-repro}"
@@ -26,7 +26,7 @@ run_cell() {
   JAZZ_CUSTOMER_PHASES="$phase" \
   JAZZ_CUSTOMER_SCALE="$SCALE" \
   JAZZ_CUSTOMER_MAX_TICKS="${JAZZ_CUSTOMER_MAX_TICKS:-200000}" \
-    cargo bench -p jazz-sim --bench customer_cold_start -- --nocapture \
+    cargo run -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --profile perf \
     | tee /dev/stderr | grep -o '{"a.*}' | tail -1 > "$log" || true
   python3 - "$log" "$identity" "$phase" << 'EOF'
 import json, sys
