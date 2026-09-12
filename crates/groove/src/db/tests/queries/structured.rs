@@ -722,3 +722,68 @@ async fn collect_by_after_recursive_closure_keeps_recursive_state_outside_limit(
         )
     );
 }
+
+/// A completed root edit must survive while another sink resumes a recursive
+/// evaluation. The public multi-sink delivery must include both results.
+#[futures_test::test]
+async fn terminal_edits_survive_recursive_evaluation_continuations() {
+    let storage = MemoryStorage::new(&["edges"]).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let roots = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("edges"),
+        ["id"],
+        [
+            CollectByField::named("id"),
+            CollectByField::named("src"),
+            CollectByField::named("dst"),
+        ],
+        [TopByOrder::asc("id")],
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let subscription = database
+        .subscribe([("roots", roots), ("reachable", reachability_collect_by(1))])
+        .unwrap();
+    while subscription.try_recv().is_ok() {}
+    let mut batch = database.open_batch();
+    for edge in 1..24 {
+        insert_edge(&mut batch, edge, edge, edge + 1);
+    }
+    database.commit_batch(batch).await.unwrap();
+    let mut root_inserts = Vec::new();
+    let mut reachable_inserts = 0;
+    let mut root_rows = Vec::new();
+    while let Ok(update) = subscription.try_recv() {
+        for (name, sink) in update.terminal_sinks {
+            for operation in sink.operations {
+                if let TerminalEdit::Insert { index, value, .. } = operation.edit {
+                    if name == "roots" {
+                        root_rows.push((
+                            index,
+                            crate::records::OwnedRecord::new(value, operation.root_descriptor)
+                                .to_values()
+                                .unwrap(),
+                        ));
+                        root_inserts.push(index);
+                    } else {
+                        reachable_inserts += 1;
+                    }
+                }
+            }
+        }
+    }
+    root_inserts.sort_unstable();
+    assert_eq!(root_inserts, (0..23).collect::<Vec<_>>());
+    assert_eq!(reachable_inserts, 23);
+    root_rows.sort_by_key(|(index, _)| *index);
+    assert_eq!(
+        root_rows
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>(),
+        (1..24)
+            .map(|id| vec![Value::U64(id), Value::U64(id), Value::U64(id + 1)])
+            .collect::<Vec<_>>()
+    );
+}

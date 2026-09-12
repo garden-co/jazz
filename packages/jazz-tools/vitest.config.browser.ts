@@ -69,6 +69,9 @@ export default defineConfig({
   define: {
     __JAZZ_BROWSER_SOAK__: JSON.stringify(process.env.JAZZ_BROWSER_SOAK ?? ""),
     __JAZZ_ABSTRACT_BENCH__: JSON.stringify(abstractBench),
+    __JAZZ_COLD_LOAD_BATCH_UPDATES__: JSON.stringify(
+      process.env.JAZZ_COLD_LOAD_BATCH_UPDATES === "1",
+    ),
     __JAZZ_COLD_LOAD_FIXTURE__: JSON.stringify(process.env.JAZZ_COLD_LOAD_FIXTURE_DIR ?? ""),
     __JAZZ_COLD_LOAD_RESPONSIVENESS__: JSON.stringify(
       process.env.JAZZ_COLD_LOAD_RESPONSIVENESS === "1",

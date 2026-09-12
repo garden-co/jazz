@@ -6,6 +6,7 @@ import type { Db } from "../../src/runtime/db.js";
 import { INDEXEDDB_BTREE_DATABASE_VERSION } from "../../src/runtime/indexeddb-page-store.js";
 
 declare const __JAZZ_ABSTRACT_BENCH__: string;
+declare const __JAZZ_COLD_LOAD_BATCH_UPDATES__: boolean;
 declare const __JAZZ_COLD_LOAD_FIXTURE__: string;
 declare const __JAZZ_COLD_LOAD_RESPONSIVENESS__: boolean;
 
@@ -19,6 +20,7 @@ const app = s.defineApp({ tasks: s.table({ title: s.string(), done: s.boolean() 
 // Phase reports and synthetic pre-update physical fixtures are written to
 // .vitest-browser-bench. The 1500-row cases include ordinary updates while a
 // subscription remains active; they are distinct from transaction staging.
+// JAZZ_COLD_LOAD_BATCH_UPDATES=1 measures the same selected rows in one transaction.
 // Set JAZZ_COLD_LOAD_FIXTURE_DIR to a previous receipt directory for the upgrade
 // case. JAZZ_COLD_LOAD_RESPONSIVENESS=1 adds a timer observer; leave it unset for
 // the primary comparison with earlier uninstrumented timing receipts.
@@ -151,11 +153,22 @@ describe.skipIf(__JAZZ_ABSTRACT_BENCH__ !== "1")("local cold-load phase receipt"
               { tier: "local" },
             );
             try {
-              await measure("ordinary_updates_with_active_subscription", async () => {
-                for (const row of rows.slice(0, 1350)) {
-                  await db!.update(app.tasks, row.id, { done: true }).wait({ tier: "local" });
-                }
-              });
+              if (__JAZZ_COLD_LOAD_BATCH_UPDATES__) {
+                const tx = db!.beginTransaction();
+                await measure("transaction_staging", async () => {
+                  for (const row of rows.slice(0, 1350))
+                    tx.update(app.tasks, row.id, { done: true });
+                });
+                await measure("transaction_commit_local", () =>
+                  tx.commit().wait({ tier: "local" }),
+                );
+              } else {
+                await measure("ordinary_updates_with_active_subscription", async () => {
+                  for (const row of rows.slice(0, 1350)) {
+                    await db!.update(app.tasks, row.id, { done: true }).wait({ tier: "local" });
+                  }
+                });
+              }
               assertSelectedRows(rows, await db.all(app.tasks, { tier: "local" }));
               await measure("final_subscription_delivery", async () => {
                 const deadline = performance.now() + 30_000;
