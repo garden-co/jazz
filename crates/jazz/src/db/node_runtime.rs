@@ -4140,10 +4140,9 @@ where
             // Do not enqueue that provisional frame merely for the stream
             // facade to discard later: raw/poll consumers must not observe a
             // stale empty opening before the authoritative reset.
-            let materialized =
-                state_ref
-                    .sender
-                    .materialized(&node.borrow(), shape.query(), &event)?;
+            let materialized = state_ref
+                .sender
+                .materialized(&node.borrow(), &shape, &event)?;
             if state_ref.sender.publish(
                 event,
                 publication_before,
@@ -4487,7 +4486,7 @@ where
                     let materialized =
                         refresh
                             .sender
-                            .materialized(&node.borrow(), shape.query(), &event)?;
+                            .materialized(&node.borrow(), &shape, &event)?;
                     if refresh.sender.publish(
                         event,
                         publication_before,
@@ -4589,11 +4588,10 @@ where
                                 }
                                 refresh.settled = settled;
                                 retained.push(Rc::downgrade(&state));
-                                let materialized = refresh.sender.materialized(
-                                    &node.borrow(),
-                                    shape.query(),
-                                    &event,
-                                )?;
+                                let materialized =
+                                    refresh
+                                        .sender
+                                        .materialized(&node.borrow(), &shape, &event)?;
                                 if refresh.sender.publish(
                                     event,
                                     publication_before,
@@ -4651,7 +4649,7 @@ where
                             ) && node
                                 .borrow()
                                 .relation_snapshot_has_materialized_required_cells(
-                                    shape.query(),
+                                    &shape,
                                     &state_ref.snapshot,
                                 )?;
                             if authoritative_reset {
@@ -4684,11 +4682,10 @@ where
                             }
                             state_ref.settled = settled;
                             retained.push(Rc::downgrade(&state));
-                            let materialized = state_ref.sender.materialized(
-                                &node.borrow(),
-                                shape.query(),
-                                &event,
-                            )?;
+                            let materialized =
+                                state_ref
+                                    .sender
+                                    .materialized(&node.borrow(), &shape, &event)?;
                             if state_ref.sender.publish(
                                 event,
                                 publication_before,
@@ -4787,7 +4784,7 @@ where
                     let materialized =
                         refresh
                             .sender
-                            .materialized(&node.borrow(), shape.query(), &event)?;
+                            .materialized(&node.borrow(), &shape, &event)?;
                     let delivered = refresh.sender.publish(
                         event,
                         publication_before,
@@ -4970,9 +4967,7 @@ where
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             let SubscriptionKind::Prepared { shape, .. } = &state.kind;
-            let materialized = state
-                .sender
-                .materialized(&node.borrow(), shape.query(), &event)?;
+            let materialized = state.sender.materialized(&node.borrow(), &shape, &event)?;
             if state.sender.publish(
                 event,
                 publication_before,

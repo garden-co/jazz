@@ -1315,16 +1315,19 @@ where
         Ok(())
     }
 
+    /// Required cells belong to the query's validated schema view, which may
+    /// differ from the owner's current write schema.
     pub(crate) fn relation_snapshot_has_materialized_required_cells(
         &self,
-        query: &crate::query::Query,
+        shape: &crate::query::ValidatedQuery,
         snapshot: &RelationSnapshot,
     ) -> Result<bool, Error> {
+        let query = shape.query();
         if query.aggregate.is_some() || query.flat_join.is_some() {
             return Ok(true);
         }
         for (index, row) in snapshot.rows.iter().enumerate() {
-            let table = self.table(row.table())?;
+            let table = self.table_in_schema_ref(row.table(), shape.schema_version())?;
             let projection = (index < snapshot.root_count && row.table() == query.table)
                 .then_some(query.select.as_deref())
                 .flatten();

@@ -1010,9 +1010,7 @@ where
                 settled,
                 tier: read_tier,
             };
-            let materialized = state
-                .sender
-                .materialized(&node, prepared.shape.query(), &event)?;
+            let materialized = state.sender.materialized(&node, &prepared.shape, &event)?;
             state.sender.publish(
                 event,
                 None,

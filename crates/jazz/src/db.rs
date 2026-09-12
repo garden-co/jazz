@@ -4389,7 +4389,7 @@ impl SubscriptionSender {
     fn materialized<S: OrderedKvStorage>(
         &self,
         node: &NodeState<S>,
-        query: &Query,
+        shape: &ValidatedQuery,
         event: &SubscriptionEvent,
     ) -> Result<bool, Error> {
         let mut publication = self.publication.borrow_mut();
@@ -4413,7 +4413,7 @@ impl SubscriptionSender {
                     rows: vec![row.row.clone()],
                     edges: Vec::new(),
                 };
-                if node.relation_snapshot_has_materialized_required_cells(query, &changed)? {
+                if node.relation_snapshot_has_materialized_required_cells(shape, &changed)? {
                     publication.unresolved.remove(&row.occurrence_id);
                 } else {
                     publication.unresolved.insert(row.occurrence_id.clone());
