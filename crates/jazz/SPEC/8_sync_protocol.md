@@ -770,6 +770,14 @@ A subscriber declares its known state per usage-site query in one of two forms:
   wire `TxId` form (`INV-SYNC-21`); unfated versions are declarable because
   `TxId`s exist before fate.
 
+Recovered fast cursors prove cached payload possession, not current query
+coverage. A receiver may advertise an unevicted recovered cursor before it has
+live authority confirmation. The response still supplies the complete current
+supporting set; any missing bodies must be repaired before applying it. Declaring
+the cursor must not mark the query live or satisfy a settled read. Fresh selected
+upstream confirmation remains required under `INV-SYNC-30`, and client-link
+authorization-progress checks still govern payload suppression.
+
 #### Authorization progress
 
 A fast declaration may additionally carry an **authorization-progress token**.
