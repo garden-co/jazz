@@ -6,13 +6,13 @@ No production runtime code was changed for this investigation.
 
 ## Workload and boundaries
 
-`crates/jazz/benches/local_batch_phases.rs` creates a synthetic `tasks` table
+`examples/todo-client-localfirst-ts/benchmarks/src/lib.rs` creates a synthetic `tasks` table
 with `title` and `done`. It seeds one transaction, drops/reopens the worker,
 sends a Local query snapshot to a fresh in-memory foreground, updates 90% of
 rows in one foreground transaction, uploads the commit to the worker, returns
 the updated supporting rows, then drops/reopens both runtimes and repeats the
 read. Exact row-ID sets and the exact set of completed rows are asserted.
-A deterministic small version is in `legacy_benchmark_smoke`.
+A deterministic small version lives in the example benchmark package.
 
 The worker backend is either shared MemoryStorage or RocksDB `WalNoSync`;
 the foreground is MemoryStorage. Both use real Jazz/Groove code, wire codecs,
@@ -33,13 +33,12 @@ rejects that size up front. Larger logical workloads require multiple batches.
 ## Reproduce
 
 ```sh
-cargo build -p jazz --bench local_batch_phases --profile perf \
-  --features testing,transport-compression-zstd
-# Use the executable (not the .d/.o files) under target/perf/deps below.
-JAZZ_BATCH_ROWS=150,750,1500,3000 target/perf/deps/local_batch_phases-<hash>
+cargo build -p jazz-example-todo-benchmark --bin todo-profile --profile perf
+# Run the profiling binary below.
+JAZZ_BATCH_ROWS=150,750,1500,3000 target/perf/todo-profile
 JAZZ_BATCH_ROWS=1500 JAZZ_BATCH_UPDATE_PERCENT=50 \
-  target/perf/deps/local_batch_phases-<hash>
-dev/t --test legacy_benchmark_smoke local_batch_phases_correctness_smoke
+  target/perf/todo-profile
+cargo test -p jazz-example-todo-benchmark --lib
 ```
 
 Build once, run repeatedly. The first native dependency build is a cold cost;
@@ -52,7 +51,7 @@ On Linux, collect attribution separately from ordinary timings:
 ```sh
 perf record --clockid mono -e task-clock -F 999 \
   --call-graph dwarf,16384 -o /tmp/local-batch.perf -- \
-  env JAZZ_BATCH_ROWS=1500 target/perf/deps/local_batch_phases-<hash>
+  env JAZZ_BATCH_ROWS=1500 target/perf/todo-profile
 perf script --no-inline --ns -i /tmp/local-batch.perf \
   -F comm,pid,tid,time,event,ip,sym,dso
 ```

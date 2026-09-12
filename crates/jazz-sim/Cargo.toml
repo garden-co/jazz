@@ -5,8 +5,6 @@ edition = "2024"
 
 [features]
 default = []
-bench-alloc-metrics = []
-bench-perf-control = []
 bench-alloc-sites = ["dep:backtrace"]
 profiling = ["dep:pprof"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
@@ -82,9 +80,6 @@ harness = false
 name = "s9_durable_execution"
 harness = false
 
-[[bench]]
-name = "customer_cold_start"
-harness = false
 
 [[bench]]
 name = "policy_graph_concurrent"

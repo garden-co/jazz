@@ -1,8 +1,11 @@
-#[path = "customer_cold_start/history_cost.rs"]
+//! Deterministic permissioned-resource example: native Core → Edge → Client.
+//! Workload revision 1 preserves the historical shallow-history fixture.
+#[cfg(all(feature = "bench-alloc-metrics", not(feature = "bench-alloc-sites")))]
+pub use alloc_metrics::CountingAllocator as SelectedAllocator;
+#[cfg(feature = "bench-alloc-sites")]
+pub use alloc_metrics::SiteAllocator as SelectedAllocator;
 mod history_cost;
-#[path = "customer_cold_start/slim_memory.rs"]
 mod slim_memory;
-#[path = "customer_cold_start/work_budget.rs"]
 mod work_budget;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -41,8 +44,7 @@ use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
 
 #[cfg(not(any(feature = "bench-alloc-metrics", feature = "bench-alloc-sites")))]
-#[global_allocator]
-static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
+pub use jazz_benchmark_guard::Allocator as SelectedAllocator;
 
 #[cfg(all(feature = "bench-alloc-metrics", not(feature = "bench-alloc-sites")))]
 mod alloc_metrics {
@@ -80,9 +82,6 @@ mod alloc_metrics {
             unsafe { Allocator.dealloc(ptr, layout) }
         }
     }
-
-    #[global_allocator]
-    static GLOBAL: CountingAllocator = CountingAllocator;
 
     #[derive(Clone, Copy, Debug, Default)]
     pub struct Snapshot {
@@ -179,9 +178,6 @@ mod alloc_metrics {
             unsafe { Allocator.dealloc(ptr, layout) }
         }
     }
-
-    #[global_allocator]
-    static GLOBAL: SiteAllocator = SiteAllocator;
 
     #[derive(Clone, Copy, Debug, Default)]
     pub struct Snapshot {
@@ -551,7 +547,7 @@ impl PerfControl {
     }
 }
 
-fn main() {
+pub fn profile_main() {
     #[cfg(feature = "cold-settle-attribution")]
     let _phase_subscriber =
         tracing::subscriber::set_default(jazz_sim::phase_attribution::Collector);
@@ -648,6 +644,7 @@ impl ResourceSpec {
 }
 
 struct Config {
+    diagnostics: bool,
     seed: u64,
     scale: f64,
     max_ticks: usize,
@@ -672,6 +669,7 @@ impl Config {
             }
         };
         Self {
+            diagnostics: true,
             seed: env_u64("JAZZ_CUSTOMER_SEED", 0xC057_A271),
             scale: env_f64("JAZZ_CUSTOMER_SCALE", 1.0),
             max_ticks: env_usize("JAZZ_CUSTOMER_MAX_TICKS", 20_000),
@@ -750,7 +748,9 @@ struct SeedWrite {
     cells: BTreeMap<String, Value>,
 }
 
-struct RunSummary {
+#[derive(Default)]
+pub struct RunSummary {
+    _keepalive: Option<Box<dyn std::any::Any>>,
     wall_ms: u128,
     tick_wall_us: [u128; 3],
     connect_ms: u128,
@@ -1742,16 +1742,31 @@ fn resource_access_group(
     }
 }
 
-fn expected_visible_counts(seeded: &Seeded, identity: BenchIdentity) -> BTreeMap<String, usize> {
+fn expected_visible_rows(
+    seeded: &Seeded,
+    identity: BenchIdentity,
+) -> BTreeMap<String, BTreeSet<RowUuid>> {
     let mut out = BTreeMap::new();
-    out.insert(ORG.to_owned(), seeded.table_rows[ORG].len());
-    out.insert(GROUP.to_owned(), seeded.table_rows[GROUP].len());
+    out.insert(
+        ORG.to_owned(),
+        seeded.table_rows[ORG].iter().copied().collect(),
+    );
+    out.insert(
+        GROUP.to_owned(),
+        seeded.table_rows[GROUP].iter().copied().collect(),
+    );
     out.insert(
         GROUP_ACCESS.to_owned(),
-        seeded.table_rows[GROUP_ACCESS].len(),
+        seeded.table_rows[GROUP_ACCESS].iter().copied().collect(),
     );
-    out.insert(GROUP_ENTRY.to_owned(), seeded.table_rows[GROUP_ENTRY].len());
-    out.insert(PROFILE.to_owned(), 21);
+    out.insert(
+        GROUP_ENTRY.to_owned(),
+        seeded.table_rows[GROUP_ENTRY].iter().copied().collect(),
+    );
+    out.insert(
+        PROFILE.to_owned(),
+        seeded.table_rows[PROFILE].iter().copied().collect(),
+    );
     for spec in RESOURCE_SPECS {
         let visible_resources = match identity {
             BenchIdentity::Member => seeded
@@ -1766,10 +1781,13 @@ fn expected_visible_counts(seeded: &Seeded, identity: BenchIdentity) -> BTreeMap
             BenchIdentity::Spy => BTreeSet::new(),
             BenchIdentity::Admin => seeded.table_rows[spec.table].iter().copied().collect(),
         };
-        out.insert(spec.table.to_owned(), visible_resources.len());
+        out.insert(spec.table.to_owned(), visible_resources);
         out.insert(
             spec.access_table(),
-            seeded.table_rows[&spec.access_table()].len(),
+            seeded.table_rows[&spec.access_table()]
+                .iter()
+                .copied()
+                .collect(),
         );
     }
     let mut child_slot = 0;
@@ -1794,16 +1812,23 @@ fn expected_visible_counts(seeded: &Seeded, identity: BenchIdentity) -> BTreeMap
                 .get(&child_table)
                 .into_iter()
                 .flatten()
-                .filter(|(_child, parent)| visible_resources.contains(parent))
-                .count();
+                .filter_map(|(child, parent)| visible_resources.contains(parent).then_some(*child))
+                .collect();
             out.insert(child_table, visible_children);
             child_slot += 1;
         }
     }
     for slot in 0..CHILD_TABLES {
-        out.entry(format!("empty_child_{slot}")).or_insert(0);
+        out.entry(format!("empty_child_{slot}")).or_default();
     }
     out
+}
+
+fn expected_visible_counts(seeded: &Seeded, identity: BenchIdentity) -> BTreeMap<String, usize> {
+    expected_visible_rows(seeded, identity)
+        .into_iter()
+        .map(|(table, rows)| (table, rows.len()))
+        .collect()
 }
 
 fn assert_policy_active(seeded: &Seeded, expected: &BTreeMap<String, usize>) {
@@ -2069,6 +2094,40 @@ fn run_connect_and_subscribe(
         ticks += 1;
     }
     let settle_ms = settle_start.elapsed().as_millis();
+    if !config.diagnostics {
+        let expected_sets = expected_visible_rows(seeded, config.identity);
+        for subscription in &subscriptions {
+            assert_eq!(
+                &subscription.rows, &expected_sets[&subscription.name],
+                "{}",
+                subscription.name
+            );
+        }
+        let rows_materialized = subscriptions.iter().map(|s| s.rows.len()).sum();
+        let expected_rows = expected.values().sum();
+        assert_eq!(rows_materialized, expected_rows);
+        return RunSummary {
+            wall_ms: start.elapsed().as_millis(),
+            connect_ms,
+            subscribe_ms,
+            settle_ms,
+            rows_materialized,
+            expected_rows,
+            subscriptions: subscriptions.len(),
+            ticks,
+            _keepalive: Some(Box::new((
+                relay,
+                client,
+                subscriptions,
+                _relay_upstream,
+                _core_sub,
+                _client_upstream,
+                _relay_sub,
+            ))),
+            ..Default::default()
+        };
+    }
+
     #[cfg(feature = "bench-perf-control")]
     perf_control.command("disable");
     // Match the readiness boundary: later one-shot verification and storage
@@ -2260,6 +2319,7 @@ fn run_connect_and_subscribe(
         attribution.selected_payload_bytes = counters.selected_payload_bytes;
     }
     RunSummary {
+        _keepalive: None,
         tick_wall_us,
         wall_ms: start.elapsed().as_millis(),
         connect_ms,
@@ -3254,5 +3314,70 @@ fn peak_rss_bytes() -> u64 {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         0
+    }
+}
+
+/// Fresh state for one repetition. Core is seeded outside timing; receivers
+/// are opened, connected and subscribed inside `first_sync`.
+pub struct Fixture {
+    schema: JazzSchema,
+    seeded: Seeded,
+    expected: BTreeMap<String, usize>,
+    config: Config,
+}
+impl Fixture {
+    pub fn new(scale: f64) -> Self {
+        jazz_benchmark_guard::refuse_contaminated_measurement();
+        assert_eq!(
+            storage_mode(),
+            "rocks",
+            "walltime contract uses RocksDB on all nodes"
+        );
+        let config = Config {
+            diagnostics: false,
+            seed: 0xC057_A271,
+            scale,
+            max_ticks: 200_000,
+            initial_sync_flush_cadence: InitialSyncFlushCadence::DEFAULT.writes(),
+            phases: vec!["cold".into()],
+            identity: BenchIdentity::Member,
+        };
+        let schema = schema();
+        let seeded = seed_core(&schema, &config);
+        let expected = expected_visible_counts(&seeded, config.identity);
+        assert_policy_active(&seeded, &expected);
+        if scale == 1.0 {
+            assert_eq!(expected.values().sum::<usize>(), 27_518);
+        }
+        Self {
+            schema,
+            seeded,
+            expected,
+            config,
+        }
+    }
+    #[inline(never)]
+    pub fn first_sync(&mut self) -> RunSummary {
+        run_cold(&self.schema, &self.seeded, &self.expected, &self.config)
+    }
+}
+impl RunSummary {
+    pub fn rows(&self) -> usize {
+        self.rows_materialized
+    }
+    pub fn verify(&self) {
+        assert_eq!(self.rows_materialized, self.expected_rows);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn permissioned_first_sync_completes() {
+        let mut fixture = Fixture::new(0.01);
+        let result = fixture.first_sync();
+        result.verify();
+        assert!(result.rows() > 0);
     }
 }

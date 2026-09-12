@@ -115,7 +115,7 @@ tracked in [#2789](https://github.com/garden-co/jazz/issues/2789).
 
 ## Reproduction and iteration notes
 
-Build the native fixture with `cargo build -p jazz-sim --bench customer_cold_start
+Build the native fixture with `cargo build -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile
 --profile perf`, then run its emitted executable from the worktree root with
 `JAZZ_CUSTOMER_IDENTITY=member JAZZ_CUSTOMER_PHASES=cold JAZZ_CUSTOMER_SCALE=1.0
 JAZZ_CUSTOMER_MAX_TICKS=200000`. Build separately with `--features bench-alloc-sites`
