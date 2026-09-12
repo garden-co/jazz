@@ -2891,3 +2891,397 @@ fn mergeable_tx_emits_one_subscription_delta_for_many_writes() {
     assert!(removed.is_empty());
     assert!(subscription.try_next_event().is_none());
 }
+
+// Internal binding-contract coverage: the WASM memory owner defers persistence
+// and drives queued synchronous staging. A pending stream must receive its
+// wake without an unrelated peer, query, or write triggering a refresh.
+#[test]
+fn deferred_queued_mergeable_commit_wakes_existing_subscription() {
+    let schema = doctest_support::schema();
+    let empty = build_public_db_test_schema(PublicSchemaBuilder::new());
+    let families = empty.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        empty,
+        doctest_support::MemoryStorage::new(&refs).unwrap(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x91; 16]),
+            author: AuthorSubject::for_test_bytes([0xa1; 16]),
+        },
+    )))
+    .unwrap();
+    db.set_deferred_local_persistence(true);
+    let view = db.register_schema_view(schema.clone()).unwrap();
+    let seed = OpenTransactionId::new();
+    db.begin_mergeable(seed).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..20 {
+        ids.push(
+            view.mergeable_tx_ref(seed)
+                .insert(
+                    "todos",
+                    doctest_support::todo_cells(&format!("row {index}"), false),
+                    Default::default(),
+                )
+                .unwrap(),
+        );
+    }
+    db.commit_mergeable_handle(seed).unwrap();
+    for _ in 0..4 {
+        block_on(db.tick()).unwrap();
+    }
+    let query = Query::from("todos");
+    let mut setup_subscription = prepared_subscribe(&view, &query, ReadOpts::default()).unwrap();
+    assert!(
+        matches!(block_on(setup_subscription.next_event()).unwrap(), SubscriptionEvent::Delta { ref added, .. } if added.len() == 20)
+    );
+    drop(setup_subscription);
+    let mut subscription = prepared_subscribe(&view, &query, ReadOpts::default()).unwrap();
+    let initial = block_on(subscription.next_event()).unwrap();
+    assert!(matches!(initial, SubscriptionEvent::Delta { ref added, .. } if added.len() == 20));
+    struct ReaderWake(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for ReaderWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let reader_wake = std::sync::Arc::new(ReaderWake(std::sync::atomic::AtomicUsize::new(0)));
+    let reader_waker = std::task::Waker::from(reader_wake.clone());
+    assert!(matches!(
+        futures::Stream::poll_next(
+            std::pin::Pin::new(&mut subscription),
+            &mut std::task::Context::from_waker(&reader_waker)
+        ),
+        std::task::Poll::Pending
+    ));
+    let update = OpenTransactionId::new();
+    db.enqueue_begin_mergeable(update, None, None).unwrap();
+    db.drive_queued_mutation_once();
+    for id in ids.iter().take(18) {
+        assert!(
+            block_on(view.local_current_row("todos", *id))
+                .unwrap()
+                .is_some()
+        );
+        view.enqueue_transaction_update(
+            update,
+            "todos".to_owned(),
+            *id,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+        db.drive_queued_mutation_once();
+    }
+    for _ in 0..4 {
+        block_on(db.tick()).unwrap();
+    }
+    let write = db.enqueue_commit_mergeable_handle(update).unwrap();
+    db.drive_queued_mutation_once();
+    for _ in 0..8 {
+        block_on(db.tick()).unwrap();
+    }
+    assert!(
+        reader_wake.0.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "live subscription reader must be woken by queued transaction publication"
+    );
+    let mut updated_rows = 0;
+    while let Some(mut event) = subscription.try_next_event() {
+        assert!(block_on(view.hydrate_subscription_event_for_binding_outcome(&mut event)).is_ok());
+
+        if let SubscriptionEvent::Delta { updated, added, .. } = event {
+            updated_rows += updated
+                .iter()
+                .chain(added.iter())
+                .filter(|row| row.cell(&schema.tables[0], "done") == Some(Value::Bool(true)))
+                .count();
+        }
+    }
+    assert_eq!(updated_rows, 18);
+    for _ in 0..8 {
+        block_on(db.tick()).unwrap();
+    }
+    let rows = prepared_all(&view, &query, ReadOpts::default());
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.cell(&schema.tables[0], "done") == Some(Value::Bool(true)))
+            .count(),
+        18
+    );
+    assert_eq!(
+        db.write_state(write.tx_id).unwrap().durability,
+        DurabilityTier::Local
+    );
+}
+
+// Internal binding-contract coverage: controlled storage holds the persistence
+// continuation after a queued transaction has transferred publication ownership.
+#[test]
+fn deferred_queued_mergeable_visibility_does_not_claim_blocked_or_failed_durability() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    for fail_persistence in [false, true] {
+        let schema = doctest_support::schema();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let (storage, control) = TestStorage::controlled(&refs);
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x93; 16]),
+                author: AuthorSubject::for_test_bytes([0xa3; 16]),
+            },
+        )))
+        .unwrap();
+        db.set_deferred_local_persistence(true);
+        let mut subscription =
+            prepared_subscribe(&db, &Query::from("todos"), ReadOpts::default()).unwrap();
+        let _ = block_on(subscription.next_event()).unwrap();
+        let open = OpenTransactionId::new();
+        db.begin_mergeable(open).unwrap();
+        let inserted = db
+            .mergeable_tx_ref(open)
+            .insert(
+                "todos",
+                doctest_support::todo_cells("locally visible", false),
+                Default::default(),
+            )
+            .unwrap();
+        control.pause_on(TestStorageOperation::WriteMany);
+        let write = db.enqueue_commit_mergeable_handle(open).unwrap();
+        // Drive only the retained commit/refresh owner, never durability.
+        for _ in 0..128 {
+            db.drive_queued_mutation_once();
+            if matches!(
+                *write.queued_status.as_ref().unwrap().borrow(),
+                QueuedMutationStatus::Published
+            ) {
+                break;
+            }
+        }
+        assert!(matches!(
+            *write.queued_status.as_ref().unwrap().borrow(),
+            QueuedMutationStatus::Published
+        ));
+        let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+            panic!("local publication must refresh before persistence completes");
+        };
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].row_uuid(), inserted);
+        assert_eq!(
+            db.write_state(write.tx_id).unwrap().durability,
+            DurabilityTier::None
+        );
+        assert_eq!(
+            block_on(write.wait(DurabilityTier::Local))
+                .unwrap_err()
+                .code,
+            ErrorCode::NotObserved
+        );
+        let mut tick = Box::pin(db.tick());
+        assert!(matches!(
+            tick.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        assert!(control.poll_count(TestStorageOperation::WriteMany) > 0);
+        drop(tick); // Cancellation must retain the node-owned persistence future.
+        assert_eq!(
+            db.write_state(write.tx_id).unwrap().durability,
+            DurabilityTier::None
+        );
+        if fail_persistence {
+            control.fail_next(TestStorageOperation::WriteMany);
+        }
+        control.resume_operation(TestStorageOperation::WriteMany);
+        if fail_persistence {
+            assert!(
+                block_on(db.tick()).is_err(),
+                "persistence failure must surface"
+            );
+            assert!(
+                block_on(write.wait(DurabilityTier::Local)).is_err(),
+                "failed persistence must not issue a Local receipt"
+            );
+        } else {
+            block_on(db.tick()).unwrap();
+            assert_eq!(
+                block_on(write.wait(DurabilityTier::Local)).unwrap(),
+                write.tx_id
+            );
+            assert_eq!(
+                db.write_state(write.tx_id).unwrap().durability,
+                DurabilityTier::Local
+            );
+        }
+    }
+}
+
+// Binding-owner coverage: required fields are classified after preceding staged
+// writes, without a synchronous bridge preflight or a whole-table read.
+#[test]
+fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
+    for exclusive in [false, true] {
+        let schema = build_public_db_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column_with_default(
+                        "done",
+                        PublicColumnType::Boolean,
+                        crate::tools::public_api::types::Value::Boolean(false),
+                    ),
+            ),
+        );
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            doctest_support::MemoryStorage::new(&refs).unwrap(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x95; 16]),
+                author: AuthorSubject::for_test_bytes([0xa5; 16]),
+            },
+        )))
+        .unwrap();
+        let missing = RowUuid::from_bytes([0x96; 16]);
+        let bad = OpenTransactionId::new();
+        if exclusive {
+            db.begin_exclusive(bad).unwrap();
+        } else {
+            db.begin_mergeable(bad).unwrap();
+        }
+        db.enqueue_transaction_upsert(
+            bad,
+            "todos".into(),
+            missing,
+            BTreeMap::from([("done".into(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+        let rejected = if exclusive {
+            db.enqueue_commit_exclusive_handle(bad).unwrap()
+        } else {
+            db.enqueue_commit_mergeable_handle(bad).unwrap()
+        };
+        for _ in 0..16 {
+            db.drive_queued_mutation_once();
+        }
+        let error = block_on(rejected.wait(DurabilityTier::Local)).unwrap_err();
+        assert!(error.message.contains("missing required field"), "{error}");
+        assert!(
+            block_on(db.local_current_row("todos", missing))
+                .unwrap()
+                .is_none()
+        );
+
+        let good = OpenTransactionId::new();
+        if exclusive {
+            db.begin_exclusive(good).unwrap();
+        } else {
+            db.begin_mergeable(good).unwrap();
+        }
+        db.enqueue_transaction_upsert(
+            good,
+            "todos".into(),
+            missing,
+            doctest_support::todo_cells("retained title", false),
+            Default::default(),
+        )
+        .unwrap();
+        db.enqueue_transaction_upsert(
+            good,
+            "todos".into(),
+            missing,
+            BTreeMap::from([("done".into(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+        let committed = if exclusive {
+            db.enqueue_commit_exclusive_handle(good).unwrap()
+        } else {
+            db.enqueue_commit_mergeable_handle(good).unwrap()
+        };
+        for _ in 0..16 {
+            db.drive_queued_mutation_once();
+        }
+        block_on(committed.wait(DurabilityTier::Local)).unwrap();
+        let row = block_on(db.local_current_row("todos", missing))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.cell(&schema.tables[0], "title"),
+            Some(Value::String("retained title".into()))
+        );
+        assert_eq!(row.cell(&schema.tables[0], "done"), Some(Value::Bool(true)));
+
+        // A new row may omit a defaulted field, but later partial patches must
+        // preserve both that field and the preceding staged title.
+        let default_row = RowUuid::from_bytes([0x97; 16]);
+        let defaults = OpenTransactionId::new();
+        if exclusive {
+            db.begin_exclusive(defaults).unwrap();
+        } else {
+            db.begin_mergeable(defaults).unwrap();
+        }
+        db.enqueue_transaction_upsert(
+            defaults,
+            "todos".into(),
+            default_row,
+            BTreeMap::from([("title".into(), Value::String("defaulted".into()))]),
+            Default::default(),
+        )
+        .unwrap();
+        let committed = if exclusive {
+            db.enqueue_commit_exclusive_handle(defaults).unwrap()
+        } else {
+            db.enqueue_commit_mergeable_handle(defaults).unwrap()
+        };
+        for _ in 0..16 {
+            db.drive_queued_mutation_once();
+        }
+        block_on(committed.wait(DurabilityTier::Local)).unwrap();
+        assert_eq!(
+            block_on(db.local_current_row("todos", default_row))
+                .unwrap()
+                .unwrap()
+                .cell(&schema.tables[0], "done"),
+            Some(Value::Bool(false))
+        );
+
+        let chain = OpenTransactionId::new();
+        if exclusive {
+            db.begin_exclusive(chain).unwrap();
+        } else {
+            db.begin_mergeable(chain).unwrap();
+        }
+        db.enqueue_transaction_delete(chain, "todos".into(), missing, Default::default())
+            .unwrap();
+        db.enqueue_transaction_upsert(
+            chain,
+            "todos".into(),
+            missing,
+            doctest_support::todo_cells("replacement", false),
+            Default::default(),
+        )
+        .unwrap();
+        let committed = if exclusive {
+            db.enqueue_commit_exclusive_handle(chain).unwrap()
+        } else {
+            db.enqueue_commit_mergeable_handle(chain).unwrap()
+        };
+        for _ in 0..16 {
+            db.drive_queued_mutation_once();
+        }
+        block_on(committed.wait(DurabilityTier::Local)).unwrap();
+        assert_eq!(
+            block_on(db.local_current_row("todos", missing))
+                .unwrap()
+                .unwrap()
+                .cell(&schema.tables[0], "title"),
+            Some(Value::String("replacement".into()))
+        );
+    }
+}

@@ -153,11 +153,14 @@ class ScriptedRuntimePort {
   }
 }
 
-function runtimeBootstrapFixture() {
+function runtimeBootstrapFixture(aliveDelayMs = 0) {
   const sent: Array<{ type?: string; id?: number }> = [];
   const port = new ScriptedRuntimePort((message) => {
     sent.push(message);
-    if (message.type === "connect-runtime") port.emit({ type: "worker-alive" });
+    if (message.type === "connect-runtime") {
+      if (aliveDelayMs === 0) port.emit({ type: "worker-alive" });
+      else setTimeout(() => port.emit({ type: "worker-alive" }), aliveDelayMs);
+    }
     if (message.type === "init") port.emit({ type: "result", id: message.id });
   });
   vi.stubGlobal(
@@ -659,6 +662,60 @@ describe("browser SharedWorker realm identity", () => {
     // The follower has finished admission and owns normal close acknowledgement.
     port.emit({ type: "result", id: sent.find((message) => message.type === "close")?.id });
     await shutdown;
+    expect(port.closed).toBe(true);
+  });
+
+  it("keeps runtime admission in the same realm when its alive reply is delayed", async () => {
+    vi.useFakeTimers();
+    const { connection, port, sent } = runtimeBootstrapFixture(1_100);
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(sent.filter((message) => message.type === "connect-runtime")).toHaveLength(1);
+    expect(sent.filter((message) => message.type === "cancel-runtime-bootstrap")).toHaveLength(0);
+    port.emit({ type: "runtime-ready" });
+    await expect(connection.ready()).resolves.toBeUndefined();
+    const shutdown = connection.shutdown();
+    await vi.advanceTimersByTimeAsync(0);
+    port.emit({ type: "result", id: sent.find((message) => message.type === "close")?.id });
+    await shutdown;
+    expect(port.closed).toBe(true);
+  });
+
+  it("rejects a silent runtime without opening a competing worker generation", async () => {
+    vi.useFakeTimers();
+    const { connection, port, sent } = runtimeBootstrapFixture(6 * 60_000);
+    const rejected = expect(connection.ready()).rejects.toBeInstanceOf(
+      BrowserWorkerUnresponsiveError,
+    );
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await rejected;
+    expect(sent.filter((message) => message.type === "connect-runtime")).toHaveLength(1);
+    expect(sent.filter((message) => message.type === "cancel-runtime-bootstrap")).toHaveLength(1);
+    port.emit({ type: "runtime-bootstrap-cancelled" });
+    await connection.shutdown();
+    expect(port.closed).toBe(true);
+  });
+
+  it("does not restart the startup budget when the first alive reply arrives late", async () => {
+    vi.useFakeTimers();
+    const { connection, port, sent } = runtimeBootstrapFixture(299_000);
+    let outcome = "pending";
+    void connection.ready().then(
+      () => {
+        outcome = "ready";
+      },
+      () => {
+        outcome = "failed";
+      },
+    );
+    await vi.advanceTimersByTimeAsync(299_000);
+    expect(outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(outcome).toBe("failed");
+    await expect(connection.ready()).rejects.toBeInstanceOf(BrowserWorkerUnresponsiveError);
+    expect(sent.filter((message) => message.type === "connect-runtime")).toHaveLength(1);
+    expect(sent.filter((message) => message.type === "cancel-runtime-bootstrap")).toHaveLength(1);
+    port.emit({ type: "runtime-bootstrap-cancelled" });
+    await connection.shutdown();
     expect(port.closed).toBe(true);
   });
 

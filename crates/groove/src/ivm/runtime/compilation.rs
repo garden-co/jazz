@@ -23,6 +23,240 @@ impl IvmRuntime {
         node
     }
 
+    /// Consumer-local column pruning. Keep the source graph intact for other
+    /// consumers and for all of its fallible computations and ordering rules.
+    fn compile_selected_columns(
+        &mut self,
+        input: CompiledNode,
+        selected: &[usize],
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        if selected.len() == input.output.fields().len() {
+            return Ok(input);
+        }
+        let names = selected
+            .iter()
+            .map(|index| format!("__narrow_field_{index}"))
+            .collect::<Vec<_>>();
+        let output = RecordDescriptor::new(selected.iter().zip(&names).map(|(index, name)| {
+            (
+                name.clone(),
+                input.output.fields()[*index].value_type.clone(),
+            )
+        }));
+        let expressions = selected
+            .iter()
+            .zip(&names)
+            .map(|(index, name)| ProjectionExpr {
+                expression: ProjectExpr::Field(FieldRef::Resolved(*index)),
+                output_name: Some(name.clone()),
+                output_identity: crate::records::FieldIdentity::Name(name.clone()),
+            })
+            .collect();
+        let mapping = selected.iter().map(|index| (0, *index)).collect();
+        let node = self.graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::MapProject(MapProjectOp {
+                    expressions,
+                    mapping,
+                }),
+                [input.node],
+                output,
+            ),
+            NodeDurability::Ephemeral,
+        );
+        self.initialize_node_runtime(node);
+        Ok(CompiledNode {
+            output,
+            node,
+            root_ordering_node: input.root_ordering_node,
+        })
+    }
+
+    /// Semi/anti joins observe right-key multiplicities, not right payloads.
+    fn compile_existence_input(
+        &mut self,
+        input: CompiledNode,
+        keys: &[FieldRef],
+    ) -> Result<(CompiledNode, Vec<PlanExpr>), IvmRuntimeError> {
+        let indices = keys
+            .iter()
+            .map(|key| resolve_field_ref(&input.output, key))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut selected = indices.clone();
+        selected.sort_unstable();
+        selected.dedup();
+        let input = self.compile_selected_columns(input, &selected)?;
+        let keys = indices
+            .iter()
+            .map(|index| {
+                let index = selected.binary_search(index).expect("selected key");
+                field_ref_name(&input.output, &FieldRef::Resolved(index)).map(PlanExpr::field)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((input, keys))
+    }
+
+    /// Project(Join) needs only consumer fields plus matching keys on each
+    /// input. Bind expressions against the original descriptor first, so
+    /// dropping or renaming columns cannot redirect a logical field reference.
+    fn narrow_projected_join(
+        &mut self,
+        input: NodeId,
+        expressions: &mut [ProjectionExpr],
+    ) -> Result<NodeId, IvmRuntimeError> {
+        let descriptor = &self
+            .graph
+            .node(input)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(input))?
+            .descriptor;
+        let OpType::Join(join) = &descriptor.operator else {
+            return Ok(input);
+        };
+        if join.residual_predicate.is_some() || !matches!(join.kind, JoinOpKind::Inner) {
+            return Ok(input);
+        }
+        let descriptor = descriptor.clone();
+        let OpType::Join(join) = &descriptor.operator else {
+            unreachable!()
+        };
+        let original = descriptor.output.records();
+        let left_len = join.left_descriptor.fields().len();
+        let input_mapping = super::join::join_output_mapping(
+            &join.left_descriptor,
+            &join.right_descriptor,
+            &original,
+        )?;
+        let mut demanded = Vec::new();
+        for expression in expressions.iter() {
+            if let Some(field) = projection_source_ref(&expression.expression) {
+                demanded.push(input_mapping[resolve_field_ref(&original, field)?]);
+            }
+        }
+        let mut left_fields = demanded
+            .iter()
+            .copied()
+            .filter_map(|(side, index)| (side == 0).then_some(index))
+            .collect::<Vec<_>>();
+        let mut right_fields = demanded
+            .iter()
+            .copied()
+            .filter_map(|(side, index)| (side == 1).then_some(index))
+            .collect::<Vec<_>>();
+        let left_keys = plan_expr_names(&join.left_key)
+            .iter()
+            .map(|name| resolve_field_ref(&join.left_descriptor, &FieldRef::name(name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let right_keys = plan_expr_names(&join.right_key)
+            .iter()
+            .map(|name| resolve_field_ref(&join.right_descriptor, &FieldRef::name(name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        left_fields.extend(&left_keys);
+        right_fields.extend(&right_keys);
+        left_fields.sort_unstable();
+        left_fields.dedup();
+        right_fields.sort_unstable();
+        right_fields.dedup();
+        if left_fields.len() == left_len
+            && right_fields.len() == join.right_descriptor.fields().len()
+        {
+            return Ok(input);
+        }
+        // The compiled Join inputs are arrangements. Prune their record inputs,
+        // then construct consumer-specific arrangements; never mutate a shared one.
+        let mut compile_side = |arrangement: NodeId,
+                                output: RecordDescriptor,
+                                fields: &[usize],
+                                keys: &[usize]|
+         -> Result<_, IvmRuntimeError> {
+            let source = self
+                .graph
+                .node(arrangement)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(arrangement))?
+                .descriptor
+                .inputs[0];
+            let compiled = self.compile_selected_columns(
+                CompiledNode {
+                    node: source,
+                    output,
+                    root_ordering_node: None,
+                },
+                fields,
+            )?;
+            let key = keys
+                .iter()
+                .map(|index| {
+                    field_ref_name(
+                        &compiled.output,
+                        &FieldRef::Resolved(
+                            fields.binary_search(index).expect("join key retained"),
+                        ),
+                    )
+                    .map(PlanExpr::field)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let arrangement = self.add_arrangement_node(
+                compiled.node,
+                compiled.output,
+                plan_expr_names(&key),
+                join.comparison,
+            );
+            Ok((compiled.output, arrangement, key))
+        };
+        let (left_descriptor, left, left_key) = compile_side(
+            descriptor.inputs[0],
+            join.left_descriptor,
+            &left_fields,
+            &left_keys,
+        )?;
+        let (right_descriptor, right, right_key) = compile_side(
+            descriptor.inputs[1],
+            join.right_descriptor,
+            &right_fields,
+            &right_keys,
+        )?;
+        let output = join_descriptor(&left_descriptor, &right_descriptor);
+        let output_positions =
+            super::join::join_output_mapping(&left_descriptor, &right_descriptor, &output)?
+                .into_iter()
+                .enumerate()
+                .map(|(position, source)| (source, position))
+                .collect::<HashMap<_, _>>();
+        for expression in expressions {
+            if let Some(field) = projection_source_ref_mut(&mut expression.expression) {
+                let (side, old) = input_mapping[resolve_field_ref(&original, field)?];
+                let retained = if side == 0 {
+                    &left_fields
+                } else {
+                    &right_fields
+                };
+                let physical = retained
+                    .binary_search(&old)
+                    .expect("consumer field retained");
+                *field = FieldRef::Resolved(output_positions[&(side, physical)]);
+            }
+        }
+        let node = self.graph.dedup_node(
+            NodeDescriptor::new(
+                OpType::Join(JoinOp {
+                    left_descriptor,
+                    right_descriptor,
+                    left_key,
+                    right_key,
+                    ..join.clone()
+                }),
+                [left, right],
+                output,
+            ),
+            NodeDurability::Ephemeral,
+        );
+        self.initialize_node_runtime(node);
+        Ok(node)
+    }
+
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_graph_compile")
+    )]
     pub(super) fn add_dedup_graph(
         &mut self,
         graph: &GraphBuilder,
@@ -744,32 +978,72 @@ impl IvmRuntime {
             GraphBuilder::Project { input, fields } => {
                 let compiled_input =
                     self.add_dedup_graph_cached(input, output_memo, compiled_memo)?;
-                let input_node = compiled_input.node;
+                let mut input_node = compiled_input.node;
                 let input_output = compiled_input.output;
                 let output = inferred_output;
-                let mapping = fields
+                let mut expressions = fields
                     .iter()
-                    .filter_map(|field| {
-                        field.source().map(|source| {
-                            resolve_field_ref(&input_output, source).map(|idx| (0, idx))
+                    .map(|field| {
+                        project_field_expr(&input_output, field).map(|expression| ProjectionExpr {
+                            expression,
+                            output_name: Some(field.output_name.clone()),
+                            output_identity: field.output_identity.clone(),
                         })
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                // Compose only total field selections. Dropping an unselected
+                // enum conversion or constant expression could change whether
+                // a row is omitted or an error is raised. Never cross those,
+                // filters, joins, winner selection or other semantic operators.
+                while expressions
+                    .iter()
+                    .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
+                {
+                    let parent = self
+                        .graph
+                        .node(input_node)
+                        .ok_or(IvmRuntimeError::GraphNodeNotFound(input_node))?;
+                    let OpType::MapProject(parent_project) = &parent.descriptor.operator else {
+                        break;
+                    };
+                    if parent_project.expressions.is_empty()
+                        || !parent_project
+                            .expressions
+                            .iter()
+                            .all(|expr| matches!(expr.expression, ProjectExpr::Field(_)))
+                    {
+                        break;
+                    }
+                    for expr in &mut expressions {
+                        let ProjectExpr::Field(field) = &expr.expression else {
+                            unreachable!();
+                        };
+                        let index = resolve_field_ref(&parent.descriptor.output.records(), field)?;
+                        expr.expression = parent_project.expressions[index].expression.clone();
+                    }
+                    input_node = parent.descriptor.inputs[0];
+                }
+                input_node = self.narrow_projected_join(input_node, &mut expressions)?;
+                let source_output = self
+                    .graph
+                    .node(input_node)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(input_node))?
+                    .descriptor
+                    .output
+                    .records();
+                let mapping = expressions
+                    .iter()
+                    .filter_map(|expr| match &expr.expression {
+                        ProjectExpr::Field(field) => {
+                            Some(resolve_field_ref(&source_output, field).map(|idx| (0, idx)))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::MapProject(MapProjectOp {
-                            expressions: fields
-                                .iter()
-                                .map(|field| {
-                                    project_field_expr(&input_output, field).map(|expression| {
-                                        ProjectionExpr {
-                                            expression,
-                                            output_name: Some(field.output_name.clone()),
-                                            output_identity: field.output_identity.clone(),
-                                        }
-                                    })
-                                })
-                                .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+                            expressions,
                             mapping,
                         }),
                         [input_node],
@@ -1022,6 +1296,8 @@ impl IvmRuntime {
                     self.add_dedup_graph_cached(left, output_memo, compiled_memo)?;
                 let compiled_right =
                     self.add_dedup_graph_cached(right, output_memo, compiled_memo)?;
+                let (compiled_right, right_key) =
+                    self.compile_existence_input(compiled_right, right_on)?;
                 let output = inferred_output;
                 let left_descriptor = compiled_left.output;
                 let right_descriptor = compiled_right.output;
@@ -1029,10 +1305,7 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| field_ref_name(&left_descriptor, field).map(PlanExpr::field))
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-                let right_key = right_on
-                    .iter()
-                    .map(|field| field_ref_name(&right_descriptor, field).map(PlanExpr::field))
-                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+
                 let left_arrangement = self.add_arrangement_node(
                     compiled_left.node,
                     left_descriptor,
@@ -1081,6 +1354,8 @@ impl IvmRuntime {
                     self.add_dedup_graph_cached(left, output_memo, compiled_memo)?;
                 let compiled_right =
                     self.add_dedup_graph_cached(right, output_memo, compiled_memo)?;
+                let (compiled_right, right_key) =
+                    self.compile_existence_input(compiled_right, right_on)?;
                 let output = inferred_output;
                 let left_descriptor = compiled_left.output;
                 let right_descriptor = compiled_right.output;
@@ -1088,10 +1363,7 @@ impl IvmRuntime {
                     .iter()
                     .map(|field| field_ref_name(&left_descriptor, field).map(PlanExpr::field))
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-                let right_key = right_on
-                    .iter()
-                    .map(|field| field_ref_name(&right_descriptor, field).map(PlanExpr::field))
-                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+
                 let left_arrangement = self.add_arrangement_node(
                     compiled_left.node,
                     left_descriptor,
@@ -1591,4 +1863,29 @@ fn arg_by_comparison_field_indices(
         .chain(order_field_indices)
         .copied()
         .collect()
+}
+
+fn projection_source_ref(expression: &ProjectExpr) -> Option<&FieldRef> {
+    match expression {
+        ProjectExpr::Field(field)
+        | ProjectExpr::Nullable(field)
+        | ProjectExpr::NullableFlat(field)
+        | ProjectExpr::RecordField { source: field, .. }
+        | ProjectExpr::EnumTagRemap { source: field, .. }
+        | ProjectExpr::EnumRemap { source: field, .. }
+        | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
+        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => None,
+    }
+}
+fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldRef> {
+    match expression {
+        ProjectExpr::Field(field)
+        | ProjectExpr::Nullable(field)
+        | ProjectExpr::NullableFlat(field)
+        | ProjectExpr::RecordField { source: field, .. }
+        | ProjectExpr::EnumTagRemap { source: field, .. }
+        | ProjectExpr::EnumRemap { source: field, .. }
+        | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
+        ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => None,
+    }
 }

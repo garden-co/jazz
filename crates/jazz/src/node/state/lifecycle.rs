@@ -1285,7 +1285,7 @@ where
         let column = column.into();
         commit
             .cells
-            .insert(column.clone(), Value::Large(staged.value_ref.clone()));
+            .insert(column.clone(), Value::Large(Box::new(staged.value_ref.clone())));
         commit.prepared_large_columns.insert(column);
         commit.staged_large_values.push(staged.id);
         Ok((commit, staged.value_ref))

@@ -20,6 +20,31 @@ where
         let Some(parent_tx) = self.query_transaction(parent).await? else {
             return Ok(ParentCoordinateValidation::Inconclusive);
         };
+        // Retain the resident cache's all-branch/all-layer lookup. On a cold
+        // cache, a valid parent needs one exact history read rather than every
+        // sibling row in its transaction. A miss still uses the completeness
+        // and wrong-coordinate rules below without changing their semantics.
+        if !self.query.tx_versions_cache.contains_key(&parent)
+            && let Some(candidate) = self
+                .query_exact_parent_version(parent, parent_tx.node_alias, coordinate)
+                .await?
+        {
+            if self.version_tx_id(&candidate)? != parent
+                || !self.version_row_matches_parent_coordinate(&candidate, coordinate)?
+            {
+                return Err(Error::InvalidStoredValue("parent history key does not match stored coordinate"));
+            }
+            return Ok(ParentCoordinateValidation::Exact);
+        }
+        // A missing exact witness in a partial transaction cannot establish
+        // an invalid parent. Other retained rows provide no evidence about
+        // this coordinate. Avoid loading that fragment for every missing
+        // parent; retain the pending coordinate constraint instead.
+        if parent_tx.view_scoped_cardinality
+            && !self.query.tx_versions_cache.contains_key(&parent)
+        {
+            return Ok(ParentCoordinateValidation::Inconclusive);
+        }
         let coordinate_versions = self
             .query_versions_for_tx_physical_coordinate(
                 parent,
@@ -31,6 +56,9 @@ where
             if self.version_row_matches_parent_coordinate(candidate, coordinate)? {
                 return Ok(ParentCoordinateValidation::Exact);
             }
+        }
+        if parent_tx.view_scoped_cardinality {
+            return Ok(ParentCoordinateValidation::Inconclusive);
         }
         let parent_versions = self.query_versions_for_tx(parent).await?;
         if parent_versions.is_empty() {
@@ -73,10 +101,11 @@ where
                 == coordinate.physical_table_id)
     }
 
-    async fn complete_parent_versions(
+    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.parent_completion"))]
+    async fn complete_parent_versions<V: std::borrow::Borrow<VersionRecord>>(
         &mut self,
         tx: &Transaction,
-        incoming: &[VersionRecord],
+        incoming: &[V],
     ) -> Result<Option<Vec<VersionRecord>>, Error> {
         let mut assembled = BTreeMap::new();
         if self.query_transaction(tx.tx_id).await?.is_some() {
@@ -86,6 +115,7 @@ where
             }
         }
         for version in incoming {
+            let version = version.borrow();
             match assembled.get(&view_version_key_for_ingest(version)) {
                 Some(existing) if existing != version => {
                     return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -206,10 +236,9 @@ where
     ) -> Result<(), Error> {
         for parent in complete_parents {
             self.invalidate_tx_version_tables_cache(*parent);
-            self.reject_mismatched_pending_children_for_parent(*parent)
-                .await?;
         }
-        Ok(())
+        self.reject_mismatched_pending_children_for_parents(complete_parents)
+            .await
     }
 
     /// Resolve durable constraints left by children that referenced a parent
@@ -219,74 +248,97 @@ where
         &mut self,
         parent: TxId,
     ) -> Result<(), Error> {
-        let Some(parent_tx) = self.query_transaction(parent).await? else {
-            return Ok(());
-        };
-        if matches!(parent_tx.fate, Fate::Rejected(_)) {
-            return Ok(());
-        }
-        let parent_versions = self.query_versions_for_tx(parent).await?;
-        if parent_versions.is_empty() {
-            return Ok(());
-        }
+        self.reject_mismatched_pending_children_for_parents(&BTreeSet::from([parent]))
+            .await
+    }
 
-        let mut invalid_children = BTreeSet::new();
+    async fn reject_mismatched_pending_children_for_parents(
+        &mut self,
+        parents: &BTreeSet<TxId>,
+    ) -> Result<(), Error> {
+        if parents.is_empty() {
+            return Ok(());
+        }
+        // Discover the constraints once for the entire admitted batch. Most
+        // downloaded transactions have no waiting children; loading their
+        // history first would probe every history table for no useful work.
+        let mut constraints = BTreeMap::<TxId, Vec<(TxId, ParentCoordinate)>>::new();
         for raw in self
             .database
             .primary_key_scan_raw("jazz_pending_edges", &[])
             .await?
         {
             let record = raw.record();
-            let parent_alias = NodeAlias(record.get_u64(
-                PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX,
-            )?);
-            let stored_parent = TxId::new(
+            let parent_alias =
+                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
+            let parent = TxId::new(
                 TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                self.node_for_alias(parent_alias).ok_or(Error::InvalidStoredValue(
-                    "pending edge parent alias must exist",
-                ))?,
+                self.node_for_alias(parent_alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "pending edge parent alias must exist",
+                    ))?,
             );
-            if stored_parent != parent {
+            if !parents.contains(&parent) {
                 continue;
             }
-            let coordinate = pending_edge_coordinate_from_record(record)?;
-            let mut exact = false;
-            for candidate in &parent_versions {
-                if self.version_row_matches_parent_coordinate(candidate, &coordinate)? {
-                    exact = true;
-                    break;
-                }
-            }
-            let parent_is_complete = !parent_tx.view_scoped_cardinality
-                && usize::try_from(parent_tx.tx.n_total_writes)
-                    .is_ok_and(|expected| parent_versions.len() >= expected);
-            if !exact && parent_is_complete {
-                let child_alias = NodeAlias(record.get_u64(
-                    PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX,
-                )?);
-                let child = TxId::new(
-                    TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
-                    self.node_for_alias(child_alias).ok_or(Error::InvalidStoredValue(
+            let child_alias =
+                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?);
+            let child = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
+                self.node_for_alias(child_alias)
+                    .ok_or(Error::InvalidStoredValue(
                         "pending edge child alias must exist",
                     ))?,
-                );
-                invalid_children.insert(child);
-            }
+            );
+            constraints
+                .entry(parent)
+                .or_default()
+                .push((child, pending_edge_coordinate_from_record(record)?));
         }
 
-        for child in invalid_children {
-            if self
-                .query_transaction(child)
-                .await?
-                .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
-            {
-                Box::pin(self.apply_fate_update(
-                    child,
-                    Fate::Rejected(RejectionReason::CausalityViolation),
-                    None,
-                    None,
-                ))
-                .await?;
+        for (parent, children) in constraints {
+            let mut invalid_children = BTreeSet::new();
+            let Some(parent_tx) = self.query_transaction(parent).await? else {
+                continue;
+            };
+            if matches!(parent_tx.fate, Fate::Rejected(_)) {
+                continue;
+            }
+            let parent_versions = self.query_versions_for_tx(parent).await?;
+            let parent_is_complete = !parent_tx.view_scoped_cardinality
+                && !parent_versions.is_empty()
+                && usize::try_from(parent_tx.tx.n_total_writes)
+                    .is_ok_and(|expected| parent_versions.len() >= expected);
+            if !parent_is_complete {
+                continue;
+            }
+            for (child, coordinate) in children {
+                let mut exact = false;
+                for candidate in &parent_versions {
+                    if self.version_row_matches_parent_coordinate(candidate, &coordinate)? {
+                        exact = true;
+                        break;
+                    }
+                }
+                if !exact {
+                    invalid_children.insert(child);
+                }
+            }
+
+            for child in invalid_children {
+                if self
+                    .query_transaction(child)
+                    .await?
+                    .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
+                {
+                    Box::pin(self.apply_fate_update(
+                        child,
+                        Fate::Rejected(RejectionReason::CausalityViolation),
+                        None,
+                        None,
+                    ))
+                    .await?;
+                }
             }
         }
         Ok(())
@@ -394,8 +446,39 @@ where
         Ok(PublishedTransaction { tx_id, persistence })
     }
 
+    async fn prepare_exact_history_version(
+        &mut self, tx_node_alias: NodeAlias, tx_time: TxTime, version: &VersionRecord,
+    ) -> Result<VersionRow, Error> {
+        let author_schema = version.schema_version();
+        let table = self.table_in_schema(version.table(), author_schema)?;
+        let schema_alias = self.ensure_schema_version_alias(author_schema).await?;
+        let authored = self.authored_column_ids_for_names(author_schema, version.table(), version.authored_columns())?;
+        VersionRow::from_wire_with_schema_version(
+            &table, version, authored, tx_node_alias, schema_alias, tx_time,
+            (author_schema != self.catalogue.current_schema_version_id).then_some(author_schema),
+        )
+    }
+
     async fn ingest_transaction_and_versions_with_current_indexes(
         &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+        update_current_indexes: bool,
+        view_scoped_cardinality: bool,
+    ) -> Result<(), Error> {
+        let batch = self.database.open_batch();
+        self.ingest_transaction_and_versions_with_current_indexes_in_batch(
+            batch, tx, versions, fate, global_time, durability, update_current_indexes,
+            view_scoped_cardinality,
+        ).await
+    }
+
+    async fn ingest_transaction_and_versions_with_current_indexes_in_batch(
+        &mut self,
+        mut batch: DatabaseBatch,
         tx: Transaction,
         versions: Vec<VersionRecord>,
         fate: Fate,
@@ -410,7 +493,6 @@ where
         } else {
             self.complete_parent_versions(&tx, &versions).await?
         };
-        let mut batch = self.database.open_batch();
         if let Some(complete_parent_versions) = complete_parent_versions.as_deref() {
             self.preflight_complete_parent_constraints(
                 &mut batch,
@@ -488,6 +570,9 @@ where
             .collect::<BTreeSet<_>>();
         for parent_node in parent_nodes {
             self.ensure_node_alias(parent_node).await?;
+        }
+        for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
+            self.ensure_schema_version_alias(schema).await?;
         }
         let stored_tx = self.query_transaction(tx.tx_id).await?;
         let tx_already_known = stored_tx.is_some();
@@ -635,28 +720,10 @@ where
             }
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             let storage_key = self.version_storage_primary_key(&stored)?;
-            if tx_already_known {
-                let existing = self.database.primary_key_get_raw_in_batch(
-                    batch,
-                    history_table.as_ref(),
-                    &self.version_storage_primary_key_values(&stored)?,
-                )
-                .await?;
-                if let Some(existing) = existing {
-                    if existing.record().raw() != groove_record.record().raw() {
-                        return Err(Error::ConflictingCommitUnit(tx.tx_id));
-                    }
-                } else {
-                    batch.insert_raw(history_table.as_ref(), storage_key, groove_record);
-                }
-            } else {
-                // SAFETY: transaction metadata and immutable history rows persist atomically, so
-                // an unknown transaction id proves that this history key is absent from storage.
-                // The bulk-ingest path also deduplicates transaction ids before staging, proving
-                // there is no earlier operation for this key in the same batch.
-                unsafe {
-                    batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
-                }
+            if batch.ensure_exact(&self.database, history_table.as_ref(), storage_key, groove_record).await?
+                == groove::db::EnsureExactOutcome::Conflict
+            {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_time.is_none()
             {
@@ -757,8 +824,9 @@ where
     /// but a known schema must never accept a descriptor borrowed from another
     /// version: that would make the omitted trailing columns indistinguishable
     /// from an authored value and reintroduce partial-row sync semantics.
-    fn malformed_authored_version_reason(&self, versions: &[VersionRecord]) -> Option<String> {
+    fn malformed_authored_version_reason<V: std::borrow::Borrow<VersionRecord>>(&self, versions: &[V]) -> Option<String> {
         for version in versions {
+            let version = version.borrow();
             for (field, physical_ms) in [
                 ("created_at_ms", version.created_at_ms()),
                 ("updated_at_ms", version.updated_at_ms()),
@@ -793,7 +861,7 @@ where
                     version.table()
                 ));
             };
-            if version.record().descriptor() != &table.wire_record_descriptor() {
+            if version.record().descriptor() != &prepared_wire_record_descriptor(table) {
                 return Some(format!(
                     "row version for table '{}' does not carry the complete descriptor of its authored schema",
                     version.table()
@@ -855,23 +923,18 @@ where
         &self,
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
-        // `VersionRecord` deliberately keeps its physical record lazily
-        // decoded. Every view-shaped ingress path (ordinary view updates,
-        // authorization-scope views after envelope removal, and repair
-        // payloads) therefore has to establish receipt validity before any
-        // code below uses an infallible VersionRecord accessor. Keeping this
-        // at the shared semantic boundary also makes direct internal callers
-        // as safe and atomic as decoded SyncMessage ingress.
-        crate::protocol::validate_version_records(versions)
-            .map_err(|_| Error::MalformedViewUpdate("malformed version receipt"))?;
+        self.validate_view_payload_versions_prepared(versions, &mut BTreeMap::new())
+    }
+
+    pub(super) fn validate_view_payload_versions_prepared<'a>(
+        &self,
+        versions: &'a [VersionRecord],
+        descriptors: &mut BTreeMap<(SchemaVersionId, &'a str), groove::records::RecordDescriptor>,
+    ) -> Result<(), Error> {
+        // View/repair bodies come from an admitted authority encoder. Check
+        // semantic catalogue compatibility below, not their byte representation.
+        // Catalogue state cannot change during this shared-borrow preflight.
         for version in versions {
-            if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
-                || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
-            {
-                return Err(Error::MalformedViewUpdate(
-                    "row version provenance exceeds packed HLC physical-millisecond range",
-                ));
-            }
             let schema = self
                 .catalogue
                 .catalogue_schemas
@@ -887,9 +950,19 @@ where
                 .ok_or(Error::MalformedViewUpdate(
                     "row version table is absent from its authored schema",
                 ))?;
-            if version.record().descriptor() != &table.wire_record_descriptor() {
+            let descriptor = descriptors
+                .entry((version.schema_version(), version.table()))
+                .or_insert_with(|| table.wire_record_descriptor());
+            if version.record().descriptor() != descriptor {
                 return Err(Error::MalformedViewUpdate(
                     "row version does not carry the complete descriptor of its authored schema",
+                ));
+            }
+            if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
+                || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
+            {
+                return Err(Error::MalformedViewUpdate(
+                    "row version provenance exceeds packed HLC physical-millisecond range",
                 ));
             }
             if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some() {
@@ -930,9 +1003,9 @@ where
     /// Ensure every known authored schema named by an arriving commit has a
     /// local alias and registered shared-storage variant. Unknown schemas stay
     /// parked until their catalogue lineage arrives and re-enters this path.
-    async fn prepare_authored_schema_variants_for_commit(
+    async fn prepare_authored_schema_variants_for_commit<V: std::borrow::Borrow<VersionRecord>>(
         &mut self,
-        versions: &[VersionRecord],
+        versions: &[V],
     ) -> Result<(), Error> {
         if self.malformed_authored_version_reason(versions).is_some() {
             return Err(Error::InvalidStoredValue(
@@ -940,6 +1013,7 @@ where
             ));
         }
         if versions.iter().any(|version| {
+            let version = version.borrow();
             !self
                 .catalogue
                 .catalogue_schemas
@@ -950,11 +1024,11 @@ where
 
         let authored_variants = versions
             .iter()
-            .map(|version| (version.table().to_owned(), version.schema_version()))
+            .map(|version| { let version = version.borrow(); (version.table().to_owned(), version.schema_version()) })
             .collect::<BTreeSet<_>>();
         let mut registered_mapping = false;
         for (table, schema_version) in authored_variants {
-            self.table_in_schema(&table, schema_version)?;
+            self.table_in_schema_ref(&table, schema_version)?;
             registered_mapping |= !self
                 .catalogue
                 .schema_version_aliases

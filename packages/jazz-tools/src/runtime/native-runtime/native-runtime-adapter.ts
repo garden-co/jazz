@@ -1411,6 +1411,8 @@ export class NativeRuntimeAdapter implements Runtime {
     const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      // The owner queue resolves the transaction-visible preimage and merges
+      // this patch. A synchronous read here can deadlock on a suspended owner.
       this.db.updateInTransaction(tx.id, table, rowId, patch, {
         head: branchView?.head,
         base: branchView?.base,

@@ -2802,3 +2802,527 @@ async fn record_values_canonicalize_delta_identity_and_are_rejected_as_arrangeme
         encoded_record_key_part(descriptor, &changed_record, &[0]).unwrap()
     );
 }
+
+// Internal coverage is needed here because correct output alone cannot detect
+// decoding copied fields, allocating per-row records, or losing batch sharing.
+#[test]
+fn prepared_projection_keeps_mixed_fields_encoded_and_shares_batch_output() {
+    let inner = RecordDescriptor::new([("label", ValueType::String), ("number", ValueType::U64)]);
+    let outer = RecordDescriptor::new([("inner", ValueType::Record(Box::new(inner)))]);
+    let source_enum =
+        ValueType::EnumTag(records::ScalarEnumSchema::new("old", ["a", "b"]).unwrap());
+    let target_enum =
+        ValueType::EnumTag(records::ScalarEnumSchema::new("new", ["b", "a"]).unwrap());
+    let source = RecordDescriptor::new([
+        ("nested", ValueType::Record(Box::new(outer))),
+        ("text", ValueType::String),
+        ("optional", ValueType::Nullable(Box::new(ValueType::String))),
+        ("state", source_enum),
+    ]);
+    let target = RecordDescriptor::new([
+        ("label", ValueType::String),
+        ("number", ValueType::U64),
+        ("copy", ValueType::String),
+        ("wrapped", ValueType::Nullable(Box::new(ValueType::String))),
+        ("flat", ValueType::Nullable(Box::new(ValueType::String))),
+        ("constant", ValueType::String),
+        ("null", ValueType::Nullable(Box::new(ValueType::U64))),
+        ("state", target_enum),
+    ]);
+    let expressions = vec![
+        ProjectExpr::RecordField {
+            source: FieldRef::Resolved(0),
+            path: vec!["inner".into(), "label".into()],
+        },
+        ProjectExpr::RecordField {
+            source: FieldRef::Resolved(0),
+            path: vec!["inner".into(), "number".into()],
+        },
+        ProjectExpr::Field(FieldRef::Resolved(1)),
+        ProjectExpr::Nullable(FieldRef::Resolved(1)),
+        ProjectExpr::NullableFlat(FieldRef::Resolved(2)),
+        ProjectExpr::Literal(LiteralValue::String("constant payload".repeat(100))),
+        ProjectExpr::Null(ValueType::Nullable(Box::new(ValueType::U64))),
+        ProjectExpr::EnumTagRemap {
+            source: FieldRef::Resolved(3),
+            tags: vec![Some(1), Some(0)],
+        },
+    ];
+    let project = MapProjectOp {
+        expressions: expressions
+            .into_iter()
+            .enumerate()
+            .map(|(i, expression)| ProjectionExpr {
+                expression,
+                output_name: Some(format!("out{i}")),
+                output_identity: records::FieldIdentity::Name(format!("out{i}")),
+            })
+            .collect(),
+        mapping: Vec::new(),
+    };
+    let deltas = (0..12)
+        .map(|i| {
+            let nested = OwnedRecord::new(
+                inner
+                    .create(&[Value::String(format!("label-{i}")), Value::U64(i)])
+                    .unwrap(),
+                inner,
+            );
+            let outer_record =
+                OwnedRecord::new(outer.create(&[Value::Record(nested)]).unwrap(), outer);
+            RecordDelta {
+                record: Bytes::from(
+                    source
+                        .create(&[
+                            Value::Record(outer_record),
+                            Value::String("borrow me".repeat(i as usize)),
+                            if i % 2 == 0 {
+                                Value::Nullable(None)
+                            } else {
+                                Value::Nullable(Some(Box::new(Value::String("present".into()))))
+                            },
+                            Value::EnumTag((i % 2) as u8),
+                        ])
+                        .unwrap(),
+                ),
+                weight: if i % 2 == 0 { 1 } else { -1 },
+            }
+        })
+        .collect();
+    let input = RecordDeltas {
+        descriptor: source,
+        deltas,
+    };
+    let expected: Vec<_> = input
+        .deltas
+        .iter()
+        .map(|row| {
+            project_record(
+                &project.expressions,
+                &project.mapping,
+                target,
+                &source,
+                row.raw(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let plan = raw_projection_fields(&project, &source, target)
+        .unwrap()
+        .unwrap();
+    PROJECT_VALUE_EVALUATIONS.with(|count| count.set(0));
+    let output =
+        NodeState::update_map_project(&project, target, &input, Some(&plan), false).unwrap();
+    assert_eq!(
+        PROJECT_VALUE_EVALUATIONS.with(|count| count.get()),
+        input.deltas.len(),
+        "only enum conversion should evaluate an owned Value"
+    );
+    for ((actual, expected), original) in output.deltas.iter().zip(expected).zip(&input.deltas) {
+        assert_eq!(actual.raw(), expected);
+        assert_eq!(actual.weight, original.weight);
+    }
+    for pair in output.deltas.windows(2) {
+        assert_eq!(
+            pair[0].record.as_ptr().wrapping_add(pair[0].record.len()),
+            pair[1].record.as_ptr(),
+            "rows share contiguous batch storage"
+        );
+    }
+    drop(input);
+    assert_eq!(
+        output.deltas[11].borrowed(&target).get_idx(1).unwrap(),
+        Value::U64(11)
+    );
+}
+
+#[test]
+fn prepared_projection_omission_rolls_back_partial_row_and_preserves_following_rows() {
+    let source_enum =
+        ValueType::EnumTag(records::ScalarEnumSchema::new("old", ["keep", "omit"]).unwrap());
+    let target_enum = ValueType::EnumTag(records::ScalarEnumSchema::new("new", ["keep"]).unwrap());
+    // Variable-width recursive conversion runs after a copied variable field,
+    // so omission must roll back both fixed bytes and prior variable payloads.
+    let source_type = ValueType::Array(Box::new(source_enum));
+    let target_type = ValueType::Array(Box::new(target_enum));
+    let source = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("text", ValueType::String),
+        ("state", source_type),
+    ]);
+    let target = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("text", ValueType::String),
+        ("state", target_type.clone()),
+    ]);
+    let expressions = vec![
+        ProjectExpr::Field(FieldRef::Resolved(0)),
+        ProjectExpr::Field(FieldRef::Resolved(1)),
+        ProjectExpr::RecursiveEnumRemap {
+            source: FieldRef::Resolved(2),
+            target: target_type,
+            remaps: RecursiveEnumRemaps {
+                scalar: BTreeMap::from([("root/array".into(), vec![Some(0), None])]),
+                ..Default::default()
+            },
+            omit_unrepresentable: true,
+        },
+    ];
+    let project = MapProjectOp {
+        expressions: expressions
+            .into_iter()
+            .enumerate()
+            .map(|(i, expression)| ProjectionExpr {
+                expression,
+                output_name: None,
+                output_identity: records::FieldIdentity::Name(format!("out{i}")),
+            })
+            .collect(),
+        mapping: Vec::new(),
+    };
+    let input = RecordDeltas {
+        descriptor: source,
+        deltas: (0..4)
+            .map(|i| RecordDelta {
+                record: Bytes::from(
+                    source
+                        .create(&[
+                            Value::U64(i),
+                            Value::String(format!("text-{i}")),
+                            Value::Array(vec![Value::EnumTag((i % 2) as u8)]),
+                        ])
+                        .unwrap(),
+                ),
+                weight: 1,
+            })
+            .collect(),
+    };
+    let plan = raw_projection_fields(&project, &source, target)
+        .unwrap()
+        .unwrap();
+    let output =
+        NodeState::update_map_project(&project, target, &input, Some(&plan), false).unwrap();
+    assert_eq!(output.deltas.len(), 2);
+    for (row, id) in output.deltas.iter().zip([0, 2]) {
+        assert_eq!(
+            row.borrowed(&target).to_values().unwrap(),
+            vec![
+                Value::U64(id),
+                Value::String(format!("text-{id}")),
+                Value::Array(vec![Value::EnumTag(0)])
+            ]
+        );
+    }
+    assert_eq!(
+        output.deltas[0]
+            .record
+            .as_ptr()
+            .wrapping_add(output.deltas[0].record.len()),
+        output.deltas[1].record.as_ptr()
+    );
+}
+
+#[test]
+fn prepared_projection_rejects_incompatible_copy_before_reading_rows() {
+    let source = RecordDescriptor::new([("value", ValueType::U64)]);
+    let target = RecordDescriptor::new([("value", ValueType::String)]);
+    let project = MapProjectOp {
+        expressions: Vec::new(),
+        mapping: vec![(0, 0)],
+    };
+    assert!(raw_projection_fields(&project, &source, target).is_err());
+}
+
+#[test]
+fn prepared_constant_error_is_evaluated_only_for_present_rows() {
+    let descriptor = RecordDescriptor::new([("value", ValueType::U8)]);
+    let project = MapProjectOp {
+        expressions: vec![ProjectionExpr {
+            expression: ProjectExpr::Literal(LiteralValue::EnumTag(0)),
+            output_name: Some("value".into()),
+            output_identity: records::FieldIdentity::Name("value".into()),
+        }],
+        mapping: Vec::new(),
+    };
+    let plan = raw_projection_fields(&project, &descriptor, descriptor)
+        .unwrap()
+        .unwrap();
+    let mut input = RecordDeltas::empty(descriptor);
+    assert!(
+        NodeState::update_map_project(&project, descriptor, &input, Some(&plan), false)
+            .unwrap()
+            .is_empty()
+    );
+    input.deltas.push(RecordDelta {
+        record: Bytes::from(descriptor.create(&[Value::U8(0)]).unwrap()),
+        weight: 1,
+    });
+    let prepared = NodeState::update_map_project(&project, descriptor, &input, Some(&plan), false)
+        .unwrap_err();
+    let semantic = project_record(
+        &project.expressions,
+        &project.mapping,
+        descriptor,
+        &descriptor,
+        input.deltas[0].raw(),
+    )
+    .unwrap_err();
+    assert_eq!(format!("{prepared:?}"), format!("{semantic:?}"));
+}
+
+// Internal pointer/graph checks are needed: public values alone cannot reveal
+// redundant copying or a projection node still executing between two aliases.
+#[test]
+fn projection_reuse_checks_physical_slots_not_names_or_logical_order() {
+    let source = RecordDescriptor::new([
+        ("text", ValueType::String),
+        ("n", ValueType::U64),
+        ("other", ValueType::String),
+    ]);
+    let target = RecordDescriptor::new([
+        ("renamed_n", ValueType::U64),
+        ("renamed_text", ValueType::String),
+        ("renamed_other", ValueType::String),
+    ]);
+    let project = MapProjectOp {
+        expressions: Vec::new(),
+        mapping: vec![(0, 1), (0, 0), (0, 2)],
+    };
+    let plan = raw_projection_fields(&project, &source, target)
+        .unwrap()
+        .unwrap();
+    let input = RecordDeltas {
+        descriptor: source,
+        deltas: vec![RecordDelta {
+            record: Bytes::from(
+                source
+                    .create(&[
+                        Value::String("first".into()),
+                        Value::U64(42),
+                        Value::String("second".into()),
+                    ])
+                    .unwrap(),
+            ),
+            weight: -2,
+        }],
+    };
+    let output =
+        NodeState::update_map_project(&project, target, &input, Some(&plan), false).unwrap();
+    assert_eq!(
+        output.deltas[0].record.as_ptr(),
+        input.deltas[0].record.as_ptr()
+    );
+    assert_eq!(output.deltas[0].weight, -2);
+    assert_eq!(
+        output.deltas[0].borrowed(&target).to_values().unwrap(),
+        vec![
+            Value::U64(42),
+            Value::String("first".into()),
+            Value::String("second".into())
+        ]
+    );
+    let swapped = MapProjectOp {
+        expressions: Vec::new(),
+        mapping: vec![(0, 1), (0, 2), (0, 0)],
+    };
+    let plan = raw_projection_fields(&swapped, &source, target)
+        .unwrap()
+        .unwrap();
+    let output =
+        NodeState::update_map_project(&swapped, target, &input, Some(&plan), false).unwrap();
+    assert_ne!(
+        output.deltas[0].record.as_ptr(),
+        input.deltas[0].record.as_ptr()
+    );
+    assert_eq!(
+        output.deltas[0].borrowed(&target).get_idx(1).unwrap(),
+        Value::String("second".into())
+    );
+}
+
+#[test]
+fn projection_composition_skips_only_adjacent_total_selections() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let source = GraphBuilder::table("albums");
+    let alias = source.clone().project_fields([
+        ProjectField::renamed("id", "key"),
+        ProjectField::renamed("title", "label"),
+    ]);
+    let inner = runtime.add_dedup_graph(&alias).unwrap();
+    let outer = runtime
+        .add_dedup_graph(&alias.project_fields([ProjectField::renamed("label", "name")]))
+        .unwrap();
+    let base = runtime.add_dedup_graph(&source).unwrap();
+    assert_eq!(
+        runtime.graph.node(outer.node).unwrap().descriptor.inputs,
+        vec![base.node]
+    );
+    assert_ne!(inner.node, outer.node); // The independently used inner alias survives.
+    let OpType::MapProject(op) = &runtime.graph.node(outer.node).unwrap().descriptor.operator
+    else {
+        panic!("projection expected")
+    };
+    let descriptor = base.output;
+    let raw = descriptor
+        .create(&[Value::U64(1), Value::String("album".into())])
+        .unwrap();
+    let output = project_record(
+        &op.expressions,
+        &op.mapping,
+        outer.output,
+        &descriptor,
+        &raw,
+    )
+    .unwrap();
+    assert_eq!(
+        outer.output.bind(&output).get_idx(0).unwrap(),
+        Value::String("album".into())
+    );
+    let partial = source.project_fields([
+        ProjectField::named("id"),
+        ProjectField::literal_typed(
+            "bad",
+            LiteralValue::String("not a number".into()),
+            ValueType::U64,
+        ),
+    ]);
+    let partial_node = runtime.add_dedup_graph(&partial).unwrap();
+    let narrowed = runtime.add_dedup_graph(&partial.project(["id"])).unwrap();
+    assert_eq!(
+        runtime.graph.node(narrowed.node).unwrap().descriptor.inputs,
+        vec![partial_node.node],
+        "discarding an output must not discard its fallible computation"
+    );
+}
+
+// Internal because row equality cannot prove batch-amortized descriptor setup.
+#[test]
+fn source_batch_prepares_one_descriptor_per_variant() {
+    let table = crate::schema::TableSchema::new(
+        "source_batch",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("label", ColumnType::String),
+        ],
+    )
+    .with_variant(1, ["id"])
+    .with_variant(2, ["id", "label"]);
+    let a = table.record_schema_for_variant(1).unwrap();
+    let b = table.record_schema_for_variant(2).unwrap();
+    let mut rows = Vec::new();
+    for id in 0..1000 {
+        let (tag, payload) = if id % 2 == 0 {
+            (1, a.create(&[Value::U64(id)]).unwrap())
+        } else {
+            (
+                2,
+                b.create(&[Value::U64(id), Value::String("value".into())])
+                    .unwrap(),
+            )
+        };
+        rows.push(crate::records::encode_variant_record(tag, &payload));
+    }
+    crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
+    let groups = NodeState::group_source_rows(&table, rows.iter().map(Vec::as_slice)).unwrap();
+    assert_eq!(
+        crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.get()),
+        2
+    );
+    assert_eq!(groups.len(), 2);
+    for group in groups {
+        assert_eq!(group.deltas.len(), 500);
+        assert_eq!(group.descriptor, if group.variant_tag == 1 { a } else { b });
+        for (index, delta) in group.deltas.iter().enumerate() {
+            assert_eq!(delta.weight, 1);
+            assert_eq!(
+                group.descriptor.bind(&delta.record).get_u64(0).unwrap(),
+                index as u64 * 2 + u64::from(group.variant_tag - 1)
+            );
+        }
+    }
+    let unknown = crate::records::encode_variant_record(3, &[]);
+    assert!(matches!(
+        NodeState::group_source_rows(&table, [unknown.as_slice()]),
+        Err(IvmRuntimeError::UnknownTableVariant { version: 3, .. })
+    ));
+}
+
+// Internal mechanism test: result equality alone cannot show whether a join
+// retains unused payload, or whether pruning damaged an independent consumer.
+#[test]
+fn join_consumers_retain_only_required_columns_without_mutating_shared_sources() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let source = GraphBuilder::table("albums");
+    let full = runtime.add_dedup_graph(&source).unwrap();
+    for anti in [false, true] {
+        let graph = if anti {
+            GraphBuilder::anti_join(source.clone(), source.clone(), ["id"], ["id"])
+        } else {
+            GraphBuilder::semi_join(source.clone(), source.clone(), ["id"], ["id"])
+        };
+        let compiled = runtime.add_dedup_graph(&graph).unwrap();
+        let operator = &runtime
+            .graph
+            .node(compiled.node)
+            .unwrap()
+            .descriptor
+            .operator;
+        let (OpType::SemiJoin(join) | OpType::AntiJoin(join)) = operator else {
+            panic!("selection join")
+        };
+        assert_eq!(join.left_descriptor, full.output);
+        assert_eq!(join.right_descriptor.fields().len(), 1);
+        assert_eq!(compiled.output, full.output);
+    }
+    let joined = GraphBuilder::join(source.clone(), source, ["id"], ["id"]);
+    let full_join = runtime.add_dedup_graph(&joined).unwrap();
+    let projected = runtime
+        .add_dedup_graph(&joined.project_fields([ProjectField::renamed("left.title", "label")]))
+        .unwrap();
+    let project = runtime.graph.node(projected.node).unwrap();
+    let pruned = runtime.graph.node(project.descriptor.inputs[0]).unwrap();
+    let OpType::Join(join) = &pruned.descriptor.operator else {
+        panic!("pruned join")
+    };
+    assert_eq!(join.left_descriptor.fields().len(), 2); // matching key + result
+    assert_eq!(join.right_descriptor.fields().len(), 1); // matching key only
+    assert_eq!(
+        runtime
+            .graph
+            .node(full_join.node)
+            .unwrap()
+            .descriptor
+            .output
+            .records()
+            .fields()
+            .len(),
+        4
+    );
+    assert_eq!(
+        runtime
+            .graph
+            .node(full.node)
+            .unwrap()
+            .descriptor
+            .output
+            .records(),
+        full.output
+    );
+    let OpType::MapProject(op) = &project.descriptor.operator else {
+        panic!("projection")
+    };
+    let input = pruned.descriptor.output.records();
+    let raw = input
+        .create(&[
+            Value::U64(7),
+            Value::String("retained".into()),
+            Value::U64(7),
+        ])
+        .unwrap();
+    let bytes =
+        project_record(&op.expressions, &op.mapping, projected.output, &input, &raw).unwrap();
+    assert_eq!(
+        projected.output.bind(&bytes).get_idx(0).unwrap(),
+        Value::String("retained".into())
+    );
+}

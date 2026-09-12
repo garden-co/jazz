@@ -880,6 +880,9 @@ impl IncrementalEvaluation<'_> {
                 }
                 Poll::Pending => {
                     self.work_queue.requeue_yielded(node);
+                    self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+                    self.root_ordering_windows =
+                        std::mem::take(&mut evaluator.root_ordering_windows);
                     drop(evaluator);
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
@@ -902,6 +905,8 @@ impl IncrementalEvaluation<'_> {
             // Resident requests completed synchronously. Install their results
             // and resume the queue within this same public poll so resident
             // writes retain their same-tick visibility contract.
+            self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+            self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
             drop(evaluator);
             return self.poll(runtime, cx);
         }

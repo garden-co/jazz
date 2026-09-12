@@ -92,6 +92,15 @@ parameterized by the immutable kind supplied by schema lowering, so neither
 physical arm duplicates that context. Inline payloads are interpreted as the
 primitive selected by that schema; the same raw UTF-8 content can therefore be
 a valid string or JSON value when stored under the corresponding column kind.
+The primitive arm contains only slot 1, a trailing raw field: its payload is
+exactly the logical bytes, without record headers, offsets, or reserved slots.
+Borrowed inline access validates the enum framing and logical kind directly;
+this preserves decode/recreate acceptance without constructing owned values.
+Owned primitive decoding copies that same raw payload after logical validation;
+it does not construct field maps or re-encode a record. Primitive encoding may
+pass the raw payload directly to the ordinary variant-record encoder for tag 2.
+These are specialized implementations of the same enum/record layout, not a
+separate scalar format; byte fixtures compare them with the generic codecs.
 Every independently addressed immutable tree node carries and authenticates its
 own format and kind before traversal. Internal raw string/bytes backing primitives
 only terminate this self-hosting enum encoding and are impossible at the public

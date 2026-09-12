@@ -1,3 +1,9 @@
+#[path = "customer_cold_start/history_cost.rs"]
+mod history_cost;
+#[path = "customer_cold_start/slim_memory.rs"]
+mod slim_memory;
+#[path = "customer_cold_start/work_budget.rs"]
+mod work_budget;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -12,6 +18,9 @@ use jazz::db::{
     SubscriptionEvent, SubscriptionStream, Transport,
 };
 use jazz::groove::records::Value;
+use jazz::groove::storage::{
+    BoxedStorage, MemoryStorage, OrderedKvStorage, OwnedWriteOperation, ScanRequest, collect_scan,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::MergeableCommit;
 use jazz::protocol::{SubscriptionKey, SyncMessage};
@@ -31,9 +40,14 @@ use jazz_sim::{emit_json_line, metadata_fields};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
 
+#[cfg(not(any(feature = "bench-alloc-metrics", feature = "bench-alloc-sites")))]
+#[global_allocator]
+static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
+
 #[cfg(all(feature = "bench-alloc-metrics", not(feature = "bench-alloc-sites")))]
 mod alloc_metrics {
-    use std::alloc::{GlobalAlloc, Layout, System};
+    use jazz_benchmark_guard::Allocator;
+    use std::alloc::{GlobalAlloc, Layout};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     pub struct CountingAllocator;
@@ -42,17 +56,28 @@ mod alloc_metrics {
     static ALLOCS: AtomicU64 = AtomicU64::new(0);
     static BYTES: AtomicU64 = AtomicU64::new(0);
 
+    fn record_request(bytes: usize) {
+        if ACTIVE.load(Ordering::Relaxed) {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
+    }
+
     unsafe impl GlobalAlloc for CountingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if ACTIVE.load(Ordering::Relaxed) {
-                ALLOCS.fetch_add(1, Ordering::Relaxed);
-                BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-            }
-            unsafe { System.alloc(layout) }
+            record_request(layout.size());
+            unsafe { Allocator.alloc(layout) }
         }
-
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record_request(layout.size());
+            unsafe { Allocator.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record_request(new_size);
+            unsafe { Allocator.realloc(ptr, layout, new_size) }
+        }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
+            unsafe { Allocator.dealloc(ptr, layout) }
         }
     }
 
@@ -82,7 +107,8 @@ mod alloc_metrics {
 
 #[cfg(feature = "bench-alloc-sites")]
 mod alloc_metrics {
-    use std::alloc::{GlobalAlloc, Layout, System};
+    use jazz_benchmark_guard::Allocator;
+    use std::alloc::{GlobalAlloc, Layout};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -90,6 +116,7 @@ mod alloc_metrics {
     const MAX_FRAMES: usize = 24;
     const DEFAULT_SAMPLE_RATE: u64 = 4096;
     const DEFAULT_MAX_SAMPLES: usize = 50_000;
+    const BYTE_SAMPLE_INTERVAL: u64 = 16 * 1024 * 1024;
 
     pub struct SiteAllocator;
 
@@ -97,6 +124,9 @@ mod alloc_metrics {
     struct StackSample {
         frames: [usize; MAX_FRAMES],
         len: usize,
+        count_sample: bool,
+        byte_weight: u64,
+        phase: (&'static str, &'static str),
     }
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -107,24 +137,46 @@ mod alloc_metrics {
     static MAX_SAMPLES: AtomicU64 = AtomicU64::new(DEFAULT_MAX_SAMPLES as u64);
     static SAMPLES: Mutex<Vec<StackSample>> = Mutex::new(Vec::new());
 
+    fn record_request(bytes: usize) {
+        if ACTIVE.load(Ordering::Relaxed) {
+            let alloc_index = ALLOCS.fetch_add(1, Ordering::Relaxed) + 1;
+            let size = bytes as u64;
+            #[cfg(feature = "cold-settle-attribution")]
+            jazz_sim::phase_attribution::record_allocation(bytes);
+            let before_bytes = BYTES.fetch_add(size, Ordering::Relaxed);
+            let byte_sample =
+                before_bytes / BYTE_SAMPLE_INTERVAL != (before_bytes + size) / BYTE_SAMPLE_INTERVAL;
+            let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed).max(1);
+            let count_sample = alloc_index.is_multiple_of(sample_rate);
+            if (count_sample || byte_sample) && !IN_SAMPLE.swap(true, Ordering::Relaxed) {
+                sample_stack(
+                    count_sample,
+                    if byte_sample {
+                        size.max(BYTE_SAMPLE_INTERVAL)
+                    } else {
+                        0
+                    },
+                );
+                IN_SAMPLE.store(false, Ordering::Relaxed);
+            }
+        }
+    }
+
     unsafe impl GlobalAlloc for SiteAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if ACTIVE.load(Ordering::Relaxed) {
-                let alloc_index = ALLOCS.fetch_add(1, Ordering::Relaxed) + 1;
-                BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-                let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed).max(1);
-                if alloc_index.is_multiple_of(sample_rate)
-                    && !IN_SAMPLE.swap(true, Ordering::Relaxed)
-                {
-                    sample_stack();
-                    IN_SAMPLE.store(false, Ordering::Relaxed);
-                }
-            }
-            unsafe { System.alloc(layout) }
+            record_request(layout.size());
+            unsafe { Allocator.alloc(layout) }
         }
-
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record_request(layout.size());
+            unsafe { Allocator.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record_request(new_size);
+            unsafe { Allocator.realloc(ptr, layout, new_size) }
+        }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
+            unsafe { Allocator.dealloc(ptr, layout) }
         }
     }
 
@@ -159,6 +211,8 @@ mod alloc_metrics {
         }
         ALLOCS.store(0, Ordering::Relaxed);
         BYTES.store(0, Ordering::Relaxed);
+        #[cfg(feature = "cold-settle-attribution")]
+        jazz_sim::phase_attribution::reset_allocation_counts();
         ACTIVE.store(true, Ordering::Relaxed);
     }
 
@@ -168,15 +222,33 @@ mod alloc_metrics {
             allocs: ALLOCS.load(Ordering::Relaxed),
             bytes: BYTES.load(Ordering::Relaxed),
         };
+        #[cfg(feature = "cold-settle-attribution")]
+        assert_eq!(
+            jazz_sim::phase_attribution::allocation_totals(),
+            (snapshot.allocs, snapshot.bytes),
+            "exclusive phase allocations must account for the global totals"
+        );
         report_sites();
         snapshot
     }
 
-    fn sample_stack() {
+    fn sample_stack(count_sample: bool, byte_weight: u64) {
         let max_samples = MAX_SAMPLES.load(Ordering::Relaxed) as usize;
         let mut sample = StackSample {
             frames: [0; MAX_FRAMES],
             len: 0,
+            count_sample,
+            byte_weight,
+            phase: {
+                #[cfg(feature = "cold-settle-attribution")]
+                {
+                    jazz_sim::phase_attribution::current_allocation_phase()
+                }
+                #[cfg(not(feature = "cold-settle-attribution"))]
+                {
+                    ("unscoped", "unscoped")
+                }
+            },
         };
         unsafe {
             backtrace::trace_unsynchronized(|frame| {
@@ -201,44 +273,177 @@ mod alloc_metrics {
             .lock()
             .expect("allocation samples lock poisoned")
             .clone();
-        let mut counts: HashMap<Vec<usize>, u64> = HashMap::new();
+        let sampled_stacks = samples.len();
+        let mut counts: HashMap<Vec<usize>, (u64, u64)> = HashMap::new();
+        let mut phase_counts: HashMap<_, (u64, u64)> = HashMap::new();
         for sample in samples {
-            *counts
+            let totals = phase_counts
+                .entry((sample.phase, sample.frames[..sample.len].to_vec()))
+                .or_default();
+            totals.0 += u64::from(sample.count_sample);
+            totals.1 += sample.byte_weight;
+            let totals = counts
                 .entry(sample.frames[..sample.len].to_vec())
-                .or_default() += 1;
+                .or_default();
+            totals.0 += u64::from(sample.count_sample);
+            totals.1 += sample.byte_weight;
         }
         let mut ranked: Vec<_> = counts.into_iter().collect();
-        ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         eprintln!(
-            "ALLOC_SITE_SUMMARY sample_rate={} sampled_stacks={} total_allocs={} total_bytes={}",
+            "ALLOC_SITE_SUMMARY sample_rate={} sampled_stacks={} byte_sample_interval={} total_allocs={} total_bytes={}",
             sample_rate,
-            ranked.iter().map(|(_, count)| *count).sum::<u64>(),
+            sampled_stacks,
+            BYTE_SAMPLE_INTERVAL,
             ALLOCS.load(Ordering::Relaxed),
             BYTES.load(Ordering::Relaxed)
         );
-        for (rank, (frames, samples)) in ranked.into_iter().take(25).enumerate() {
-            eprintln!(
-                "ALLOC_SITE rank={} samples={} estimated_allocs={}",
-                rank + 1,
-                samples,
-                samples * sample_rate
-            );
-            for (index, ip) in frames.iter().copied().enumerate().take(16) {
-                let mut printed = false;
-                backtrace::resolve(ip as *mut _, |symbol| {
-                    let name = symbol
-                        .name()
-                        .map(|name| name.to_string())
-                        .unwrap_or_else(|| "<unknown>".to_owned());
-                    if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
-                        eprintln!("  #{index:<2} {name} {}:{line}", file.display());
-                    } else {
-                        eprintln!("  #{index:<2} {name}");
-                    }
-                    printed = true;
+        // A caller can appear under many monomorphized/async stacks. Attribute
+        // each sample once to its nearest repository allocation site as well.
+        let mut callers: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut resolved: HashMap<usize, Option<String>> = HashMap::new();
+        let mut examples: HashMap<String, (u64, Vec<usize>)> = HashMap::new();
+        for (frames, totals) in &ranked {
+            for ip in frames {
+                let caller = resolved.entry(*ip).or_insert_with(|| {
+                    let mut caller = None;
+                    backtrace::resolve(*ip as *mut _, |symbol| {
+                        if caller.is_some() {
+                            return;
+                        }
+                        let Some(file) = symbol.filename() else {
+                            return;
+                        };
+                        let file = file.to_string_lossy();
+                        if !file.contains("/crates/") || file.contains("/benches/") {
+                            return;
+                        }
+                        let Some(name) = symbol.name() else {
+                            return;
+                        };
+                        let name = name.to_string();
+                        let name = name
+                            .rsplit_once("::h")
+                            .filter(|(_, hash)| {
+                                hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                            })
+                            .map(|(name, _)| name)
+                            .unwrap_or(&name);
+                        caller = Some(name.to_owned());
+                    });
+                    caller
                 });
-                if !printed {
-                    eprintln!("  #{index:<2} 0x{ip:x}");
+                if let Some(caller) = caller {
+                    let entry = callers.entry(caller.clone()).or_default();
+                    entry.0 += totals.0;
+                    entry.1 += totals.1;
+                    let example = examples.entry(caller.clone()).or_default();
+                    if totals.0 > example.0 {
+                        *example = (totals.0, frames.clone());
+                    }
+                    break;
+                }
+            }
+        }
+        // Attribute every sampled stack exactly once, including unresolved
+        // callers, within the phase captured at allocation time.
+        let mut phase_callers: HashMap<_, (u64, u64)> = HashMap::new();
+        for ((phase, frames), totals) in phase_counts {
+            let caller = frames
+                .iter()
+                .find_map(|ip| resolved.get(ip).and_then(Option::as_deref))
+                .unwrap_or("unresolved");
+            let entry = phase_callers.entry((phase, caller.to_owned())).or_default();
+            entry.0 += totals.0;
+            entry.1 += totals.1;
+        }
+        let mut phase_callers = phase_callers.into_iter().collect::<Vec<_>>();
+        phase_callers.sort_by(|a, b| a.0.cmp(&b.0));
+        for (((role, phase), caller), (count, bytes)) in phase_callers {
+            eprintln!(
+                "ALLOC_PHASE_CALLER role={role} phase={phase} estimated_allocs={} estimated_bytes={bytes} caller={caller}",
+                count * sample_rate
+            );
+        }
+        let mut callers = callers.into_iter().collect::<Vec<_>>();
+        for metric in ["count", "bytes"] {
+            callers.sort_by_key(|(_, totals)| {
+                std::cmp::Reverse(if metric == "count" {
+                    totals.0
+                } else {
+                    totals.1
+                })
+            });
+            for (rank, (caller, totals)) in callers.iter().take(30).enumerate() {
+                eprintln!(
+                    "ALLOC_CALLER metric={} rank={} estimated_allocs={} estimated_bytes={} caller={}",
+                    metric,
+                    rank + 1,
+                    totals.0 * sample_rate,
+                    totals.1,
+                    caller
+                );
+                // Show the most frequently count-sampled calling context, not
+                // an invented aggregate stack. Reporting runs after tracking stops.
+                if metric == "count" {
+                    if let Some((samples, frames)) = examples.get(caller) {
+                        eprintln!("  representative_context_samples={samples}");
+                        for ip in frames {
+                            backtrace::resolve(*ip as *mut _, |symbol| {
+                                let Some(file) = symbol.filename() else {
+                                    return;
+                                };
+                                let path = file.to_string_lossy();
+                                if !path.contains("/crates/") || path.contains("/benches/") {
+                                    return;
+                                }
+                                if let Some(name) = symbol.name() {
+                                    eprintln!(
+                                        "    {name} {}:{}",
+                                        file.display(),
+                                        symbol.lineno().unwrap_or(0)
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        for metric in ["count", "bytes"] {
+            ranked.sort_by_key(|(_, totals)| {
+                std::cmp::Reverse(if metric == "count" {
+                    totals.0
+                } else {
+                    totals.1
+                })
+            });
+            for (rank, (frames, (samples, sampled_bytes))) in ranked.iter().take(25).enumerate() {
+                eprintln!(
+                    "ALLOC_SITE metric={} rank={} samples={} estimated_allocs={} estimated_bytes={}",
+                    metric,
+                    rank + 1,
+                    samples,
+                    samples * sample_rate,
+                    sampled_bytes
+                );
+                for (index, ip) in frames.iter().copied().enumerate().take(16) {
+                    let mut printed = false;
+                    backtrace::resolve(ip as *mut _, |symbol| {
+                        let name = symbol
+                            .name()
+                            .map(|name| name.to_string())
+                            .unwrap_or_else(|| "<unknown>".to_owned());
+                        if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
+                            eprintln!("  #{index:<2} {name} {}:{line}", file.display());
+                        } else {
+                            eprintln!("  #{index:<2} {name}");
+                        }
+                        printed = true;
+                    });
+                    if !printed {
+                        eprintln!("  #{index:<2} 0x{ip:x}");
+                    }
                 }
             }
         }
@@ -284,7 +489,7 @@ const CHILD_TABLES: usize = 6;
 const DOMINANT_CHILD_TABLE: &str = "res_l_child_3";
 const DOMINANT_CHILD_VISIBLE_PARENTS: usize = 36;
 const DOMINANT_CHILD_TOTAL_PARENTS: usize = 65;
-const SEED_CACHE_VERSION: &str = "customer-cold-start-seed-v5";
+const SEED_CACHE_VERSION: &str = "customer-cold-start-seed-v7";
 const SEED_CACHE_READY: &str = ".jazz_customer_seed_ready";
 
 const RESOURCE_SPECS: [ResourceSpec; 14] = [
@@ -304,9 +509,94 @@ const RESOURCE_SPECS: [ResourceSpec; 14] = [
     ResourceSpec::new("res_n", 1, 2, None),
 ];
 
+// External perf starts disabled. Acknowledged commands bound CPU sampling to
+// the same connect/subscribe/settle interval as allocation attribution.
+#[cfg(feature = "bench-perf-control")]
+struct PerfControl {
+    control: std::fs::File,
+    acknowledgements: std::io::BufReader<std::fs::File>,
+}
+
+#[cfg(feature = "bench-perf-control")]
+impl PerfControl {
+    fn start() -> Self {
+        let open = |name| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(std::env::var_os(name).expect("perf control requires control and ack FIFOs"))
+                .expect("open perf control FIFO")
+        };
+        let mut control = Self {
+            control: open("JAZZ_PERF_CONTROL_FIFO"),
+            acknowledgements: std::io::BufReader::new(open("JAZZ_PERF_ACK_FIFO")),
+        };
+        control.command("enable");
+        control
+    }
+
+    fn command(&mut self, command: &str) {
+        use std::io::{BufRead, Write};
+        writeln!(self.control, "{command}").expect("write perf command");
+        self.control.flush().expect("flush perf command");
+        let mut acknowledgement = String::new();
+        self.acknowledgements
+            .read_line(&mut acknowledgement)
+            .expect("read perf acknowledgement");
+        assert_eq!(
+            acknowledgement.trim_matches(|ch: char| ch == '\0' || ch.is_ascii_whitespace()),
+            "ack",
+            "unexpected perf acknowledgement"
+        );
+    }
+}
+
 fn main() {
+    #[cfg(feature = "cold-settle-attribution")]
+    let _phase_subscriber =
+        tracing::subscriber::set_default(jazz_sim::phase_attribution::Collector);
+    // Allocation attribution deliberately instruments the workload. Its timing
+    // is not a benchmark receipt, and sampler configuration must remain usable.
+    #[cfg(not(any(
+        feature = "bench-alloc-sites",
+        feature = "bench-alloc-metrics",
+        feature = "bench-perf-control"
+    )))]
     jazz_benchmark_guard::refuse_contaminated_measurement();
+    #[cfg(any(feature = "bench-alloc-sites", feature = "bench-alloc-metrics"))]
+    eprintln!(
+        "allocation attribution run: wall-clock timings are not comparable to clean receipts"
+    );
+    #[cfg(feature = "bench-perf-control")]
+    eprintln!("scoped CPU attribution run: wall-clock timings are not clean receipts");
+    #[cfg(feature = "cold-settle-attribution")]
+    eprintln!(
+        "phase attribution enabled: compare elapsed time only with the same instrumentation; disable this feature for absolute latency"
+    );
     let config = Config::from_env();
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_HISTORY_COST") {
+        history_cost::run(Path::new(&path));
+        return;
+    }
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_SLIM_MEMORY") {
+        slim_memory::run(Path::new(&path));
+        return;
+    }
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_DECODE_CAPTURE") {
+        measure_capture_decode(Path::new(&path));
+        return;
+    }
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_EXPORT_SQL") {
+        export_sql_fixture(&config, std::path::Path::new(&path));
+        return;
+    }
+    if storage_mode() != "rocks" {
+        assert_eq!(
+            config.phases,
+            vec!["cold"],
+            "memory modes currently measure cold loading only; set JAZZ_CUSTOMER_PHASES=cold"
+        );
+    }
     let schema = schema();
     let seeded = seed_core(&schema, &config);
     let expected = expected_visible_counts(&seeded, config.identity);
@@ -435,7 +725,7 @@ enum BenchIdentity {
 
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
-    core: Node<RocksDbStorage>,
+    core: Node<BoxedStorage>,
     ordinary_user: RowUuid,
     visible_groups: BTreeSet<RowUuid>,
     table_rows: BTreeMap<String, Vec<RowUuid>>,
@@ -462,6 +752,7 @@ struct SeedWrite {
 
 struct RunSummary {
     wall_ms: u128,
+    tick_wall_us: [u128; 3],
     connect_ms: u128,
     subscribe_ms: u128,
     settle_ms: u128,
@@ -535,6 +826,7 @@ struct RunSummary {
 /// sender's required sizing work before it can decide whether to chunk.
 #[derive(Clone, Default)]
 struct AttributionSummary {
+    phase_timing: JsonValue,
     core_tick_ns: u64,
     relay_tick_ns: u64,
     client_tick_ns: u64,
@@ -566,13 +858,15 @@ struct AttributionSummary {
 
 #[derive(Clone, Default)]
 struct OperatorAttribution {
-    map_calls: [u64; 4],
-    map_input_records: [u64; 4],
-    map_output_records: [u64; 4],
-    join_calls: [u64; 4],
-    join_left_records: [u64; 4],
-    join_right_records: [u64; 4],
-    join_output_records: [u64; 4],
+    map_buffer_capacity: u64,
+    map_buffer_used: u64,
+    map_calls: [u64; 2],
+    map_input_records: [u64; 2],
+    map_output_records: [u64; 2],
+    join_calls: [u64; 2],
+    join_left_records: [u64; 2],
+    join_right_records: [u64; 2],
+    join_output_records: [u64; 2],
 }
 
 #[cfg(feature = "cold-settle-attribution")]
@@ -582,7 +876,9 @@ impl OperatorAttribution {
         before: jazz::groove::cold_settle_attribution::Snapshot,
         after: jazz::groove::cold_settle_attribution::Snapshot,
     ) {
-        for index in 0..4 {
+        self.map_buffer_capacity += after.map_buffer_capacity - before.map_buffer_capacity;
+        self.map_buffer_used += after.map_buffer_used - before.map_buffer_used;
+        for index in 0..2 {
             self.map_calls[index] += after.map_calls[index] - before.map_calls[index];
             self.map_input_records[index] +=
                 after.map_input_records[index] - before.map_input_records[index];
@@ -618,12 +914,12 @@ struct SubscriptionTimeline {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db<BoxedStorage>,
 }
 
 struct DbClient {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db<BoxedStorage>,
 }
 
 struct OpenSubscription {
@@ -638,6 +934,7 @@ struct OpenSubscription {
 
 #[derive(Default)]
 struct TransportMetrics {
+    capture: RefCell<Option<SyncCapture>>,
     messages: Cell<u64>,
     view_updates: Cell<u64>,
     bytes: Cell<u64>,
@@ -648,6 +945,109 @@ struct TransportMetrics {
     #[cfg(feature = "cold-settle-attribution")]
     attribution: RefCell<ProbeAttribution>,
     view_updates_by_subscription: RefCell<BTreeMap<SubscriptionKey, ViewUpdateSummary>>,
+}
+
+// Diagnostic capture is intentionally outside clean timing receipts. The SQL
+// replay persists the actual immutable bytes, not a smaller synthetic payload.
+struct SyncCapture {
+    writer: std::io::BufWriter<fs::File>,
+    schema: JazzSchema,
+}
+
+impl SyncCapture {
+    fn record(&mut self, message: &SyncMessage) {
+        use std::io::Write;
+        let (carriers, supporting) = match message {
+            SyncMessage::ViewUpdate(view) | SyncMessage::AuthorizationScopeView { view, .. } => {
+                (&view.version_carriers, view.supporting_rows.len())
+            }
+            SyncMessage::CurrentRowsReceipt(receipt) => (&receipt.version_carriers, 0),
+            SyncMessage::CommitUnit { .. } | SyncMessage::AuthorityPublication(_) => panic!(
+                "extend SQL capture for non-view version delivery before comparing this fixture"
+            ),
+            _ => return,
+        };
+        let bundles = version_bundle_refs(carriers).map(|bundle| {
+            let versions = bundle.versions.iter().map(|version| {
+                let table = self.schema.tables.iter().find(|t| t.name == version.table()).unwrap();
+                let cells = table.columns.iter().enumerate().map(|(position, column)|
+                    (column.name().to_owned(), version.cell_at(position).expect("fixture cell present")))
+                    .collect::<BTreeMap<_, _>>();
+                json!({"table": version.table(), "row": version.row_uuid().0.to_string(),
+                    "schema": version.schema_version(), "branch": version.branch_key(),
+                    "parents": version.parents(), "cells": cells,
+                    "wire_hex": capture_hex(&postcard::to_allocvec(version).unwrap())})
+            }).collect::<Vec<_>>();
+            json!({"tx": bundle.tx, "tx_hex": capture_hex(&postcard::to_allocvec(bundle.tx).unwrap()),
+                "scope": bundle.scope, "fate": bundle.fate, "global_time": bundle.global_time,
+                "durability": bundle.durability, "versions": versions})
+        }).collect::<Vec<_>>();
+        serde_json::to_writer(
+            &mut self.writer,
+            &json!({"supporting_count": supporting, "bundles": bundles}),
+        )
+        .unwrap();
+        writeln!(&mut self.writer).unwrap();
+    }
+}
+
+fn measure_capture_decode(path: &Path) {
+    use std::io::BufRead;
+    let decode_hex = |value: &JsonValue| {
+        value
+            .as_str()
+            .unwrap()
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let mut encoded = Vec::new();
+    for line in std::io::BufReader::new(fs::File::open(path).unwrap()).lines() {
+        let frame: JsonValue = serde_json::from_str(&line.unwrap()).unwrap();
+        for bundle in frame["bundles"].as_array().unwrap() {
+            assert_eq!(bundle["versions"].as_array().unwrap().len(), 1);
+            encoded.push((
+                decode_hex(&bundle["tx_hex"]),
+                decode_hex(&bundle["versions"][0]["wire_hex"]),
+            ));
+        }
+    }
+    let schema = schema();
+    for round in 0..3 {
+        let started = Instant::now();
+        let mut decoded = Vec::with_capacity(encoded.len());
+        for (tx, version) in &encoded {
+            let tx: jazz::tx::Transaction = postcard::from_bytes(tx).unwrap();
+            let version: jazz::protocol::VersionRecord = postcard::from_bytes(version).unwrap();
+            let table = schema
+                .tables
+                .iter()
+                .find(|table| table.name == version.table())
+                .unwrap();
+            let cells = (0..table.columns.len())
+                .map(|index| version.cell_at(index).unwrap())
+                .collect::<Vec<_>>();
+            decoded.push((tx, version, cells));
+        }
+        let elapsed = started.elapsed();
+        std::hint::black_box(&decoded);
+        println!(
+            "{}",
+            json!({"round": round, "bundles": decoded.len(), "decode_and_extract_ms": elapsed.as_secs_f64()*1000.0,
+            "encoded_bytes": encoded.iter().map(|(tx, row)| tx.len()+row.len()).sum::<usize>()})
+        );
+    }
+}
+
+fn capture_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 15) as usize] as char);
+    }
+    output
 }
 
 #[cfg(feature = "cold-settle-attribution")]
@@ -752,7 +1152,14 @@ struct CountedDuplex {
 }
 
 impl Transport for DuplexTransport {
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.benchmark_transport")
+    )]
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if let Some(capture) = self.metrics.capture.borrow_mut().as_mut() {
+            capture.record(&message);
+        }
         self.metrics.messages.set(self.metrics.messages.get() + 1);
         if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription,
@@ -963,7 +1370,7 @@ fn resource_policy(access_table: &str) -> PolicyExpr {
         &[("administrator", PublicValue::Boolean(false))],
         GROUP_ACCESS,
         "user_id",
-        &["user"],
+        &["user", "account"],
         "group_id",
     )
 }
@@ -986,7 +1393,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         }
         fs::create_dir_all(&tmp_cache).expect("create temporary customer seed cache");
         {
-            let storage = open_storage(&tmp_cache, schema);
+            let storage = BoxedStorage::new(open_storage(&tmp_cache, schema));
             let state = block_on(jazz::node::NodeState::new_history_complete(
                 node(1),
                 schema.clone(),
@@ -1003,7 +1410,13 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
 
     let core_dir = tempfile::tempdir().unwrap();
     copy_dir_contents(&cache_dir, core_dir.path()).expect("copy cached customer seed store");
-    let storage = open_storage(core_dir.path(), schema);
+    let rocks = open_storage(core_dir.path(), schema);
+    let storage = if storage_mode() == "all-memory" {
+        BoxedStorage::new(copy_seed_to_memory(&rocks))
+    } else {
+        BoxedStorage::new(rocks)
+    };
+    let storage = work_budget::wrap(storage, "core");
     let state = block_on(jazz::node::NodeState::new_history_complete(
         node(1),
         schema.clone(),
@@ -1200,7 +1613,72 @@ fn push_seed(
     });
 }
 
-fn write_seed_plan(core: &Node<RocksDbStorage>, plan: &SeedPlan) {
+// Research export only: JSON is an interchange artifact, not a Jazz storage codec.
+fn export_sql_fixture(config: &Config, path: &std::path::Path) {
+    let plan = build_seed_plan(config);
+    let mut expected = plan.table_rows.clone();
+    let mut resources = Vec::new();
+    let mut child_slot = 0;
+    for spec in RESOURCE_SPECS {
+        let visible = plan.access[spec.table]
+            .iter()
+            .filter_map(|(row, group)| plan.visible_groups.contains(group).then_some(*row))
+            .collect::<BTreeSet<_>>();
+        expected.insert(spec.table.to_owned(), visible.iter().copied().collect());
+        let child = spec.child_rows.map(|_| {
+            let table = spec.child_table(child_slot);
+            child_slot += 1;
+            expected.insert(
+                table.clone(),
+                plan.child_parent[&table]
+                    .iter()
+                    .filter_map(|(row, parent)| visible.contains(parent).then_some(*row))
+                    .collect(),
+            );
+            table
+        });
+        resources.push(
+            serde_json::json!({"table": spec.table, "access": spec.access_table(), "child": child}),
+        );
+    }
+    for slot in 0..CHILD_TABLES {
+        expected.entry(format!("empty_child_{slot}")).or_default();
+    }
+    expected.retain(|table, _| subscription_tables().contains(table));
+    let writes = plan
+        .writes
+        .iter()
+        .map(|write| {
+            serde_json::json!({
+                "table": write.table, "id": write.row.0.to_string(), "cells": write.cells
+            })
+        })
+        .collect::<Vec<_>>();
+    let expected = expected
+        .into_iter()
+        .map(|(table, rows)| {
+            (
+                table,
+                rows.into_iter()
+                    .map(|row| row.0.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let document = serde_json::json!({
+        "fixture": SEED_CACHE_VERSION, "scale": config.scale,
+        "account": AuthorSubject::for_test_uuid(plan.ordinary_user.0).account_id().unwrap().0.to_string(),
+        "resources": resources, "expected": expected, "writes": writes,
+        "history": "one accepted mergeable transaction and one version per application row; no prior row versions"
+    });
+    serde_json::to_writer(
+        std::io::BufWriter::new(fs::File::create(path).unwrap()),
+        &document,
+    )
+    .unwrap();
+}
+
+fn write_seed_plan(core: &Node<BoxedStorage>, plan: &SeedPlan) {
     for write in &plan.writes {
         seed_db(core, &write.table, write.row, write.cells.clone());
     }
@@ -1412,15 +1890,40 @@ fn run_connect_and_subscribe(
     expected: &BTreeMap<String, usize>,
     config: &Config,
 ) -> RunSummary {
-    alloc_metrics::reset_and_start();
     #[cfg(feature = "cold-settle-attribution")]
     {
+        jazz_sim::phase_attribution::reset();
         jazz::cold_settle_attribution::reset();
         jazz::groove::cold_settle_attribution::reset();
     }
+    work_budget::start();
+    alloc_metrics::reset_and_start();
+    #[cfg(feature = "bench-perf-control")]
+    let mut perf_control = PerfControl::start();
     let start = Instant::now();
     let relay_core = duplex_counted();
     let client_relay = duplex_counted();
+    if let Some(root) = std::env::var_os("JAZZ_CUSTOMER_CAPTURE_SYNC") {
+        assert_eq!(label, "cold", "capture requires only the cold phase");
+        eprintln!("SQL sync capture enabled: discard this run's timing");
+        fs::create_dir_all(&root).unwrap();
+        for (name, metrics) in [
+            ("core-edge", &relay_core.right_to_left),
+            ("edge-client", &client_relay.right_to_left),
+        ] {
+            let path = Path::new(&root).join(format!("{name}.jsonl"));
+            *metrics.capture.borrow_mut() = Some(SyncCapture {
+                writer: std::io::BufWriter::new(
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(path)
+                        .unwrap(),
+                ),
+                schema: schema(),
+            });
+        }
+    }
     let _relay_upstream = block_on(relay.db.connect_upstream(relay_core.left_transport));
     let _core_sub = seeded
         .core
@@ -1459,6 +1962,7 @@ fn run_connect_and_subscribe(
 
     let settle_start = Instant::now();
     let mut ticks = 0_usize;
+    let mut tick_wall_us = [0_u128; 3];
     #[allow(unused_mut)]
     let mut attribution = AttributionSummary::default();
     while !subscriptions
@@ -1486,9 +1990,14 @@ fn run_connect_and_subscribe(
         let before_core_to_relay = relay_core.right_to_left.messages.get();
         #[cfg(feature = "cold-settle-attribution")]
         let core_operators_before = jazz::groove::cold_settle_attribution::snapshot();
-        #[cfg(feature = "cold-settle-attribution")]
         let core_tick_start = Instant::now();
+        #[cfg(feature = "cold-settle-attribution")]
+        tracing::trace_span!("cold.phase.core")
+            .in_scope(|| block_on(seeded.core.tick()))
+            .unwrap();
+        #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(seeded.core.tick()).unwrap();
+        tick_wall_us[0] += core_tick_start.elapsed().as_micros();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.core_tick_ns += core_tick_start.elapsed().as_nanos() as u64;
@@ -1504,9 +2013,14 @@ fn run_connect_and_subscribe(
         let relay_to_client_before = client_relay.right_to_left.messages.get();
         #[cfg(feature = "cold-settle-attribution")]
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
-        #[cfg(feature = "cold-settle-attribution")]
         let relay_tick_start = Instant::now();
+        #[cfg(feature = "cold-settle-attribution")]
+        tracing::trace_span!("cold.phase.relay")
+            .in_scope(|| block_on(relay.db.tick()))
+            .unwrap();
+        #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(relay.db.tick()).unwrap();
+        tick_wall_us[1] += relay_tick_start.elapsed().as_micros();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.relay_tick_ns += relay_tick_start.elapsed().as_nanos() as u64;
@@ -1522,9 +2036,14 @@ fn run_connect_and_subscribe(
         let client_to_relay_before = client_relay.left_to_right.messages.get();
         #[cfg(feature = "cold-settle-attribution")]
         let client_operators_before = jazz::groove::cold_settle_attribution::snapshot();
-        #[cfg(feature = "cold-settle-attribution")]
         let client_tick_start = Instant::now();
+        #[cfg(feature = "cold-settle-attribution")]
+        tracing::trace_span!("cold.phase.client")
+            .in_scope(|| block_on(client.db.tick()))
+            .unwrap();
+        #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(client.db.tick()).unwrap();
+        tick_wall_us[2] += client_tick_start.elapsed().as_micros();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.client_tick_ns += client_tick_start.elapsed().as_nanos() as u64;
@@ -1550,6 +2069,26 @@ fn run_connect_and_subscribe(
         ticks += 1;
     }
     let settle_ms = settle_start.elapsed().as_millis();
+    #[cfg(feature = "bench-perf-control")]
+    perf_control.command("disable");
+    // Match the readiness boundary: later one-shot verification and storage
+    // sizing are diagnostics, not work needed to make subscriptions usable.
+    let alloc_snapshot = alloc_metrics::stop();
+    let budget = work_budget::stop();
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_WORK_BUDGET") {
+        fs::write(path, serde_json::to_vec_pretty(&budget).unwrap()).unwrap();
+    }
+    #[cfg(feature = "cold-settle-attribution")]
+    let projection_nodes_at_readiness = jazz::groove::cold_settle_attribution::map_node_work();
+    #[cfg(feature = "cold-settle-attribution")]
+    {
+        attribution.phase_timing = jazz_sim::phase_attribution::snapshot();
+        if let Some(mut path) = std::env::var_os("JAZZ_PHASE_TIMELINE") {
+            path.push(format!(".{label}.json"));
+            jazz_sim::phase_attribution::write_timeline(std::path::Path::new(&path))
+                .expect("write phase CPU timeline");
+        }
+    }
     if label == "warm" {
         // Warm readiness is relay-local, but the benchmark also asserts that
         // the hot relay declares known state when it reconnects upstream. Drive
@@ -1654,7 +2193,6 @@ fn run_connect_and_subscribe(
     let encoded_storage_bytes =
         core_encoded_storage_bytes + relay_encoded_storage_bytes + client_encoded_storage_bytes;
     let peak_rss_bytes = peak_rss_bytes();
-    let alloc_snapshot = alloc_metrics::stop();
     let memory_amplification = if encoded_storage_bytes == 0 {
         0.0
     } else {
@@ -1691,6 +2229,20 @@ fn run_connect_and_subscribe(
         attribution.probe_core_to_relay_total_ns = core_to_relay_probe.total_ns;
         attribution.probe_relay_to_client_calls = relay_to_client_probe.calls;
         attribution.probe_relay_to_client_total_ns = relay_to_client_probe.total_ns;
+        for node in projection_nodes_at_readiness {
+            eprintln!(
+                "PROJECT_NODE {}",
+                json!({
+                    "node": node.node,
+                    "hydrate": node.hydrate,
+                    "calls": node.calls,
+                    "input_records": node.input_records,
+                    "output_records": node.output_records,
+                    "elapsed_ns": node.elapsed_ns,
+                    "plan": node.plan,
+                })
+            );
+        }
         let counters = jazz::cold_settle_attribution::snapshot();
         attribution.preflight_payload_encodes = counters.preflight_payload_encodes;
         attribution.preflight_payload_encode_ns = counters.preflight_payload_encode_ns;
@@ -1708,6 +2260,7 @@ fn run_connect_and_subscribe(
         attribution.selected_payload_bytes = counters.selected_payload_bytes;
     }
     RunSummary {
+        tick_wall_us,
         wall_ms: start.elapsed().as_millis(),
         connect_ms,
         subscribe_ms,
@@ -1868,16 +2421,19 @@ fn subscription_tables() -> Vec<String> {
     tables
 }
 
-fn seed_db(core: &Node<RocksDbStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
+fn seed_db(core: &Node<BoxedStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
     let node = core.node();
     let mut node = block_on(node.lock());
-    jazz_sim::fixture::commit_mergeable_unit_settled(
+    let (tx_id, _) = jazz_sim::fixture::commit_mergeable_unit_settled(
         &mut node,
         MergeableCommit::new(table, row, next_seed_time())
             .made_by(AuthorSubject::SYSTEM)
             .cells(cells),
     )
     .unwrap();
+    // Core seed rows must be accepted, not merely persisted local writes.
+    let outcome = block_on(node.finalize_local_mergeable_commit(tx_id)).unwrap();
+    jazz_sim::fixture::settle_outcome(&mut node, outcome).unwrap();
 }
 
 fn open_db_node(
@@ -1887,7 +2443,7 @@ fn open_db_node(
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbNode {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
-    let storage = open_storage(dir.path(), &schema);
+    let storage = work_budget::wrap(open_receiver_storage(dir.path(), &schema), "edge");
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -1909,7 +2465,7 @@ fn open_client_db(
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbClient {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
-    let storage = open_storage(dir.path(), &schema);
+    let storage = work_budget::wrap(open_receiver_storage(dir.path(), &schema), "client");
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -1925,6 +2481,59 @@ fn open_client_db(
             .unwrap();
     }
     DbClient { _dir: dir, db }
+}
+
+fn storage_mode() -> String {
+    let mode = std::env::var("JAZZ_CUSTOMER_STORAGE").unwrap_or_else(|_| "rocks".to_owned());
+    assert!(
+        matches!(mode.as_str(), "rocks" | "memory-receivers" | "all-memory"),
+        "unknown storage mode {mode}"
+    );
+    mode
+}
+
+fn open_receiver_storage(path: &Path, schema: &JazzSchema) -> BoxedStorage {
+    if storage_mode() == "rocks" {
+        BoxedStorage::new(open_storage(path, schema))
+    } else {
+        let families = schema.column_families();
+        let names = families.iter().map(String::as_str).collect::<Vec<_>>();
+        BoxedStorage::new(MemoryStorage::new(&names).unwrap())
+    }
+}
+
+// Preload identical physical seed state, including aliases and acceptance
+// metadata. This is setup, not measured synchronization or reseeding work.
+fn copy_seed_to_memory(source: &RocksDbStorage) -> MemoryStorage {
+    let families = source
+        .column_family_names()
+        .expect("RocksDB enumerates families");
+    let names = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let memory = MemoryStorage::new(&names).unwrap();
+    for family in families {
+        let entries = block_on(collect_scan(
+            block_on(source.scan(ScanRequest::prefix(family.clone(), Vec::new()))).unwrap(),
+        ))
+        .unwrap();
+        let operations = entries
+            .iter()
+            .map(|(key, value)| OwnedWriteOperation::Set {
+                cf: family.clone(),
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect();
+        block_on(memory.write_many(operations)).unwrap();
+        let restored = block_on(collect_scan(
+            block_on(memory.scan(ScanRequest::prefix(family, Vec::new()))).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            entries, restored,
+            "in-memory seed differs from persisted seed"
+        );
+    }
+    memory
 }
 
 fn open_storage(path: &std::path::Path, schema: &JazzSchema) -> RocksDbStorage {
@@ -1968,7 +2577,15 @@ fn group_cells(org: RowUuid, i: usize) -> BTreeMap<String, Value> {
 fn group_access_cells(group: RowUuid, user: RowUuid, i: usize) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("group_id".to_owned(), Value::Uuid(group.0)),
-        ("user_id".to_owned(), Value::Uuid(user.0)),
+        (
+            "user_id".to_owned(),
+            Value::Uuid(
+                AuthorSubject::for_test_uuid(user.0)
+                    .account_id()
+                    .expect("fixture identity has an account")
+                    .0,
+            ),
+        ),
         ("role".to_owned(), Value::EnumTag((i % 3) as u8)),
     ])
 }
@@ -2118,6 +2735,22 @@ fn pending_description(subscriptions: &[OpenSubscription]) -> String {
 
 fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     let mut fields = metadata_fields("customer_cold_start", "native", config.seed, "full");
+    fields.insert("storage_mode".to_owned(), json!(storage_mode()));
+    fields.insert(
+        "node_tick_wall_us_core_edge_client".to_owned(),
+        json!(summary.tick_wall_us),
+    );
+    fields.insert(
+        "sync_capture_enabled".to_owned(),
+        json!(std::env::var_os("JAZZ_CUSTOMER_CAPTURE_SYNC").is_some()),
+    );
+    fields.insert(
+        "allocation_instrumented".to_owned(),
+        json!(cfg!(any(
+            feature = "bench-alloc-sites",
+            feature = "bench-alloc-metrics"
+        ))),
+    );
     fields
         .get_mut("knobs")
         .and_then(JsonValue::as_object_mut)
@@ -2131,6 +2764,18 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         WireCompression::Lz4 => "lz4",
         WireCompression::Zstd => "zstd",
     };
+    fields.insert(
+        "cpu_profile_scope".to_owned(),
+        json!(if cfg!(feature = "bench-perf-control") {
+            Some("connect_subscribe_settle")
+        } else {
+            None
+        }),
+    );
+    fields.insert(
+        "phase_attribution_enabled".to_owned(),
+        json!(cfg!(feature = "cold-settle-attribution")),
+    );
     fields.insert("phase".to_owned(), json!(phase));
     fields.insert("scale".to_owned(), json!(config.scale));
     fields.insert("active_transport_codec".to_owned(), json!(transport_codec));
@@ -2288,6 +2933,18 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         "core_hydration_memo_entries".to_owned(),
         json!(summary.core_hydration_memo_entries),
     );
+    fields.insert(
+        "allocation_scope".to_owned(),
+        json!("connect_subscribe_settle"),
+    );
+    fields.insert(
+        "rust_allocator".to_owned(),
+        json!(jazz_benchmark_guard::ALLOCATOR_NAME),
+    );
+    fields.insert(
+        "allocator_preload".to_owned(),
+        json!(std::env::var_os("LD_PRELOAD").is_some()),
+    );
     fields.insert("peak_rss_bytes".to_owned(), json!(summary.peak_rss_bytes));
     fields.insert(
         "core_encoded_storage_bytes".to_owned(),
@@ -2395,10 +3052,16 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
         ),
     );
     let attribution = &summary.attribution;
+    fields.insert(
+        "settle_phase_timing".to_owned(),
+        attribution.phase_timing.clone(),
+    );
     let operator_json = |operators: &OperatorAttribution| {
         json!({
             "map_project": {
                 "calls": operators.map_calls,
+                "new_buffer_capacity_bytes": operators.map_buffer_capacity,
+                "new_buffer_used_bytes": operators.map_buffer_used,
                 "input_records": operators.map_input_records,
                 "output_records": operators.map_output_records,
             },
@@ -2451,7 +3114,7 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
                 "selected_payload_bytes": attribution.selected_payload_bytes,
             },
             "operator_cardinality": {
-                "bucket_order": ["tick_other", "tick_dominant_child", "hydrate_other", "hydrate_dominant_child"],
+                "bucket_order": ["tick", "hydrate"],
                 "core_to_relay": operator_json(&attribution.core_operators),
                 "relay_to_client": operator_json(&attribution.relay_operators),
                 "client": operator_json(&attribution.client_operators),
@@ -2576,15 +3239,19 @@ fn env_f64(name: &str, default: f64) -> f64 {
 }
 
 fn peak_rss_bytes() -> u64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     unsafe {
         let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
         if libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) == 0 {
-            return usage.assume_init().ru_maxrss as u64;
+            let peak = usage.assume_init().ru_maxrss as u64;
+            #[cfg(target_os = "linux")]
+            return peak.saturating_mul(1024);
+            #[cfg(target_os = "macos")]
+            return peak;
         }
         0
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         0
     }

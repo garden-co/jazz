@@ -78,3 +78,10 @@ measurement intent was ported to `authorization_scope_benchmark`.
 The old `memory_benchmark` file was removed rather than left as a broken
 RuntimeCore path. Reintroduce it after the `Db` facade exposes retained
 memory metrics comparable to the old SyncManager/QueryManager breakdown.
+
+`local_batch_phases` is the native inner-loop equivalent of the synthetic
+browser cold-load/bulk-update receipt. It separates foreground authoring,
+worker ingestion, supporting-row publication, codec work, receiver ingestion,
+and querying, with MemoryStorage/RocksDB and a raw batch baseline. See
+`dev/benchmarks/native-local-batch-profile.md` for commands, profile-clock
+requirements, observed amplification, and fidelity limits.

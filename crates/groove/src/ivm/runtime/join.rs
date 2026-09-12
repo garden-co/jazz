@@ -32,19 +32,28 @@ struct JoinBucket {
 }
 
 impl JoinBucket {
+    #[cfg(test)]
     fn get(&self, record: &Bytes) -> Option<&i64> {
-        self.overlay
-            .get(record)
-            .and_then(Option::as_ref)
-            .or_else(|| {
-                (!self.overlay.contains_key(record))
-                    .then(|| self.base.get(record))
-                    .flatten()
-            })
+        match self.overlay.get(record) {
+            Some(weight) => weight.as_ref(),
+            None => self.base.get(record),
+        }
     }
 
+    #[cfg(test)]
     fn set(&mut self, record: Bytes, weight: i64) {
         Rc::make_mut(&mut self.overlay).insert(record, (weight != 0).then_some(weight));
+    }
+
+    fn add_weight(&mut self, record: &Bytes, delta: i64) -> i64 {
+        // An overlay tombstone means zero, not the weight in the base.
+        // Entry retains the probe used to read the old weight for the write.
+        let weight = Rc::make_mut(&mut self.overlay)
+            .entry(record.clone())
+            .or_insert_with(|| self.base.get(record).copied());
+        let next = weight.unwrap_or_default() + delta;
+        *weight = (next != 0).then_some(next);
+        next
     }
 
     fn iter(&self) -> impl Iterator<Item = (&Bytes, &i64)> {
@@ -598,9 +607,7 @@ impl ArrangementState {
                     let bucket = buckets
                         .entry(delta.key.clone())
                         .or_insert_with(|| self.bucket(&delta.key).cloned().unwrap_or_default());
-                    let next_weight = bucket.get(&delta.delta.record).copied().unwrap_or_default()
-                        + delta.delta.weight;
-                    bucket.set(delta.delta.record.clone(), next_weight);
+                    bucket.add_weight(&delta.delta.record, delta.delta.weight);
                 }
                 let overlay = Rc::make_mut(&mut self.overlay);
                 for (key, bucket) in buckets {
@@ -769,15 +776,9 @@ fn append_join_deltas(
 fn apply_join_delta_to_index(index: &mut JoinIndex, deltas: &[KeyedRecordDelta<'_>]) {
     for delta in deltas {
         let bucket = index.entry(delta.key.clone()).or_default();
-        let next_weight =
-            bucket.get(&delta.delta.record).copied().unwrap_or_default() + delta.delta.weight;
-        if next_weight == 0 {
-            bucket.set(delta.delta.record.clone(), 0);
-            if bucket.is_empty() {
-                index.remove(&delta.key);
-            }
-        } else {
-            bucket.set(delta.delta.record.clone(), next_weight);
+        let next_weight = bucket.add_weight(&delta.delta.record, delta.delta.weight);
+        if next_weight == 0 && bucket.is_empty() {
+            index.remove(&delta.key);
         }
     }
 }
@@ -799,15 +800,18 @@ fn keyed_join_deltas<'a>(
 ) -> Result<Vec<KeyedRecordDelta<'a>>, IvmRuntimeError> {
     if let Some(field_indices) = scalar_join_field_indices(descriptor, fields)? {
         let mut keyed = Vec::with_capacity(deltas.len());
+        // Short keys are retained inline by JoinKey. Reuse the temporary encoder
+        // buffer instead of allocating and discarding it for every input row.
+        let mut key = Vec::new();
         for delta in deltas {
-            let mut key = Vec::new();
+            key.clear();
             for field_idx in &field_indices {
                 let value = descriptor.get_idx(delta.raw(), *field_idx)?;
                 encode_join_key_part(&mut key, &value, comparison)?;
             }
             keyed.push(KeyedRecordDelta {
                 delta,
-                key: JoinKey::from_vec(key),
+                key: JoinKey::from_slice(&key),
             });
         }
         return Ok(keyed);
@@ -1421,5 +1425,25 @@ mod tests {
         staged.commit_overlay();
         assert_eq!(staged.get(&record), Some(&1));
         assert_eq!(staged.get(&added), Some(&1));
+    }
+    // Internal because snapshot sharing and tombstone/base interaction are
+    // private arrangement mechanics, not a separate public query operation.
+    #[test]
+    fn bucket_weight_updates_preserve_tombstones_and_shared_snapshots() {
+        let record = Bytes::from_static(b"same-row");
+        let original = JoinBucket::from_records(HashMap::from_iter([(record.clone(), 2)]));
+        let mut staged = original.clone();
+        assert_eq!(staged.add_weight(&record, -2), 0);
+        assert_eq!(staged.get(&record), None);
+        let absent = staged.clone();
+        assert_eq!(staged.add_weight(&record, -1), -1);
+        assert_eq!(staged.add_weight(&record, 4), 3);
+        assert_eq!(original.get(&record), Some(&2));
+        assert_eq!(absent.get(&record), None);
+        assert!(Rc::ptr_eq(&original.base, &staged.base));
+        staged.commit_overlay();
+        assert_eq!(staged.get(&record), Some(&3));
+        assert_eq!(original.get(&record), Some(&2));
+        assert_eq!(absent.get(&record), None);
     }
 }

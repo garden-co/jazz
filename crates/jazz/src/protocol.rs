@@ -800,6 +800,11 @@ fn validate_version_bundles(bundles: &[VersionBundle]) -> Result<(), VersionBund
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RECEIPT_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn validate_version_records(
     versions: &[VersionRecord],
 ) -> Result<(), VersionBundleRunError> {
@@ -892,8 +897,8 @@ mod version_record_wire_row {
     const MAGIC: &[u8; 5] = b"JVRR\x01";
 
     // Descriptor identity includes immutable names, layouts, nested types and
-    // enum registry/case schemas. Cache only successful canonicalization;
-    // arbitrary OwnedRecord bytes still require validation on every call.
+    // enum registry/case schemas. Row bytes are produced by the encoder;
+    // untrusted receipt admission is separate from this representation codec.
     const MAX_DESCRIPTOR_PROOFS: usize = 16;
     const MAX_DESCRIPTOR_PROOF_BYTES: usize = 64 * 1024;
 
@@ -982,11 +987,6 @@ mod version_record_wire_row {
     pub(super) fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
         let proof = descriptor_for_encode(record.descriptor())?;
         let descriptor = &proof.encoded;
-        let canonical = proof.canonical;
-        let values = canonical.bind(record.raw()).to_values()?;
-        if canonical.create(&values)? != record.raw() {
-            return Err(groove::records::Error::NonCanonicalRecord);
-        }
         let length =
             u32::try_from(descriptor.len()).map_err(|_| groove::records::Error::LengthOverflow)?;
         let mut bytes = Vec::with_capacity(MAGIC.len() + 4 + descriptor.len() + record.raw().len());
@@ -1012,10 +1012,6 @@ mod version_record_wire_row {
         let end = 9usize.checked_add(length).ok_or_else(invalid)?;
         let descriptor = descriptor_for_decode(bytes.get(9..end).ok_or_else(invalid)?)?.canonical;
         let raw = bytes.get(end..).ok_or_else(invalid)?;
-        let values = descriptor.bind(raw).to_values()?;
-        if descriptor.create(&values)? != raw {
-            return Err(invalid());
-        }
         Ok(OwnedRecord::new(raw.to_vec(), descriptor))
     }
 
@@ -1053,8 +1049,13 @@ mod version_record_wire_row {
                 assert!(decode(&malformed_descriptor).is_err());
                 DESCRIPTOR_PROOFS
                     .with(|cache| assert_eq!(cache.borrow().entries.len(), usize::from(warm)));
-                assert!(decode(&malformed_row).is_err());
-                assert!(encode(&OwnedRecord::new(malformed_raw.clone(), descriptor)).is_err());
+                // The row codec preserves bytes; explicit receipt admission
+                // owns untrusted row validation, not descriptor cache hits.
+                assert_eq!(decode(&malformed_row).unwrap().raw(), malformed_raw);
+                assert_eq!(
+                    encode(&OwnedRecord::new(malformed_raw.clone(), descriptor)).unwrap(),
+                    malformed_row
+                );
                 assert_eq!(encode(&record).unwrap(), encoded);
             }
         }
@@ -1166,7 +1167,10 @@ mod version_record_wire_row {
             assert!(decode(&unknown_version).is_err());
             let mut trailing = encoded.clone();
             trailing.push(0);
-            assert!(decode(&trailing).is_err());
+            assert_eq!(
+                decode(&trailing).unwrap().raw(),
+                &trailing[9 + u32::from_le_bytes(trailing[5..9].try_into().unwrap()) as usize..]
+            );
             assert!(decode(&encoded[..8]).is_err());
             assert!(decode(&postcard::to_allocvec(&original).unwrap()).is_err());
         }
@@ -1196,6 +1200,8 @@ impl VersionRecord {
     /// deliberately permits deferred decoding, so callers must pass through
     /// here before treating a deserialized record as trusted.
     pub(crate) fn validate_receipt(&self) -> Result<(), VersionBundleRunError> {
+        #[cfg(test)]
+        RECEIPT_VALIDATIONS.with(|count| count.set(count.get() + 1));
         let malformed = || VersionBundleRunError::MalformedVersionRecord {
             table: self.table().to_owned(),
         };
@@ -1242,7 +1248,7 @@ impl VersionRecord {
             WireRowRecord::FIELD_CREATED_BY_IDX,
             WireRowRecord::FIELD_UPDATED_BY_IDX,
         ] {
-            RowAuthor::from_value(borrowed.get_idx(index).map_err(|_| malformed())?)
+            RowAuthor::from_record(borrowed.get_record(index).map_err(|_| malformed())?)
                 .map_err(|_| malformed())?;
         }
         borrowed
@@ -1458,10 +1464,10 @@ impl VersionRecord {
 
     /// Original author for this logical row.
     pub fn created_by(&self) -> AuthorSubject {
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(WireRowRecord::FIELD_CREATED_BY_IDX)
+                .get_record(WireRowRecord::FIELD_CREATED_BY_IDX)
                 .expect("valid wire created_by"),
         )
         .expect("canonical wire created_by")
@@ -1478,10 +1484,10 @@ impl VersionRecord {
 
     /// Author of this row version.
     pub fn updated_by(&self) -> AuthorSubject {
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(WireRowRecord::FIELD_UPDATED_BY_IDX)
+                .get_record(WireRowRecord::FIELD_UPDATED_BY_IDX)
                 .expect("valid wire updated_by"),
         )
         .expect("canonical wire updated_by")
@@ -5767,7 +5773,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(15);
             let encoded = groove::large_values::encode_stored_scalar(
                 value.kind,
-                &groove::large_values::StoredScalar::Chunked(value.clone()),
+                &groove::large_values::StoredScalar::Chunked(value.as_ref().clone()),
             )
             .expect("admitted large descriptor has canonical encoding");
             put_bytes(bytes, &encoded);
@@ -6422,7 +6428,7 @@ mod tests {
         for value in [
             Value::Record(record),
             Value::Enum(enum_value),
-            Value::Large(large),
+            Value::Large(Box::new(large)),
         ] {
             assert!(
                 MigrationLens::new(
@@ -6578,7 +6584,7 @@ mod tests {
             versions: vec![noncanonical],
         };
         assert!(message.validate_version_carriers().is_err());
-        assert!(crate::wire::encode_sync_message(&message).is_err());
+        assert!(crate::wire::encode_sync_message(&message).is_ok());
 
         // Hostile peers do not use our guarded encoder. Their postcard bytes
         // must fail closed without reaching the infallible public accessors.
@@ -6602,8 +6608,9 @@ mod tests {
             versions: vec![trailing_record],
         };
         assert!(
-            postcard::to_allocvec(&trailing_message).is_err(),
-            "the canonical row writer rejects trailing bytes"
+            crate::wire::decode_sync_message(&postcard::to_allocvec(&trailing_message).unwrap())
+                .is_err(),
+            "untrusted receipt admission rejects trailing row bytes"
         );
         // A hostile sender can still write an invalid blob without invoking
         // that writer. Splice its explicitly framed row into a valid message.
@@ -6698,7 +6705,7 @@ mod tests {
             table.wire_record_descriptor(),
             noncanonical_author,
         ));
-        assert!(crate::wire::encode_sync_message(&message).is_err());
+        assert!(crate::wire::encode_sync_message(&message).is_ok());
         let remote = postcard::to_allocvec(&message).unwrap();
         assert!(crate::wire::decode_sync_message(&remote).is_err());
 

@@ -1093,6 +1093,16 @@ where
             match local.subscription.try_recv() {
                 Ok(deltas) => {
                     local.initial_received = true;
+                    #[cfg(feature = "testing")]
+                    if local.result_table == "group"
+                        && std::env::var_os("JAZZ_HISTORY_DEBUG").is_some()
+                    {
+                        eprintln!(
+                            "HISTORY_GROUP_RUNTIME sinks={} terminal_sinks={}",
+                            deltas.sinks.len(),
+                            deltas.terminal_sinks.len()
+                        );
+                    }
                     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=drain sinks={} terminals={}",

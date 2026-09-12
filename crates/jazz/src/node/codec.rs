@@ -202,14 +202,18 @@ impl records::RecordField for AuthorSubject {
 
 impl records::RecordField for RowAuthor {
     fn read_raw(bytes: &[u8], value_type: &records::ValueType) -> Result<Self, records::Error> {
-        RowAuthor::from_value(<Value as records::RecordField>::read_raw(
-            bytes, value_type,
-        )?)
-        .map_err(|_| records::Error::NonCanonicalRecord)
+        let records::ValueType::Record(descriptor) = value_type else {
+            return Err(records::Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        };
+        RowAuthor::from_record(descriptor.bind(bytes))
+            .map_err(|_| records::Error::NonCanonicalRecord)
     }
 
     fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
-        RowAuthor::from_value(record.get_idx(idx)?).map_err(|_| records::Error::NonCanonicalRecord)
+        RowAuthor::from_record(record.get_record(idx)?)
+            .map_err(|_| records::Error::NonCanonicalRecord)
     }
 
     fn to_value(&self) -> Value {
@@ -1901,29 +1905,74 @@ impl VersionRecord {
         schema_version: SchemaVersionId,
         authored_columns: Option<BTreeSet<String>>,
     ) -> Result<Self, Error> {
-        // Wire records remain the replicated immutable projection. Content and
-        // register rows now live in different storage tables, so projection at
-        // this API boundary is assembled from typed row accessors.
-        let cells = table
-            .columns
-            .iter()
-            .map(|column| stored.cell(table, &column.name))
-            .collect::<Result<Vec<_>, _>>()?;
-        VersionRecord::encode(
-            table,
+        let descriptor = version_record_descriptors(table).1;
+        let input = stored.record.borrowed();
+        let register = stored.is_register_record();
+        let raw = descriptor.create_with_encoded_fields::<Error>(
+            input.raw().len(),
+            |index, output| {
+                // Both stored layouts share the provenance prefix. Timestamps
+                // are packed HLC values in storage and milliseconds on wire.
+                let source = match index {
+                    0 => Some(HistoryRowRecord::FIELD_ROW_UUID_IDX),
+                    1 => Some(HistoryRowRecord::FIELD_PARENTS_IDX),
+                    2 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
+                    4 => Some(HistoryRowRecord::FIELD_UPDATED_BY_IDX),
+                    i if i >= WireRowRecord::USER_CELLS && !register => {
+                        Some(HistoryRowRecord::USER_CELLS + i - WireRowRecord::USER_CELLS)
+                    }
+                    _ => None,
+                };
+                if let Some(source) = source {
+                    let span = input.descriptor().field_span(input.raw(), source)?;
+                    output.extend_from_slice(&input.raw()[span]);
+                    return Ok(());
+                }
+                let value = match index {
+                    3 => Value::U64(stored.created_at().physical_ms()),
+                    5 => Value::U64(stored.updated_at().physical_ms()),
+                    6 => Value::Nullable(stored.deletion().map(|deletion| {
+                        Box::new(Value::EnumTag(match deletion {
+                            DeletionEvent::Deleted => 0,
+                            DeletionEvent::Restored => 1,
+                        }))
+                    })),
+                    _ => Value::Nullable(None),
+                };
+                descriptor.encode_field_into(index, &value, output)?;
+                Ok(())
+            },
+        )?;
+        #[cfg(test)]
+        {
+            // Application equality cannot detect changed durable bytes. Keep
+            // the former value-based encoder as an independent byte oracle.
+            let cells = table
+                .columns
+                .iter()
+                .map(|column| stored.cell(table, &column.name))
+                .collect::<Result<Vec<_>, _>>()?;
+            let expected = VersionRecord::encode(
+                table,
+                schema_version,
+                stored.row_uuid(),
+                stored.parents(),
+                stored.created_by(),
+                stored.created_at().physical_ms(),
+                stored.updated_by(),
+                stored.updated_at().physical_ms(),
+                &cells,
+                stored.deletion(),
+            )?;
+            assert_eq!(raw.as_slice(), expected.record().raw());
+        }
+        Ok(VersionRecord::new(
+            table.name.clone(),
             schema_version,
-            stored.row_uuid(),
-            stored.parents(),
-            stored.created_by(),
-            stored.created_at().physical_ms(),
-            stored.updated_by(),
-            stored.updated_at().physical_ms(),
-            &cells,
-            stored.deletion(),
+            OwnedRecord::new(raw, descriptor),
         )
-        .map(|record| record.with_branch_key(stored.branch_key().clone()))
-        .map(|record| record.with_authored_columns(authored_columns))
-        .map_err(Error::from)
+        .with_branch_key(stored.branch_key().clone())
+        .with_authored_columns(authored_columns))
     }
 }
 
@@ -2081,6 +2130,93 @@ pub(super) struct VersionRowParts {
     pub(super) deletion: Option<DeletionEvent>,
 }
 
+// Record layout depends on the table name (enum registry binding) and ordered
+// physical column shape, not defaults, indices, or policies. Compare the shape
+// itself: schema objects are mutable and a table name alone is insufficient.
+struct HistoryDescriptorCacheEntry {
+    table_name: String,
+    columns: Vec<(
+        String,
+        groove::schema::ColumnType,
+        crate::schema::LargeValueSemanticKind,
+    )>,
+    descriptor: records::RecordDescriptor,
+    wire_descriptor: records::RecordDescriptor,
+}
+
+#[cfg(test)]
+thread_local! {
+    static HISTORY_DESCRIPTOR_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn prepared_wire_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    version_record_descriptors(table).1
+}
+
+fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    version_record_descriptors(table).0
+}
+
+fn version_record_descriptors(
+    table: &TableSchema,
+) -> (records::RecordDescriptor, records::RecordDescriptor) {
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<HistoryDescriptorCacheEntry>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(entry) = cache.iter().find(|entry| {
+            entry.table_name == table.name
+                && entry.columns.len() == table.columns.len()
+                && entry
+                    .columns
+                    .iter()
+                    .zip(&table.columns)
+                    .all(|((name, ty, kind), column)| {
+                        name == &column.name
+                            && ty == &column.column_type
+                            && kind == &column.large_value_kind
+                    })
+        }) {
+            return (entry.descriptor, entry.wire_descriptor);
+        }
+        #[cfg(test)]
+        HISTORY_DESCRIPTOR_BUILDS.with(|count| count.set(count.get() + 1));
+        let descriptor = table.authored_history_storage_table().record_schema();
+        let wire_descriptor = table.wire_record_descriptor();
+        // Bound retained preparation data even for applications with continual
+        // schema changes. Eviction affects preparation cost only, never bytes.
+        if cache.len() == 128 {
+            cache.remove(0);
+        }
+        cache.push(HistoryDescriptorCacheEntry {
+            table_name: table.name.clone(),
+            columns: table
+                .columns
+                .iter()
+                .map(|column| {
+                    (
+                        column.name.clone(),
+                        column.column_type.clone(),
+                        column.large_value_kind,
+                    )
+                })
+                .collect(),
+            descriptor,
+            wire_descriptor,
+        });
+        (descriptor, wire_descriptor)
+    })
+}
+
+pub(super) fn register_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    // Every table uses the same fixed deletion-register record fields.
+    static DESCRIPTOR: std::sync::OnceLock<records::RecordDescriptor> = std::sync::OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| table.register_storage_table().record_schema())
+}
+
 impl VersionRow {
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
@@ -2095,14 +2231,17 @@ impl VersionRow {
             history_values_from_parts(table, &parts)?
         };
         let record = if is_deletion {
-            owned_record_from_storage_values(&table.register_storage_table(), values)?
+            owned_record_from_storage_values_with_descriptor(
+                register_record_descriptor(table),
+                values,
+            )?
         } else {
             match history_descriptor {
                 Some(descriptor) => {
                     owned_record_from_storage_values_with_descriptor(descriptor, values)?
                 }
-                None => owned_record_from_storage_values(
-                    &table.authored_history_storage_table(),
+                None => owned_record_from_storage_values_with_descriptor(
+                    history_record_descriptor(table),
                     values,
                 )?,
             }
@@ -2133,34 +2272,115 @@ impl VersionRow {
                 "row version parents must be sorted and unique",
             ));
         }
-        let (storage_table, values) = if let Some(deletion) = version.deletion() {
-            (
-                table.register_storage_table(),
+        let deletion = version.deletion();
+        let descriptor = if deletion.is_some() {
+            register_record_descriptor(table)
+        } else {
+            history_record_descriptor(table)
+        };
+        let source = version.record().borrowed();
+        let source_descriptor = source.descriptor();
+        // Admission still requires an account-bearing row author, including the
+        // reserved SYSTEM identity. Preserve that check without rebuilding Values.
+        RowAuthor::from_persisted_subject(version.created_by())
+            .map_err(|_| Error::UnadmittedWriteAuthor)?;
+        RowAuthor::from_persisted_subject(version.updated_by())
+            .map_err(|_| Error::UnadmittedWriteAuthor)?;
+        let created_at = TxTime::from_physical_ms(version.created_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
+            .0;
+        let updated_at = TxTime::from_physical_ms(version.updated_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
+            .0;
+        let raw = descriptor.create_with_encoded_fields::<Error>(
+            source.raw().len() + 128,
+            |index, output| {
+                let source_index = match index {
+                    1 => Some(0),
+                    5 => Some(1),
+                    6 => Some(2),
+                    8 => Some(4),
+                    i if deletion.is_none() && i >= 10 && i < 10 + table.columns.len() => {
+                        Some(i - 10 + 7)
+                    }
+                    _ => None,
+                };
+                if let Some(source_index) = source_index {
+                    if source_descriptor
+                        .fields()
+                        .get(source_index)
+                        .is_some_and(|field| {
+                            field.value_type == descriptor.fields()[index].value_type
+                        })
+                    {
+                        let span = source_descriptor.field_span(source.raw(), source_index)?;
+                        output.extend_from_slice(&source.raw()[span]);
+                        return Ok(());
+                    }
+                }
+                let value = match index {
+                    0 => Value::Bytes(version.branch_key().canonical_bytes()),
+                    1 => Value::Uuid(version.row_uuid().0),
+                    2 => Value::U64(tx_time.0),
+                    3 => Value::U64(tx_node_alias.0),
+                    4 => Value::U64(schema_version_alias.0),
+                    5 => Value::Array(
+                        version
+                            .parents()
+                            .iter()
+                            .map(|parent| tx_id_value(*parent))
+                            .collect(),
+                    ),
+                    6 => row_author_value(version.created_by())?,
+                    7 => Value::U64(created_at),
+                    8 => row_author_value(version.updated_by())?,
+                    9 => Value::U64(updated_at),
+                    _ if deletion.is_some() => deletion_event_value(deletion.unwrap()),
+                    i if i < 10 + table.columns.len() => {
+                        let value = version.optional_cell_at(i - 10);
+                        if let Some(value) = value.as_ref() {
+                            validate_cell_value(&table.columns[i - 10], value)?;
+                        }
+                        Value::Nullable(value.map(Box::new))
+                    }
+                    _ => authored_column_ids_value(authored_columns.as_ref()),
+                };
+                descriptor.encode_field_into(index, &value, output)?;
+                Ok(())
+            },
+        )?;
+        #[cfg(test)]
+        {
+            // Compare the optimized representation boundary with the previous
+            // Value-based encoder across every ingress fixture in the unit suite.
+            let values = if let Some(deletion) = deletion {
                 register_values_from_wire(
                     version,
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
                     deletion,
-                )?,
-            )
-        } else {
-            (
-                table.authored_history_storage_table(),
+                )?
+            } else {
                 history_values_from_wire(
                     table,
                     version,
-                    authored_columns,
+                    authored_columns.clone(),
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
-                )?,
-            )
-        };
+                )?
+            };
+            assert_eq!(
+                raw,
+                descriptor.create(&values)?,
+                "borrowed wire ingest changed storage bytes"
+            );
+        }
         Ok(Self {
             table: groove::Intern::new(version.table().to_owned()),
             branch_key: version.branch_key().clone(),
-            record: owned_record_from_storage_values(&storage_table, values)?,
+            record: OwnedRecord::new(raw, descriptor),
         })
     }
 
@@ -2233,10 +2453,10 @@ impl VersionRow {
         } else {
             HistoryRowRecord::FIELD_CREATED_BY_IDX
         };
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(idx)
+                .get_record(idx)
                 .expect("valid created_by"),
         )
         .expect("canonical created_by")
@@ -2263,10 +2483,10 @@ impl VersionRow {
         } else {
             HistoryRowRecord::FIELD_UPDATED_BY_IDX
         };
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(idx)
+                .get_record(idx)
                 .expect("valid updated_by"),
         )
         .expect("canonical updated_by")
@@ -4063,6 +4283,7 @@ pub(super) fn history_values_from_parts(
     Ok(values)
 }
 
+#[cfg(test)]
 fn history_values_from_wire(
     table: &TableSchema,
     version: &VersionRecord,
@@ -4134,6 +4355,7 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
     ])
 }
 
+#[cfg(test)]
 fn register_values_from_wire(
     version: &VersionRecord,
     tx_node_alias: NodeAlias,
@@ -4221,6 +4443,7 @@ fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Erro
     ])
 }
 
+#[cfg(test)]
 pub(super) fn global_current_values(
     table: &TableSchema,
     version: &VersionRow,
@@ -4991,6 +5214,98 @@ pub(super) fn version_layer_string(layer: VersionLayer) -> String {
 #[cfg(test)]
 mod authority_storage_codec_tests {
     use super::*;
+
+    // Internal because application values cannot reveal descriptor construction
+    // frequency or accidental reuse of a different physical enum registry.
+    #[test]
+    fn version_descriptor_preparation_tracks_exact_schema_shape() {
+        use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+        let table = |name: &str, ty: ColumnType| {
+            JazzSchema::new(
+                &SchemaBuilder::new()
+                    .table(TableSchemaBuilder::new(name).column("payload", ty))
+                    .build(),
+            )
+            .unwrap()
+            .tables()[0]
+                .clone()
+        };
+        let text = table("descriptor_cache_test", ColumnType::Text);
+        let json = table("descriptor_cache_test", ColumnType::Json { schema: None });
+        let integer = table("descriptor_cache_test", ColumnType::Integer);
+        let enum_type = || ColumnType::ScalarEnum {
+            name: "state".into(),
+            variants: vec!["a".into(), "b".into()],
+        };
+        let enum_a = table("descriptor_cache_enum_a", enum_type());
+        let enum_b = table("descriptor_cache_enum_b", enum_type());
+        HISTORY_DESCRIPTOR_BUILDS.with(|count| count.set(0));
+        for table in [&text, &json, &integer, &enum_a, &enum_b] {
+            let expected = table.authored_history_storage_table().record_schema();
+            for _ in 0..100 {
+                assert_eq!(history_record_descriptor(table), expected);
+                assert_eq!(
+                    version_record_descriptors(table).1,
+                    table.wire_record_descriptor()
+                );
+                assert_eq!(
+                    register_record_descriptor(table),
+                    table.register_storage_table().record_schema()
+                );
+            }
+        }
+        assert_eq!(HISTORY_DESCRIPTOR_BUILDS.with(|count| count.get()), 5);
+        assert_ne!(
+            history_record_descriptor(&text),
+            history_record_descriptor(&json)
+        );
+        assert_ne!(
+            history_record_descriptor(&enum_a),
+            history_record_descriptor(&enum_b)
+        );
+        // Eviction must change only cost, not the selected record layout.
+        for index in 0..140 {
+            let other = table(
+                &format!("descriptor_cache_eviction_{index}"),
+                ColumnType::Text,
+            );
+            assert_eq!(
+                history_record_descriptor(&other),
+                other.authored_history_storage_table().record_schema()
+            );
+        }
+        assert_eq!(
+            history_record_descriptor(&text),
+            text.authored_history_storage_table().record_schema()
+        );
+    }
+
+    // Internal: these names are engine-owned lookup keys, not an application API.
+    #[test]
+    fn physical_version_name_resolution_preserves_exact_constructor_spelling() {
+        for id in [0, 1, 10, 1000, u64::MAX] {
+            let id = PhysicalTableId(id);
+            for (name, deletion) in [
+                (physical_history_table_name(id), false),
+                (physical_register_table_name(id), true),
+            ] {
+                assert_eq!(physical_version_table_id(&name, deletion), Some(id));
+                assert_eq!(physical_version_table_id(&name, !deletion), None);
+            }
+        }
+        for name in [
+            "jazz_physical__history",
+            "jazz_physical_01_history",
+            "jazz_physical_+1_history",
+            "jazz_physical_-1_history",
+            "jazz_physical_18446744073709551616_history",
+            "jazz_physical_1_history_extra",
+            "jazz_physical_1a_history",
+            "jazz_deletion_history",
+        ] {
+            assert_eq!(physical_version_table_id(name, false), None, "{name}");
+        }
+    }
 
     fn tx(time: u64, node: u8) -> TxId {
         TxId::new(TxTime(time), NodeUuid::from_bytes([node; 16]))

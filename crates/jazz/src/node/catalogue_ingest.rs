@@ -53,6 +53,159 @@ fn next_schema_version_alias_in_catalogue(
     ))
 }
 
+/// Adopt the authority's UUIDs without changing local enum tags. A node can
+/// have persisted rows before its first trusted snapshot, so replacing only
+/// the manifest leaves those rows' registries referring to provisional UUIDs.
+/// The two manifests describe the same authored schema: their occurrence and
+/// ordinal coordinates identify the corresponding cases, including UUIDs in
+/// nested payload paths. Registry order and introduction coordinates stay put.
+fn rebind_provisional_mapping_identities(
+    mapping: &mut SchemaPhysicalMapping,
+    identities: PhysicalIdentityManifest,
+) -> Result<
+    BTreeMap<crate::ids::GlobalPhysicalEnumVariantId, crate::ids::GlobalPhysicalEnumVariantId>,
+    Error,
+> {
+    if mapping.identities == identities {
+        return Ok(BTreeMap::new());
+    }
+    let mut replacements = BTreeMap::new();
+    let mut origins = BTreeMap::new();
+    for (table_name, table) in &mapping.identities.tables {
+        let authority_table =
+            identities
+                .tables
+                .get(table_name)
+                .ok_or(Error::InvalidCatalogueUpdate(
+                    "snapshot identity table missing",
+                ))?;
+        for (column_name, column) in &table.columns {
+            let authority_column =
+                authority_table
+                    .columns
+                    .get(column_name)
+                    .ok_or(Error::InvalidCatalogueUpdate(
+                        "snapshot identity column missing",
+                    ))?;
+            for (path, cases) in &column.enum_variants {
+                let authority_cases = authority_column.enum_variants.get(path).ok_or(
+                    Error::InvalidCatalogueUpdate("snapshot enum identity occurrence missing"),
+                )?;
+                if cases.len() != authority_cases.len() {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "snapshot enum identity occurrence width differs",
+                    ));
+                }
+                for (old, new) in cases.iter().copied().zip(authority_cases.iter().copied()) {
+                    if replacements
+                        .insert(old, new)
+                        .is_some_and(|previous| previous != new)
+                        || origins
+                            .insert(new, old)
+                            .is_some_and(|previous| previous != old)
+                    {
+                        return Err(Error::InvalidCatalogueUpdate(
+                            "snapshot enum identity rebind is ambiguous",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if replacements
+        .iter()
+        .any(|(old, new)| old != new && replacements.contains_key(new))
+    {
+        return Err(Error::InvalidCatalogueUpdate(
+            "snapshot enum identity rebind overlaps provisional identities",
+        ));
+    }
+    rebind_mapping_enum_cases(mapping, &replacements)?;
+    mapping.identities = identities;
+    Ok(replacements)
+}
+
+fn rebind_mapping_enum_cases(
+    mapping: &mut SchemaPhysicalMapping,
+    replacements: &BTreeMap<
+        crate::ids::GlobalPhysicalEnumVariantId,
+        crate::ids::GlobalPhysicalEnumVariantId,
+    >,
+) -> Result<(), Error> {
+    if replacements.is_empty() {
+        return Ok(());
+    }
+    let path_replacements = replacements
+        .iter()
+        .map(|(old, new)| (old.0.simple().to_string(), new.0.simple().to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let rebind_path = |path: String| {
+        let mut previous = "";
+        path.split('/')
+            .map(|component| {
+                let rebound = if previous == "case" {
+                    path_replacements
+                        .get(component)
+                        .map(String::as_str)
+                        .unwrap_or(component)
+                } else {
+                    component
+                };
+                previous = component;
+                rebound
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    for table in mapping.tables.values_mut() {
+        for cases in table.scalar_enum_cases.values_mut() {
+            for case in cases {
+                if let Some(id) = replacements.get(&case.id) {
+                    case.id = *id;
+                }
+            }
+        }
+        for cases in table.payload_enum_cases.values_mut() {
+            for case in cases {
+                if let Some(id) = replacements.get(&case.id) {
+                    case.id = *id;
+                }
+            }
+        }
+        for paths in table.nested_scalar_enum_cases.values_mut() {
+            let previous = std::mem::take(paths);
+            for (path, mut cases) in previous {
+                for case in &mut cases {
+                    if let Some(id) = replacements.get(&case.id) {
+                        case.id = *id;
+                    }
+                }
+                if paths.insert(rebind_path(path), cases).is_some() {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "snapshot enum occurrence rebind collides",
+                    ));
+                }
+            }
+        }
+        for paths in table.nested_payload_enum_cases.values_mut() {
+            let previous = std::mem::take(paths);
+            for (path, mut cases) in previous {
+                for case in &mut cases {
+                    if let Some(id) = replacements.get(&case.id) {
+                        case.id = *id;
+                    }
+                }
+                if paths.insert(rebind_path(path), cases).is_some() {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "snapshot enum occurrence rebind collides",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -411,8 +564,18 @@ where
         // snapshot genesis manifest before validating descendant publications.
         // Otherwise a valid authority lineage would be compared to freshly
         // minted local UUIDs and rejected during snapshot planning.
-        if let Some(mapping) = planned.physical_mappings.get_mut(genesis_id) {
-            mapping.identities = genesis_physical_identities.clone();
+        let genesis_rebindings = planned
+            .physical_mappings
+            .get_mut(genesis_id)
+            .map(|mapping| {
+                rebind_provisional_mapping_identities(mapping, genesis_physical_identities.clone())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        for (schema, mapping) in &mut planned.physical_mappings {
+            if schema != genesis_id {
+                rebind_mapping_enum_cases(mapping, &genesis_rebindings)?;
+            }
         }
 
         for (catalogue_seq, publication) in lineages {
@@ -510,7 +673,7 @@ where
         // Schema identity deliberately excludes policy and physical-index
         // declarations. Apply the sender's final payloads after lineage so
         // agreeing same-id metadata updates use the ordinary trusted path.
-        for schema in schemas.into_values() {
+        for schema in schemas.values().cloned() {
             if !planned.catalogue_schemas.contains_key(&schema.id) {
                 return Err(Error::InvalidCatalogueUpdate(
                     "trusted catalogue snapshot schema has no lineage",
@@ -548,7 +711,11 @@ where
             // Preserve only below-semantic-layer aliases. The authority
             // manifest is the global identity source of truth and replaces
             // any provisional UUIDs minted while the receiver was offline.
-            local_mapping.identities = authority_identities;
+            let anchor_rebindings =
+                rebind_provisional_mapping_identities(&mut local_mapping, authority_identities)?;
+            for mapping in planned.physical_mappings.values_mut() {
+                rebind_mapping_enum_cases(mapping, &anchor_rebindings)?;
+            }
             planned.schema_version_aliases.insert(anchor, local_alias);
             planned.physical_mappings.insert(anchor, local_mapping);
 
@@ -658,9 +825,127 @@ where
             .schema_version_aliases
             .get(&planned.current_schema_version_id)
             .copied();
+        // Validate the complete authority graph, including retained mappings.
+        // The live catalogue can additionally contain the application's local
+        // draft schema awaiting its lineage publication. That provisional
+        // schema is not another authority genesis and must remain pending.
+        // Snapshot admission above already requires exactly one authority root.
+        let authority_mappings = planned
+            .physical_mappings
+            .iter()
+            .filter(|(schema, _)| schemas.contains_key(schema))
+            .map(|(schema, mapping)| (*schema, mapping.clone()))
+            .collect();
+        Self::validate_durable_physical_identity_bindings(
+            &schemas,
+            &authority_mappings,
+            &planned.staged_lineages,
+            &planned.active_lineages_by_target,
+            &planned.pending_lineages,
+            Some(*genesis_id),
+            CatalogueBootstrapState::Ready,
+        )?;
+        validate_scalar_enum_case_provenance(
+            &planned.physical_mappings,
+            &planned.schema_version_aliases,
+        )?;
+        validate_payload_enum_case_provenance(
+            &planned.physical_mappings,
+            &planned.schema_version_aliases,
+        )?;
         Ok(PlannedCatalogueSnapshot {
             catalogue: planned,
             activated_lineages,
         })
+    }
+}
+
+#[cfg(test)]
+mod enum_rebinding_tests {
+    use super::*;
+
+    // Internal coverage is necessary: public schema builders currently reject
+    // enums nested inside payload fields, but recovered mappings support these
+    // UUID-qualified paths. Public direct/array adoption tests cover row bytes.
+    #[test]
+    fn payload_owned_enum_paths_rebind_without_changing_physical_provenance() {
+        use crate::ids::GlobalPhysicalEnumVariantId;
+        let id = |value| GlobalPhysicalEnumVariantId(uuid::Uuid::from_u128(value));
+        let schema = SchemaVersionId(uuid::Uuid::from_u128(7));
+        let old_path = format!("root/case/{}/field/status", id(1).0.simple());
+        let new_path = format!("root/case/{}/field/status", id(2).0.simple());
+        let column = PhysicalColumnId(9);
+        let mut mapping = SchemaPhysicalMapping {
+            identities: PhysicalIdentityManifest {
+                tables: BTreeMap::new(),
+            },
+            tables: BTreeMap::from([(
+                "items".to_owned(),
+                TablePhysicalMapping {
+                    table_id: PhysicalTableId(3),
+                    columns: BTreeMap::from([("event".to_owned(), column)]),
+                    variant_cases: Vec::new(),
+                    scalar_enum_cases: BTreeMap::new(),
+                    payload_enum_cases: BTreeMap::new(),
+                    nested_scalar_enum_cases: BTreeMap::from([(
+                        column,
+                        BTreeMap::from([(
+                            old_path.clone(),
+                            vec![GlobalScalarEnumCaseId {
+                                id: id(3),
+                                introducing_schema: schema,
+                                introducing_ordinal: 5,
+                            }],
+                        )]),
+                    )]),
+                    nested_payload_enum_cases: BTreeMap::from([(
+                        column,
+                        BTreeMap::from([(
+                            old_path.clone(),
+                            vec![GlobalEnumCaseId {
+                                id: id(4),
+                                introducing_schema: schema,
+                                introducing_ordinal: 300,
+                            }],
+                        )]),
+                    )]),
+                },
+            )]),
+        };
+        let replacements = BTreeMap::from([(id(1), id(2)), (id(3), id(5)), (id(4), id(6))]);
+        rebind_mapping_enum_cases(&mut mapping, &replacements).unwrap();
+        let table = &mapping.tables["items"];
+        assert_eq!(table.table_id, PhysicalTableId(3));
+        assert_eq!(table.columns["event"], column);
+        assert!(!table.nested_scalar_enum_cases[&column].contains_key(&old_path));
+        assert!(!table.nested_payload_enum_cases[&column].contains_key(&old_path));
+        let scalar = &table.nested_scalar_enum_cases[&column][&new_path][0];
+        assert_eq!(
+            (
+                scalar.id,
+                scalar.introducing_schema,
+                scalar.introducing_ordinal
+            ),
+            (id(5), schema, 5)
+        );
+        let payload = &table.nested_payload_enum_cases[&column][&new_path][0];
+        assert_eq!(
+            (
+                payload.id,
+                payload.introducing_schema,
+                payload.introducing_ordinal
+            ),
+            (id(6), schema, 300)
+        );
+        let mut collision = mapping.clone();
+        let paths = collision
+            .tables
+            .get_mut("items")
+            .unwrap()
+            .nested_scalar_enum_cases
+            .get_mut(&column)
+            .unwrap();
+        paths.insert(old_path, paths[&new_path].clone());
+        assert!(rebind_mapping_enum_cases(&mut collision, &replacements).is_err());
     }
 }

@@ -218,20 +218,25 @@ impl IvmRuntime {
         if self.pending_incremental_polling {
             return;
         }
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
+        let removed = self.gc_ephemeral_nodes(0);
+        if !removed.is_empty() {
+            let removed: HashSet<_> = removed.into_iter().collect();
+            // Reclaim a batch with one pass per state map, not one full scan
+            // for every expired node. Shared and suspended nodes are retained
+            // by gc_ephemeral_nodes before this set is constructed.
+            self.operator_states
+                .retain(|key, _| !removed.contains(&key.node));
+            self.arrangement_states
+                .retain(|key, _| !removed.contains(&key.input));
+            self.eval_memo.retain(|key, _| !removed.contains(&key.node));
+            for node in removed {
+                self.arrangement_keys_by_input.remove(&node);
+                self.node_meta.remove(&node);
+            }
         }
         if !self.pending_incremental.is_pending() {
             self.ephemeral_graph_gc_pending = false;
         }
-    }
-
-    pub(super) fn remove_node_runtime(&mut self, node: NodeId) {
-        self.operator_states.retain(|key, _| key.node != node);
-        self.arrangement_states.retain(|key, _| key.input != node);
-        self.arrangement_keys_by_input.remove(&node);
-        self.eval_memo.retain(|key, _| key.node != node);
-        self.node_meta.remove(&node);
     }
 
     pub(super) fn affected_recursive_nodes_are_current(

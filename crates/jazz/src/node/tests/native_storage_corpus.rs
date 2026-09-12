@@ -1098,7 +1098,7 @@ where
         .expect("fixture root finalizes through the normal node admission path");
     first_commit
         .cells
-        .insert("attachment".to_owned(), Value::Large(staged.value_ref));
+        .insert("attachment".to_owned(), Value::Large(Box::new(staged.value_ref)));
     first_commit
         .prepared_large_columns
         .insert("attachment".to_owned());

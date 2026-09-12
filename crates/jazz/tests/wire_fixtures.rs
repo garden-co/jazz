@@ -1027,7 +1027,7 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
     }
 }
 
-/// Snapshots have only exact native row references; duplicate references are malformed.
+/// Untrusted admission rejects malformed references; the trusted encoder does not validate.
 #[test]
 fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
     let (_, _, message) = wire_fixture_messages()
@@ -1038,13 +1038,11 @@ fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
         unreachable!()
     };
     view.supporting_rows.push(view.supporting_rows[0].clone());
-    assert!(encode_sync_message(&SyncMessage::ViewUpdate(view.clone())).is_err());
-    let bytes = postcard::to_allocvec(&SyncMessage::ViewUpdate(view.clone())).unwrap();
+    let bytes = encode_sync_message(&SyncMessage::ViewUpdate(view.clone())).unwrap();
     assert!(decode_sync_message(&bytes).is_err());
     view.supporting_rows.pop();
     view.supporting_rows[0].version_table = String::new().into();
-    assert!(encode_sync_message(&SyncMessage::ViewUpdate(view.clone())).is_err());
-    let bytes = postcard::to_allocvec(&SyncMessage::ViewUpdate(view)).unwrap();
+    let bytes = encode_sync_message(&SyncMessage::ViewUpdate(view)).unwrap();
     assert!(decode_sync_message(&bytes).is_err());
 }
 

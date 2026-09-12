@@ -147,6 +147,22 @@ _Further invariants._ `INV-QUERY-5` — `MapProject` copies only configured fiel
 and preserves the input weight. `INV-QUERY-6` — `UnwrapNullable` preserves the
 original delta weight.
 
+### Consumer-local column pruning
+
+After resolving field references against the original descriptors, compilation
+may narrow a semi/anti join's right input to its matching fields. Projection
+preserves weights; it is not DISTINCT. Multiple rows sharing a key retain their
+combined multiplicity, including simultaneous insertion and retraction.
+
+For a projection over an inner join, each join input may retain only fields
+required by the output expressions and matching keys. Expressions are rebound
+to the narrowed descriptor by resolved position; logical field labels must not
+be reinterpreted after dropping columns. Comparison modes and exact value types
+remain unchanged. These are consumer-local graphs: independently used sources,
+projections and arrangements remain intact. Pruning does not cross upstream
+filters, winner/window selection, recursive boundaries or fallible expressions;
+it must not suppress errors or change which rows qualify or their ordering.
+
 ### 3.4 Joins
 
 Joins combine or suppress rows by key. groove executes the **inner equi-join**

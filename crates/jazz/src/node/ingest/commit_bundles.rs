@@ -2,6 +2,24 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Benchmark-only entry to the ordinary reset-bundle bulk ingestion path.
+    /// Inputs are predecoded trusted captures; this deliberately omits wire
+    /// admission and subscription scope bookkeeping to isolate installation.
+    #[cfg(feature = "testing")]
+    pub async fn ingest_captured_reset_bundles_for_benchmark(
+        &mut self,
+        bundles: &[crate::protocol::VersionBundle],
+    ) -> Result<usize, Error> {
+        let refs = bundles
+            .iter()
+            .map(crate::protocol::VersionBundle::as_ref)
+            .collect::<Vec<_>>();
+        Ok(self
+            .ingest_reset_view_bundle_refs_in_bulk(&refs, None)
+            .await?
+            .len())
+    }
+
     /// Ingest a commit unit as fate authority.
     pub async fn ingest_commit_unit(
         &mut self,
@@ -44,7 +62,8 @@ where
         } else {
             tx
         };
-        if crate::protocol::validate_version_records(&versions).is_err() {
+        if ingest_context.is_none_or(|context| !context.trust.is_trusted())
+            && crate::protocol::validate_version_records(&versions).is_err() {
             return self
                 .reject_malformed_commit(tx, "malformed version receipt".to_owned())
                 .await
@@ -280,13 +299,6 @@ where
         versions: Vec<VersionRecord>,
     ) -> Result<PublicationOutcome<Fate>, Error> {
         self.require_catalogue_ready()?;
-        if crate::protocol::validate_version_records(&versions).is_err() {
-            let fate = Fate::Rejected(RejectionReason::MalformedCommit(
-                "malformed version receipt".to_owned(),
-            ));
-            self.ingest_rejected_transaction(tx, fate.clone()).await?;
-            return Ok(PublicationOutcome::settled(fate));
-        }
         let tx_id = tx.tx_id;
         if tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit(
@@ -503,12 +515,23 @@ where
     where
         S: ReopenableStorage,
     {
+        self.ingest_relay_commit_unit_with_encoder_trust(tx, versions, false).await
+    }
+
+    pub(crate) async fn ingest_relay_commit_unit_with_encoder_trust(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        trusted_encoder: bool,
+    ) -> Result<(), Error>
+    where S: ReopenableStorage,
+    {
         self.require_catalogue_ready()?;
         let tx = Transaction {
             permission_subject: None,
             ..tx
         };
-        if crate::protocol::validate_version_records(&versions).is_err()
+        if (!trusted_encoder && crate::protocol::validate_version_records(&versions).is_err())
             || commit_unit_limit_violation(&versions).is_some()
             || !commit_unit_write_count_matches(&tx, versions.len())
         {
@@ -1002,28 +1025,29 @@ where
         let versions = canonical_versions(versions);
         self.prepare_authored_schema_variants_for_commit(&versions).await?;
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
-            let mut existing_versions = self
-                .query_versions_for_tx(tx.tx_id).await?
-                .into_iter()
-                .map(|stored| self.version_record_from_row(&stored))
-                .collect::<Result<Vec<_>, Error>>()?;
-            existing_versions.sort();
             if !(known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
                 || existing.view_scoped_cardinality
                     && known_transaction_payload_matches_redacted_cardinality(&existing.tx, &tx))
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
+            // Normalize aliases before establishing the batch's resident base.
+            for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
+                self.ensure_schema_version_alias(schema).await?;
+            }
+            for parent in versions.iter().flat_map(VersionRecord::parents) {
+                self.ensure_node_alias(parent.node).await?;
+            }
+            let mut batch = self.database.open_batch();
             let mut version_bundles = Vec::new();
             for version in versions {
-                match existing_versions.iter().find(|existing| {
-                    view_version_key_for_ingest(existing) == view_version_key_for_ingest(&version)
-                }) {
-                    Some(existing) if existing != &version => {
-                        return Err(Error::ConflictingCommitUnit(tx.tx_id));
-                    }
-                    Some(_) => {}
-                    None => version_bundles.push(version),
+                let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, &version).await?;
+                let (table, record) = self.version_storage_write_binding(&stored)?;
+                let key = self.version_storage_primary_key(&stored)?;
+                match batch.ensure_exact(&self.database, table.as_ref(), key, record).await? {
+                    groove::db::EnsureExactOutcome::Inserted => version_bundles.push(version),
+                    groove::db::EnsureExactOutcome::AlreadyIdentical => {},
+                    groove::db::EnsureExactOutcome::Conflict => return Err(Error::ConflictingCommitUnit(tx.tx_id)),
                 }
             }
             if version_bundles.is_empty() && !existing.view_scoped_cardinality {
@@ -1031,12 +1055,15 @@ where
                     .await?;
                 return Ok(());
             }
-            return self.ingest_transaction_and_versions(
+            return self.ingest_transaction_and_versions_with_current_indexes_in_batch(
+                batch,
                 tx,
                 version_bundles,
                 fate,
                 global_time,
                 durability,
+                true,
+                false,
             ).await;
         }
         self.ingest_transaction_and_versions(tx, versions, fate, global_time, durability)
@@ -1100,6 +1127,7 @@ where
         .await
     }
 
+    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.ingest"))]
     pub(super) async fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
@@ -1216,7 +1244,6 @@ where
             .flat_map(|(tx_bundles, _, _)| {
                 tx_bundles.iter().flat_map(|bundle| bundle.versions)
             })
-            .cloned()
             .collect::<Vec<_>>();
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
 
@@ -1224,7 +1251,7 @@ where
         for (tx_bundles, tx, _) in &eligible {
             let versions = tx_bundles
                 .iter()
-                .flat_map(|bundle| bundle.versions.iter().cloned())
+                .flat_map(|bundle| bundle.versions.iter())
                 .collect::<Vec<_>>();
             if let Some(versions) = self.complete_parent_versions(tx, &versions).await? {
                 complete_parents.push((tx.tx_id, versions));
@@ -1306,15 +1333,16 @@ where
             versions.sort();
             for version in versions {
                 let author_schema = version.schema_version();
-                let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
+                self.table_in_schema_ref(version.table(), author_schema)?;
                 let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
+                let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
                 let authored_column_ids = self.authored_column_ids_for_names(
                     author_schema,
                     version.table(),
                     version.authored_columns(),
                 )?;
                 let stored = VersionRow::from_wire_with_schema_version(
-                    &source_table_schema,
+                    source_table_schema,
                     version,
                     authored_column_ids,
                     tx_node_alias,
@@ -1373,8 +1401,16 @@ where
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
-        self.rebuild_merge_heads_after_history_commit(&content_rows)
-            .await?;
+        // Counterfactual benchmark only: price the post-write history reread.
+        // This is not a supported ingestion mode or a proof of redundancy.
+        #[cfg(feature = "testing")]
+        let skip_head_rebuild = std::env::var_os("JAZZ_HISTORY_SKIP_HEAD_REBUILD").is_some();
+        #[cfg(not(feature = "testing"))]
+        let skip_head_rebuild = false;
+        if !skip_head_rebuild {
+            self.rebuild_merge_heads_after_history_commit(&content_rows)
+                .await?;
+        }
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
             self.persist_storage_consistency_marker_through(tx_time).await?;
         }

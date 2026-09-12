@@ -559,6 +559,10 @@ where
         .await
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_lowering")
+    )]
     async fn compile_query_program_request_with_inline_sources_and_access_paths_inner(
         &mut self,
         request: QueryProgramRequest,

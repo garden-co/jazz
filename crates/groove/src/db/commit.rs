@@ -110,12 +110,30 @@ impl Database {
     /// persistence. The returned handle owns the pending persistence work and
     /// no longer borrows this database, so resident queries may continue while
     /// storage suspends.
-    pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.storage_apply")
+    )]
+    pub async fn apply_batch(&mut self, mut batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
+        batch.check_exact_base(self)?;
         self.ensure_not_poisoned()?;
         let accepted_large_values = batch.accepted_large_values.clone();
         let defer_notifications_until_durable =
             batch.notification_timing == NotificationTiming::AfterPersistence;
+        // Later ordinary writes must not invalidate an ensure_exact result.
+        let exact_keys = std::mem::take(&mut batch.exact_keys);
+        let borrowed_exact_keys = exact_keys
+            .iter()
+            .map(|((table, key), value)| ((table.as_str(), key.as_slice()), value))
+            .collect::<HashMap<_, _>>();
         let pending_writes = self.pending_writes_from_batch(batch)?;
+        for write in &pending_writes {
+            if let Some(expected) = borrowed_exact_keys.get(&(write.table(), write.key()))
+                && write.stored_record().as_ref() != Some(*expected)
+            {
+                return Err(Error::ImmutableBatchConflict);
+            }
+        }
         let mut accepted_staging = Vec::new();
         for staged_id in &accepted_large_values {
             let key = staged_large_value_key(*staged_id);
@@ -140,12 +158,8 @@ impl Database {
                 else {
                     continue;
                 };
-                for value in descriptor.bind(record).to_values()? {
-                    if value_contains_large_ref(&value, &staged.value_ref) {
-                        found = true;
-                        break;
-                    }
-                }
+                found = descriptor
+                    .visit_large_value_refs(record, |reference| reference == &staged.value_ref)?;
                 if found {
                     break;
                 }
@@ -165,36 +179,40 @@ impl Database {
         let stores = pending_writes
             .iter()
             .zip(&descriptors)
-            .map(|(write, descriptor)| {
-                let key_descriptor = self
-                    .table(write.table())
-                    .ok()
-                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
-                record_store_for_table(&overlay, write.table(), key_descriptor, descriptor)
-            })
+            .map(|(write, descriptor)| RecordStore::new(&overlay, write.table(), descriptor))
             .collect::<Vec<_>>();
         let table_deltas =
             compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
         let mut durable_root_deltas = BTreeMap::<crate::large_values::NodeRef, i64>::new();
         for table_delta in &table_deltas {
             for delta in &table_delta.deltas {
-                for value in table_delta.descriptor.bind(&delta.record).to_values()? {
-                    collect_large_root_deltas(&value, delta.weight, &mut durable_root_deltas);
-                }
+                table_delta
+                    .descriptor
+                    .visit_large_value_refs(&delta.record, |reference| {
+                        *durable_root_deltas
+                            .entry(reference.root.clone())
+                            .or_default() += delta.weight;
+                        false
+                    })?;
             }
         }
         let mut staged_operations = pending_writes
-            .iter()
+            .into_iter()
             .map(|write| match write {
-                PendingTableWrite::Set { key, .. } => OwnedWriteOperation::Set {
-                    cf: write.table().to_owned(),
-                    key: key.clone(),
-                    value: write.stored_record().expect("set has a stored record"),
+                PendingTableWrite::Set {
+                    table,
+                    key,
+                    variant_tag,
+                    record,
+                    ..
+                } => OwnedWriteOperation::Set {
+                    cf: table,
+                    key,
+                    value: encode_variant_record(variant_tag, &record),
                 },
-                PendingTableWrite::Delete { key, .. } => OwnedWriteOperation::Delete {
-                    cf: write.table().to_owned(),
-                    key: key.clone(),
-                },
+                PendingTableWrite::Delete { table, key, .. } => {
+                    OwnedWriteOperation::Delete { cf: table, key }
+                }
             })
             .collect::<Vec<_>>();
         for staged_id in accepted_large_values {
@@ -361,11 +379,9 @@ impl Database {
         let tick = self
             .ivm_runtime
             .assign_resident_publication(resident_tick, publication);
-        let staged_operations = staged_state.borrow().clone().into_operations();
-
         self.resident_writes
             .borrow_mut()
-            .extend(staged_operations.iter().cloned());
+            .extend(staged_state.borrow().operations().iter().cloned());
         self.resident_publications
             .insert(publication, Rc::clone(&staged_state));
         if !roots.is_empty() {
@@ -453,7 +469,7 @@ impl Database {
     pub(super) fn refresh_resident_writes(&mut self) {
         let mut resident_writes = StagedWriteState::default();
         for operations in self.resident_publications.values() {
-            resident_writes.extend(operations.borrow().clone().into_operations());
+            resident_writes.extend(operations.borrow().operations().iter().cloned());
         }
         *self.resident_writes.borrow_mut() = resident_writes;
     }
@@ -737,59 +753,5 @@ impl Database {
         } else {
             Ok(())
         }
-    }
-}
-
-fn value_contains_large_ref(value: &Value, expected: &crate::large_values::LargeValueRef) -> bool {
-    match value {
-        Value::Large(value_ref) => value_ref == expected,
-        Value::Tuple(values) | Value::Array(values) => values
-            .iter()
-            .any(|value| value_contains_large_ref(value, expected)),
-        Value::Nullable(Some(value)) => value_contains_large_ref(value, expected),
-        Value::Record(record) => record.to_values().is_ok_and(|values| {
-            values
-                .iter()
-                .any(|value| value_contains_large_ref(value, expected))
-        }),
-        Value::Enum(value) => value.record().to_values().is_ok_and(|values| {
-            values
-                .iter()
-                .any(|value| value_contains_large_ref(value, expected))
-        }),
-        _ => false,
-    }
-}
-
-fn collect_large_root_deltas(
-    value: &Value,
-    weight: i64,
-    deltas: &mut BTreeMap<crate::large_values::NodeRef, i64>,
-) {
-    match value {
-        Value::Large(value_ref) => {
-            *deltas.entry(value_ref.root.clone()).or_default() += weight;
-        }
-        Value::Tuple(values) | Value::Array(values) => {
-            for value in values {
-                collect_large_root_deltas(value, weight, deltas);
-            }
-        }
-        Value::Nullable(Some(value)) => collect_large_root_deltas(value, weight, deltas),
-        Value::Record(record) => {
-            if let Ok(values) = record.to_values() {
-                for value in values {
-                    collect_large_root_deltas(&value, weight, deltas);
-                }
-            }
-        }
-        Value::Enum(value) => {
-            if let Ok(values) = value.record().to_values() {
-                for value in values {
-                    collect_large_root_deltas(&value, weight, deltas);
-                }
-            }
-        }
-        _ => {}
     }
 }

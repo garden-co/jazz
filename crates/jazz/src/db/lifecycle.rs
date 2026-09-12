@@ -142,7 +142,7 @@ where
         let node =
             NodeState::new(config.identity.node, config.schema.clone(), config.storage).await?;
         let node = Node::new(node);
-        node.restore_pending_uploads(config.identity)?;
+        node.restore_pending_uploads(config.identity).await?;
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
@@ -333,7 +333,7 @@ where
         let node =
             NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
         let node = Node::new(node);
-        node.restore_pending_uploads(config.identity)?;
+        node.restore_pending_uploads(config.identity).await?;
         node.restore_edge_authority_uploads().await?;
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
@@ -761,9 +761,10 @@ where
     /// node differs from the worker node, so ordinary local-origin recovery
     /// cannot discover them after a cold worker restart.
     #[doc(hidden)]
-    pub fn restore_browser_relay_pending_uploads(&self) -> Result<(), Error> {
+    pub async fn restore_browser_relay_pending_uploads(&self) -> Result<(), Error> {
         self.node
             .restore_browser_relay_pending_uploads(self.identity.author)
+            .await
     }
 
     /// Let a single-threaded host return resident writes synchronously while

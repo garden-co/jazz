@@ -2,6 +2,197 @@
 
 use super::*;
 
+#[test]
+fn trusted_snapshot_preserves_offline_enum_rows_and_reopens() {
+    assert_snapshot_preserves_offline_enum_rows(false);
+}
+
+#[test]
+fn trusted_snapshot_preserves_descendant_anchor_enum_rows_and_reopens() {
+    assert_snapshot_preserves_offline_enum_rows(true);
+}
+
+fn assert_snapshot_preserves_offline_enum_rows(descendant: bool) {
+    let scalar = PublicColumnType::ScalarEnum {
+        name: "Status".to_owned(),
+        variants: vec!["pending".to_owned(), "done".to_owned()],
+    };
+    let payload_type = PublicColumnType::EnumPayload {
+        cases: vec![PublicEnumCaseDescriptor {
+            name: "message".to_owned(),
+            fields: vec![PublicColumnDescriptor::new(
+                "level",
+                PublicColumnType::Integer,
+            )],
+        }],
+    };
+    let make_schema = |extra: bool| {
+        let table = PublicTableSchemaBuilder::new("items")
+            .column("status", scalar.clone())
+            .column("event", payload_type.clone())
+            .column(
+                "statuses",
+                PublicColumnType::Array {
+                    element: Box::new(scalar.clone()),
+                },
+            )
+            .column(
+                "events",
+                PublicColumnType::Array {
+                    element: Box::new(payload_type.clone()),
+                },
+            );
+        let table = if extra {
+            table.column("extra", PublicColumnType::Text)
+        } else {
+            table
+        };
+        build_public_db_test_schema(PublicSchemaBuilder::new().table(table))
+    };
+    let base = make_schema(false);
+    let schema = make_schema(descendant);
+    let table = &schema.tables[0];
+    let event_column = table
+        .columns
+        .iter()
+        .find(|column| column.name == "event")
+        .unwrap();
+    let ValueType::Enum(event_schema) = &event_column.column_type else {
+        panic!("payload enum")
+    };
+    let event = Value::Enum(
+        EnumValue::create(0, event_schema.cases[0].payload.clone(), &[Value::I32(7)]).unwrap(),
+    );
+    // Binding-facing Db accepts core cells; row_input! targets JazzClient values.
+    let mut expected = BTreeMap::from([
+        ("status".to_owned(), Value::EnumTag(1)),
+        ("event".to_owned(), event.clone()),
+        (
+            "statuses".to_owned(),
+            Value::Array(vec![Value::EnumTag(1), Value::EnumTag(0)]),
+        ),
+        ("events".to_owned(), Value::Array(vec![event])),
+    ]);
+    if descendant {
+        expected.insert("extra".to_owned(), Value::String("offline".to_owned()));
+    }
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, _) = groove::storage::TestStorage::controlled(&refs);
+    let reopen = storage.clone();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xdd; 16]),
+        author: AuthorSubject::SYSTEM,
+    };
+    let db = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity,
+        id_source: Some(Box::new(SeededRowIdSource::new(0xdd))),
+    }))
+    .unwrap();
+    let write = db
+        .insert("items", expected.clone(), Default::default())
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+    drop(write);
+    let before = prepared_all(
+        &db,
+        &Query::from("items"),
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..ReadOpts::default()
+        },
+    );
+    assert_eq!(before.len(), 1);
+    let row = before[0].row_uuid();
+
+    // Host-admitted backend trust is fixture plumbing; all row and reopen
+    // assertions use Db. The two opens mint independent provisional manifests.
+    let authority = open_core(0xde, AuthorSubject::SYSTEM, &base);
+    if descendant {
+        let evolved = SchemaVersion::new(schema.clone());
+        let lens = MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "extra".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        )
+        .unwrap();
+        let publication = authority
+            .author_schema_lineage_publication(
+                evolved.clone(),
+                lens,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .unwrap();
+        authority.publish_schema_with_lens(1, publication).unwrap();
+        authority
+            .set_current_write_schema(CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            })
+            .unwrap();
+    }
+    let (upstream, downstream) = duplex();
+    let accepted = authority.accept_subscriber_with_trust(
+        downstream,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let connection = block_on(db.connect_upstream(upstream));
+    for _ in 0..20 {
+        authority.tick().unwrap();
+        db.tick().unwrap();
+    }
+    let after = prepared_all(
+        &db,
+        &Query::from("items"),
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..ReadOpts::default()
+        },
+    );
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].row_uuid(), row);
+    for (column, value) in &expected {
+        assert_eq!(after[0].cell(table, column).unwrap(), *value);
+    }
+    block_on(db.detach_connection_async(&connection)).unwrap();
+    drop(connection);
+    drop(accepted);
+    block_on(db.close()).unwrap();
+    drop(db);
+    let storage = block_on(reopen.reopen(families)).unwrap();
+    let reopened = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity,
+        id_source: Some(Box::new(SeededRowIdSource::new(0xdf))),
+    }))
+    .expect("authority UUIDs and persisted enum registries remain coherent on reopen");
+    let rows = prepared_all(
+        &reopened,
+        &Query::from("items"),
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            ..ReadOpts::default()
+        },
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), row);
+    for (column, value) in &expected {
+        assert_eq!(rows[0].cell(table, column).unwrap(), *value);
+    }
+}
+
 pub(super) fn assert_authority_rejects_staged_write(
     client: &Db<RocksDbStorage>,
     server: &CoreDb,

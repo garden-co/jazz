@@ -41,7 +41,7 @@ Invariant digest:
 - `INV-STORAGE-24`: Persisted index scans MUST decode the persisted index record's `"value"` as primary-key bytes and fetch the current base table record; if the base record is missing for a primary-key table, the index MUST be treated as invalid.
 - `INV-STORAGE-25`: Ordered index key encoding via `encode_key_part` MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys.
 - `INV-STORAGE-26`: Record-store persistence is row-only: each logical stored record has its canonical row key/value entry, and no storage maintenance may replace a run of rows with a second logical representation.
-- `INV-STORAGE-27`: A record-valued `ValueType` MUST carry its descriptor inline and accept only canonical child bytes; it MUST NOT appear, directly or recursively, in a durable primary key.
+- `INV-STORAGE-27`: A record-valued `ValueType` MUST carry its descriptor inline and its encoder MUST emit canonical child bytes; it MUST NOT appear, directly or recursively, in a durable primary key.
 - `INV-STORAGE-28`: Every enum occurrence has an independent persistent registry identity; nested enums and the hidden whole-row enum never share or flatten registry state.
 
 Engine-owned schema catalogues and operator-supplied native schema files are trusted
@@ -89,6 +89,34 @@ Whole-row storage uses the same bounded-tag machinery through `VariantRecord`; i
 registry is hidden inside the table implementation. Jazz normalizes these opaque
 physical rows at `VariantProject` before exposing logical rows, so no physical tag or
 whole-row enum appears in Jazz's public schema, wire values, lenses, or query API.
+
+## Encoder trust and byte preservation
+
+Storage and transport own byte integrity: they MUST preserve the bytes supplied
+by the encoder. Record getters MUST NOT compensate for hypothetical corruption
+by repeatedly validating or re-encoding stored values. Storage-layer integrity
+mechanisms and explicit format/version dispatch remain owned by those layers.
+
+A trusted encoder MUST produce the specified representation. Its output MUST be
+decoded directly, without structural or canonicality pre-validation, recursive
+validation on access, or decode/re-encode comparisons. This includes locally
+encoded records and their storage round trips. Canonical encoding remains an
+encoder obligation, not a requirement to prove canonicality on every read.
+Ordinary decoding still interprets tags and offsets; this contract does not
+require unsafe memory access or bypassing language memory safety.
+
+For untrusted encoder input, pre-decoding checks MUST be limited to correct
+pointer/offset ranges and bounded resource use, including data-lookup fanout,
+lengths, allocation, nesting and decompression amplification. Decoder failure
+may terminate the originating connection gracefully, but MUST NOT affect another
+connection, poison shared state, abort the process, or exhaust node-wide resources.
+Jazz's sync and topology chapters define the connection boundary. Storage must
+not acquire partially decoded state from a failed connection.
+
+These rules supersede blanket decoder rejection/validation language elsewhere in
+this chapter: byte-layout constraints specify what encoders emit, while the
+encoder's trust determines runtime prechecks. Application type checking,
+transaction constraints and authorization are separate semantic responsibilities.
 
 ## Details
 
@@ -468,9 +496,31 @@ Tree writes are copy-on-write: the changed leaf and every changed ancestor get
 fresh page ids, then one IndexedDB transaction writes the new immutable closure
 and replaces `current` after checking the observed generation. A crash before
 publication leaves at most unreachable new pages; a published root never names
-a torn or missing child. Reclamation is a separate reachability operation and
-may delete only pages proven unreachable from the published root, never pages
-merely replaced by an in-flight write. Reopening observes either the old root
+a torn or missing child. Reclamation may delete only pages proven unreachable
+from the published root. Path-local retirement atomically deletes replaced leaves,
+ancestors, and the overflow chains owned by replaced/deleted values together with
+publication, only when the PageStore proves exclusive tree ownership. Generic and
+memory stores default to retaining durable pages so independent cold handles can
+finish reading their older complete closure and reach generation-conflict recovery.
+All writers sharing those handles must remain non-reclaiming: low-level direct
+handles may not coexist with an exclusive browser worker owner.
+The browser capability consumes one live database Web Lock/worker epoch proof for
+one live tree at a time; tree clones share its root, and the last clone dropping
+releases tree admission for a fresh open. It expires before release/close/invalidation,
+and deletion commits recheck it at publication. A worker runtime owns a revocable
+tree token independent of foreground identity leases. After the last admitted
+peer's flush barrier, retirement revokes that token synchronously and drains its
+already-started page transactions before permitting a new runtime/schema to claim
+a successor token. Every cached read/write and pending hydration/open completion
+checks liveness; every token-bearing commit rechecks its exact token before page
+publication, including commits with no deletions. A late old guard release cannot
+release its successor. Foreground lease operations retain the same page store and
+Web Lock across this handoff. No boundary depends on garbage collection of closed
+WASM wrappers.
+Unpublished superseded fresh pages
+are omitted from the commit regardless of ownership. A separate reachability
+collector is still required for historical garbage; this policy changes neither
+the durable page encoding nor the storage epoch. Reopening observes either the old root
 and complete closure or the new root and complete closure.
 Before persistence, one logical write—including every operation in a
 `write_many` call—is also locally atomic. If page construction or validation
@@ -505,13 +555,15 @@ a descriptor registry or encode descriptor bytes beside every child value. The
 record values therefore uses the existing array framing around the canonical raw
 bytes of each element descriptor; no second outer-record layout is introduced.
 
-Record values are admitted only when their embedded descriptor equals the
-declared `ValueType::Record` descriptor and their raw bytes are canonical for
-that descriptor: decode every child value, recreate the record, and require
-byte equality. Validation alone is insufficient because `OwnedRecord::new`
-currently accepts arbitrary raw bytes (`src/records/mod.rs:1577-1582`). The
-recreate-and-compare rule is required for byte-based weighted consolidation and
-deterministic final tie-breaking.
+Record-valued encoders MUST use the declared embedded descriptor and emit its
+specified canonical bytes. Readers follow “Encoder trust and byte preservation”
+above; neither tuple-containing nor tuple-free records require decode/recreate/
+compare on access. Byte-based consolidation and deterministic tie-breaking rely
+on the trusted encoder contract. Untrusted client input is contained at its
+connection boundary before trusted state publication; copying untrusted bytes
+alone MUST NOT confer trusted-encoder provenance. The exact handling of client
+representations at that boundary must preserve these semantics without adding
+blanket canonical pre-validation.
 
 `Record`, `Array<Record>`, and any recursively containing value type MUST be
 rejected as a durable primary-key part. The primary-key codec has no
@@ -784,3 +836,35 @@ The former hybrid columnar-base proposal is rejected and is not part of Groove's
 - 🔶 [#1775](https://github.com/garden-co/jazz/issues/1775) — Current-base selection, compaction handoff, scan exclusion, and compaction-quality receipts.
 - 🔶 [#1774](https://github.com/garden-co/jazz/issues/1774) — Portable storage guarantees, reopen normativity, async persistence, serverless backends, row encoding, and compression policy.
 - 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Explicit index declarations and stale-index behavior.
+
+### Batch-scoped immutable record insertion
+
+`DatabaseBatch::ensure_exact(database, table, key, record)` resolves an immutable
+record against the resident database and preceding operations in that batch.
+It returns `Inserted`, `AlreadyIdentical`, or `Conflict`. `Inserted` stages the
+record but does not publish or persist it. `AlreadyIdentical` adds no physical
+write or query delta. `Conflict` invalidates the whole batch; attempting to
+apply it must fail before publishing any of its writes, without poisoning the
+database. Later operations must not contradict an ensured record.
+
+Equality compares the same locally encoded record representation, including
+its variant discriminator. It does not decode and reconstruct logical fields.
+The operation retains its absence decision for delta computation, avoiding a
+second storage read for inserted records. Repeated keys observe earlier staged
+writes. An empty duplicate-only history batch may still accompany mutable
+transaction/fate updates supplied by the higher layer.
+
+These decisions are scoped to one database owner and resident publication
+revision. Applying them to another database or after a resident publication
+fails with `StaleImmutableBatch`; callers rebuild instead of reusing stale
+outcomes. As with ordinary Groove index/IVM batches, the database owner must
+serialize mutations to its managed tables. This API is not a cross-owner
+compare-and-swap transaction and must not be used to coordinate independently
+mutating database instances over the same tables.
+
+The storage seam's `compare_value` is a side-effect-free read returning absent,
+identical or different. It does not reserve a key. Implementations may compare
+borrowed memory, pinned storage values or B-tree leaf/overflow bytes without
+returning an owned old value. The staged/resident overlays must participate in
+this lookup. Backends retain their existing atomic `write_many` persistence
+boundary. No new durable record or wire encoding is introduced.

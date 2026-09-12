@@ -542,6 +542,20 @@ pub(super) fn physical_register_table_name(table_id: PhysicalTableId) -> String 
     format!("jazz_physical_{}_register", table_id.0)
 }
 
+/// Inverse of the physical history/register name constructors. Resolve the id
+/// once instead of allocating a formatted name for every catalogue candidate.
+pub(super) fn physical_version_table_id(name: &str, is_deletion: bool) -> Option<PhysicalTableId> {
+    let suffix = if is_deletion { "_register" } else { "_history" };
+    let digits = name.strip_prefix("jazz_physical_")?.strip_suffix(suffix)?;
+    // Keep the exact spelling accepted by comparing with the constructors:
+    // unsigned decimal, no sign, no padding, including the single digit zero.
+    if digits.is_empty() || !digits.as_bytes()[0].is_ascii_digit()
+        || (digits.len() > 1 && digits.starts_with('0')) {
+        return None;
+    }
+    digits.parse().ok().map(PhysicalTableId)
+}
+
 /// Fixed sparse deletion history shared by every physical content lineage.
 ///
 /// Unlike `physical_register_table_name`, this is not a per-lineage table;

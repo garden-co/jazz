@@ -778,13 +778,15 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     );
 
     let mut peer = relay_with_system_binding(subscription);
-    peer.declare_known_state(
-        subscription,
-        Some(crate::protocol::KnownStateDeclaration::Fast {
-            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalTime::new(10, 0).unwrap(),
-        }),
-    );
+    let authority = AuthorityResultKey::unscoped(BindingViewKey {
+        shape_id: shape.shape_id(), binding_id: binding.binding_id(), read_view: subscription.read_view,
+    });
+    let declaration = reader.known_state_declaration_for_subscription(
+        &shape, &binding, subscription, &[], AuthorSubject::SYSTEM, None,
+    ).unwrap();
+    assert!(declaration.is_some(), "recovered cursor must be advertised");
+    assert!(!reader.has_settled_authority_result(&authority));
+    peer.declare_known_state(subscription, declaration);
 
     let update = peer
         .rehydrate_query_for_subscription_with_opts(
@@ -799,6 +801,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory,
+        supporting_rows,
         ..
     }) = &update
     else {
@@ -808,8 +811,10 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     // fresh attachment's complete authority input manifest.
     assert!(!peer_payload_inventory.opening_pending);
     assert!(version_bundles.is_empty());
-
+    assert_eq!(supporting_rows.len(), 1, "fresh response still supplies the complete input set");
+    assert!(!reader.has_settled_authority_result(&authority));
     reader.apply_sync_message_settled(update).unwrap();
+    assert!(reader.has_settled_authority_result(&authority));
     assert_eq!(
         receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
             .into_iter()
@@ -1172,7 +1177,7 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
 }
 
 #[test]
-fn fast_known_state_requires_a_live_receipt_after_reopen_and_eviction() {
+fn fast_known_state_survives_reopen_without_live_authority_but_not_eviction() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_reader_dir, reader) = open_node_with_uuid(node(3));
@@ -1223,10 +1228,12 @@ fn fast_known_state_requires_a_live_receipt_after_reopen_and_eviction() {
             None,
         )
         .unwrap();
-    assert_eq!(
-        declaration, None,
-        "durably recovered membership is cache material, not a live authority handoff"
-    );
+    assert!(matches!(declaration, Some(crate::protocol::KnownStateDeclaration::Fast { .. })));
+    let authority = AuthorityResultKey::unscoped(BindingViewKey {
+        shape_id: shape.shape_id(), binding_id: binding.binding_id(), read_view: subscription.read_view,
+    });
+    assert!(!reopened.has_settled_authority_result(&authority),
+        "advertising cached payloads must not restore live authority");
 
     let report = reopened.evict_cold(&PeerEvictionPins::default()).unwrap();
     assert_eq!(report.row_versions_evictable, 1);
@@ -1645,7 +1652,12 @@ fn storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement() {
             None,
         )
         .unwrap();
-    assert_eq!(declaration, None);
+    assert!(matches!(declaration, Some(crate::protocol::KnownStateDeclaration::Fast { .. })));
+    let authority = AuthorityResultKey::unscoped(BindingViewKey {
+        shape_id: shape.shape_id(), binding_id: binding.binding_id(), read_view: subscription.read_view,
+    });
+    assert!(!reopened.has_settled_authority_result(&authority),
+        "a durable cursor must not promote storage recovery to live settlement");
 }
 
 #[test]

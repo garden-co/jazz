@@ -780,7 +780,7 @@ where
             .prepare_and_stage_large_value(kind, &bytes)
             .await?;
         self.enforce_large_value_staging_policy(&staged).await?;
-        let descriptor = Value::Large(staged.value_ref.clone());
+        let descriptor = Value::Large(Box::new(staged.value_ref.clone()));
         *value = if nullable {
             Value::Nullable(Some(Box::new(descriptor)))
         } else {

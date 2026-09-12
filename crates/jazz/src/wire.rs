@@ -316,6 +316,7 @@ pub struct WireInboundContext {
     expected_protocol_version: u16,
     negotiated_features: WireFeatures,
     expected_session: Option<WireSession>,
+    trusted_encoder: bool,
 }
 
 impl WireInboundContext {
@@ -328,6 +329,19 @@ impl WireInboundContext {
             expected_protocol_version,
             negotiated_features,
             expected_session,
+            trusted_encoder: false,
+        }
+    }
+
+    pub(crate) fn set_trusted_encoder(&mut self, trusted: bool) {
+        self.trusted_encoder = trusted;
+    }
+
+    pub(crate) fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+        if self.trusted_encoder {
+            postcard::from_bytes(bytes)
+        } else {
+            decode_frame(bytes)
         }
     }
 
@@ -502,7 +516,23 @@ pub(crate) fn admit_complete_envelope(
     validate_logical_message_len(payload.len()).map_err(|message| {
         WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
     })?;
-    decode_sync_message_for_features(&payload, context.negotiated_features).map_err(|error| {
+    let decoded = if context.trusted_encoder {
+        decode_sync_message_trusted(&payload)
+            .map_err(|error| {
+                WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    error.to_string(),
+                )
+            })
+            .and_then(|message| {
+                ensure_sync_message_features(&message, context.negotiated_features)?;
+                Ok(message)
+            })
+    } else {
+        decode_sync_message_for_features(&payload, context.negotiated_features)
+    };
+    decoded.map_err(|error| {
         WireError::new(
             error.code,
             error.retry,
@@ -579,9 +609,7 @@ pub fn validate_frame_for_artifact_corpus(
 
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
 pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
-    message
-        .validate_wire_contract()
-        .map_err(|_| postcard::Error::SerdeSerCustom)?;
+    // Our encoder owns correctness; do not decode/revalidate its input rows.
     to_allocvec(message)
 }
 
@@ -622,6 +650,13 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
         return Err(postcard::Error::DeserializeBadOption);
     }
     Ok(message)
+}
+
+/// Decode output from a topology-trusted encoder without representation checks.
+/// Trust is assigned locally when the transport is installed, never on the wire.
+#[doc(hidden)]
+pub fn decode_sync_message_trusted(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    postcard::from_bytes(bytes)
 }
 
 /// Decode one canonical postcard value only when it consumes the complete input.
@@ -1850,6 +1885,39 @@ mod tests {
         })
     }
 
+    // Internal work accounting is needed: decoded values alone cannot expose
+    // a redundant receipt pass or prove the locally selected trust boundary.
+    #[test]
+    fn trusted_encoder_skips_receipt_validation_but_session_admission_keeps_it() {
+        let message = SyncMessage::RowVersionPayloads {
+            version_bundles: version_bundles(2),
+        };
+        crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.set(0));
+        let payload = encode_sync_message(&message).unwrap();
+        assert_eq!(
+            crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()),
+            0
+        );
+        let mut trusted = WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, None);
+        trusted.set_trusted_encoder(true);
+        let mut decoder = WireStreamDecoder::new(FEATURE_NONE).unwrap();
+        let envelope = WireEnvelope::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, payload.clone());
+        assert_eq!(
+            admit_complete_envelope(&trusted, &mut decoder, envelope.clone()).unwrap(),
+            message
+        );
+        assert_eq!(
+            crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()),
+            0
+        );
+        let session = WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, None);
+        assert_eq!(
+            admit_complete_envelope(&session, &mut decoder, envelope).unwrap(),
+            message
+        );
+        assert!(crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()) > 0);
+    }
+
     fn version_bundles(count: usize) -> Vec<VersionBundle> {
         let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
         let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
@@ -2262,7 +2330,9 @@ mod tests {
                 },
             });
         assert!(
-            encode_sync_message(&SyncMessage::ViewUpdate(payload)).is_err(),
+            SyncMessage::ViewUpdate(payload)
+                .validate_wire_contract()
+                .is_err(),
             "an exact snapshot reference must name one native register layer"
         );
     }

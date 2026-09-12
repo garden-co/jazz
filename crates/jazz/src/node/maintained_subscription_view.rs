@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
+use std::sync::Arc;
 
 use groove::ivm::{
     MultisinkDeltas, RecordDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment,
@@ -11,8 +12,8 @@ use groove::records::{
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
     deletion_event_from_value, history_values_from_parts, nullable_value,
-    owned_record_from_storage_values_with_descriptor, register_values_from_parts,
-    runtime_result_identity_bytes, tx_ids_from_value, version_tx_id_from_aliases,
+    register_values_from_parts, runtime_result_identity_bytes, tx_ids_from_value,
+    version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
@@ -151,6 +152,8 @@ pub(crate) struct MaintainedSubscriptionView {
     /// sequence key: one flat relation can validly contain more than one
     /// occurrence of the same root.
     structured_root_key_order: Vec<Vec<u8>>,
+    #[cfg(test)]
+    root_order_insert_comparisons: usize,
     structured_app_row_descriptor: Option<RecordDescriptor>,
     /// Whether this maintained subscription retains the recursive app-row
     /// collector. Flat unordered subscriptions release it after their reset;
@@ -169,7 +172,7 @@ pub(crate) struct MaintainedSubscriptionView {
     /// publication diffs this set against its acknowledged predecessor so a
     /// +/− pair observed in one drain is never serialized as an ambiguous
     /// ordered operation.
-    source_fact_weights: BTreeMap<ProgramFactEntry, BTreeMap<SourceFactOrigin, i64>>,
+    source_fact_weights: BTreeMap<ProgramFactEntry, [i64; 3]>,
     selected_deletion_witnesses: BTreeMap<ProgramFactEntry, VersionRow>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
@@ -189,6 +192,8 @@ impl Default for MaintainedSubscriptionView {
             structured_terminal_records: BTreeMap::new(),
             structured_root_keys: BTreeMap::new(),
             structured_root_key_order: Vec::new(),
+            #[cfg(test)]
+            root_order_insert_comparisons: 0,
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
             storage_backed_result_materialization: false,
@@ -242,7 +247,7 @@ struct ReplacementIndex {
 struct VersionIdentity {
     table: groove::Intern<String>,
     layer: VersionLayer,
-    raw_record: Vec<u8>,
+    raw_record: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -250,7 +255,7 @@ struct VersionSortKey {
     table: groove::Intern<String>,
     row_uuid: RowUuid,
     layer: VersionLayer,
-    raw_record: Vec<u8>,
+    raw_record: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -456,21 +461,21 @@ impl MaintainedSubscriptionView {
         let requires_authoritative_membership_reconcile =
             !deltas.is_empty() && kind.requires_authoritative_membership_reconcile();
         let mut decode_plan_cache = VersionDecodePlanCache::new();
-        let decoded = deltas
-            .iter()
-            .map(|(record, weight)| {
-                decode_typed_terminal_record(
-                    record,
-                    kind,
-                    tables,
-                    node_aliases,
-                    &mut decode_plan_cache,
-                    self.read_view,
-                )
-                .map(|event| (event, weight))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut transitions = self.apply_decoded_deltas(decoded, node_aliases)?;
+        let mut payload_plans = std::collections::HashMap::new();
+        let read_view = self.read_view;
+        let decoded = deltas.iter().map(|(record, weight)| {
+            decode_typed_terminal_record(
+                record,
+                kind,
+                tables,
+                node_aliases,
+                &mut decode_plan_cache,
+                &mut payload_plans,
+                read_view,
+            )
+            .map(|event| (event, weight))
+        });
+        let mut transitions = self.apply_decoded_delta_results(decoded, node_aliases)?;
         if observed_result_delta_batch {
             transitions.observed_result_delta_batches += 1;
         }
@@ -479,6 +484,10 @@ impl MaintainedSubscriptionView {
         Ok(transitions)
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.decode_query_outputs")
+    )]
     pub(crate) fn apply_multisink_deltas(
         &mut self,
         deltas: MultisinkDeltas,
@@ -494,22 +503,22 @@ impl MaintainedSubscriptionView {
         // whole active closure here would turn every incremental tick into a
         // snapshot-sized operation.
         let mut peer_source_fact_changes = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
-        for (sink, terminal) in &deltas.terminal_sinks {
+        for (sink, terminal) in deltas.terminal_sinks {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
                 && !terminal.operations.is_empty()
             {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_operations sink={sink} kind={:?} operations={}",
-                    schemas.get(sink)?,
+                    schemas.get(&sink)?,
                     terminal.operations.len(),
                 );
             }
             if let MaintainedTerminalKind::RootCollectorAppRows { layout, .. } =
-                schemas.get(sink)?
+                schemas.get(&sink)?
             {
                 let operations = terminal
                     .operations
-                    .iter()
+                    .into_iter()
                     .map(|operation| rebind_terminal_operation_to_layout(operation, layout))
                     .collect::<Result<Vec<_>, _>>()?;
                 // A root removal can share its batch with descendants which
@@ -517,9 +526,11 @@ impl MaintainedSubscriptionView {
                 // skip only those now-unreachable descendants. This mirrors
                 // the facade reducer and keeps malformed descendants for an
                 // otherwise retained root fail-closed.
-                let inserted_roots = operations
+                let (root_operations, nested_operations): (Vec<_>, Vec<_>) = operations
+                    .into_iter()
+                    .partition(|operation| operation.path.is_empty());
+                let inserted_roots = root_operations
                     .iter()
-                    .filter(|operation| operation.path.is_empty())
                     .filter_map(|operation| match operation.edit {
                         TerminalEdit::Insert { .. } => Some((operation.root_key.clone(), true)),
                         TerminalEdit::Remove { .. } => Some((operation.root_key.clone(), false)),
@@ -529,9 +540,8 @@ impl MaintainedSubscriptionView {
                     .into_iter()
                     .filter_map(|(key, present)| present.then_some(key))
                     .collect::<BTreeSet<_>>();
-                let removed_roots = operations
+                let removed_roots = root_operations
                     .iter()
-                    .filter(|operation| operation.path.is_empty())
                     .filter_map(|operation| {
                         matches!(operation.edit, TerminalEdit::Remove { .. })
                             .then_some(operation.root_key.clone())
@@ -547,15 +557,7 @@ impl MaintainedSubscriptionView {
                             .map(|record| (key.clone(), record))
                     })
                     .collect::<BTreeMap<_, _>>();
-                for operation in operations
-                    .iter()
-                    .filter(|operation| operation.path.is_empty())
-                    .chain(
-                        operations
-                            .iter()
-                            .filter(|operation| !operation.path.is_empty()),
-                    )
-                {
+                for operation in root_operations.into_iter().chain(nested_operations) {
                     if !operation.path.is_empty()
                         && removed_roots.contains(operation.root_key.as_slice())
                         && !inserted_roots.contains(operation.root_key.as_slice())
@@ -581,7 +583,7 @@ impl MaintainedSubscriptionView {
                         self.structured_terminal_records
                             .insert(operation.root_key.clone(), record);
                     }
-                    transitions.terminal_operations.push(operation.clone());
+                    transitions.terminal_operations.push(operation);
                 }
             }
         }
@@ -681,13 +683,27 @@ impl MaintainedSubscriptionView {
         transitions.result_payload_removes.extend(payload_removes);
     }
 
-    pub(crate) fn apply_decoded_deltas(
+    #[cfg(test)]
+    fn apply_decoded_deltas(
         &mut self,
         rows: impl IntoIterator<Item = (DecodedMaintainedEvent, i64)>,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
+        self.apply_decoded_delta_results(rows.into_iter().map(Ok), node_aliases)
+    }
+
+    fn apply_decoded_delta_results(
+        &mut self,
+        rows: impl IntoIterator<Item = Result<(DecodedMaintainedEvent, i64), super::Error>>,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        // Decode into the net-change accumulator directly. No retained state
+        // changes until the complete input has decoded successfully.
+        #[cfg(feature = "cold-settle-attribution")]
+        let net_span = tracing::trace_span!("cold.phase.terminal_net").entered();
         let mut net = BTreeMap::<EventIdentity, (NetEvent, i64)>::new();
-        for (event, weight) in rows {
+        for row in rows {
+            let (event, weight) = row?;
             let net_event = match event {
                 DecodedMaintainedEvent::ResultCurrent { member, payload } => {
                     NetEvent::Result(member, payload)
@@ -729,6 +745,10 @@ impl MaintainedSubscriptionView {
                 .or_insert((net_event, weight));
         }
 
+        #[cfg(feature = "cold-settle-attribution")]
+        drop(net_span);
+        #[cfg(feature = "cold-settle-attribution")]
+        let _apply_span = tracing::trace_span!("cold.phase.terminal_apply").entered();
         let mut transitions = ResultTransitions::default();
         for (_, (event, weight)) in net {
             if weight == 0 {
@@ -831,10 +851,12 @@ impl MaintainedSubscriptionView {
     /// This intentionally exposes neither rendered result rows nor internal
     /// proof/relationship facts.
     pub(crate) fn active_peer_source_closure_facts(&self) -> BTreeSet<ProgramFactEntry> {
+        #[cfg(test)]
+        SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(count.get() + 1));
         self.source_fact_weights
             .iter()
             .filter(|(fact, weights)| {
-                weights.values().any(|weight| *weight > 0) && fact.is_peer_source_closure_fact()
+                weights.iter().any(|weight| *weight > 0) && fact.is_peer_source_closure_fact()
             })
             .map(|(fact, _)| fact.clone())
             .chain(self.selected_deletion_witnesses.keys().cloned())
@@ -871,25 +893,31 @@ impl MaintainedSubscriptionView {
         fact: ProgramFactEntry,
         weight: i64,
     ) -> Option<bool> {
-        let was_present = self
-            .source_fact_weights
-            .get(&fact)
-            .is_some_and(|weights| weights.values().any(|weight| *weight > 0));
-        let weights = self.source_fact_weights.entry(fact.clone()).or_default();
-        let next = weights.get(&origin).copied().unwrap_or(0) + weight;
-        if next == 0 {
-            weights.remove(&origin);
-        } else {
-            weights.insert(origin, next);
+        let slot = match origin {
+            SourceFactOrigin::Version => 0,
+            SourceFactOrigin::Replacement => 1,
+            SourceFactOrigin::ProgramFact => 2,
+        };
+        match self.source_fact_weights.entry(fact) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                if weight != 0 {
+                    let mut weights = [0; 3];
+                    weights[slot] = weight;
+                    entry.insert(weights);
+                }
+                (weight > 0).then_some(true)
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let weights = entry.get_mut();
+                let was_present = weights.iter().any(|weight| *weight > 0);
+                weights[slot] += weight;
+                let is_present = weights.iter().any(|weight| *weight > 0);
+                if weights.iter().all(|weight| *weight == 0) {
+                    entry.remove();
+                }
+                (was_present != is_present).then_some(is_present)
+            }
         }
-        if weights.is_empty() {
-            self.source_fact_weights.remove(&fact);
-        }
-        let is_present = self
-            .source_fact_weights
-            .get(&fact)
-            .is_some_and(|weights| weights.values().any(|weight| *weight > 0));
-        (was_present != is_present).then_some(is_present)
     }
 
     pub(crate) fn replacement_for(
@@ -1217,6 +1245,7 @@ impl MaintainedSubscriptionView {
                 })?;
             return Ok(());
         }
+        let root_was_present = self.structured_root_keys.contains_key(&operation.root_key);
         let _root = match &operation.edit {
             TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
                 let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
@@ -1245,8 +1274,18 @@ impl MaintainedSubscriptionView {
                 let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
                 self.structured_app_rows.remove(&operation.root_key);
                 self.apply_structured_app_row_delta(operation.root_key.clone(), record, 1);
-                self.structured_root_key_order
-                    .retain(|key| key != &operation.root_key);
+                // An insert may replace an existing occurrence. Fresh roots
+                // cannot be in the order yet: scanning the growing vector for
+                // each one would make an initial result quadratic.
+                if root_was_present {
+                    self.structured_root_key_order.retain(|key| {
+                        #[cfg(test)]
+                        {
+                            self.root_order_insert_comparisons += 1;
+                        }
+                        key != &operation.root_key
+                    });
+                }
                 self.structured_root_key_order.insert(
                     (*index).min(self.structured_root_key_order.len()),
                     operation.root_key.clone(),
@@ -1524,12 +1563,16 @@ fn covered_input_for_version(
 /// present nullable cell. Nested edits address named collections and stable
 /// keys. An unrelated root field may tighten without changing those edits,
 /// but the addressed collection's complete subtree layout must agree exactly.
+#[cfg_attr(
+    feature = "cold-settle-attribution",
+    tracing::instrument(skip_all, name = "cold.phase.rebind_terminal_output")
+)]
 fn rebind_terminal_operation_to_layout(
-    operation: &TerminalOperation,
+    mut operation: TerminalOperation,
     layout: &TerminalRootLayout,
 ) -> Result<TerminalOperation, super::Error> {
     if operation.root_descriptor == layout.root_descriptor {
-        return Ok(operation.clone());
+        return Ok(operation);
     }
     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
         eprintln!(
@@ -1540,15 +1583,14 @@ fn rebind_terminal_operation_to_layout(
     if !terminal_descriptor_can_rebind_to_layout(
         &operation.root_descriptor,
         &layout.root_descriptor,
-    ) || !terminal_nested_collection_layout_agrees(operation, &layout.root_descriptor)
+    ) || !terminal_nested_collection_layout_agrees(&operation, &layout.root_descriptor)
     {
         return Err(super::Error::InvalidStoredValue(
             "structured terminal operation descriptor disagrees with prepared root layout",
         ));
     }
 
-    let mut rebound = operation.clone();
-    match &mut rebound.edit {
+    match &mut operation.edit {
         TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. }
             if operation.path.is_empty() =>
         {
@@ -1560,8 +1602,8 @@ fn rebind_terminal_operation_to_layout(
         }
         _ => {}
     }
-    rebound.root_descriptor = layout.root_descriptor;
-    Ok(rebound)
+    operation.root_descriptor = layout.root_descriptor;
+    Ok(operation)
 }
 
 fn terminal_nested_collection_layout_agrees(
@@ -2047,6 +2089,10 @@ fn decode_typed_terminal_record(
     tables: &TableSchemas,
     node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     decode_plan_cache: &mut VersionDecodePlanCache,
+    payload_plans: &mut std::collections::HashMap<
+        RecordDescriptor,
+        super::descriptor_roles::CurrentPayloadEncodePlan,
+    >,
     read_view: crate::protocol::ReadViewKey,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
@@ -2185,8 +2231,16 @@ fn decode_typed_terminal_record(
                 None => member,
             }
             .into();
-            let (descriptor, row_bytes) =
-                super::descriptor_roles::encode_current_payload_record(record, schema)?;
+            let plan = match payload_plans.entry(record.descriptor()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(super::descriptor_roles::CurrentPayloadEncodePlan::new(
+                        record.descriptor(),
+                        schema,
+                    )?)
+                }
+            };
+            let (descriptor, row_bytes) = plan.encode(record)?;
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),
                 descriptor,
@@ -2642,6 +2696,10 @@ fn validate_witness_event_kind(
     }
 }
 
+#[cfg_attr(
+    feature = "cold-settle-attribution",
+    tracing::instrument(skip_all, name = "cold.phase.decode_version_witness")
+)]
 fn decode_typed_version_witness(
     record: BorrowedRecord<'_>,
     schema: &VersionWitnessSchema,
@@ -2694,14 +2752,6 @@ fn decode_typed_version_witness(
         },
         None => BranchKey::default(),
     };
-    let mut cells = BTreeMap::new();
-    if layer == VersionLayer::Content {
-        for column in &table.columns {
-            if let Some(value) = nullable_value(record.get_idx(plan.user_indices[&column.name])?)? {
-                cells.insert(column.name.clone(), value);
-            }
-        }
-    }
     let authored_columns = if layer == VersionLayer::Content {
         nullable_value(record.get_idx(plan.authored_columns_idx)?)?
             .map(authored_column_ids_from_value)
@@ -2720,7 +2770,7 @@ fn decode_typed_version_witness(
         )?),
         tx_time,
         parents: tx_ids_from_value(record.get_idx(plan.parents_idx)?)?,
-        created_by: RowAuthor::from_value(record.get_idx(plan.created_by_idx)?)
+        created_by: RowAuthor::from_record(record.get_record(plan.created_by_idx)?)
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject(),
         // Current-row provenance is public Unix milliseconds. Witness state
@@ -2732,7 +2782,7 @@ fn decode_typed_version_witness(
                     "maintained witness created_at_ms exceeds packed HLC range",
                 )
             })?,
-        updated_by: RowAuthor::from_value(record.get_idx(plan.updated_by_idx)?)
+        updated_by: RowAuthor::from_record(record.get_record(plan.updated_by_idx)?)
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject(),
         updated_at: TxTime::from_physical_ms(record_u64_idx(record, plan.updated_at_idx)?)
@@ -2741,7 +2791,7 @@ fn decode_typed_version_witness(
                     "maintained witness updated_at_ms exceeds packed HLC range",
                 )
             })?,
-        cells,
+        cells: BTreeMap::new(),
         authored_columns,
         deletion,
     };
@@ -2750,10 +2800,59 @@ fn decode_typed_version_witness(
     } else {
         register_values_from_parts(&parts)?
     };
+    // Query witnesses already contain encoded nullable user cells. Copy those
+    // fields into the history layout instead of allocating a cells map, cloning
+    // its values, and encoding them again. Metadata still follows the existing
+    // normalization path (in particular author admission and packed timestamps).
+    let raw = plan.descriptor.create_with_encoded_fields::<super::Error>(
+        record.raw().len(),
+        |index, output| {
+            if layer == VersionLayer::Content && index >= 10 && index < 10 + table.columns.len() {
+                let source_index = plan.user_indices[&table.columns[index - 10].name];
+                if record.descriptor().fields()[source_index].value_type
+                    == plan.descriptor.fields()[index].value_type
+                {
+                    let span = record.descriptor().field_span(record.raw(), source_index)?;
+                    output.extend_from_slice(&record.raw()[span]);
+                    return Ok(());
+                }
+                let value = record.get_idx(source_index)?;
+                nullable_value(value.clone())?;
+                plan.descriptor.encode_field_into(index, &value, output)?;
+            } else {
+                plan.descriptor
+                    .encode_field_into(index, &values[index], output)?;
+            }
+            Ok(())
+        },
+    )?;
+    #[cfg(test)]
+    let mut parts = parts;
+    #[cfg(test)]
+    {
+        // Internal byte-equivalence oracle: public query equality would not
+        // detect a change to the immutable history record's exact encoding.
+        let reference_parts = &mut parts;
+        if layer == VersionLayer::Content {
+            for column in &table.columns {
+                if let Some(value) =
+                    nullable_value(record.get_idx(plan.user_indices[&column.name])?)?
+                {
+                    reference_parts.cells.insert(column.name.clone(), value);
+                }
+            }
+        }
+        let reference_values = if layer == VersionLayer::Content {
+            history_values_from_parts(table, reference_parts)?
+        } else {
+            register_values_from_parts(reference_parts)?
+        };
+        assert_eq!(raw, plan.descriptor.create(&reference_values)?);
+    }
     let version = VersionRow {
         table: groove::Intern::new(parts.table),
         branch_key: parts.branch_key,
-        record: owned_record_from_storage_values_with_descriptor(plan.descriptor, values)?,
+        record: OwnedRecord::new(raw, plan.descriptor),
     };
     version.validate_canonical()?;
     Ok(version)
@@ -2922,7 +3021,7 @@ impl WeightedVersionIndex {
         let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
             super::Error::InvalidStoredValue("history tx node alias must exist"),
         )?;
-        let sort_key = VersionSortKey::for_row(&row);
+        let sort_key = VersionSortKey::for_row(&row, &identity);
         let new = old + weight;
 
         if old <= 0 && new > 0 {
@@ -3006,10 +3105,11 @@ impl ReplacementIndex {
             let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
                 super::Error::InvalidStoredValue("history tx node alias must exist"),
             )?;
+            let sort_key = VersionSortKey::for_row(&row, &identity);
             row_versions.insert(
                 identity,
                 WeightedVersion {
-                    sort_key: VersionSortKey::for_row(&row),
+                    sort_key,
                     row,
                     tx_id,
                     weight: new,
@@ -3129,15 +3229,11 @@ fn result_member_payload_entry_bytes(payload: &ResultMemberPayloadEntry) -> usiz
 }
 
 fn version_identity_bytes(identity: &VersionIdentity) -> usize {
-    mem::size_of_val(identity)
-        + intern_string_bytes(&identity.table)
-        + vec_bytes(&identity.raw_record)
+    mem::size_of_val(identity) + intern_string_bytes(&identity.table) + identity.raw_record.len()
 }
 
 fn version_sort_key_bytes(sort_key: &VersionSortKey) -> usize {
-    mem::size_of_val(sort_key)
-        + intern_string_bytes(&sort_key.table)
-        + vec_bytes(&sort_key.raw_record)
+    mem::size_of_val(sort_key) + intern_string_bytes(&sort_key.table) + sort_key.raw_record.len()
 }
 
 fn replacement_key_bytes(key: &ReplacementKey) -> usize {
@@ -3159,18 +3255,18 @@ impl VersionIdentity {
         Self {
             table: row.table,
             layer: row.layer(),
-            raw_record: row.record.raw().to_vec(),
+            raw_record: Arc::from(row.record.raw()),
         }
     }
 }
 
 impl VersionSortKey {
-    fn for_row(row: &VersionRow) -> Self {
+    fn for_row(row: &VersionRow, identity: &VersionIdentity) -> Self {
         Self {
             table: row.table,
             row_uuid: row.row_uuid(),
             layer: row.layer(),
-            raw_record: row.record.raw().to_vec(),
+            raw_record: Arc::clone(&identity.raw_record),
         }
     }
 }
@@ -3611,6 +3707,50 @@ mod tests {
     // applied sort/window semantics, and a public root UUID cannot express
     // two flat occurrences of that root with different joined payloads.
     #[test]
+    fn fresh_collector_roots_skip_order_scans_but_reinsert_repositions() {
+        // Internal mechanism test: the public result cannot reveal a scan of
+        // every existing key for each fresh insert. Also pin reinsertion's
+        // occurrence identity and position, so skipping all scans is unsafe.
+        let descriptor = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
+        let root = row(0x82);
+        let value = descriptor.create(&[Value::Uuid(root.0)]).unwrap();
+        let mut view = MaintainedSubscriptionView::default();
+        let insert = |i: u64, index| {
+            let key = i.to_be_bytes().to_vec();
+            TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Insert {
+                    key,
+                    index,
+                    value: value.clone(),
+                },
+            }
+        };
+        for i in 0..2000 {
+            view.apply_structured_terminal_operation(&insert(i, i as usize))
+                .unwrap();
+        }
+        assert_eq!(view.root_order_insert_comparisons, 0);
+        assert_eq!(view.structured_root_key_order.len(), 2000);
+        // The same public root is allowed at many occurrence keys. Reinsert
+        // only one occurrence, replacing its position without duplicating it.
+        view.apply_structured_terminal_operation(&insert(999, 0))
+            .unwrap();
+        assert_eq!(view.structured_root_key_order.len(), 2000);
+        assert_eq!(view.structured_root_key_order[0], 999_u64.to_be_bytes());
+        assert_eq!(view.structured_root_key_order[1], 0_u64.to_be_bytes());
+        assert_eq!(
+            view.structured_root_key_order
+                .iter()
+                .filter(|key| **key == 999_u64.to_be_bytes())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn collector_terminal_keys_preserve_same_root_payloads_order_and_edits() {
         let descriptor =
             RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
@@ -3726,7 +3866,8 @@ mod tests {
             },
         };
 
-        let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+        let rebound =
+            rebind_terminal_operation_to_layout(operation.clone(), &layout(target)).unwrap();
         assert_eq!(rebound.root_descriptor, target);
         let TerminalEdit::Update { value, .. } = rebound.edit else {
             panic!("operation remains an update");
@@ -3786,7 +3927,8 @@ mod tests {
             },
         };
 
-        let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+        let rebound =
+            rebind_terminal_operation_to_layout(operation.clone(), &layout(target)).unwrap();
         let TerminalEdit::Update { value, .. } = rebound.edit else {
             panic!("operation remains an update");
         };
@@ -3819,7 +3961,7 @@ mod tests {
         };
 
         assert!(matches!(
-            rebind_terminal_operation_to_layout(&operation, &layout(target)),
+            rebind_terminal_operation_to_layout(operation.clone(), &layout(target)),
             Err(Error::InvalidStoredValue(
                 "structured terminal operation descriptor disagrees with prepared root layout"
             ))
@@ -3874,7 +4016,8 @@ mod tests {
                 path: vec![TerminalPathSegment::Collection("members".to_owned())],
                 edit,
             };
-            let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+            let rebound =
+                rebind_terminal_operation_to_layout(operation.clone(), &layout(target)).unwrap();
             assert_eq!(rebound.root_descriptor, target);
             assert_eq!(rebound.root_key, operation.root_key);
             assert_eq!(rebound.path, operation.path);
@@ -3914,7 +4057,9 @@ mod tests {
                 path,
                 edit: TerminalEdit::Remove { key: vec![1] },
             };
-            assert!(rebind_terminal_operation_to_layout(&operation, &layout(target)).is_err());
+            assert!(
+                rebind_terminal_operation_to_layout(operation.clone(), &layout(target)).is_err()
+            );
         }
         let other_child =
             RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("name", ValueType::String)]);
@@ -3932,7 +4077,10 @@ mod tests {
             path: vec![TerminalPathSegment::Collection("members".to_owned())],
             edit: TerminalEdit::Remove { key: vec![1] },
         };
-        assert!(rebind_terminal_operation_to_layout(&operation, &layout(changed_target)).is_err());
+        assert!(
+            rebind_terminal_operation_to_layout(operation.clone(), &layout(changed_target))
+                .is_err()
+        );
     }
 
     fn witness_schema() -> VersionWitnessSchema {
@@ -4096,6 +4244,39 @@ mod tests {
             maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), -1),
             Some(false)
         );
+        assert!(maintained.source_fact_weights.is_empty());
+    }
+
+    // Internal: signed terminal weights can temporarily be negative, and
+    // only this boundary exposes each witness origin's independent presence.
+    #[test]
+    fn signed_source_weights_do_not_cancel_another_origins_presence() {
+        let row = version(row(0x53), 12, "signed source");
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(test_source(), &row, &aliases()).unwrap(),
+        );
+        let mut maintained = MaintainedSubscriptionView::default();
+        for (origin, weight, transition, visible) in [
+            (SourceFactOrigin::Version, 1, Some(true), true),
+            (SourceFactOrigin::Replacement, -1, None, true),
+            (SourceFactOrigin::Version, -1, Some(false), false),
+            (SourceFactOrigin::Replacement, 1, None, false),
+            (SourceFactOrigin::ProgramFact, 2, Some(true), true),
+            (SourceFactOrigin::Version, -2, None, true),
+            (SourceFactOrigin::ProgramFact, -2, Some(false), false),
+            (SourceFactOrigin::Version, 2, None, false),
+        ] {
+            assert_eq!(
+                maintained.apply_source_fact_delta(origin, fact.clone(), weight),
+                transition,
+            );
+            assert_eq!(
+                maintained
+                    .active_peer_source_closure_facts()
+                    .contains(&fact),
+                visible
+            );
+        }
         assert!(maintained.source_fact_weights.is_empty());
     }
 
@@ -4536,6 +4717,47 @@ mod tests {
         assert_eq!(removal.result_payload_removes, vec![member]);
     }
 
+    // Internal because malformed typed terminal events are below the public
+    // query API. A late decode failure must not publish the earlier rows.
+    #[test]
+    fn late_decoded_event_error_leaves_retained_rows_unchanged() {
+        let descriptor = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
+        let event = || {
+            (
+                DecodedMaintainedEvent::StructuredAppRow {
+                    root: row(1),
+                    record: OwnedRecord::new(
+                        descriptor.create(&[Value::Uuid(row(1).0)]).unwrap(),
+                        descriptor,
+                    ),
+                },
+                1,
+            )
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+        let result = maintained.apply_decoded_delta_results(
+            [
+                Ok(event()),
+                Err(super::super::Error::InvalidStoredValue(
+                    "late terminal decode",
+                )),
+            ],
+            &aliases(),
+        );
+        assert!(matches!(
+            result,
+            Err(super::super::Error::InvalidStoredValue(
+                "late terminal decode"
+            ))
+        ));
+        assert!(maintained.structured_app_rows().is_empty());
+        // Positive control: the valid prefix would be observable if applied.
+        maintained
+            .apply_decoded_deltas([event()], &aliases())
+            .unwrap();
+        assert_eq!(maintained.structured_app_rows().len(), 1);
+    }
+
     #[test]
     fn discarded_structured_app_row_collector_does_not_retain_later_deltas() {
         let descriptor =
@@ -4909,4 +5131,9 @@ mod terminal_role_hash_tests {
         );
         assert_ne!(first.id, terminal_root_layout(&changed_name).id);
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static SOURCE_CLOSURE_TRAVERSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }

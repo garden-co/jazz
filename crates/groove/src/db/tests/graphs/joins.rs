@@ -1431,3 +1431,109 @@ async fn anti_join_resubscribe_hydrates_from_storage_after_unretained_changes() 
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 }
+
+#[futures_test::test]
+async fn existence_join_narrowing_keeps_duplicate_key_counts_across_retractions() {
+    for anti in [false, true] {
+        let storage = MemoryStorage::new(&["albums", "artists"]).unwrap();
+        let mut database = Database::new(albums_artists_schema(), storage)
+            .await
+            .unwrap();
+        let left = GraphBuilder::table("albums");
+        let right = GraphBuilder::table("artists");
+        let graph = if anti {
+            GraphBuilder::anti_join(left, right, ["title"], ["name"])
+        } else {
+            GraphBuilder::semi_join(left, right, ["title"], ["name"])
+        };
+        let subscription = database.subscribe_one_sink(graph.clone()).await.unwrap();
+        assert!(subscription.recv().unwrap().is_empty());
+        let album = vec![Value::U64(7), Value::U64(11), Value::String("same".into())];
+        let mut batch = database.open_batch();
+        batch.insert("albums", album.clone());
+        batch.insert(
+            "artists",
+            vec![Value::U64(11), Value::String("same".into())],
+        );
+        batch.insert(
+            "artists",
+            vec![Value::U64(12), Value::String("same".into())],
+        );
+        database.commit_batch(batch).await.unwrap();
+        if anti {
+            assert!(subscription.try_recv().is_err());
+        } else {
+            assert_eq!(expect_recv_vals(&subscription), [(album.clone(), 1)]);
+        }
+        // The rows differ only in a field discarded by the existence input.
+        // Removing one must not act as if their common key disappeared.
+        let mut batch = database.open_batch();
+        batch.delete("artists", PrimaryKeyValue::U64(11));
+        database.commit_batch(batch).await.unwrap();
+        assert!(subscription.try_recv().is_err());
+        // Replace the last matching row in one tick: still no threshold crossing.
+        let mut batch = database.open_batch();
+        batch.delete("artists", PrimaryKeyValue::U64(12));
+        batch.insert(
+            "artists",
+            vec![Value::U64(13), Value::String("same".into())],
+        );
+        database.commit_batch(batch).await.unwrap();
+        assert!(subscription.try_recv().is_err());
+        let mut batch = database.open_batch();
+        batch.delete("artists", PrimaryKeyValue::U64(13));
+        database.commit_batch(batch).await.unwrap();
+        assert_eq!(
+            expect_recv_vals(&subscription),
+            [(album, if anti { 1 } else { -1 })]
+        );
+    }
+}
+
+#[futures_test::test]
+async fn projected_join_preserves_values_with_unnamed_input_slots() {
+    use crate::records::{DescriptorField, FieldIdentity, RecordDescriptor, ValueType};
+    let descriptor = RecordDescriptor::new_with_fields([
+        DescriptorField {
+            name: None,
+            identity: Some(FieldIdentity::Slot(42)),
+            value_type: ValueType::U64,
+        },
+        DescriptorField::new("id", ValueType::U64),
+        DescriptorField::new("label", ValueType::String),
+    ]);
+    let side = |label: &str| {
+        GraphBuilder::values(
+            descriptor,
+            [vec![
+                Value::U64(999),
+                Value::U64(1),
+                Value::String(label.into()),
+            ]],
+        )
+        .unwrap()
+    };
+    let graph = GraphBuilder::join(side("left value"), side("right value"), ["id"], ["id"])
+        .project_fields([
+            ProjectField::renamed("left.label", "left_label"),
+            ProjectField::renamed("right.label", "right_label"),
+        ]);
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(
+            vec![
+                Value::String("left value".into()),
+                Value::String("right value".into())
+            ],
+            1
+        )]
+    );
+}

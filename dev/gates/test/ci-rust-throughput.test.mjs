@@ -1848,7 +1848,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /set -m/);
   assert.match(runner, /bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
   assert.match(runner, /bash -c "\$\{browser_tests_command\}" >"\$\{browser_tests_log\}" 2>&1 &/);
-  assert.match(runner, /browser_tests_pid=\$!\nset \+m/);
+  assert.match(runner, /browser_tests_pid=\$![\s\S]*log_monitor_pid=\$![\s\S]*set \+m/);
   assert.doesNotMatch(runner, /^setsid /m);
   assert.match(runner, /trap 'interrupt 130' INT/);
   assert.match(runner, /trap 'interrupt 143' TERM/);
@@ -2144,4 +2144,177 @@ test("parallel TypeScript runner terminates both child process groups", async ()
   assert.equal(fs.existsSync(nodeMarker), false, "node descendant survived TERM");
   assert.equal(fs.existsSync(browserMarker), false, "browser descendant survived TERM");
   fs.rmSync(fixture, { recursive: true, force: true });
+});
+
+for (const [signal, expected] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+]) {
+  test(`parallel TypeScript runner retains bounded diagnostics on ${signal}`, async () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-tails-"));
+    const command = (suite) =>
+      `printf '%20000s\\n' x; echo ${suite}-last-test; touch "$RUNNER_TEMP/${suite}-ready"; sleep 30`;
+    const child = spawn("bash", [path.join(root, "dev/gates/run-ts-tests.sh")], {
+      cwd: root,
+      env: {
+        ...process.env,
+        RUNNER_TEMP: fixture,
+        JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
+        JAZZ_NODE_TEST_COMMAND: command("node"),
+        JAZZ_BROWSER_TEST_COMMAND: command("browser"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk;
+    });
+    const closed = new Promise((resolve) => child.once("close", (code) => resolve(code)));
+    const watchdog = setTimeout(() => child.kill("SIGKILL"), 5000);
+    try {
+      const deadline = Date.now() + 3000;
+      while (
+        !["node", "browser"].every((suite) => fs.existsSync(path.join(fixture, `${suite}-ready`)))
+      ) {
+        assert.ok(Date.now() < deadline, "synthetic suites did not start");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      child.kill(signal);
+      assert.equal(await closed, expected, output);
+      assert.match(output, /node-last-test/);
+      assert.match(output, /browser-last-test/);
+      assert.ok(Buffer.byteLength(output) < 34000, "interruption diagnostics were not bounded");
+      for (const suite of ["node", "browser"]) {
+        const log = fs.readdirSync(fixture).find((name) => name.startsWith(`jazz-${suite}-tests-`));
+        assert.ok(log, "complete suite log was not retained");
+        assert.ok(fs.statSync(path.join(fixture, log)).size > 20000);
+      }
+    } finally {
+      clearTimeout(watchdog);
+      if (child.exitCode === null) child.kill("SIGTERM");
+      await closed;
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const ending of ["complete", "SIGTERM", "SIGKILL"]) {
+  test(`parallel TypeScript runner publishes bounded progress before ${ending} and stops its monitor`, async () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-progress-"));
+    const command = (suite) =>
+      `echo $$ > "$RUNNER_TEMP/${suite}-pid"; printf '%20000s\\n' x; echo ${suite}-progress; while [ ! -f "$RUNNER_TEMP/finish" ]; do sleep 0.1; done`;
+    const child = spawn("bash", [path.join(root, "dev/gates/run-ts-tests.sh")], {
+      cwd: root,
+      env: {
+        ...process.env,
+        RUNNER_TEMP: fixture,
+        JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
+        JAZZ_TEST_LOG_INTERVAL_SECONDS: "1",
+        JAZZ_NODE_TEST_COMMAND: command("node"),
+        JAZZ_BROWSER_TEST_COMMAND: command("browser"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk;
+    });
+    const closed = new Promise((resolve) =>
+      child.once("close", (code, signal) => resolve({ code, signal })),
+    );
+    const watchdog = setTimeout(() => child.kill("SIGKILL"), 8000);
+    try {
+      const deadline = Date.now() + 5000;
+      while (!output.includes("node-progress") || !output.includes("browser-progress")) {
+        assert.ok(Date.now() < deadline, "no suite progress was published before termination");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(child.exitCode, null, "progress arrived only after suite completion");
+      assert.ok(Buffer.byteLength(output) < 34000, "live diagnostics were not bounded");
+      const monitor = Number(output.match(/live log monitor PID: (\d+)/)?.[1]);
+      assert.ok(monitor > 0, "monitor PID not reported");
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      assert.equal(
+        (output.match(/bounded live log tail:/g) ?? []).length,
+        2,
+        "unchanged suite logs were replayed again",
+      );
+      if (ending === "complete") fs.writeFileSync(path.join(fixture, "finish"), "");
+      else child.kill(ending);
+      let closeTimer;
+      const result = await Promise.race([
+        closed,
+        new Promise((_, reject) => {
+          closeTimer = setTimeout(
+            () => reject(new Error("monitor kept its output pipe open")),
+            3000,
+          );
+        }),
+      ]).finally(() => clearTimeout(closeTimer));
+      assert.deepEqual(
+        result,
+        ending === "SIGKILL"
+          ? { code: null, signal: "SIGKILL" }
+          : { code: ending === "complete" ? 0 : 143, signal: null },
+      );
+      // SIGKILL cannot reap its child: an init/subreaper may briefly retain an
+      // exited zombie. It must never leave a running monitor or inherited pipe.
+      const state = spawnSync("ps", ["-o", "stat=", "-p", String(monitor)], {
+        encoding: "utf8",
+      }).stdout.trim();
+      assert.ok(
+        state === "" || (ending === "SIGKILL" && state.startsWith("Z")),
+        `monitor survived: ${state}`,
+      );
+      for (const suite of ["node", "browser"]) {
+        const log = fs.readdirSync(fixture).find((name) => name.startsWith(`jazz-${suite}-tests-`));
+        if (ending === "complete") assert.equal(log, undefined);
+        else assert.ok(log && fs.statSync(path.join(fixture, log)).size > 20000);
+      }
+    } finally {
+      clearTimeout(watchdog);
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      const monitorPid = Number(output.match(/live log monitor PID: (\d+)/)?.[1]);
+      if (monitorPid > 0) {
+        try {
+          process.kill(-monitorPid, "SIGTERM");
+        } catch (error) {
+          if (error.code !== "ESRCH") throw error;
+        }
+      }
+      // The hard-kill scenario cannot run the parent's suite cleanup trap.
+      for (const suite of ["node", "browser"]) {
+        const pidFile = path.join(fixture, `${suite}-pid`);
+        if (fs.existsSync(pidFile)) {
+          try {
+            process.kill(-Number(fs.readFileSync(pidFile, "utf8").trim()), "SIGTERM");
+          } catch (error) {
+            if (error.code !== "ESRCH") throw error;
+          }
+        }
+      }
+      await closed;
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+}
+
+test("CI rejects inherited live-log timing overrides", () => {
+  const result = spawnSync("bash", [path.join(root, "dev/gates/run-ts-tests.sh")], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      JAZZ_REQUIRE_CI_TEST_COMMANDS: "1",
+      JAZZ_TEST_LOG_INTERVAL_SECONDS: "1",
+    },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /JAZZ_TEST_LOG_INTERVAL_SECONDS.*forbidden/);
 });

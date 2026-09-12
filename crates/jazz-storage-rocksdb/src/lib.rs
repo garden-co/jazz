@@ -160,7 +160,8 @@ impl StorageCursor for RocksDbCursor<'_> {
                 return Ok(None);
             }
             let batch_limit = self.remaining.unwrap_or(256).min(256);
-            let mut batch = Vec::with_capacity(batch_limit);
+            // Short and empty scans should not reserve a full page.
+            let mut batch = Vec::new();
             while batch.len() < batch_limit {
                 let Some(item) = self.iterator.next() else {
                     self.done = true;
@@ -717,6 +718,30 @@ impl ReopenableStorage for RocksDbStorage {
 }
 
 impl OrderedKvStorage for RocksDbStorage {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<groove::storage::ValueComparison, Error>> {
+        Box::pin(async move {
+            let value = if cf == "default" {
+                self.db.get_pinned(&key).storage()?
+            } else {
+                self.db
+                    .get_pinned_cf(self.cf_handle(&cf)?, &key)
+                    .storage()?
+            };
+            Ok(match value {
+                None => groove::storage::ValueComparison::Absent,
+                Some(value) if value.as_ref() == expected.as_slice() => {
+                    groove::storage::ValueComparison::Identical
+                }
+                Some(_) => groove::storage::ValueComparison::Different,
+            })
+        })
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             let value = if cf == "default" {

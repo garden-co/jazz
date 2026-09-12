@@ -6,9 +6,10 @@ edition = "2024"
 [features]
 default = []
 test = []
-cold-settle-attribution = []
+cold-settle-attribution = ["dep:tracing"]
 
 [dependencies]
+tracing = { version = "0.1", optional = true }
 internment = { version = "0.8.6", features = ["serde"] }
 bytes = "1"
 blake3 = "1"
@@ -39,4 +40,8 @@ harness = false
 
 [[bench]]
 name = "micro"
+harness = false
+
+[[bench]]
+name = "record_validation"
 harness = false

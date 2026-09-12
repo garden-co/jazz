@@ -11,11 +11,15 @@ const wasmArtifactFiles = [
   "jazz_wasm.d.ts",
   "jazz_wasm.js",
 ];
-export function stageNativeFingerprints(root, { local = false, workspace = false } = {}) {
-  if (local && workspace) throw new Error("--local and --workspace are mutually exclusive");
+export function stageNativeFingerprints(
+  root,
+  { local = false, workspace = false, profiling = false } = {},
+) {
+  if ([local, workspace, profiling].filter(Boolean).length > 1)
+    throw new Error("--local, --workspace and --profiling are mutually exclusive");
   const wasm = read(join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json"));
   const napi =
-    local || workspace
+    local || workspace || profiling
       ? read(
           join(
             root,
@@ -33,7 +37,10 @@ export function stageNativeFingerprints(root, { local = false, workspace = false
   ])
     if (!/^[a-f0-9]{64}$/.test(manifest.nativeArtifactFingerprint ?? ""))
       throw new Error(`${name} manifest lacks a native fingerprint`);
-  if (wasm.kind !== "wasm" || wasm.profile !== (local ? "fast" : "release"))
+  if (
+    wasm.kind !== "wasm" ||
+    wasm.profile !== (profiling ? "profiling" : local ? "fast" : "release")
+  )
     throw new Error("downloaded WASM manifest has the wrong kind/profile");
   const artifacts = wasm.artifacts;
   if (!Array.isArray(artifacts) || artifacts.length !== wasmArtifactFiles.length)
@@ -78,6 +85,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     stageNativeFingerprints(root, {
       local: process.argv.includes("--local"),
       workspace: process.argv.includes("--workspace"),
+      profiling: process.argv.includes("--profiling"),
     });
   } catch (error) {
     console.error(`stage native fingerprints: ${error.message}`);

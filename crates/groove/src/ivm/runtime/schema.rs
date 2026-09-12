@@ -436,8 +436,7 @@ impl IvmRuntime {
                 .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
             mapping,
         };
-        let raw_projection = raw_projection_fields(&project, &source, payload)?
-            .map(Arc::<[RawProjectionField]>::from);
+        let raw_projection = raw_projection_fields(&project, &source, payload)?.map(Arc::new);
         let case = VariantProjectionCase::Enum {
             source,
             tag,
@@ -632,8 +631,8 @@ impl IvmRuntime {
                     .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
                 mapping,
             };
-            let raw_projection = raw_projection_fields(&project, &source, projection.output)?
-                .map(Arc::<[RawProjectionField]>::from);
+            let raw_projection =
+                raw_projection_fields(&project, &source, projection.output)?.map(Arc::new);
             VariantProjectionCase::Project {
                 source,
                 project,

@@ -1478,3 +1478,33 @@ fn policy_context_carries_alpha_enforcement_mode() {
 
     assert_ne!(permissive, enforcing);
 }
+
+// Internal compiler-contract test: equal public rows cannot prove whether
+// wide witness encoding happens before or after exact-version selection.
+#[test]
+fn immutable_witness_encoding_follows_exact_version_selection() {
+    for fact in [
+        ProgramFactKey::VersionWitnesses,
+        ProgramFactKey::ReplacementWitnesses,
+    ] {
+        let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
+            reads: QueryReadSet::primary(current_read_view()),
+            policy: system_policy_context(),
+            input: row_set_input(0x31),
+            output: RowSetOutputRequest {
+                app_rows: None,
+                facts: BTreeSet::from([fact]),
+            },
+        };
+        let program = lower_query_program(request, &mut FakeSourceResolver::default()).unwrap();
+        assert!(program.lowered.terminals.iter().any(|terminal| graph_any(&terminal.graph, &|graph| {
+            let GraphBuilder::Project { input, fields } = graph else { return false };
+            fields.iter().any(|field| field.output_name == "event_kind")
+                && fields.iter().any(|field| field.output_name == "parents")
+                && matches!(input.as_ref(), GraphBuilder::SemiJoin { left, left_on, right_on, .. }
+                    if matches!(left.as_ref(), GraphBuilder::Table { table, .. } if table.ends_with("_content_versions"))
+                    && left_on.len() == 3 && right_on.len() == 3)
+        })));
+    }
+}

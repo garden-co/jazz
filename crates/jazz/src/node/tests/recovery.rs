@@ -2687,3 +2687,154 @@ fn transaction_metadata_round_trips_through_recovery() {
         Some(r#"{"source":"exclusive"}"#.to_owned())
     );
 }
+
+
+#[test]
+fn transaction_status_projects_state_without_decoding_payloads() {
+    // Internal coverage is required to plant semantically invalid durable
+    // payloads and measure decoder work: neither is exposed by public APIs.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&temp_dir, schema);
+    let tx_id = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(9), 10)
+                .cells(BTreeMap::from([("title".to_owned(), "status".to_owned())])),
+        )
+        .unwrap();
+    let mut stored = core.query_transaction(tx_id).unwrap().unwrap();
+    let expected = (stored.fate.clone(), stored.global_time, stored.durability);
+
+    // Exercise both the cached-alias path and durable alias discovery.
+    core.node_aliases.remove(&tx_id.node);
+    assert_eq!(
+        core.transaction_state_settled(tx_id),
+        Some(expected.clone())
+    );
+    assert_eq!(core.node_aliases.get(&tx_id.node), Some(&stored.node_alias));
+    assert!(
+        core.transaction_state_settled(TxId::new(TxTime::from(999), tx_id.node))
+            .is_none()
+    );
+    core.pending_persistence.insert(tx_id);
+    assert_eq!(
+        core.transaction_state_settled(tx_id),
+        Some((expected.0.clone(), expected.1, DurabilityTier::None))
+    );
+    core.pending_persistence.remove(&tx_id);
+
+    assert!(
+        core.transaction_state_settled(TxId::new(tx_id.time, node(0x72)))
+            .is_none()
+    );
+    for fate in [
+        Fate::Pending,
+        Fate::Accepted,
+        Fate::Rejected(RejectionReason::AuthorizationDenied),
+        Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
+        Fate::Rejected(RejectionReason::ExclusiveConflict),
+        Fate::Rejected(RejectionReason::CausalityViolation),
+        Fate::Rejected(RejectionReason::Cascade { root: tx_id }),
+        Fate::Rejected(RejectionReason::MalformedCommit("detail".to_owned())),
+    ] {
+        for durability in [
+            DurabilityTier::None,
+            DurabilityTier::Local,
+            DurabilityTier::Edge,
+            DurabilityTier::Global,
+        ] {
+            for global_time in [None, Some(GlobalTime(42))] {
+                let mut batch = core.database.open_batch();
+                batch.update(
+                    "jazz_transactions",
+                    transaction_values(
+                        stored.node_alias,
+                        &stored.tx,
+                        fate.clone(),
+                        global_time,
+                        durability,
+                        core.contribution_merge_storage_value(None).unwrap(),
+                    )
+                    .unwrap(),
+                );
+                let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
+                let persisted = crate::db::block_on(applied.persist());
+                core.database.finish_persistence(persisted).unwrap();
+                assert_eq!(
+                    core.transaction_state_settled(tx_id),
+                    Some((fate.clone(), global_time, durability))
+                );
+                let audit = core.transaction_record(tx_id).unwrap();
+                assert_eq!(
+                    core.transaction_state_settled(tx_id),
+                    Some((audit.fate, audit.global_time, audit.durability))
+                );
+            }
+        }
+    }
+
+    for payload_bytes in [16, 1024 * 1024] {
+        stored.tx.user_metadata_json = Some("x".repeat(payload_bytes));
+        let mut provenance = canonical_contribution_provenance(tx_id);
+        let duplicate = provenance.substitutions[0].sources[0].clone();
+        provenance.substitutions[0].sources.push(duplicate);
+        stored.tx.contribution_merge = Some(provenance);
+        let values = transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            stored.fate.clone(),
+            stored.global_time,
+            stored.durability,
+            core.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut batch = core.database.open_batch();
+        batch.update("jazz_transactions", values.clone());
+        let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        core.database.finish_persistence(persisted).unwrap();
+
+        super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(0));
+        for _ in 0..1500 {
+            assert_eq!(
+                core.transaction_state_settled(tx_id),
+                Some(expected.clone())
+            );
+        }
+        assert_eq!(
+            super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.get()),
+            0,
+            "status polling must do zero payload decodes regardless of payload size or poll count"
+        );
+        assert!(
+            core.query_transaction(tx_id).resolve().is_err(),
+            "full durable reads must still reject malformed contribution identities"
+        );
+        assert!(core.transaction_record(tx_id).is_none());
+
+        // Valid record framing does not make an incomplete rejected fate valid.
+        for reason in [None, Some("cascade")] {
+            let mut invalid_state = values.clone();
+            invalid_state[TransactionRowRecord::FIELD_FATE_IDX] =
+                Value::String("rejected".to_owned());
+            invalid_state[TransactionRowRecord::FIELD_REJECTION_REASON_IDX] =
+                Value::Nullable(reason.map(|reason| Box::new(Value::String(reason.to_owned()))));
+            let mut batch = core.database.open_batch();
+            batch.update("jazz_transactions", invalid_state);
+            let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
+            let persisted = crate::db::block_on(applied.persist());
+            core.database.finish_persistence(persisted).unwrap();
+            for pending in [false, true] {
+                if pending {
+                    core.pending_persistence.insert(tx_id);
+                }
+                assert!(
+                    core.transaction_state_settled(tx_id).is_none(),
+                    "pending durability override must not hide malformed fate fields"
+                );
+                core.pending_persistence.remove(&tx_id);
+            }
+        }
+    }
+}

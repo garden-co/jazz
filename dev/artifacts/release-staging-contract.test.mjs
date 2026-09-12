@@ -311,6 +311,48 @@ test("release fingerprint staging verifies downloaded WASM bytes before deriving
   assert.throws(() => stageNativeFingerprints(root), /downloaded WASM artifact hash mismatch/);
 });
 
+test("profiling fingerprint staging requires explicit admission, matching hashes and release NAPI", () => {
+  const root = releaseFixture();
+  writeWasmRelease(root);
+  const wasmManifestPath = join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json");
+  const wasmManifest = JSON.parse(readFileSync(wasmManifestPath, "utf8"));
+  wasmManifest.profile = "profiling";
+  writeFileSync(wasmManifestPath, JSON.stringify(wasmManifest));
+  const generation = join(root, "crates/jazz-napi/.native-artifacts/generation-profiling-test");
+  mkdirSync(generation, { recursive: true });
+  writeFileSync(
+    join(root, "crates/jazz-napi/native-binding.pointer.cjs"),
+    'require("./.native-artifacts/generation-profiling-test/index.js");',
+  );
+  const napiManifestPath = join(generation, ".jazz-artifact-manifest.json");
+  const napiManifest = { kind: "napi", profile: "release", nativeArtifactFingerprint: fingerprint };
+  writeFileSync(napiManifestPath, JSON.stringify(napiManifest));
+  assert.throws(() => stageNativeFingerprints(root, { workspace: true }), /wrong kind\/profile/);
+  assert.throws(() => stageNativeFingerprints(root, { local: true }), /wrong kind\/profile/);
+  assert.throws(
+    () => stageNativeFingerprints(root, { local: true, profiling: true }),
+    /mutually exclusive/,
+  );
+  stageNativeFingerprints(root, { profiling: true });
+  assert.match(
+    readFileSync(
+      join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"),
+      "utf8",
+    ),
+    new RegExp(fingerprint),
+  );
+  napiManifest.profile = "fast";
+  writeFileSync(napiManifestPath, JSON.stringify(napiManifest));
+  assert.throws(
+    () => stageNativeFingerprints(root, { profiling: true }),
+    /NAPI manifest has the wrong kind\/profile/,
+  );
+  napiManifest.profile = "release";
+  writeFileSync(napiManifestPath, JSON.stringify(napiManifest));
+  writeFileSync(join(root, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm"), "tampered bytes");
+  assert.throws(() => stageNativeFingerprints(root, { profiling: true }), /artifact hash mismatch/);
+});
+
 test("release fingerprint staging rejects omitted, duplicate, empty, and malformed WASM artifact entries", () => {
   const cases = [
     { name: "omitted", artifacts: [], expected: /list each generated artifact exactly once/ },

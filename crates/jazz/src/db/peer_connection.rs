@@ -331,7 +331,11 @@ where
                         && tx.made_by == session_claim_binding.0
                 });
                 state
-                    .ingest_relay_commit_unit(tx.clone(), versions.clone())
+                    .ingest_relay_commit_unit_with_encoder_trust(
+                        tx.clone(),
+                        versions.clone(),
+                        ingest_context.trust.is_trusted(),
+                    )
                     .await?;
                 if same_scope_author {
                     state
@@ -884,7 +888,7 @@ fn collect_large_value_refs(value: &Value, refs: &mut Vec<groove::large_values::
     match value {
         Value::Large(value_ref) => {
             if !refs.contains(value_ref) {
-                refs.push(value_ref.clone());
+                refs.push(value_ref.as_ref().clone());
             }
         }
         Value::Tuple(values) | Value::Array(values) => {
@@ -3515,7 +3519,7 @@ where
                                             self.node
                                                 .lock()
                                                 .await
-                                                .ingest_relay_commit_unit(tx, versions)
+                                                .ingest_relay_commit_unit_with_encoder_trust(tx, versions, true)
                                                 .await?;
                                         }
                                         other => {

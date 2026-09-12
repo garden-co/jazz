@@ -23,8 +23,8 @@ use super::{
     ArgByDirection, ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError,
     NodeState, RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta,
     VariantProjection, VariantProjectionKey, arg_by_candidate_replaces, consolidate_deltas,
-    encoded_record_key_part, plan_expr_names, project_binding_source_deltas, scan_bounds,
-    touched_join_keys,
+    encoded_record_key_part, plan_expr_names, project_binding_source_deltas, raw_projection_fields,
+    scan_bounds, touched_join_keys,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -1677,13 +1677,33 @@ impl HydrationEvaluator<'_> {
                 }
                 OpType::MapProject(project) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
-                    let result =
-                        NodeState::update_map_project(project, output_desc, &input, None, false);
+                    #[cfg(feature = "cold-settle-attribution")]
+                    let projection_started = std::time::Instant::now();
+                    let fields = raw_projection_fields(project, &input.descriptor, output_desc)?;
+                    let result = NodeState::update_map_project(
+                        project,
+                        output_desc,
+                        &input,
+                        fields.as_ref(),
+                        false,
+                    );
                     #[cfg(feature = "cold-settle-attribution")]
                     if let Ok(output) = &result {
+                        crate::cold_settle_attribution::record_map_node(
+                            node.0,
+                            true,
+                            input.deltas.len(),
+                            output.deltas.len(),
+                            projection_started.elapsed().as_nanos() as u64,
+                            || {
+                                format!(
+                                    "inputs={:?} projection={project:?}",
+                                    graph_node.descriptor.inputs
+                                )
+                            },
+                        );
                         crate::cold_settle_attribution::record_map(
                             true,
-                            self.depends_on_dominant_child(node)?,
                             input.deltas.len(),
                             output.deltas.len(),
                         );
@@ -1787,7 +1807,6 @@ impl HydrationEvaluator<'_> {
                     #[cfg(feature = "cold-settle-attribution")]
                     crate::cold_settle_attribution::record_join(
                         true,
-                        self.depends_on_dominant_child(node)?,
                         left.deltas.len(),
                         right.deltas.len(),
                         deltas.len(),
@@ -1835,7 +1854,6 @@ impl HydrationEvaluator<'_> {
                     #[cfg(feature = "cold-settle-attribution")]
                     crate::cold_settle_attribution::record_join(
                         true,
-                        self.depends_on_dominant_child(node)?,
                         left.deltas.len(),
                         right.deltas.len(),
                         deltas.len(),
@@ -1964,39 +1982,6 @@ impl HydrationEvaluator<'_> {
             .first()
             .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
         self.eval_node(input).await
-    }
-
-    #[cfg(feature = "cold-settle-attribution")]
-    fn depends_on_dominant_child(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
-        let graph_node = self
-            .graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        if matches!(
-            &graph_node.descriptor.operator,
-            OpType::TableSource(source) if source.table == "res_l_child_3"
-        ) || ["parent_id", "value_text", "value_json"]
-            .into_iter()
-            .all(|field| {
-                graph_node
-                    .descriptor
-                    .output
-                    .records()
-                    .fields()
-                    .iter()
-                    .any(|candidate| candidate.name.as_deref() == Some(field))
-            })
-        {
-            return Ok(true);
-        }
-        graph_node
-            .descriptor
-            .inputs
-            .iter()
-            .copied()
-            .map(|input| self.depends_on_dominant_child(input))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|dependencies| dependencies.into_iter().any(|dependency| dependency))
     }
 }
 

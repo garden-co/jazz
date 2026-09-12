@@ -437,19 +437,25 @@ where
         }
     }
 
-    /// Return the legacy transaction fate tuple.
+    /// Return the legacy transaction fate tuple by projecting stored status.
+    /// Payload author/contribution validation belongs to full transaction reads;
+    /// this read retains storage framing and status-field validation.
     pub async fn transaction_state(
         &mut self,
         tx_id: TxId,
     ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)> {
-        self.transaction_record(tx_id).await.map(|record| {
-            let durability = if self.pending_persistence.contains(&tx_id) {
-                DurabilityTier::None
-            } else {
-                record.durability
-            };
-            (record.fate, record.global_time, durability)
-        })
+        self.query_transaction_state(tx_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(fate, global_time, stored_durability)| {
+                let durability = if self.pending_persistence.contains(&tx_id) {
+                    DurabilityTier::None
+                } else {
+                    stored_durability
+                };
+                (fate, global_time, durability)
+            })
     }
 
     /// Return the durable audit record for a transaction, including rejected
@@ -536,8 +542,8 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            let made_by = RowAuthor::from_value(
-                record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            let made_by = RowAuthor::from_record(
+                record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
             )
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject();
@@ -605,8 +611,8 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || RowAuthor::from_value(
-                    record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+                || RowAuthor::from_record(
+                    record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
                 )
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .as_author_subject()
@@ -1213,19 +1219,10 @@ where
     /// logical table-prefix scan.
     pub async fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
         let mut total = 0_u64;
-        for class_cf in [
-            "__groove_class_history",
-            "__groove_class_register",
-            "__groove_class_global_current",
-            "__groove_class_ahead_current",
-            "__groove_class_changes",
-            "__groove_class_indices",
-            "__groove_class_content",
-            "__groove_class_meta",
-        ] {
+        for class_cf in self.try_current_schema()?.physical_column_families() {
             total += self
                 .database
-                .approximate_class_bytes(class_cf)
+                .approximate_class_bytes(&class_cf)
                 .await
                 .map_err(Error::Groove)?
                 .unwrap_or_default();

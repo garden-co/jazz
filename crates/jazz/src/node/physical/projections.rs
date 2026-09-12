@@ -7,7 +7,7 @@ where
         schema_version: SchemaVersionId,
         logical_table: &str,
     ) -> Result<PhysicalTableId, Error> {
-        self.table_in_schema(logical_table, schema_version)?;
+        self.table_in_schema_ref(logical_table, schema_version)?;
         self.catalogue
             .physical_mappings
             .get(&schema_version)

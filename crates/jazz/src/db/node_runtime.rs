@@ -904,11 +904,13 @@ where
 
     /// Restore locally originated, unsettled durable writes into the
     /// process-local upload queue after reopening client storage.
-    pub(super) fn restore_pending_uploads(&self, identity: DbIdentity) -> Result<(), Error> {
-        let mut node = self.node.borrow_mut();
-        let pending = node.pending_transaction_ids_for(identity.node, identity.author);
-        let pending = crate::db::block_on(pending)?;
-        drop(node);
+    pub(super) async fn restore_pending_uploads(&self, identity: DbIdentity) -> Result<(), Error> {
+        let pending = self
+            .node
+            .lock()
+            .await
+            .pending_transaction_ids_for(identity.node, identity.author)
+            .await?;
         let mut restored = HashSet::new();
         for tx_id in pending {
             if restored.insert(tx_id) {
@@ -934,14 +936,16 @@ where
         Ok(())
     }
 
-    pub(super) fn restore_browser_relay_pending_uploads(
+    pub(super) async fn restore_browser_relay_pending_uploads(
         &self,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        let mut node = self.node.borrow_mut();
-        let pending = node.pending_transaction_ids_for_author(author);
-        let pending = crate::db::block_on(pending)?;
-        drop(node);
+        let pending = self
+            .node
+            .lock()
+            .await
+            .pending_transaction_ids_for_author(author)
+            .await?;
         self.browser_relay_recovered_tx_ids
             .borrow_mut()
             .extend(pending.iter().copied());
@@ -1958,9 +1962,10 @@ where
 
     async fn connect_upstream_inner(
         &self,
-        transport: Box<dyn Transport>,
+        mut transport: Box<dyn Transport>,
         strict_replay: bool,
     ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
+        transport.set_trusted_encoder(true);
         loop {
             // Connection installation mutates runtime metadata synchronously, but
             // first needs a coherent view of storage-owning node state. Evaluation
@@ -2583,7 +2588,7 @@ where
 
     fn accept_subscriber_with_peer_and_startup(
         &self,
-        transport: Box<dyn Transport>,
+        mut transport: Box<dyn Transport>,
         identity: AuthorSubject,
         trust: CommitUnitTrust,
         claims: BTreeMap<String, Value>,
@@ -2626,6 +2631,7 @@ where
             .connection_session_context()
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+        transport.set_trusted_encoder(ingest_context.trust.is_trusted());
         let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
@@ -4134,10 +4140,9 @@ where
             // Do not enqueue that provisional frame merely for the stream
             // facade to discard later: raw/poll consumers must not observe a
             // stale empty opening before the authoritative reset.
-            let materialized =
-                state_ref
-                    .sender
-                    .materialized(&node.borrow(), shape.query(), &event)?;
+            let materialized = state_ref
+                .sender
+                .materialized(&node.borrow(), &shape, &event)?;
             if state_ref.sender.publish(
                 event,
                 publication_before,
@@ -4481,7 +4486,7 @@ where
                     let materialized =
                         refresh
                             .sender
-                            .materialized(&node.borrow(), shape.query(), &event)?;
+                            .materialized(&node.borrow(), &shape, &event)?;
                     if refresh.sender.publish(
                         event,
                         publication_before,
@@ -4583,11 +4588,10 @@ where
                                 }
                                 refresh.settled = settled;
                                 retained.push(Rc::downgrade(&state));
-                                let materialized = refresh.sender.materialized(
-                                    &node.borrow(),
-                                    shape.query(),
-                                    &event,
-                                )?;
+                                let materialized =
+                                    refresh
+                                        .sender
+                                        .materialized(&node.borrow(), &shape, &event)?;
                                 if refresh.sender.publish(
                                     event,
                                     publication_before,
@@ -4645,7 +4649,7 @@ where
                             ) && node
                                 .borrow()
                                 .relation_snapshot_has_materialized_required_cells(
-                                    shape.query(),
+                                    &shape,
                                     &state_ref.snapshot,
                                 )?;
                             if authoritative_reset {
@@ -4678,11 +4682,10 @@ where
                             }
                             state_ref.settled = settled;
                             retained.push(Rc::downgrade(&state));
-                            let materialized = state_ref.sender.materialized(
-                                &node.borrow(),
-                                shape.query(),
-                                &event,
-                            )?;
+                            let materialized =
+                                state_ref
+                                    .sender
+                                    .materialized(&node.borrow(), &shape, &event)?;
                             if state_ref.sender.publish(
                                 event,
                                 publication_before,
@@ -4781,7 +4784,7 @@ where
                     let materialized =
                         refresh
                             .sender
-                            .materialized(&node.borrow(), shape.query(), &event)?;
+                            .materialized(&node.borrow(), &shape, &event)?;
                     let delivered = refresh.sender.publish(
                         event,
                         publication_before,
@@ -4964,9 +4967,7 @@ where
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             let SubscriptionKind::Prepared { shape, .. } = &state.kind;
-            let materialized = state
-                .sender
-                .materialized(&node.borrow(), shape.query(), &event)?;
+            let materialized = state.sender.materialized(&node.borrow(), &shape, &event)?;
             if state.sender.publish(
                 event,
                 publication_before,
@@ -5170,6 +5171,11 @@ pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
+
+    /// Assign encoder trust from the locally admitted connection role.
+    /// Semantic transports have no byte decoder to configure.
+    #[doc(hidden)]
+    fn set_trusted_encoder(&mut self, _trusted: bool) {}
 
     /// Return the immutable wire admission context paired with this transport.
     #[doc(hidden)]

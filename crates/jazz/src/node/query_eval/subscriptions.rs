@@ -1086,19 +1086,18 @@ where
                 )
             })
             .unwrap_or_else(|| AuthorityResultKey::unscoped(binding_view_key));
-        if !self.has_settled_authority_result(&authority_result_key) {
-            // An absent/retired live receipt cannot be recreated from its
-            // durable cursor alone: that cursor does not restore the source
-            // manifest or facts. Full startup recovery loads these together;
-            // a new usage here must instead await a fresh authority closure.
-            // Slow exact declarations are still known-state declarations: they
-            // must describe a binding view the server has previously settled
-            // for this client. A purely local first subscription could include
-            // rows the serving peer has not observed yet; truncating that to an
-            // exact set would silently overclaim and can make stale rehydrate
-            // responses suppress local live state.
+        // A retained local window is not proof of the complete upstream input.
+        if self
+            .query
+            .retained_root_window_sources
+            .contains_key(&authority_result_key)
+        {
             return Ok(None);
         }
+        // Durable payload possession survives restart; live authority does not.
+        // Advertising this cursor only deduplicates bodies. The serving peer
+        // must still send a fresh complete supporting set, and ordinary receipt
+        // admission/repair must finish before the query becomes confirmed.
         if let Some(position) = self
             .query
             .authority_results
@@ -1123,6 +1122,11 @@ where
                     position,
                 },
             }));
+        }
+        // Without a durable cursor, only a live exact receipt can justify an
+        // exact declaration. Locally authored/cached rows alone cannot do so.
+        if !self.has_settled_authority_result(&authority_result_key) {
+            return Ok(None);
         }
         // A live exact receipt without a fast watermark still proves which
         // membership this process received, but cannot claim currentness at a

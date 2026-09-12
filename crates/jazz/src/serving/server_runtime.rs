@@ -25,7 +25,7 @@ use crate::serving::{
 use crate::tools::native_transport_connector::{
     NativeTransportTerminal, NativeTransportTerminalFuture,
 };
-use crate::wire::{TransportError, WireFrame, WireTransport, decode_frame, decode_sync_message};
+use crate::wire::{TransportError, WireFrame, WireTransport};
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::task::LocalSpawnExt;
@@ -1226,7 +1226,9 @@ fn perform_shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
 }
 
 fn inbound_frame_phase(frame: &[u8]) -> String {
-    let Ok(frame) = decode_frame(frame) else {
+    // Diagnostic naming is not admission. Do not perform receipt validation
+    // or canonical re-encoding before the actual connection decoder runs.
+    let Ok(frame) = postcard::from_bytes::<WireFrame>(frame) else {
         return "malformed wire frame".to_owned();
     };
     let WireFrame::Message(envelope) = frame else {
@@ -1237,7 +1239,7 @@ fn inbound_frame_phase(frame: &[u8]) -> String {
             WireFrame::Message(_) => unreachable!("message handled above"),
         };
     };
-    match decode_sync_message(&envelope.payload) {
+    match postcard::from_bytes::<SyncMessage>(&envelope.payload) {
         Ok(message) => sync_message_name(&message).to_owned(),
         Err(_) => "malformed SyncMessage".to_owned(),
     }

@@ -1849,3 +1849,40 @@ fn row_version_repair_preserves_preceding_complete_subscription_updates() {
     assert_eq!(row_ids(&snapshots[0].rows), vec![row(0xb6)]);
     assert_eq!(row_ids(&snapshots[1].rows), vec![row(0xb7)]);
 }
+
+// Internal transport instrumentation is necessary to assert encoder provenance:
+// identical valid query results would not show an accidentally checked decoder.
+#[test]
+fn encoder_trust_is_assigned_by_connection_role() {
+    struct TrustProbe(Rc<std::cell::Cell<Option<bool>>>);
+    impl Transport for TrustProbe {
+        fn set_trusted_encoder(&mut self, trusted: bool) {
+            self.0.set(Some(trusted));
+        }
+        fn send(&mut self, _: SyncMessage) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            None
+        }
+    }
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd7; 16]);
+    let client = open_db(0xd8, author, &schema);
+    let probe = Rc::new(std::cell::Cell::new(None));
+    let _upstream = block_on(client.connect_upstream(Box::new(TrustProbe(probe.clone()))));
+    assert_eq!(probe.get(), Some(true));
+    let server = open_core(0xd7, AuthorSubject::SYSTEM, &schema);
+    for (trust, expected) in [
+        (CommitUnitTrust::Session, false),
+        (CommitUnitTrust::Relay, false),
+        (CommitUnitTrust::TrustedBackend, true),
+        (CommitUnitTrust::TrustedAuthority, true),
+        (CommitUnitTrust::TrustedAdmin, true),
+    ] {
+        let probe = Rc::new(std::cell::Cell::new(None));
+        let _subscriber =
+            server.accept_subscriber_with_trust(Box::new(TrustProbe(probe.clone())), author, trust);
+        assert_eq!(probe.get(), Some(expected), "{trust:?}");
+    }
+}

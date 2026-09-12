@@ -346,7 +346,7 @@ async function openPhysicalDatabaseOwner(
   let pageStore: IndexedDbPageStore | null = null;
   try {
     pageStore = await IndexedDbPageStore.open(dbName, { owner: storageOwner });
-    await pageStore.claimBrowserWorkerEpoch(epoch.id);
+    await pageStore.claimBrowserWorkerEpoch(epoch.id, epoch);
     const owner: PhysicalDatabaseOwner = {
       epoch,
       pageStore,
@@ -911,9 +911,10 @@ async function retireForegroundNodeLease(
 function retireUnclaimedRuntimeOwners(): void {
   if (pendingBootstrapOperations !== 0) return;
   for (const [dbName, owner] of pendingRuntimeOwnerRetirements) {
-    pendingRuntimeOwnerRetirements.delete(dbName);
-    if (physicalDatabaseOwners.get(dbName) !== owner) continue;
-    if (contexts.has(dbName)) continue;
+    if (physicalDatabaseOwners.get(dbName) !== owner || contexts.has(dbName)) {
+      pendingRuntimeOwnerRetirements.delete(dbName);
+      continue;
+    }
     const leaseOwner = foregroundLeaseOwners.get(dbName);
     if (
       leaseOwner &&
@@ -922,6 +923,7 @@ function retireUnclaimedRuntimeOwners(): void {
         leaseOwner.pendingLeaseFinalizations > 0)
     )
       continue;
+    pendingRuntimeOwnerRetirements.delete(dbName);
     foregroundLeaseOwners.delete(dbName);
     void releasePhysicalDatabaseOwner(dbName).catch(() => undefined);
   }
@@ -1972,6 +1974,7 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
 }
 
 async function releaseIdleContext(context: RuntimeContext): Promise<void> {
+  if (contexts.get(context.key) !== context) return;
   if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return;
   if (!context.closing) {
     context.closing = (async () => {
@@ -1984,6 +1987,10 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       // The last peer's flush barrier already drained evaluator persistence.
       // Do not retain a graceful close future after every page has gone: a
       // suspended cold/query lifecycle cannot add durability at this point.
+      // Revoke every old cached tree before dropping GC-retained WASM wrappers.
+      // Foreground leases belong to the physical owner, not to this schema pin.
+      const physicalOwner = physicalDatabaseOwners.get(context.options.dbName);
+      const treeRetirement = context.pageStore?.retireTreeOwnership();
       context.runtime?.discard();
       context.runtime = null;
       context.disposePageStoreInvalidation?.();
@@ -1993,7 +2000,13 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       context.disposeTelemetry = null;
       context.disposeAuxiliaryTrace?.();
       context.disposeAuxiliaryTrace = null;
-      if (contexts.get(context.key) === context) contexts.delete(context.key);
+      await treeRetirement;
+      if (contexts.get(context.key) !== context) return;
+      contexts.delete(context.key);
+      if (physicalOwner && physicalDatabaseOwners.get(context.options.dbName) === physicalOwner) {
+        pendingRuntimeOwnerRetirements.set(context.options.dbName, physicalOwner);
+      }
+      retireUnclaimedRuntimeOwners();
     })();
   }
   await context.closing;
@@ -2011,6 +2024,7 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
 }
 
 function maybeCloseWorker(): void {
+  retireUnclaimedRuntimeOwners();
   if (!workerHasLiveWork()) {
     if (pendingWorkerClose) return;
     const closeToken = Symbol("worker-idle-close");
@@ -2066,12 +2080,13 @@ function workerHasLiveWork(): boolean {
   );
 }
 
-function hasForegroundLeaseWork(): boolean {
-  return [...foregroundLeaseOwners.values()].some(
-    (owner) =>
-      owner.activeLeaseIds.size > 0 ||
-      owner.pendingLeaseAllocations > 0 ||
-      owner.pendingLeaseFinalizations > 0,
+function hasForegroundLeaseWork(dbName?: string): boolean {
+  return [...foregroundLeaseOwners.entries()].some(
+    ([name, owner]) =>
+      (dbName === undefined || name === dbName) &&
+      (owner.activeLeaseIds.size > 0 ||
+        owner.pendingLeaseAllocations > 0 ||
+        owner.pendingLeaseFinalizations > 0),
   );
 }
 

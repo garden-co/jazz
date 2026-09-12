@@ -691,6 +691,10 @@ impl GraphRuntimeView<'_> {
             .retain(|key, _| key.scope != self.scope);
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.ivm_hydrate")
+    )]
     pub(super) async fn eval_root(
         &mut self,
         node: NodeId,
@@ -742,6 +746,10 @@ impl TickEvaluator<'_> {
     /// Keeping graph traversal here iterative makes stack use independent of
     /// graph depth, including recursive seed/step scopes which do not use the
     /// outer tick work queue.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.ivm_update")
+    )]
     pub(super) async fn update_subgraph(
         &mut self,
         root: NodeId,
@@ -1160,6 +1168,8 @@ impl TickEvaluator<'_> {
                 }
                 OpType::MapProject(project) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    #[cfg(feature = "cold-settle-attribution")]
+                    let projection_started = std::time::Instant::now();
                     let raw_projection =
                         self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
                     let result = NodeState::update_map_project(
@@ -1171,9 +1181,21 @@ impl TickEvaluator<'_> {
                     );
                     #[cfg(feature = "cold-settle-attribution")]
                     if let Ok(output) = &result {
+                        crate::cold_settle_attribution::record_map_node(
+                            node.0,
+                            self.context.eval_mode == EvalMode::Hydrate,
+                            input.deltas.len(),
+                            output.deltas.len(),
+                            projection_started.elapsed().as_nanos() as u64,
+                            || {
+                                format!(
+                                    "inputs={:?} projection={project:?}",
+                                    graph_node.descriptor.inputs
+                                )
+                            },
+                        );
                         crate::cold_settle_attribution::record_map(
                             self.context.eval_mode == EvalMode::Hydrate,
-                            self.depends_on_dominant_child(node)?,
                             input.deltas.len(),
                             output.deltas.len(),
                         );
@@ -1597,7 +1619,7 @@ impl TickEvaluator<'_> {
         project: &MapProjectOp,
         input_desc: &RecordDescriptor,
         output_desc: RecordDescriptor,
-    ) -> Result<Option<Arc<[RawProjectionField]>>, IvmRuntimeError> {
+    ) -> Result<Option<Arc<PreparedProjection>>, IvmRuntimeError> {
         if let Some(cached) = self
             .node_meta
             .get(&node)
@@ -1629,45 +1651,6 @@ impl TickEvaluator<'_> {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
         Ok(deltas)
-    }
-
-    #[cfg(feature = "cold-settle-attribution")]
-    pub(super) fn depends_on_dominant_child(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
-        let graph_node = self
-            .graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        if matches!(
-            &graph_node.descriptor.operator,
-            OpType::TableSource(source) if source.table == "res_l_child_3"
-        ) {
-            return Ok(true);
-        }
-        // Policy lowering can replace the direct table source with an indexed
-        // source. The anonymous child shape is unique in this benchmark, so
-        // retain the tag through that lowering as well.
-        if ["parent_id", "value_text", "value_json"]
-            .into_iter()
-            .all(|field| {
-                graph_node
-                    .descriptor
-                    .output
-                    .records()
-                    .fields()
-                    .iter()
-                    .any(|candidate| candidate.name.as_deref() == Some(field))
-            })
-        {
-            return Ok(true);
-        }
-        graph_node
-            .descriptor
-            .inputs
-            .iter()
-            .copied()
-            .map(|input| self.depends_on_dominant_child(input))
-            .collect::<Result<Vec<_>, _>>()
-            .map(|dependencies| dependencies.into_iter().any(|dependency| dependency))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1769,7 +1752,6 @@ impl TickEvaluator<'_> {
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
-            self.depends_on_dominant_child(node)?,
             left_delta.len(),
             right_delta.len(),
             deltas.len(),
@@ -1849,7 +1831,6 @@ impl TickEvaluator<'_> {
             #[cfg(feature = "cold-settle-attribution")]
             crate::cold_settle_attribution::record_join(
                 self.context.eval_mode == EvalMode::Hydrate,
-                self.depends_on_dominant_child(node)?,
                 left_delta.len(),
                 right_delta.len(),
                 deltas.len(),
@@ -1930,7 +1911,6 @@ impl TickEvaluator<'_> {
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
-            self.depends_on_dominant_child(node)?,
             left_delta.len(),
             right_delta.len(),
             deltas.len(),
@@ -2152,6 +2132,10 @@ impl TickEvaluator<'_> {
     /// a root-scope arrangement keyed by the collector input; a collector is
     /// structurally terminal, so it can never become state in a recursive step
     /// or inherit a recursive sub-tick work bound.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.collect_results")
+    )]
     fn update_collect_by(
         &mut self,
         node: NodeId,
@@ -2959,7 +2943,7 @@ impl TickEvaluator<'_> {
                 Value::Large(value) => {
                     if pending.current.is_none() {
                         pending.current = Some(crate::large_values::StreamingChecksum::new(
-                            value.clone(),
+                            value.as_ref().clone(),
                             checksum.window_bytes,
                             checksum.max_bytes_per_turn,
                         )?);

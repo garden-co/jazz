@@ -330,6 +330,14 @@ pub type ScanVisitor<'visitor> =
 /// absences. Successful writes through the same storage instance must be
 /// reflected by those resident reads. A backend may evict retained data; after
 /// eviction, a later read may become pending again.
+/// Result of comparing an encoded value without returning its body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueComparison {
+    Absent,
+    Identical,
+    Different,
+}
+
 pub trait OrderedKvStorage {
     /// Whether a read that yields once may be immediately re-polled by the
     /// caller without turning an external storage wait into a synchronous
@@ -354,6 +362,23 @@ pub trait OrderedKvStorage {
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>>;
+    /// Compare at the storage boundary. Backends can avoid cloning resident values.
+    /// This is a read, not a conditional mutation or a cross-writer reservation.
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        Box::pin(async move {
+            Ok(match self.get(cf, key).await? {
+                None => ValueComparison::Absent,
+                Some(value) if value == expected => ValueComparison::Identical,
+                Some(_) => ValueComparison::Different,
+            })
+        })
+    }
+
     /// Atomically install `value` only when `key` is absent. Returns the
     /// pre-existing value when another writer already installed one.
     fn put_if_absent(
@@ -503,6 +528,15 @@ impl<S> OrderedKvStorage for Rc<S>
 where
     S: OrderedKvStorage,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        self.as_ref().compare_value(cf, key, expected)
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         self.as_ref().permits_eager_read_retry()
     }
@@ -597,6 +631,15 @@ impl<S> OrderedKvStorage for &S
 where
     S: OrderedKvStorage,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        S::compare_value(*self, cf, key, expected)
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         S::permits_eager_read_retry(*self)
     }
@@ -977,6 +1020,18 @@ impl LayoutStorage {
 }
 
 impl OrderedKvStorage for LayoutStorage {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        Box::pin(async move {
+            let (cf, key) = self.physical_key(&cf, &key)?;
+            self.inner.compare_value(cf, key, expected).await
+        })
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
@@ -1207,6 +1262,15 @@ impl BoxedStorage {
 }
 
 impl OrderedKvStorage for BoxedStorage {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        self.inner.compare_value(cf, key, expected)
+    }
+
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.inner.scan(request)
     }
@@ -1582,6 +1646,10 @@ impl StagedWriteState {
         }
     }
 
+    pub(crate) fn operations(&self) -> &[OwnedWriteOperation] {
+        &self.operations
+    }
+
     pub(crate) fn into_operations(self) -> Vec<OwnedWriteOperation> {
         self.operations
     }
@@ -1602,20 +1670,61 @@ impl StagedWriteState {
                     });
             }
 
-            let mut latest_by_cf_key: BTreeMap<String, BTreeMap<Vec<u8>, usize>> = BTreeMap::new();
-            for (index, operation) in self.operations.iter().enumerate() {
-                latest_by_cf_key
-                    .entry(operation.cf().to_owned())
-                    .or_default()
-                    .insert(operation.key().to_vec(), index);
-            }
-            self.latest_by_cf_key = Some(latest_by_cf_key);
+            self.ensure_key_index();
         }
 
         self.latest_by_cf_key
             .as_ref()
             .and_then(|latest_by_cf_key| latest_by_cf_key.get(cf))
             .and_then(|latest_by_key| latest_by_key.get(key).copied())
+    }
+
+    fn ensure_key_index(&mut self) {
+        if self.latest_by_cf_key.is_some() {
+            return;
+        }
+        let mut latest_by_cf_key: BTreeMap<String, BTreeMap<Vec<u8>, usize>> = BTreeMap::new();
+        for (index, operation) in self.operations.iter().enumerate() {
+            latest_by_cf_key
+                .entry(operation.cf().to_owned())
+                .or_default()
+                .insert(operation.key().to_vec(), index);
+        }
+        self.latest_by_cf_key = Some(latest_by_cf_key);
+    }
+
+    fn scan_snapshot(
+        &mut self,
+        cf: &str,
+        bounds: &ScanBounds,
+    ) -> VecDeque<(Vec<u8>, Option<Value>)> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        if self.operations.is_empty() || bounds.is_empty_range() {
+            return VecDeque::new();
+        }
+        self.ensure_key_index();
+        let Some(by_key) = self
+            .latest_by_cf_key
+            .as_ref()
+            .and_then(|by_cf| by_cf.get(cf))
+        else {
+            return VecDeque::new();
+        };
+        let (start, end) = match bounds {
+            ScanBounds::Prefix(prefix) => (prefix.as_slice(), prefix_successor(prefix)),
+            ScanBounds::Range { start, end } => (start.as_slice(), Some(end.clone())),
+        };
+        let upper = end.as_deref().map_or(Unbounded, Excluded);
+        by_key
+            .range::<[u8], _>((Included(start), upper))
+            .map(|(key, index)| {
+                let value = match &self.operations[*index] {
+                    OwnedWriteOperation::Set { value, .. } => Some(value.clone()),
+                    OwnedWriteOperation::Delete { .. } => None,
+                };
+                (key.clone(), value)
+            })
+            .collect()
     }
 
     pub(crate) fn contains_key(&mut self, cf: &ColumnFamilyName, key: &Key) -> bool {
@@ -1714,47 +1823,15 @@ impl<'a, S: ?Sized> StagedWriteOverlay<'a, S> {
     }
 }
 
-fn overlay_point_value(
-    mut value: Option<Value>,
-    operations: &[OwnedWriteOperation],
-    cf: &str,
-    key: &[u8],
-) -> Result<Option<Value>, Error> {
-    for operation in operations {
-        if operation.cf() != cf || operation.key() != key {
-            continue;
-        }
-        match operation {
-            OwnedWriteOperation::Set { value: set, .. } => value = Some(set.clone()),
-            OwnedWriteOperation::Delete { .. } => value = None,
-        }
-    }
-    Ok(value)
-}
-
-fn snapshot_staged_operations(
-    staged_writes: &RefCell<StagedWriteState>,
-    include: impl Fn(&OwnedWriteOperation) -> bool,
-) -> Vec<OwnedWriteOperation> {
-    staged_writes
-        .borrow()
-        .operations
-        .iter()
-        .filter(|operation| include(operation))
-        .cloned()
-        .collect()
-}
-
 /// Ordered cursor which merges the durable base with the staged transaction
 /// writes as the caller asks for batches.  It intentionally owns only the
 /// in-range staged keys; its base cursor remains lazy, so a logical limit does
 /// not turn a sparse staged overlay into a full base-prefix materialization.
 struct OverlayScanCursor<'a> {
     base: StorageScan<'a>,
-    staged: VecDeque<(Vec<u8>, Vec<OwnedWriteOperation>)>,
+    staged: VecDeque<(Vec<u8>, Option<Value>)>,
     base_entries: VecDeque<KeyValue>,
     base_done: bool,
-    cf: String,
     direction: ScanDirection,
     remaining: Option<usize>,
 }
@@ -1789,11 +1866,8 @@ impl OverlayScanCursor<'_> {
                 let staged_entry = choice.1.then(|| self.staged.pop_front()).flatten();
 
                 match staged_entry {
-                    Some((key, operations)) => {
-                        let base_value = base_entry.map(|(_, value)| value);
-                        if let Some(value) =
-                            overlay_point_value(base_value, &operations, &self.cf, &key)?
-                        {
+                    Some((key, value)) => {
+                        if let Some(value) = value {
                             return Ok(Some((key, value)));
                         }
                     }
@@ -1817,7 +1891,8 @@ impl StorageCursor for OverlayScanCursor<'_> {
                 return Ok(None);
             };
 
-            let mut values = Vec::with_capacity(batch_len);
+            // Short and empty scans should not reserve a full page.
+            let mut values = Vec::new();
             while values.len() < batch_len {
                 let Some(entry) = self.next_entry().await? else {
                     break;
@@ -1840,38 +1915,19 @@ fn overlay_scan<'a, S>(
 where
     S: OrderedKvStorage + ?Sized,
 {
-    let cf = request.cf.clone();
-    let bounds = request.bounds.clone();
-    let operations = snapshot_staged_operations(staged_writes, |operation| {
-        operation.cf() == cf
-            && match &bounds {
-                ScanBounds::Prefix(prefix) => operation.key().starts_with(prefix),
-                ScanBounds::Range { start, end } => {
-                    operation.key() >= start.as_slice() && operation.key() < end.as_slice()
-                }
-            }
-    });
+    // Capture only the final value per key at scan creation. Later staged
+    // writes must not change this cursor's overlay snapshot.
+    let mut staged = staged_writes
+        .borrow_mut()
+        .scan_snapshot(&request.cf, &request.bounds);
     Box::pin(async move {
-        let mut staged = BTreeMap::<Vec<u8>, Vec<OwnedWriteOperation>>::new();
-        for operation in operations {
-            staged
-                .entry(operation.key().to_vec())
-                .or_default()
-                .push(operation);
-        }
-
         // A base limit of only the logical result size is unsound: every
         // staged key whose final operation can remove it may consume one of
         // those physical entries without producing a logical result. A
         // Thus `limit + removals` is both a hard physical ceiling and enough base entries to fill the
         // requested logical result when they exist.
         let physical_max_items = request.max_items.map(|limit| {
-            let final_removals = staged
-                .values()
-                .filter(|operations| {
-                    matches!(operations.last(), Some(OwnedWriteOperation::Delete { .. }))
-                })
-                .count();
+            let final_removals = staged.iter().filter(|(_, value)| value.is_none()).count();
             limit.saturating_add(final_removals)
         });
         let base = base
@@ -1880,7 +1936,6 @@ where
                 ..request.clone()
             })
             .await?;
-        let mut staged = staged.into_iter().collect::<VecDeque<_>>();
         if request.direction == ScanDirection::Reverse {
             staged.make_contiguous().reverse();
         }
@@ -1889,7 +1944,6 @@ where
             staged,
             base_entries: VecDeque::new(),
             base_done: false,
-            cf: request.cf,
             direction: request.direction,
             remaining: request.max_items,
         }) as StorageScan<'a>)
@@ -1900,6 +1954,29 @@ impl<S: ?Sized> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        Box::pin(async move {
+            {
+                let mut staged = self.staged_writes.borrow_mut();
+                if let Some(index) = staged.latest_index(&cf, &key) {
+                    return Ok(match &staged.operations[index] {
+                        OwnedWriteOperation::Delete { .. } => ValueComparison::Absent,
+                        OwnedWriteOperation::Set { value, .. } if value == &expected => {
+                            ValueComparison::Identical
+                        }
+                        _ => ValueComparison::Different,
+                    });
+                }
+            }
+            self.base.compare_value(cf, key, expected).await
+        })
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         self.base.permits_eager_read_retry()
     }
@@ -2085,6 +2162,37 @@ pub mod conformance {
     where
         S: OrderedKvStorage,
     {
+        let key = b"comparison-only".to_vec();
+        assert_eq!(
+            storage
+                .compare_value("records".into(), key.clone(), b"first".to_vec())
+                .await
+                .unwrap(),
+            ValueComparison::Absent
+        );
+        storage
+            .set("records".into(), key.clone(), b"first".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .compare_value("records".into(), key.clone(), b"first".to_vec())
+                .await
+                .unwrap(),
+            ValueComparison::Identical
+        );
+        assert_eq!(
+            storage
+                .compare_value("records".into(), key.clone(), b"other".to_vec())
+                .await
+                .unwrap(),
+            ValueComparison::Different
+        );
+        assert_eq!(
+            storage.get("records".into(), key.clone()).await.unwrap(),
+            Some(b"first".to_vec())
+        );
+        storage.delete("records".into(), key).await.unwrap();
         storage
             .set("records".into(), b"user:2".to_vec(), b"two".to_vec())
             .await
@@ -3823,6 +3931,73 @@ mod tests {
             vec![(b"row:298".to_vec(), b"reverse-override".to_vec())]
         );
         assert_eq!(storage.take_scan_entries_materialized(), 2);
+    }
+
+    #[futures_test::test]
+    async fn staged_scan_keeps_final_values_and_its_open_snapshot() {
+        let storage = MemoryStorage::new(&["records", "other"]).unwrap();
+        let transaction = StorageTransaction::new(&storage);
+        transaction.stage_owned_operations(vec![
+            OwnedWriteOperation::set("records", b"a", b"old"),
+            OwnedWriteOperation::set("records", b"a", b"new"),
+            OwnedWriteOperation::set("records", b"b", b"removed"),
+            OwnedWriteOperation::delete("records", b"b"),
+            OwnedWriteOperation::delete("records", b"c"),
+            OwnedWriteOperation::set("records", b"c", b"restored"),
+            OwnedWriteOperation::set("other", b"a", b"other-family"),
+            OwnedWriteOperation::set("records", &[255, 0], b"high"),
+        ]);
+        let open = transaction
+            .scan(ScanRequest::range(
+                "records".into(),
+                b"a".to_vec(),
+                b"d".to_vec(),
+            ))
+            .await
+            .unwrap();
+        transaction.stage_owned_operations(vec![
+            OwnedWriteOperation::set("records", b"a", b"later"),
+            OwnedWriteOperation::set("records", b"b", b"revived"),
+            OwnedWriteOperation::set("records", b"d", b"outside-range"),
+        ]);
+        assert_eq!(
+            collect_scan(open).await.unwrap(),
+            vec![
+                (b"a".to_vec(), b"new".to_vec()),
+                (b"c".to_vec(), b"restored".to_vec()),
+            ]
+        );
+        let current = transaction
+            .scan(ScanRequest::range("records".into(), b"a".to_vec(), b"d".to_vec()).reversed())
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_scan(current).await.unwrap(),
+            vec![
+                (b"c".to_vec(), b"restored".to_vec()),
+                (b"b".to_vec(), b"revived".to_vec()),
+                (b"a".to_vec(), b"later".to_vec()),
+            ]
+        );
+        let high = transaction
+            .scan(ScanRequest::prefix("records".into(), vec![255]))
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_scan(high).await.unwrap(),
+            vec![(vec![255, 0], b"high".to_vec())]
+        );
+        for (start, end) in [(b"d", b"a"), (b"a", b"a")] {
+            let empty = transaction
+                .scan(ScanRequest::range(
+                    "records".into(),
+                    start.to_vec(),
+                    end.to_vec(),
+                ))
+                .await
+                .unwrap();
+            assert!(collect_scan(empty).await.unwrap().is_empty());
+        }
     }
 
     // Internal receipt: the regression is work performed inside the storage overlay and is not

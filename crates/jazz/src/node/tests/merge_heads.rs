@@ -853,3 +853,64 @@ fn merge_heads_match_history_after_merge_version_application() {
     core.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
 }
+
+// Internal because avoiding transaction-wide materialization is not observable
+// through query results; the reachability answers pin the semantic boundary too.
+#[test]
+fn ancestry_lookup_avoids_transaction_wide_reads_resident_and_cold() {
+    let schema = two_column_schema();
+    let (dir, mut writer) = open_node_with_schema(node(0xe1), schema.clone());
+    let row_uuid = row(0xe2);
+    let (parent, _) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row_uuid, 10)
+            .cells(BTreeMap::from([("title".to_owned(), "first".to_owned())])),
+    ).unwrap();
+    let (child, _) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row_uuid, 11).parents(vec![parent])
+            .cells(BTreeMap::from([("title".to_owned(), "second".to_owned())])),
+    ).unwrap();
+    let table_id = writer.physical_table_id_for_schema(
+        writer.catalogue.current_write_schema.schema, "todos",
+    ).unwrap();
+    // Force the resident branch, then repeat against cold persisted history.
+    let versions = writer.query_versions_for_tx(child).unwrap();
+    writer.cache_tx_versions(child, versions);
+    for cold in [false, true] {
+        if cold {
+            drop(writer);
+            writer = reopen_node_at(&dir, node(0xe1), schema.clone());
+            writer.query.tx_versions_cache.clear();
+        }
+        reset_query_versions_for_tx_call_count();
+        assert!(writer.content_version_reaches_tx(
+            table_id, &BranchKey::default(), row_uuid, child, parent,
+        ).unwrap());
+        assert!(!writer.content_version_reaches_tx(
+            table_id, &BranchKey::default(), row(0xe3), child, parent,
+        ).unwrap());
+        assert!(!writer.content_version_reaches_tx(
+            table_id, &BranchKey::default(), row_uuid, parent, child,
+        ).unwrap());
+        assert_eq!(query_versions_for_tx_call_count(), 0,
+            "row ancestry must never materialize a whole transaction (cold={cold})");
+    }
+}
+
+// Internal work-count receipt: transaction fate handling may read the full
+// unit once; exact row matching must not add another transaction-wide read.
+#[test]
+fn known_transaction_matching_probes_only_incoming_history_keys() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xf1), schema);
+    let tx_id = writer.commit_mergeable_many_settled((0..32).map(|i| {
+        MergeableCommit::new("todos", row(i + 1), 10)
+            .cells(BTreeMap::from([("title".to_owned(), "same".to_owned())]))
+    }).collect()).unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer.commit_unit_for(tx_id).unwrap() else { panic!("commit unit"); };
+    let state = writer.query_transaction(tx_id).unwrap().unwrap();
+    writer.query.tx_versions_cache.clear();
+    reset_query_versions_for_tx_call_count();
+    writer.ingest_known_transaction(tx, versions, state.fate.clone(), state.global_time, state.durability).unwrap();
+    assert_eq!(query_versions_for_tx_call_count(), 1, "only fate processing needs a whole-transaction read");
+    assert_eq!(writer.query_versions_for_tx(tx_id).unwrap().len(), 32);
+}

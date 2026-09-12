@@ -37,8 +37,9 @@ pub enum Value {
     String(String),
     Bytes(Vec<u8>),
     /// Engine-owned indirect physical arm. Public result boundaries
-    /// materialize this back into the declared logical scalar type.
-    Large(crate::large_values::LargeValueRef),
+    /// materialize this back into the declared logical scalar type. Box the
+    /// uncommon reference so every ordinary materialized cell stays compact.
+    Large(Box<crate::large_values::LargeValueRef>),
     Uuid(uuid::Uuid),
     EnumTag(u8),
     Tuple(Vec<Value>),
@@ -776,7 +777,7 @@ fn descriptor_codec_take<'a>(
     nodes: &'a [DescriptorCodecNode],
     cursor: &mut usize,
 ) -> Result<&'a DescriptorCodecNode, Error> {
-    let node = nodes.get(*cursor).ok_or(Error::UnexpectedEof)?;
+    let node = nodes.get(*cursor).ok_or_else(|| Error::UnexpectedEof)?;
     *cursor += 1;
     Ok(node)
 }
@@ -1230,7 +1231,9 @@ impl ValueType {
     /// on large-value hydration.
     pub(crate) fn may_contain_stored_scalar(&self) -> bool {
         match self {
-            Self::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => true,
+            Self::String
+            | Self::Bytes
+            | Self::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => true,
             Self::Tuple(members) => members.iter().any(Self::may_contain_stored_scalar),
             Self::Array(inner) | Self::Nullable(inner) => inner.may_contain_stored_scalar(),
             Self::Record(descriptor) => descriptor
@@ -1577,18 +1580,29 @@ impl ValueType {
 
 pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
+    encode_value_into(&mut bytes, value, value_type)?;
+    Ok(bytes)
+}
+
+pub(super) fn encode_value_into(
+    bytes: &mut Vec<u8>,
+    value: &Value,
+    value_type: &ValueType,
+) -> Result<(), Error> {
     match (value, value_type) {
         (Value::String(value), ValueType::String) => {
-            bytes.extend(crate::large_values::encode_stored_scalar(
+            crate::large_values::encode_primitive_stored_scalar_into(
                 crate::large_values::LargeValueKind::String,
-                &crate::large_values::StoredScalar::Primitive(value.as_bytes().to_vec()),
-            )?)
+                value.as_bytes(),
+                bytes,
+            )?;
         }
         (Value::Bytes(value), ValueType::Bytes) => {
-            bytes.extend(crate::large_values::encode_stored_scalar(
+            crate::large_values::encode_primitive_stored_scalar_into(
                 crate::large_values::LargeValueKind::Bytes,
-                &crate::large_values::StoredScalar::Primitive(value.clone()),
-            )?)
+                value,
+                bytes,
+            )?;
         }
         (
             Value::String(value),
@@ -1603,33 +1617,39 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
                 crate::large_values::LargeValueKind::Bytes,
             ))),
-        ) => bytes.extend(crate::large_values::encode_stored_scalar(
-            crate::large_values::LargeValueKind::Bytes,
-            &crate::large_values::StoredScalar::Primitive(value.clone()),
-        )?),
+        ) => {
+            crate::large_values::encode_primitive_stored_scalar_into(
+                crate::large_values::LargeValueKind::Bytes,
+                value,
+                bytes,
+            )?;
+        }
         (
             Value::String(value),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
                 kind @ (crate::large_values::LargeValueKind::String
                 | crate::large_values::LargeValueKind::Json),
             ))),
-        ) => bytes.extend(crate::large_values::encode_stored_scalar(
-            *kind,
-            &crate::large_values::StoredScalar::Primitive(value.as_bytes().to_vec()),
-        )?),
+        ) => {
+            crate::large_values::encode_primitive_stored_scalar_into(
+                *kind,
+                value.as_bytes(),
+                bytes,
+            )?;
+        }
         (
             Value::Large(value),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))),
         ) if value.kind == *kind => bytes.extend(crate::large_values::encode_stored_scalar(
             *kind,
-            &crate::large_values::StoredScalar::Chunked(value.clone()),
+            &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
         )?),
         (Value::Large(value), ValueType::String)
             if value.kind == crate::large_values::LargeValueKind::String =>
         {
             bytes.extend(crate::large_values::encode_stored_scalar(
                 crate::large_values::LargeValueKind::String,
-                &crate::large_values::StoredScalar::Chunked(value.clone()),
+                &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
             )?)
         }
         (Value::Large(value), ValueType::Bytes)
@@ -1637,7 +1657,7 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
         {
             bytes.extend(crate::large_values::encode_stored_scalar(
                 crate::large_values::LargeValueKind::Bytes,
-                &crate::large_values::StoredScalar::Chunked(value.clone()),
+                &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
             )?)
         }
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
@@ -1646,13 +1666,13 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
         }
         (Value::EnumTag(value), ValueType::EnumTag(_)) => bytes.push(*value),
         (Value::Tuple(values), ValueType::Tuple(members)) => {
-            encode_tuple(&mut bytes, values, members)?;
+            encode_tuple(bytes, values, members)?;
         }
         (Value::Array(values), ValueType::Array(element_type)) => {
-            encode_array(&mut bytes, values, element_type)?;
+            encode_array(bytes, values, element_type)?;
         }
         (Value::Nullable(value), ValueType::Nullable(inner_type)) => {
-            encode_nullable(&mut bytes, value.as_deref(), inner_type)?;
+            encode_nullable(bytes, value.as_deref(), inner_type)?;
         }
         (Value::Record(record), ValueType::Record(_)) => {
             ensure_value_type(value, value_type)?;
@@ -1660,19 +1680,16 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
         }
         (Value::Enum(enum_value), ValueType::Enum(schema)) => {
             ensure_enum_value(enum_value, schema)?;
-            bytes.extend(super::encode_variant_record(
-                enum_value.tag,
-                enum_value.record.raw(),
-            ));
+            super::append_variant_record(bytes, enum_value.tag, enum_value.record.raw());
         }
-        _ if value_type.is_fixed_size() => encode_fixed_value(&mut bytes, value, value_type)?,
+        _ if value_type.is_fixed_size() => encode_fixed_value(bytes, value, value_type)?,
         _ => {
             return Err(Error::TypeMismatch {
                 expected: value_type.clone(),
             });
         }
     }
-    Ok(bytes)
+    Ok(())
 }
 
 pub(super) fn encode_fixed_value(
@@ -1759,7 +1776,7 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
             crate::large_values::StoredScalar::Chunked(value)
                 if value.kind == crate::large_values::LargeValueKind::String =>
             {
-                Ok(Value::Large(value))
+                Ok(Value::Large(Box::new(value)))
             }
             crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
                 expected: value_type.clone(),
@@ -1773,7 +1790,7 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
             crate::large_values::StoredScalar::Chunked(value)
                 if value.kind == crate::large_values::LargeValueKind::Bytes =>
             {
-                Ok(Value::Large(value))
+                Ok(Value::Large(Box::new(value)))
             }
             crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
                 expected: value_type.clone(),
@@ -1797,7 +1814,7 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
                         .map_err(|_| Error::InvalidUtf8),
                 },
                 crate::large_values::StoredScalar::Chunked(value) if value.kind == *kind => {
-                    Ok(Value::Large(value))
+                    Ok(Value::Large(Box::new(value)))
                 }
                 crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
                     expected: value_type.clone(),
@@ -1817,11 +1834,9 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         ValueType::Array(element_type) => decode_array(bytes, element_type),
         ValueType::Nullable(inner_type) => decode_nullable(bytes, inner_type),
         ValueType::Record(descriptor) => {
-            let values = descriptor.bind(bytes).to_values()?;
-            let canonical = descriptor.create(&values)?;
-            if canonical != bytes {
-                return Err(Error::NonCanonicalRecord);
-            }
+            // Nested values are lazy records, just like top-level OwnedRecord.
+            // Encoding/admission owns validity; reading a field must not decode
+            // and re-encode every descendant to establish canonicality again.
             Ok(Value::Record(OwnedRecord::new(
                 bytes.to_vec(),
                 **descriptor,
@@ -1834,11 +1849,6 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
                     other => other,
                 })?;
             let case = schema.case(tag)?;
-            let values = case.payload.bind(payload).to_values()?;
-            let canonical = case.payload.create(&values)?;
-            if canonical != payload {
-                return Err(Error::NonCanonicalRecord);
-            }
             Ok(Value::Enum(EnumValue::new(
                 tag,
                 OwnedRecord::new(payload.to_vec(), case.payload),
@@ -1934,7 +1944,7 @@ fn validate_nullable(
     inner_type: &ValueType,
     require_constructible: bool,
 ) -> Result<(), Error> {
-    let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
+    let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
     match flag {
         0 if inner_type.fixed_size().is_some() && payload.iter().any(|byte| *byte != 0) => {
             Err(Error::InvalidOffset)
@@ -2002,7 +2012,7 @@ fn validate_tuple(
             })?;
         let end = checked_add(offset, width)?;
         validate_value_inner(
-            bytes.get(offset..end).ok_or(Error::UnexpectedEof)?,
+            bytes.get(offset..end).ok_or_else(|| Error::UnexpectedEof)?,
             member,
             require_constructible,
         )?;
@@ -2023,7 +2033,13 @@ fn encode_nullable(
     match value {
         Some(value) => {
             bytes.push(1);
-            bytes.extend(encode_value(value, inner_type)?);
+            if inner_type.is_fixed_size() {
+                // The parent already owns the output buffer. Fixed payloads
+                // need no temporary Vec, including nested nullable values.
+                encode_fixed_value(bytes, value, inner_type)?;
+            } else {
+                encode_value_into(bytes, value, inner_type)?;
+            }
         }
         None => {
             bytes.push(0);
@@ -2037,8 +2053,78 @@ fn encode_nullable(
     Ok(())
 }
 
+/// Inspect only framing needed to find an indirect scalar. Admission owns
+/// validity of the record; this is not another canonical decoding pass.
+pub(super) fn visit_encoded_indirect_values(
+    bytes: &[u8],
+    value_type: &ValueType,
+    visitor: &mut impl FnMut(&[u8], &ValueType) -> Result<bool, Error>,
+) -> Result<bool, Error> {
+    match value_type {
+        ValueType::String
+        | ValueType::Bytes
+        | ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(_))) => {
+            let (tag, _) = super::split_variant_record(bytes)?;
+            match tag {
+                2 => Ok(false),
+                3 => visitor(bytes, value_type),
+                _ => Err(Error::LargeValue(
+                    crate::large_values::Error::MalformedScalar,
+                )),
+            }
+        }
+        ValueType::Nullable(inner) => {
+            let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
+            match flag {
+                0 => Ok(false),
+                1 => visit_encoded_indirect_values(payload, inner, visitor),
+                flag => Err(Error::InvalidNullFlag(flag)),
+            }
+        }
+        ValueType::Record(descriptor) => {
+            descriptor.visit_encoded_indirect_fields(bytes, 0..descriptor.fields().len(), visitor)
+        }
+        ValueType::Enum(schema) => {
+            let (tag, payload) = super::split_variant_record(bytes)?;
+            let descriptor = schema.case(tag)?.payload;
+            descriptor.visit_encoded_indirect_fields(payload, 0..descriptor.fields().len(), visitor)
+        }
+        ValueType::Array(inner) if inner.may_contain_stored_scalar() => {
+            // Indirect-capable array elements are variable-width. Bounds-check
+            // the offset table before visiting entries, without allocating it.
+            let count = u32_to_usize(read_u32_at(bytes, 0)?)?;
+            let mut start = checked_add(
+                4,
+                count
+                    .saturating_sub(1)
+                    .checked_mul(4)
+                    .ok_or_else(|| Error::InvalidOffset)?,
+            )?;
+            if start > bytes.len() {
+                return Err(Error::UnexpectedEof);
+            }
+            for index in 0..count {
+                let end = if index + 1 == count {
+                    bytes.len()
+                } else {
+                    u32_to_usize(read_u32_at(bytes, 4 + index * 4)?)?
+                };
+                let item = bytes.get(start..end).ok_or_else(|| Error::InvalidOffset)?;
+                if visit_encoded_indirect_values(item, inner, visitor)? {
+                    return Ok(true);
+                }
+                start = end;
+            }
+            Ok(false)
+        }
+        // Tuples are restricted to fixed-size members and cannot contain an
+        // indirect scalar. Raw engine fields and all other scalars cannot either.
+        _ => Ok(false),
+    }
+}
+
 fn decode_nullable(bytes: &[u8], inner_type: &ValueType) -> Result<Value, Error> {
-    let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
+    let (&flag, payload) = bytes.split_first().ok_or_else(|| Error::UnexpectedEof)?;
     match flag {
         0 => {
             if inner_type.fixed_size().is_some() {
@@ -2071,22 +2157,20 @@ fn encode_array(
         return Ok(());
     }
 
+    let base = bytes.len();
     write_u32(bytes, usize_to_u32(values.len())?);
-    let encoded_values = values
-        .iter()
-        .map(|value| encode_value(value, element_type))
-        .collect::<Result<Vec<_>, _>>()?;
-    let offset_table_size = encoded_values.len().saturating_sub(1) * 4;
-    let mut next_offset = 4 + offset_table_size;
-    for encoded in encoded_values
-        .iter()
-        .take(encoded_values.len().saturating_sub(1))
-    {
-        next_offset = checked_add(next_offset, encoded.len())?;
-        write_u32(bytes, usize_to_u32(next_offset)?);
-    }
-    for encoded in encoded_values {
-        bytes.extend(encoded);
+    let offset_count = values.len().saturating_sub(1);
+    let payload_start = checked_add(bytes.len(), offset_count * 4)?;
+    bytes.resize(payload_start, 0);
+    for (index, value) in values.iter().enumerate() {
+        encode_value_into(bytes, value, element_type)?;
+        if index < offset_count {
+            // Offsets belong to this array, even when nested inside another
+            // array, nullable value or a record's shared output buffer.
+            let end = usize_to_u32(bytes.len() - base)?;
+            let slot = base + 4 + index * 4;
+            bytes[slot..slot + 4].copy_from_slice(&end.to_le_bytes());
+        }
     }
     Ok(())
 }
@@ -2134,7 +2218,7 @@ fn decode_array(bytes: &[u8], element_type: &ValueType) -> Result<Value, Error> 
     Ok(Value::Array(values))
 }
 
-pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result<(), Error> {
+pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result<(), Error> {
     match (value, value_type) {
         (Value::U8(_), ValueType::U8)
         | (Value::U16(_), ValueType::U16)
@@ -2220,11 +2304,7 @@ pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
                     expected: value_type.clone(),
                 });
             }
-            let values = record.to_values()?;
-            if descriptor.create(&values)? != record.raw() {
-                return Err(Error::NonCanonicalRecord);
-            }
-            Ok(())
+            validate_embedded_record(record.borrowed())
         }
         (Value::Enum(enum_value), ValueType::Enum(schema)) => ensure_enum_value(enum_value, schema),
         _ => Err(Error::TypeMismatch {
@@ -2240,8 +2320,47 @@ fn ensure_enum_value(value: &EnumValue, schema: &EnumSchema) -> Result<(), Error
             expected: ValueType::Enum(Box::new(schema.clone())),
         });
     }
-    let values = value.record.to_values()?;
-    if case.payload.create(&values)? != value.record.raw() {
+    validate_embedded_record(value.record.borrowed())
+}
+
+// Tuple decoding and encoding have historically different constructibility
+// rules (including nullable member byte order). Preserve the exact round-trip
+// admission rule for those descriptors rather than broadening accepted bytes.
+fn contains_tuple(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Tuple(_) => true,
+        ValueType::Array(inner) | ValueType::Nullable(inner) => contains_tuple(inner),
+        ValueType::Record(descriptor) => descriptor
+            .fields()
+            .iter()
+            .any(|field| contains_tuple(&field.value_type)),
+        ValueType::Enum(schema) => schema.cases.iter().any(|case| {
+            case.payload
+                .fields()
+                .iter()
+                .any(|field| contains_tuple(&field.value_type))
+        }),
+        _ => false,
+    }
+}
+
+fn validate_embedded_record(record: super::BorrowedRecord<'_>) -> Result<(), Error> {
+    let descriptor = record.descriptor();
+    if !descriptor
+        .fields()
+        .iter()
+        .any(|field| contains_tuple(&field.value_type))
+        && record.validate_canonical().is_ok()
+    {
+        // Record spans cover the complete packed layout; scalar, offset,
+        // nullable and enum validators enforce canonical encodings.
+        return Ok(());
+    }
+    // The diagnostic error ordering of structural validation differs from
+    // decoding (for example malformed UTF-8 scalar payloads). Preserve legacy
+    // errors on invalid input as well as legacy tuple admission semantics.
+    let values = record.to_values()?;
+    if descriptor.create(&values)? != record.raw() {
         return Err(Error::NonCanonicalRecord);
     }
     Ok(())
@@ -2343,7 +2462,7 @@ fn decode_tuple(bytes: &[u8], members: &[ValueType]) -> Result<Value, Error> {
                 member_type: member_type.clone(),
             })?;
         let end = checked_add(offset, width)?;
-        let member = bytes.get(offset..end).ok_or(Error::UnexpectedEof)?;
+        let member = bytes.get(offset..end).ok_or_else(|| Error::UnexpectedEof)?;
         values.push(decode_tuple_member(member, member_type)?);
         offset = end;
     }
@@ -2439,7 +2558,7 @@ pub(super) fn write_u32(bytes: &mut Vec<u8>, value: u32) {
 }
 
 pub(super) fn checked_add(left: usize, right: usize) -> Result<usize, Error> {
-    left.checked_add(right).ok_or(Error::LengthOverflow)
+    left.checked_add(right).ok_or_else(|| Error::LengthOverflow)
 }
 
 pub(super) fn usize_to_u32(value: usize) -> Result<u32, Error> {

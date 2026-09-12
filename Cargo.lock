@@ -1526,6 +1526,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "thiserror",
+ "tracing",
  "uuid",
  "web-time",
 ]
@@ -2071,6 +2072,9 @@ dependencies = [
 [[package]]
 name = "jazz-benchmark-guard"
 version = "0.1.0"
+dependencies = [
+ "mimalloc",
+]
 
 [[package]]
 name = "jazz-cli"
@@ -2347,8 +2351,10 @@ dependencies = [
  "postcard",
  "pprof",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
+ "tracing",
  "uuid",
  "zstd",
 ]
