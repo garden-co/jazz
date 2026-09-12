@@ -3246,3 +3246,83 @@ fn source_batch_prepares_one_descriptor_per_variant() {
         Err(IvmRuntimeError::UnknownTableVariant { version: 3, .. })
     ));
 }
+
+// Internal mechanism test: result equality alone cannot show whether a join
+// retains unused payload, or whether pruning damaged an independent consumer.
+#[test]
+fn join_consumers_retain_only_required_columns_without_mutating_shared_sources() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let source = GraphBuilder::table("albums");
+    let full = runtime.add_dedup_graph(&source).unwrap();
+    for anti in [false, true] {
+        let graph = if anti {
+            GraphBuilder::anti_join(source.clone(), source.clone(), ["id"], ["id"])
+        } else {
+            GraphBuilder::semi_join(source.clone(), source.clone(), ["id"], ["id"])
+        };
+        let compiled = runtime.add_dedup_graph(&graph).unwrap();
+        let operator = &runtime
+            .graph
+            .node(compiled.node)
+            .unwrap()
+            .descriptor
+            .operator;
+        let (OpType::SemiJoin(join) | OpType::AntiJoin(join)) = operator else {
+            panic!("selection join")
+        };
+        assert_eq!(join.left_descriptor, full.output);
+        assert_eq!(join.right_descriptor.fields().len(), 1);
+        assert_eq!(compiled.output, full.output);
+    }
+    let joined = GraphBuilder::join(source.clone(), source, ["id"], ["id"]);
+    let full_join = runtime.add_dedup_graph(&joined).unwrap();
+    let projected = runtime
+        .add_dedup_graph(&joined.project_fields([ProjectField::renamed("left.title", "label")]))
+        .unwrap();
+    let project = runtime.graph.node(projected.node).unwrap();
+    let pruned = runtime.graph.node(project.descriptor.inputs[0]).unwrap();
+    let OpType::Join(join) = &pruned.descriptor.operator else {
+        panic!("pruned join")
+    };
+    assert_eq!(join.left_descriptor.fields().len(), 2); // matching key + result
+    assert_eq!(join.right_descriptor.fields().len(), 1); // matching key only
+    assert_eq!(
+        runtime
+            .graph
+            .node(full_join.node)
+            .unwrap()
+            .descriptor
+            .output
+            .records()
+            .fields()
+            .len(),
+        4
+    );
+    assert_eq!(
+        runtime
+            .graph
+            .node(full.node)
+            .unwrap()
+            .descriptor
+            .output
+            .records(),
+        full.output
+    );
+    let OpType::MapProject(op) = &project.descriptor.operator else {
+        panic!("projection")
+    };
+    let input = pruned.descriptor.output.records();
+    let raw = input
+        .create(&[
+            Value::U64(7),
+            Value::String("retained".into()),
+            Value::U64(7),
+        ])
+        .unwrap();
+    let bytes =
+        project_record(&op.expressions, &op.mapping, projected.output, &input, &raw).unwrap();
+    assert_eq!(
+        projected.output.bind(&bytes).get_idx(0).unwrap(),
+        Value::String("retained".into())
+    );
+}

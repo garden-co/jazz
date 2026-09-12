@@ -3130,43 +3130,73 @@ fn content_version_witness_graph_from_visible_graph(
             inline_version_witness_fields_for_tagged_rows(source, event_kind)?,
         ),
     };
-    let witness_names = witness_fields
-        .iter()
-        .map(|field| field.output_name.clone())
-        .collect::<Vec<_>>();
-    let witnesses = witness_source.project_fields(witness_fields);
-    let version = version_witness_fields(&source.row_shape)?;
-    if routing_param_fields.is_empty() {
-        return Ok(GraphBuilder::semi_join(
-            witnesses,
-            visible_graph,
-            ["row_uuid", "tx_time", "tx_node_id"],
-            [
-                source.row_shape.row_uuid_field.clone(),
-                version.tx_time_field.clone(),
-                version.tx_node_field.clone(),
-            ],
-        ));
-    }
-    let mut fields = witness_names
-        .into_iter()
-        .map(|field| ProjectField::renamed(format!("right.{field}"), field))
-        .collect::<Vec<_>>();
-    fields.extend(
-        routing_param_fields
+    // Resolve selection against the raw carrier before expanding it into a
+    // terminal witness (which duplicates metadata and wraps authored cells).
+    let witness_keys = ["row_uuid", "tx_time", "tx_node_id"].map(|name| {
+        let field = witness_fields
             .iter()
-            .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone())),
-    );
-    Ok(GraphBuilder::join(
-        visible_graph,
-        witnesses,
-        [
-            source.row_shape.row_uuid_field.clone(),
-            version.tx_time_field.clone(),
-            version.tx_node_field.clone(),
-        ],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
+            .find(|field| field.output_name == name)
+            .expect("witness projection declares its exact version key");
+        let groove::ivm::ProjectExpr::Field(source) = &field.expression else {
+            unreachable!("witness identity is a source field")
+        };
+        source.clone()
+    });
+    let version = version_witness_fields(&source.row_shape)?;
+    let visible_keys = vec![
+        FieldRef::name(source.row_shape.row_uuid_field.clone()),
+        FieldRef::name(version.tx_time_field),
+        FieldRef::name(version.tx_node_field),
+    ];
+    if routing_param_fields.is_empty() {
+        return Ok(GraphBuilder::SemiJoin {
+            left: std::sync::Arc::new(witness_source),
+            right: std::sync::Arc::new(visible_graph),
+            left_on: witness_keys.into(),
+            right_on: visible_keys,
+            comparison: groove::ivm::ValueComparison::Exact,
+        }
+        .project_fields(witness_fields));
+    }
+
+    // A routed publication keeps the visibility relation's bag multiplicity
+    // and binding values. Groove prunes unused join input columns after
+    // binding the exact keys and the projection's field dependencies.
+    let mut fields = witness_fields;
+    for field in &mut fields {
+        use groove::ivm::ProjectExpr;
+        let key = match &mut field.expression {
+            ProjectExpr::Field(key)
+            | ProjectExpr::Nullable(key)
+            | ProjectExpr::NullableFlat(key)
+            | ProjectExpr::RecordField { source: key, .. }
+            | ProjectExpr::EnumTagRemap { source: key, .. }
+            | ProjectExpr::EnumRemap { source: key, .. }
+            | ProjectExpr::RecursiveEnumRemap { source: key, .. } => key,
+            ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
+                continue;
+            }
+        };
+        match key {
+            FieldRef::Name(name) | FieldRef::StoredName(name) => {
+                *key = FieldRef::stored_name(format!("right.{name}"));
+            }
+            FieldRef::Resolved(_) => unreachable!("witness carriers are bound by name"),
+        }
+    }
+    fields.extend(routing_param_fields.iter().map(|field| {
+        let mut projected = ProjectField::named(field);
+        projected.expression =
+            groove::ivm::ProjectExpr::Field(FieldRef::stored_name(format!("left.{field}")));
+        projected
+    }));
+    Ok(GraphBuilder::Join {
+        left: std::sync::Arc::new(visible_graph),
+        right: std::sync::Arc::new(witness_source),
+        left_on: visible_keys,
+        right_on: witness_keys.into(),
+        comparison: groove::ivm::ValueComparison::Exact,
+    }
     .project_fields(fields))
 }
 

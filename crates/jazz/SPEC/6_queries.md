@@ -19,6 +19,16 @@ materialize a Groove source by launching another Jazz query. In particular,
 policy preparation, source resolution, and schema projection MUST NOT call the
 ordinary one-shot query pipeline to obtain an input relation.
 
+Jazz specifies exact row/version identities and policy/binding dependencies before
+requesting immutable supporting or replacement witnesses. The witness carrier
+is constructed after selection against the authorized visible relation. A routed
+selection retains its binding fields and multiplicity; narrowing must not allow
+one route or version to borrow another's visibility. This ordering changes only
+intermediate computation, not the witness's wire or storage representation.
+General column pruning belongs to Groove's resolved graph compiler: Jazz need
+not encode unused payload into existence-check inputs or prescribe a physical
+arrangement layout. This does not imply a second storage lookup.
+
 Lowering itself is synchronous and pure. The implementation separates any
 currently necessary asynchronous source preparation from
 `lower_resolved_query_program`: preparation produces owned declarative source
