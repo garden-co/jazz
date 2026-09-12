@@ -2,6 +2,53 @@
 
 use super::*;
 
+#[cfg(feature = "cold-settle-attribution")]
+fn trace_uuid_fields(records: &RecordDeltas) -> BTreeMap<String, (usize, i64)> {
+    let Ok(target) = std::env::var("GROOVE_TRACE_UUID") else {
+        return BTreeMap::new();
+    };
+    let target = uuid::Uuid::parse_str(&target).expect("diagnostic UUID");
+    fn uuid_type(ty: &crate::records::ValueType) -> bool {
+        match ty {
+            crate::records::ValueType::Uuid => true,
+            crate::records::ValueType::Nullable(inner) => uuid_type(inner),
+            _ => false,
+        }
+    }
+    fn matches(value: &Value, target: uuid::Uuid) -> bool {
+        match value {
+            Value::Uuid(value) => *value == target,
+            Value::Nullable(Some(value)) => matches(value, target),
+            _ => false,
+        }
+    }
+    let mut counts = BTreeMap::new();
+    for (i, field) in records
+        .descriptor
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| uuid_type(&f.value_type))
+    {
+        for delta in &records.deltas {
+            if matches(
+                &records
+                    .descriptor
+                    .get_idx(delta.raw(), i)
+                    .expect("diagnostic field"),
+                target,
+            ) {
+                let count = counts
+                    .entry(field.name.clone().unwrap_or_else(|| format!("field_{i}")))
+                    .or_insert((0, 0));
+                count.0 += 1;
+                count.1 += delta.weight;
+            }
+        }
+    }
+    counts
+}
+
 fn plan_expr_fields(expressions: &[PlanExpr]) -> BTreeSet<String> {
     expressions
         .iter()
@@ -1454,6 +1501,27 @@ impl TickEvaluator<'_> {
             self.metrics.records_processed += result.deltas.len();
             let result = Arc::new(result);
             let payload_bytes = record_deltas_encoded_bytes(&result);
+            #[cfg(feature = "cold-settle-attribution")]
+            if std::env::var_os("GROOVE_WORK_NODE_TRACE").is_some() {
+                let detail = match &graph_node.descriptor.operator {
+                    OpType::InlineRecords(_) => "InlineRecords".to_owned(),
+                    other => format!("{other:?}"),
+                };
+                eprintln!(
+                    "GROOVE_WORK_NODE {}",
+                    serde_json::json!({
+                        "node": node.0,
+                        "mode": format!("{:?}", self.context.eval_mode),
+                        "inputs": graph_node.descriptor.inputs.iter().map(|n| n.0).collect::<Vec<_>>(),
+                        "operator": detail.split(['(', '{', ' ']).next().unwrap(),
+                        "detail": detail,
+                        "rows": result.deltas.len(),
+                        "bytes": payload_bytes,
+                        "fields": format!("{:?}", result.descriptor.fields()),
+                        "selected_uuid_fields": trace_uuid_fields(&result),
+                    })
+                );
+            }
             *self.memo_use_clock += 1;
             if let Some(previous) = self.eval_memo.insert(
                 memo_key,

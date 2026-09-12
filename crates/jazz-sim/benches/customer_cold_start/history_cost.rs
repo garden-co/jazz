@@ -116,6 +116,10 @@ pub fn run(root: &Path) {
     if std::env::var_os("JAZZ_HISTORY_GROUP_ONLY").is_some() {
         expected.retain(|t, _| t == "group");
     }
+    if let Ok(table) = std::env::var("JAZZ_HISTORY_TABLE") {
+        expected.retain(|t, _| t == &table);
+        assert!(!expected.is_empty(), "selected table must exist");
+    }
     let fixture_cells = fixture["writes"]
         .as_array()
         .unwrap()
@@ -299,8 +303,14 @@ pub fn run(root: &Path) {
                             .db
                             .prepare_query(&Query::from(table.as_str()))
                             .unwrap();
+                        if std::env::var_os("GROOVE_WORK_NODE_TRACE").is_some() {
+                            eprintln!("WORK_QUERY_BEGIN dataset={dataset} table={table}");
+                        }
                         let rows =
                             block_on(receiver.db.all_for_identity(&q, opts(), author)).unwrap();
+                        if std::env::var_os("GROOVE_WORK_NODE_TRACE").is_some() {
+                            eprintln!("WORK_QUERY_END dataset={dataset} table={table}");
+                        }
                         let columns = &table_schema
                             .tables
                             .iter()
@@ -338,6 +348,26 @@ pub fn run(root: &Path) {
                             rows.iter().map(|r| r.row_uuid()).collect::<BTreeSet<_>>(),
                             expected[table],
                             "one-shot {table}"
+                        );
+                    }
+                }
+                if std::env::var_os("JAZZ_HISTORY_VERIFY_ABSENT_IDENTITY").is_some() {
+                    let absent = AuthorSubject::for_test_uuid(uuid::Uuid::from_u128(u128::MAX - 5));
+                    for table in table_schema
+                        .tables
+                        .iter()
+                        .filter(|t| t.read_policy.is_some())
+                    {
+                        let q = receiver
+                            .db
+                            .prepare_query(&Query::from(table.name.as_str()))
+                            .unwrap();
+                        let rows =
+                            block_on(receiver.db.all_for_identity(&q, opts(), absent)).unwrap();
+                        assert!(
+                            rows.is_empty(),
+                            "absent identity unexpectedly read {}",
+                            table.name
                         );
                     }
                 }

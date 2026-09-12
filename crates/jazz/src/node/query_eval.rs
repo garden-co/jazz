@@ -222,6 +222,8 @@ pub(crate) fn take_required_sink_deltas(
 }
 
 mod lowering;
+#[cfg(feature = "testing")]
+mod snapshot_experiment;
 
 pub(crate) use lowering::PolicyAuthorizationGraph;
 use lowering::*;
@@ -1496,6 +1498,12 @@ where
             )
         };
         let needs_binding = || {
+            #[cfg(feature = "testing")]
+            if std::env::var_os("JAZZ_DIRECT_SNAPSHOT_EXPERIMENT").is_some()
+                && settled_binding_view.is_none()
+            {
+                return false;
+            }
             let parameters = &program
                 .as_ref()
                 .expect("program is compiled when no prepared plan is supplied")
@@ -1537,13 +1545,35 @@ where
         let table_schema = self.query_output_table(shape.query(), shape.schema_version())?;
         let app_output = materialization_app_row_schema(plan.as_deref(), program.as_ref())?;
         let deltas_result = match plan {
-            None => self
-                .database
-                .query_graph(lowered_materialization_app_rows_graph(
-                    &program.expect("program is compiled when no prepared plan is supplied"),
-                )?)
-                .await
-                .map_err(Error::Groove),
+            None => {
+                let program =
+                    program.expect("program is compiled when no prepared plan is supplied");
+                let graph = lowered_materialization_app_rows_graph(&program)?;
+                #[cfg(feature = "testing")]
+                let graph = if std::env::var_os("JAZZ_DIRECT_SNAPSHOT_EXPERIMENT").is_some()
+                    && settled_binding_view.is_none()
+                {
+                    let params = prepared_params_from_domain(&program.lowered.parameters);
+                    let values = binding_values_for_plan(
+                        binding,
+                        &params,
+                        &policy,
+                        PreparedClaimBindingMode::Strict,
+                    )?;
+                    let values = params
+                        .iter()
+                        .zip(values)
+                        .map(|(p, v)| (p.name.clone(), v))
+                        .collect();
+                    snapshot_experiment::freeze_bindings(&graph, &values)?
+                } else {
+                    graph
+                };
+                self.database
+                    .query_graph(graph)
+                    .await
+                    .map_err(Error::Groove)
+            }
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params, .. } => {
                     let values = binding_values_for_plan(
@@ -1731,6 +1761,12 @@ where
 
         let phase_started = Instant::now();
         let needs_binding = || {
+            #[cfg(feature = "testing")]
+            if std::env::var_os("JAZZ_DIRECT_SNAPSHOT_EXPERIMENT").is_some()
+                && settled_binding_view.is_none()
+            {
+                return false;
+            }
             let parameters = &program
                 .as_ref()
                 .expect("program is compiled when no prepared plan is supplied")
@@ -1769,13 +1805,35 @@ where
         let phase_started = Instant::now();
         let app_output = materialization_app_row_schema(plan.as_deref(), program.as_ref())?;
         let deltas_result = match plan {
-            None => self
-                .database
-                .query_graph(lowered_materialization_app_rows_graph(
-                    &program.expect("program is compiled when no prepared plan is supplied"),
-                )?)
-                .await
-                .map_err(Error::Groove),
+            None => {
+                let program =
+                    program.expect("program is compiled when no prepared plan is supplied");
+                let graph = lowered_materialization_app_rows_graph(&program)?;
+                #[cfg(feature = "testing")]
+                let graph = if std::env::var_os("JAZZ_DIRECT_SNAPSHOT_EXPERIMENT").is_some()
+                    && settled_binding_view.is_none()
+                {
+                    let params = prepared_params_from_domain(&program.lowered.parameters);
+                    let values = binding_values_for_plan(
+                        binding,
+                        &params,
+                        &policy,
+                        PreparedClaimBindingMode::Strict,
+                    )?;
+                    let values = params
+                        .iter()
+                        .zip(values)
+                        .map(|(p, v)| (p.name.clone(), v))
+                        .collect();
+                    snapshot_experiment::freeze_bindings(&graph, &values)?
+                } else {
+                    graph
+                };
+                self.database
+                    .query_graph(graph)
+                    .await
+                    .map_err(Error::Groove)
+            }
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params, .. } => {
                     let values = binding_values_for_plan(

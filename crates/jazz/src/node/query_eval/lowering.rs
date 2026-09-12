@@ -951,6 +951,35 @@ where
         // runtime can resume it without unrelated transport traffic.
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_params = prepared_route_param_names(&program.lowered.parameters);
+        #[cfg(feature = "testing")]
+        if std::env::var_os("JAZZ_FROZEN_SUBSCRIPTION_EXPERIMENT").is_some() {
+            let values = binding_values_for_plan(
+                binding,
+                &params,
+                &program.request.policy,
+                prepared_claim_binding_mode,
+            )?;
+            let values = params
+                .iter()
+                .zip(values)
+                .map(|(p, v)| (p.name.clone(), v))
+                .collect();
+            let sinks = program
+                .lowered
+                .terminals
+                .iter()
+                .map(|terminal| {
+                    let public_fields = terminal_public_fields(&terminal.output)?;
+                    let graph =
+                        super::snapshot_experiment::freeze_bindings(&terminal.graph, &values)?;
+                    Ok((terminal.sink.clone(), graph.project(public_fields)))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            return self
+                .database
+                .subscribe_with_waker(sinks, progress_waker)
+                .map_err(Error::Groove);
+        }
         if params.is_empty() {
             let sinks: Vec<(String, GraphBuilder)> = program
                 .lowered
