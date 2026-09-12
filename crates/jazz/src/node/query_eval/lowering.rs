@@ -959,9 +959,9 @@ where
                 &program.request.policy,
                 prepared_claim_binding_mode,
             )?;
-            let values = params
+            let values_by_name = params
                 .iter()
-                .zip(values)
+                .zip(values.iter().cloned())
                 .map(|(p, v)| (p.name.clone(), v))
                 .collect();
             let sinks = program
@@ -970,9 +970,25 @@ where
                 .iter()
                 .map(|terminal| {
                     let public_fields = terminal_public_fields(&terminal.output)?;
+                    let route_fields = terminal_route_fields(
+                        &route_params,
+                        &terminal_route_eligible_fields(&terminal.output)?,
+                    );
+                    let indices = prepared_route_value_indices(&params, &route_fields);
+                    let routed = RoutedMultisinkTerminal::new(
+                        terminal.sink.clone(),
+                        terminal.graph.clone(),
+                        route_fields,
+                        public_fields,
+                    )
+                    .with_route_value_indices(indices);
+                    let output = self.database.graph_output_descriptor(&terminal.graph)?;
+                    let graph = routed
+                        .bound_graph_for_experiment(&values, &output)
+                        .map_err(|e| Error::Groove(e.into()))?;
                     let graph =
-                        super::snapshot_experiment::freeze_bindings(&terminal.graph, &values)?;
-                    Ok((terminal.sink.clone(), graph.project(public_fields)))
+                        super::snapshot_experiment::freeze_bindings(&graph, &values_by_name)?;
+                    Ok((terminal.sink.clone(), graph))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             return self

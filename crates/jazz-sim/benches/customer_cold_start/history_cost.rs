@@ -171,9 +171,10 @@ pub fn run(root: &Path) {
                 }))
                 .unwrap();
                 let receiver = DbNode { _dir: dir, db };
-                let mut streams = Vec::new();
-                let prepare = Instant::now();
-                if active {
+                let late_subscribe =
+                    active && std::env::var_os("JAZZ_HISTORY_LATE_SUBSCRIBE").is_some();
+                let subscribe = || {
+                    let mut streams = Vec::new();
                     for table in expected.keys().take(
                         std::env::var("JAZZ_HISTORY_QUERY_LIMIT")
                             .ok()
@@ -189,8 +190,15 @@ pub fn run(root: &Path) {
                                 .unwrap();
                         streams.push((table.clone(), stream, BTreeSet::new()));
                     }
-                }
-                if active {
+                    streams
+                };
+                let prepare = Instant::now();
+                let mut streams = if active && !late_subscribe {
+                    subscribe()
+                } else {
+                    Vec::new()
+                };
+                if active && !late_subscribe {
                     let mut initial = BTreeSet::new();
                     for _ in 0..16 {
                         block_on(receiver.db.refresh_after_benchmark_ingest()).unwrap();
@@ -213,7 +221,7 @@ pub fn run(root: &Path) {
                         "empty subscriptions must be initialized before ingest"
                     );
                 }
-                let subscription_setup_ms = prepare.elapsed().as_secs_f64() * 1000.;
+                let mut subscription_setup_ms = prepare.elapsed().as_secs_f64() * 1000.;
                 alloc_metrics::reset_and_start();
                 work_budget::start();
                 let t = Instant::now();
@@ -237,6 +245,11 @@ pub fn run(root: &Path) {
                         serde_json::to_vec(&budget).unwrap(),
                     )
                     .unwrap();
+                }
+                if late_subscribe {
+                    let prepare = Instant::now();
+                    streams = subscribe();
+                    subscription_setup_ms += prepare.elapsed().as_secs_f64() * 1000.;
                 }
                 let t = Instant::now();
                 if active {
@@ -373,7 +386,7 @@ pub fn run(root: &Path) {
                 }
                 println!(
                     "{}",
-                    json!({"dataset":dataset,"round":round,"active":active,"unique_transactions":unique,"ingest_ms":ingest_ms,"subscription_setup_ms":subscription_setup_ms,"delivery_ms":delivery_ms,"query_ms":query_ms,"ingest_allocations":allocations.allocs,"ingest_allocation_bytes":allocations.bytes})
+                    json!({"dataset":dataset,"round":round,"active":active,"late_subscribe":late_subscribe,"unique_transactions":unique,"ingest_ms":ingest_ms,"subscription_setup_ms":subscription_setup_ms,"delivery_ms":delivery_ms,"query_ms":query_ms,"ingest_allocations":allocations.allocs,"ingest_allocation_bytes":allocations.bytes})
                 );
             }
         }

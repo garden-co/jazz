@@ -129,6 +129,24 @@ impl RoutedMultisinkTerminal {
         }
     }
 
+    /// Experimental graph-only counterpart of binding a routed terminal.
+    /// BindingSource leaves remain symbolic; this does not register a session.
+    #[doc(hidden)]
+    pub fn bound_graph_for_experiment(
+        &self,
+        binding_values: &[Value],
+        output: &RecordDescriptor,
+    ) -> Result<GraphBuilder, IvmRuntimeError> {
+        if let Some(index) = self
+            .route_value_indices
+            .iter()
+            .find(|i| **i >= binding_values.len())
+        {
+            return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
+        }
+        bound_routed_multisink_graph(self, binding_values, output)
+    }
+
     /// Select non-prefix binding values for the terminal's route predicates.
     pub fn with_route_value_indices(
         mut self,

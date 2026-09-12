@@ -56,3 +56,36 @@ The test-only substitution uses recursive traversal with a DAG memo. It is not
 production-ready for arbitrarily deep graphs; a production version needs a bounded
 iterative traversal, focused semantic/lifecycle tests and independent review.
 No storage/wire changes or release-readiness claims are made.
+
+## Operator trace interpretation
+
+Separate instrumented runs count outputs of computed operators, including
+retractions. These are not unique rows, allocation bytes, or clean timing runs.
+For the larger dataset's second mixed-query pass, ordinary bindings produce
+5,188,900 intermediate records / 2,498 MB of encoded outputs; concrete snapshots
+produce 1,259,970 / 566 MB. Ordinary execution has 17,080 Tick node executions in
+addition to hydration; concrete snapshots have none.
+
+A tracked row from the largest child table appears with negative weights during
+later queries on other tables. For example, the second `res_m_access_edges` query
+processes 445,716 Tick output records and only 2,136 hydration records. This is
+consistent with the code's queued binding-retraction lifecycle: releasing a
+snapshot binding queues removal, later hydration flushes that removal through
+the graph. Immediate rebinding can cancel it, so repeating a lone query does not
+reproduce the cost of the full mixed-query pass.
+
+The remaining large query still produces about 1.08 million intermediate records
+in the concrete control. Its 43,000 source rows carry roughly 574 bytes each
+through current-winner selection and early operators, before yielding 23,831
+permitted output rows. Removing temporary bindings does not eliminate that work.
+
+The corrected live-subscription control reuses Groove's existing bound-terminal
+normalization, including root collector routing. It passes both full fixture
+oracles. Repeated timing comparisons are in progress.
+
+`JAZZ_HISTORY_LATE_SUBSCRIBE=1` is a separate harness-only control: install the
+identical capture before registering the same live queries, then require their
+complete initial output. It prices initial snapshot construction versus empty
+subscription setup plus incremental maintenance. It does not implement safe
+propagation deferral for an existing production subscription or permit dropping
+already-observable intermediate updates.
