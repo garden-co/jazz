@@ -1,27 +1,35 @@
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_client, connect_ready_user};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_query};
 
 use super::*;
 
-/// Verifies that enforcing mode propagates into nested EXISTS_REL scans, so a
-/// missing explicit SELECT policy on a nested probed table denies the insert.
+/// Verifies that a nested EXISTS_REL policy survives public-schema conversion
+/// and authorises a correlated insert when its scanned tables expose SELECT.
 #[tokio::test]
-#[ignore = "#1759: schema conversion does not support nested ExistsRel inside an EXISTS policy"]
-async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
+async fn local_insert_with_nested_exists_rel_policy_allows_correlated_insert() {
     tokio::task::LocalSet::new()
-        .run_until(
-            local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel_inner(),
-        )
+        .run_until(local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inner(true))
         .await;
 }
 
-async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel_inner() {
+/// Alice's correlated write can use private policy evidence, without exposing it.
+#[tokio::test]
+async fn nested_exists_rel_insert_reads_private_raw_evidence() {
+    tokio::task::LocalSet::new()
+        .run_until(local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inner(false))
+        .await;
+}
+
+async fn local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inner(
+    expose_evidence: bool,
+) {
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::all_of([
+                pe::eq("id", pe::session(vec!["__jazz_outer_row", "admin_id"])),
                 pe::eq("user_id", pe::session(vec!["claims", "sub"])),
                 pe::exists(pe::table("team_memberships").where_(pe::rel::all_of([
-                    pe::rel::eq_outer("team_id", "team_id"),
+                    pe::rel::eq_outer("id", "membership_id"),
                     pe::rel::eq_session("user_id", vec!["claims", "sub"]),
                 ]))),
             ]))));
@@ -30,16 +38,30 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .column("team_id", ColumnType::Text),
+                .policies(permissions(|p| {
+                    if expose_evidence {
+                        p.allow_read().always();
+                    } else {
+                        p.allow_insert().always();
+                    }
+                })),
         )
         .table(
             TableSchema::builder("team_memberships")
-                .column("team_id", ColumnType::Text)
-                .column("user_id", ColumnType::Text),
+                .column("user_id", ColumnType::Text)
+                .policies(permissions(|p| {
+                    if expose_evidence {
+                        p.allow_read().always();
+                    } else {
+                        p.allow_insert().always();
+                    }
+                })),
         )
         .table(
             TableSchema::builder("projects")
                 .column("name", ColumnType::Text)
+                .fk_column("admin_id", "admins")
+                .fk_column("membership_id", "team_memberships")
                 .policies(projects_policies),
         )
         .build();
@@ -55,27 +77,57 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
     )
     .await;
 
-    client
-        .insert(
-            "admins",
-            crate::row_input!("user_id" => super::ALICE_ID, "team_id" => "team-a"),
-        )
-        .expect("seed admin row");
-    client
+    let admin_id = client
+        .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
+        .expect("seed admin row")
+        .0;
+    let membership_id = client
         .insert(
             "team_memberships",
-            crate::row_input!("team_id" => "team-a", "user_id" => super::ALICE_ID),
+            crate::row_input!("user_id" => super::ALICE_ID),
         )
-        .expect("seed membership row");
+        .expect("seed membership row")
+        .0;
 
-    let err = client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
-        .insert("projects", crate::row_input!("name" => "alice project"))
-        .expect_err(
-            "enforcing mode should deny nested EXISTS_REL checks when the probed table lacks an explicit SELECT policy",
-        );
-    assert_client_policy_denied(err, "projects", Operation::Insert);
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
+    let transaction = alice
+        .insert(
+            "projects",
+            crate::row_input!(
+                "name" => "alice project",
+                "admin_id" => admin_id,
+                "membership_id" => membership_id,
+            ),
+        )
+        .expect("insert should be accepted optimistically")
+        .2
+        .expect("insert should be pending server policy evaluation");
+    alice
+        .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+        .await
+        .expect("nested EXISTS_REL policy should authorise the correlated insert");
 
+    if !expose_evidence {
+        for table in ["admins", "team_memberships"] {
+            wait_for_query(
+                &alice,
+                Query::from(table),
+                Some(jazz::tools::DurabilityTier::EdgeServer),
+                Duration::from_secs(5),
+                "policy evidence stays private",
+                |rows| rows.is_empty().then_some(()),
+            )
+            .await;
+        }
+    }
+    alice.shutdown().await.expect("shutdown Alice client");
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }

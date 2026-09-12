@@ -1393,6 +1393,7 @@ fn append_exists_policy_clause(
     let mut outer_correlations = Vec::new();
     let mut filters = Vec::new();
     let mut nested_exists = Vec::new();
+    let mut nested_exists_rel = Vec::new();
     let mut conditions = Vec::new();
     collect_policy_conjuncts(condition, &mut conditions);
 
@@ -1412,6 +1413,7 @@ fn append_exists_policy_clause(
                 table: nested_table,
                 condition: nested_condition,
             } => nested_exists.push((index, nested_table.as_str(), nested_condition.as_ref())),
+            PolicyExpr::ExistsRel { rel } => nested_exists_rel.push((index, rel)),
             other => filters.push(convert_policy_predicate(
                 &exists_table_name,
                 &format!("{path}.Exists[{index}]"),
@@ -1463,9 +1465,9 @@ fn append_exists_policy_clause(
     // proof about the protected row, not a join relative to the first proof
     // row. Lower it through this same correlated-join path so every declared
     // FK edge remains independently validated by the core query contract.
-    nested_exists
-        .into_iter()
-        .try_fold(query, |query, (index, nested_table, nested_condition)| {
+    let query = nested_exists.into_iter().try_fold(
+        query,
+        |query, (index, nested_table, nested_condition)| {
             append_exists_policy_clause(
                 schema,
                 table,
@@ -1474,6 +1476,12 @@ fn append_exists_policy_clause(
                 nested_table,
                 nested_condition,
             )
+        },
+    )?;
+    nested_exists_rel
+        .into_iter()
+        .try_fold(query, |query, (index, rel)| {
+            append_exists_rel_policy_clause(table, &format!("{path}.Exists[{index}]"), query, rel)
         })
 }
 
