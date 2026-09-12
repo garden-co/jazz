@@ -2,6 +2,24 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Benchmark-only entry to the ordinary reset-bundle bulk ingestion path.
+    /// Inputs are predecoded trusted captures; this deliberately omits wire
+    /// admission and subscription scope bookkeeping to isolate installation.
+    #[cfg(feature = "testing")]
+    pub async fn ingest_captured_reset_bundles_for_benchmark(
+        &mut self,
+        bundles: &[crate::protocol::VersionBundle],
+    ) -> Result<usize, Error> {
+        let refs = bundles
+            .iter()
+            .map(crate::protocol::VersionBundle::as_ref)
+            .collect::<Vec<_>>();
+        Ok(self
+            .ingest_reset_view_bundle_refs_in_bulk(&refs, None)
+            .await?
+            .len())
+    }
+
     /// Ingest a commit unit as fate authority.
     pub async fn ingest_commit_unit(
         &mut self,

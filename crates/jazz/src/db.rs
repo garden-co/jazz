@@ -2633,6 +2633,28 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Testing-only direct bulk installer; excludes connection admission and
+    /// scope receipts for isolated benchmark measurements.
+    #[cfg(feature = "testing")]
+    pub async fn ingest_captured_reset_bundles_for_benchmark(
+        &self,
+        bundles: &[crate::protocol::VersionBundle],
+    ) -> Result<usize, Error> {
+        Ok(self
+            .node
+            .node()
+            .lock()
+            .await
+            .ingest_captured_reset_bundles_for_benchmark(bundles)
+            .await?)
+    }
+
+    /// Complete the ordinary facade refresh after direct benchmark ingestion.
+    #[cfg(feature = "testing")]
+    pub async fn refresh_after_benchmark_ingest(&self) -> Result<usize, Error> {
+        self.refresh_subscriptions().await
+    }
+
     /// Reserve local transaction-clock positions through `high_water` before a
     /// trusted native foreground host reuses a node identity.
     pub async fn reserve_minted_tx_time_after(&self, high_water: TxTime) -> Result<(), Error> {

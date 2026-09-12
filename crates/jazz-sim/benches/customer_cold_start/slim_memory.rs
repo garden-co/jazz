@@ -3,12 +3,14 @@ use super::*;
 use std::io::BufRead;
 use uuid::Uuid;
 
-type Encoded = Vec<(Vec<u8>, Vec<u8>)>;
+type Encoded = Vec<(Vec<u8>, Vec<u8>, jazz::tx::Fate)>;
 struct Store {
     rows: Vec<jazz::protocol::VersionRecord>,
     tables: BTreeMap<String, Vec<usize>>,
     keys: BTreeMap<(String, Uuid), usize>,
     transactions: Vec<Vec<u8>>,
+    history: BTreeMap<(String, Uuid, jazz::tx::TxId), usize>,
+    fates: BTreeMap<jazz::tx::TxId, jazz::tx::Fate>,
 }
 fn hex(value: &JsonValue) -> Vec<u8> {
     value
@@ -28,33 +30,72 @@ fn read(path: &Path) -> Encoded {
             assert_eq!(b["fate"], "Accepted");
             assert_eq!(b["versions"].as_array().unwrap().len(), 1);
             assert_eq!(b["versions"][0]["parents"], json!([]));
-            result.push((hex(&b["tx_hex"]), hex(&b["versions"][0]["wire_hex"])));
+            result.push((
+                hex(&b["tx_hex"]),
+                hex(&b["versions"][0]["wire_hex"]),
+                serde_json::from_value(b["fate"].clone()).unwrap(),
+            ));
         }
     }
     result
 }
 impl Store {
     fn ingest(input: &Encoded) -> Self {
+        let history_mode = std::env::var_os("JAZZ_SLIM_HISTORY").is_some();
         let mut s = Self {
             rows: Vec::new(),
             tables: BTreeMap::new(),
             keys: BTreeMap::new(),
             transactions: Vec::new(),
+            history: BTreeMap::new(),
+            fates: BTreeMap::new(),
         };
-        for (tx, bytes) in input {
-            let _: jazz::tx::Transaction = postcard::from_bytes(tx).unwrap();
+        let mut tx_ids = Vec::<jazz::tx::TxId>::new();
+        for (tx, bytes, fate) in input {
+            let decoded: jazz::tx::Transaction = postcard::from_bytes(tx).unwrap();
             let row: jazz::protocol::VersionRecord = postcard::from_bytes(bytes).unwrap();
             let key = (row.table().to_owned(), row.row_uuid().0);
-            if let Some(&i) = s.keys.get(&key) {
+            if history_mode {
+                // Explicit shallow-history contract; never silently approximate
+                // ancestor/deletion/exclusive semantics with timestamp ordering.
+                assert_eq!(decoded.kind, jazz::tx::TxKind::Mergeable);
+                assert!(row.parents().is_empty());
+                assert!(row.deletion().is_none());
+                if let Some(previous) = s.fates.insert(decoded.tx_id, fate.clone()) {
+                    assert_eq!(previous, *fate);
+                }
+                let history_key = (key.0.clone(), key.1, decoded.tx_id);
+                if let Some(&i) = s.history.get(&history_key) {
+                    assert_eq!(s.rows[i], row);
+                    assert_eq!(s.transactions[i], *tx);
+                    continue;
+                }
+                let i = s.rows.len();
+                s.history.insert(history_key, i);
+                if s.fates[&decoded.tx_id] == jazz::tx::Fate::Accepted {
+                    let wins = s.keys.get(&key).is_none_or(|&old| {
+                        decoded.tx_id.time.sort_key(decoded.tx_id.node)
+                            > tx_ids[old].time.sort_key(tx_ids[old].node)
+                    });
+                    if wins {
+                        s.keys.insert(key, i);
+                    }
+                }
+                tx_ids.push(decoded.tx_id);
+                s.rows.push(row);
+                s.transactions.push(tx.clone());
+            } else if let Some(&i) = s.keys.get(&key) {
                 assert_eq!(s.rows[i], row);
                 assert_eq!(s.transactions[i], *tx);
             } else {
                 let i = s.rows.len();
-                s.tables.entry(key.0.clone()).or_default().push(i);
                 s.keys.insert(key, i);
                 s.rows.push(row);
                 s.transactions.push(tx.clone());
             }
+        }
+        for ((table, _), &i) in &s.keys {
+            s.tables.entry(table.clone()).or_default().push(i);
         }
         s
     }
@@ -274,6 +315,16 @@ pub fn run(root: &Path) {
     let plan = Plan::new(&fixture);
     let ce = read(&root.join("core-edge.jsonl"));
     let ec = read(&root.join("edge-client.jsonl"));
+    if std::env::var_os("JAZZ_SLIM_HISTORY").is_some() {
+        let mut pending = vec![ce[0].clone()];
+        pending[0].2 = jazz::tx::Fate::Pending;
+        let probe = Store::ingest(&pending);
+        assert_eq!(probe.history.len(), 1);
+        assert!(
+            probe.keys.is_empty(),
+            "pending history must not become accepted current state"
+        );
+    }
     let core = Store::ingest(&ce); // preexisting Core state, outside load timing
     // Sensitivity: a principal with no membership must not receive protected
     // resource or child outputs. This would fail if the permission filter were
@@ -316,7 +367,7 @@ pub fn run(root: &Path) {
         plan.verify(&client, &client_result.0, &fixture);
         println!(
             "{}",
-            json!({"round":round,"allocation_requests":allocations.allocs,"allocation_bytes":allocations.bytes,"total_ms":total_ms,"core_query_ms":core_ms,"edge_ingest_ms":edge_ingest_ms,"edge_query_ms":edge_query_ms,"client_ingest_ms":client_ingest_ms,"client_query_ms":client_query_ms,"unique_rows":[core.rows.len(),edge.rows.len(),client.rows.len()],"operator_row_visits":[core_result.2,edge_result.2,client_result.2],"support_memberships":[core_result.1,edge_result.1,client_result.1],"output_fields":[core_result.3,edge_result.3,client_result.3]})
+            json!({"history_mode":std::env::var_os("JAZZ_SLIM_HISTORY").is_some(),"history_entries":[core.history.len(),edge.history.len(),client.history.len()],"fate_entries":[core.fates.len(),edge.fates.len(),client.fates.len()],"round":round,"allocation_requests":allocations.allocs,"allocation_bytes":allocations.bytes,"total_ms":total_ms,"core_query_ms":core_ms,"edge_ingest_ms":edge_ingest_ms,"edge_query_ms":edge_query_ms,"client_ingest_ms":client_ingest_ms,"client_query_ms":client_query_ms,"unique_rows":[core.rows.len(),edge.rows.len(),client.rows.len()],"operator_row_visits":[core_result.2,edge_result.2,client_result.2],"support_memberships":[core_result.1,edge_result.1,client_result.1],"output_fields":[core_result.3,edge_result.3,client_result.3]})
         );
     }
 }

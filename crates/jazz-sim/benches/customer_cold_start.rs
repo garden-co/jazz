@@ -1,3 +1,5 @@
+#[path = "customer_cold_start/history_cost.rs"]
+mod history_cost;
 #[path = "customer_cold_start/slim_memory.rs"]
 mod slim_memory;
 #[path = "customer_cold_start/work_budget.rs"]
@@ -572,6 +574,10 @@ fn main() {
         "phase attribution enabled: compare elapsed time only with the same instrumentation; disable this feature for absolute latency"
     );
     let config = Config::from_env();
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_HISTORY_COST") {
+        history_cost::run(Path::new(&path));
+        return;
+    }
     if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_SLIM_MEMORY") {
         slim_memory::run(Path::new(&path));
         return;
