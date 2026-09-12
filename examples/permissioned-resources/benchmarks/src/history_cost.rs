@@ -239,16 +239,15 @@ pub fn run(root: &Path) {
                     for _ in 0..16 {
                         let refreshed =
                             block_on(receiver.db.refresh_after_benchmark_ingest()).unwrap();
-                        let ticked = block_on(receiver.db.tick()).unwrap();
+                        block_on(receiver.db.tick()).unwrap();
                         if std::env::var_os("JAZZ_HISTORY_DEBUG").is_some() {
-                            eprintln!("HISTORY_REFRESH changed={refreshed} tick={ticked:?}");
+                            eprintln!("HISTORY_REFRESH changed={refreshed} tick=()");
                         }
                         for (table, stream, rows) in &mut streams {
                             while let Some(event) = stream.try_next_event() {
                                 if table == "group"
                                     && std::env::var_os("JAZZ_HISTORY_DEBUG").is_some()
-                                {
-                                    if let SubscriptionEvent::Delta {
+                                    && let SubscriptionEvent::Delta {
                                         reset,
                                         added,
                                         updated,
@@ -258,15 +257,14 @@ pub fn run(root: &Path) {
                                         settled,
                                         ..
                                     } = &event
-                                    {
-                                        eprintln!(
-                                            "HISTORY_GROUP reset={reset} add={} update={} remove={} terminal={} publishable={publishable} settled={settled}",
-                                            added.len(),
-                                            updated.len(),
-                                            removed.len(),
-                                            terminal_operations.len()
-                                        );
-                                    }
+                                {
+                                    eprintln!(
+                                        "HISTORY_GROUP reset={reset} add={} update={} remove={} terminal={} publishable={publishable} settled={settled}",
+                                        added.len(),
+                                        updated.len(),
+                                        removed.len(),
+                                        terminal_operations.len()
+                                    );
                                 }
                                 apply_complete_event(rows, event);
                             }
