@@ -30,16 +30,43 @@ pub(crate) mod replay;
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
 #[derive(Clone, Debug, Default)]
 struct JoinBucket {
-    base: Rc<HashMap<Bytes, i64>>,
+    base: Rc<Vec<(Bytes, i64)>>,
     overlay: Rc<HashMap<Bytes, Option<i64>>>,
 }
 
 impl JoinBucket {
     #[cfg(test)]
+    fn base_weight(&self, record: &Bytes) -> Option<&i64> {
+        self.base
+            .binary_search_by(|(stored, _)| stored.cmp(record))
+            .ok()
+            .map(|i| &self.base[i].1)
+    }
+
+    fn from_sorted_records(mut records: Vec<(Bytes, i64)>) -> Self {
+        records.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let mut write = 0;
+        for read in 0..records.len() {
+            if write > 0 && records[write - 1].0 == records[read].0 {
+                records[write - 1].1 += records[read].1;
+            } else {
+                records.swap(write, read);
+                write += 1;
+            }
+        }
+        records.truncate(write);
+        records.retain(|(_, weight)| *weight != 0);
+        Self {
+            base: Rc::new(records),
+            overlay: Rc::default(),
+        }
+    }
+
+    #[cfg(test)]
     fn get(&self, record: &Bytes) -> Option<&i64> {
         match self.overlay.get(record) {
             Some(weight) => weight.as_ref(),
-            None => self.base.get(record),
+            None => self.base_weight(record),
         }
     }
 
@@ -51,9 +78,14 @@ impl JoinBucket {
     fn add_weight(&mut self, record: &Bytes, delta: i64) -> i64 {
         // An overlay tombstone means zero, not the weight in the base.
         // Entry retains the probe used to read the old weight for the write.
+        let base = &self.base;
         let weight = Rc::make_mut(&mut self.overlay)
             .entry(record.clone())
-            .or_insert_with(|| self.base.get(record).copied());
+            .or_insert_with(|| {
+                base.binary_search_by(|(stored, _)| stored.cmp(record))
+                    .ok()
+                    .map(|i| base[i].1)
+            });
         let next = weight.unwrap_or_default() + delta;
         *weight = (next != 0).then_some(next);
         next
@@ -76,6 +108,7 @@ impl JoinBucket {
         self.iter().next().is_none()
     }
 
+    #[cfg(test)]
     fn commit_overlay(&mut self) {
         if self.overlay.is_empty() {
             return;
@@ -83,21 +116,18 @@ impl JoinBucket {
         let overlay = std::mem::take(&mut self.overlay);
         let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
         let base = Rc::make_mut(&mut self.base);
-        for (record, weight) in overlay {
-            if let Some(weight) = weight {
-                base.insert(record, weight);
-            } else {
-                base.remove(&record);
-            }
-        }
+        base.retain(|(record, _)| !overlay.contains_key(record));
+        base.extend(
+            overlay
+                .into_iter()
+                .filter_map(|(record, weight)| weight.map(|weight| (record, weight))),
+        );
+        base.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     }
 
     #[cfg(test)]
     fn from_records(records: HashMap<Bytes, i64>) -> Self {
-        Self {
-            base: Rc::new(records),
-            overlay: Rc::default(),
-        }
+        Self::from_sorted_records(records.into_iter().collect())
     }
 }
 type JoinIndex = HashMap<JoinKey, JoinBucket>;
@@ -780,23 +810,21 @@ fn append_join_deltas(
     Ok(())
 }
 
-fn apply_join_delta_to_index(index: &mut JoinIndex, deltas: &[KeyedRecordDelta<'_>]) {
-    for delta in deltas {
-        let bucket = index.entry(delta.key.clone()).or_default();
-        let next_weight = bucket.add_weight(&delta.delta.record, delta.delta.weight);
-        if next_weight == 0 && bucket.is_empty() {
-            index.remove(&delta.key);
-        }
-    }
-}
-
 fn build_join_delta_index(deltas: &[KeyedRecordDelta<'_>]) -> JoinIndex {
-    let mut index = HashMap::default();
-    apply_join_delta_to_index(&mut index, deltas);
-    for bucket in index.values_mut() {
-        bucket.commit_overlay();
+    let mut buckets: HashMap<JoinKey, Vec<(Bytes, i64)>> = HashMap::default();
+    for delta in deltas {
+        buckets
+            .entry(delta.key.clone())
+            .or_default()
+            .push((delta.delta.record.clone(), delta.delta.weight));
     }
-    index
+    buckets
+        .into_iter()
+        .filter_map(|(key, records)| {
+            let bucket = JoinBucket::from_sorted_records(records);
+            (!bucket.is_empty()).then_some((key, bucket))
+        })
+        .collect()
 }
 
 fn keyed_join_deltas<'a>(
@@ -1074,6 +1102,31 @@ pub(super) fn join_output_mapping(
 
 #[cfg(test)]
 mod tests {
+    // Signed intermediate weights and shared bucket snapshots are internal
+    // contracts; public row APIs cannot expose these states directly.
+    #[test]
+    fn compact_bucket_consolidates_retractions_and_keeps_snapshot() {
+        use super::*;
+        let a = Bytes::from_static(b"a");
+        let b = Bytes::from_static(b"b");
+        let c = Bytes::from_static(b"c");
+        let original = JoinBucket::from_sorted_records(vec![
+            (b.clone(), 2),
+            (a.clone(), 1),
+            (b.clone(), -2),
+            (c.clone(), -1),
+        ]);
+        assert_eq!(
+            original.base.as_ref(),
+            &vec![(a.clone(), 1), (c.clone(), -1)]
+        );
+        let mut updated = original.clone();
+        updated.add_weight(&a, -1);
+        updated.add_weight(&c, 2);
+        updated.commit_overlay();
+        assert_eq!(updated.base.as_ref(), &vec![(c.clone(), 1)]);
+        assert_eq!(original.base.as_ref(), &vec![(a, 1), (c, -1)]);
+    }
     use std::collections::BTreeMap;
 
     use super::*;
