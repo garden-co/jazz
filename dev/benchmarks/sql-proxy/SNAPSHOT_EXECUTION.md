@@ -89,3 +89,54 @@ complete initial output. It prices initial snapshot construction versus empty
 subscription setup plus incremental maintenance. It does not implement safe
 propagation deferral for an existing production subscription or permit dropping
 already-observable intermediate updates.
+
+## Live and scheduling controls
+
+Three fresh processes per mode, rotated against their own baseline. Sum includes
+subscription registration, ingestion and delivery; it excludes subsequent reads.
+Medians of each process's sum, milliseconds:
+
+| Control                      | Larger dataset baseline / candidate | Smaller dataset baseline / candidate |
+| ---------------------------- | ----------------------------------: | -----------------------------------: |
+| Concrete live bindings       |                       4,750 / 4,248 |                        3,727 / 3,372 |
+| Subscribe after installation |                       4,726 / 4,316 |                        3,745 / 3,409 |
+
+Both effects are approximately 9–11%, not the multi-fold snapshot-read gain.
+Concrete live bindings also lose ordinary prepared-read reuse: the larger
+subsequent first read rises from ~695 ms to ~3,151 ms. Do not replace all prepared
+subscriptions on the strength of the ingest result.
+
+Late subscription moves most maintenance into initial hydration: larger ingest
+falls from ~3,171 ms to ~1,617 ms, while registration rises from ~996 ms to
+~2,684 ms. The total, not the shortened ingest phase, governs the conclusion.
+
+A further public-API control selects Global tier with deferred local updates
+(`JAZZ_HISTORY_GLOBAL_READ`). Every captured version is already globally accepted,
+so output should remain equal in this fixture. This prices the additional
+current/ahead overlay machinery used for Local reads; it does not justify
+ignoring pending writes in production.
+
+## Full-topology checkpoint
+
+A single optimized all-memory checkpoint per mode yields 11,489 ms baseline,
+11,511 ms concrete snapshots, and 11,660 ms concrete snapshots plus concrete
+live subscriptions. All return 27,518 rows and pass the fixture assertions.
+These samples establish no end-to-end improvement. The cold workload is driven
+by subscriptions, so the one-shot result must not be presented as its speedup.
+
+## Further guarded execution controls
+
+With the `performance-experiments` feature, `GROOVE_DIRECT_INITIAL_WINNERS`
+uses a compact group-to-borrowed-winner map for positive hydration input. It
+retains the original arrangement for subsequent updates, including its original
+ordering and byte tie-break convention. It avoids reconstructing an empty
+before-image; signed and incremental paths remain unchanged. Initial read
+measurements show only a small effect, with broader correctness checks pending.
+
+`JAZZ_AUTH_JOIN_ORDER_EXPERIMENT` changes the association of the existing
+permission/binding joins. Before: attach every binding to wide source rows,
+then match authorized (row, route) proofs. After: join proofs to bindings on
+all the same route fields, then join that compact relation to source rows by
+row identity. Proof deduplication, route predicates, output identities and
+multiplicity remain required. This is a guarded, unvalidated experiment, not
+permission bypass or permission-result caching.

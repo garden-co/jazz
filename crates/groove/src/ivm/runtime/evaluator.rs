@@ -2051,6 +2051,64 @@ impl TickEvaluator<'_> {
                 arrangement.mark_forward_as_of(sub_tick)?;
             }
         }
+        // Research control: a positive initial snapshot has no before image.
+        // Retain the same arrangement for later incremental updates, but use a
+        // small group -> borrowed winner index instead of rebuilding before/after
+        // multisets. Incremental and signed input paths remain unchanged.
+        #[cfg(feature = "performance-experiments")]
+        if self.context.eval_mode == EvalMode::Hydrate
+            && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace
+            && std::env::var_os("GROOVE_DIRECT_INITIAL_WINNERS").is_some()
+            && input.deltas.iter().all(|delta| delta.weight > 0)
+        {
+            let mut winners = BTreeMap::<Vec<u8>, &RecordDelta>::new();
+            for delta in &input.deltas {
+                let key = encoded_arrangement_key_part(
+                    output_desc,
+                    delta.raw(),
+                    spec.group_field_indices,
+                )?;
+                match winners.entry(key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(delta);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let old = entry.get();
+                        let candidate_key = encoded_record_key_part(
+                            output_desc,
+                            delta.raw(),
+                            spec.comparison_field_indices,
+                        )?;
+                        let old_key = encoded_record_key_part(
+                            output_desc,
+                            old.raw(),
+                            spec.comparison_field_indices,
+                        )?;
+                        if arg_by_candidate_replaces(
+                            &candidate_key,
+                            delta.raw(),
+                            &old_key,
+                            old.raw(),
+                            spec.direction,
+                        ) {
+                            entry.insert(delta);
+                        }
+                    }
+                }
+            }
+            let deltas = winners
+                .into_values()
+                .map(|delta| RecordDelta {
+                    record: delta.record.clone(),
+                    weight: 1,
+                })
+                .collect();
+            self.insert_arrangement(arrangement_key, arrangement);
+            return Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas,
+            });
+        }
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
             let group_key =

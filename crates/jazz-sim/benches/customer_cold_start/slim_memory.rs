@@ -1,4 +1,6 @@
-//! Workload-specific reference, not an alternative Jazz implementation.
+#[path = "slim_memory/history.rs"]
+mod history;
+// Workload-specific reference, not an alternative Jazz implementation.
 use super::*;
 use std::io::BufRead;
 use uuid::Uuid;
@@ -310,6 +312,9 @@ impl Plan {
     }
 }
 pub fn run(root: &Path) {
+    if std::env::var_os("JAZZ_SLIM_RICH_HISTORY").is_some() {
+        return history::run(root);
+    }
     let fixture: JsonValue =
         serde_json::from_reader(fs::File::open(root.join("fixture.json")).unwrap()).unwrap();
     let plan = Plan::new(&fixture);

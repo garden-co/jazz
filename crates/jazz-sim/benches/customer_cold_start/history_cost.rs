@@ -35,6 +35,16 @@ fn read(path: &Path) -> Vec<VersionBundle> {
 }
 fn opts() -> ReadOpts {
     ReadOpts {
+        tier: if std::env::var_os("JAZZ_HISTORY_GLOBAL_READ").is_some() {
+            jazz::tx::DurabilityTier::Global
+        } else {
+            jazz::tx::DurabilityTier::Local
+        },
+        local_updates: if std::env::var_os("JAZZ_HISTORY_GLOBAL_READ").is_some() {
+            jazz::db::LocalUpdates::Deferred
+        } else {
+            jazz::db::LocalUpdates::Immediate
+        },
         propagation: jazz::db::Propagation::LocalOnly,
         ..ReadOpts::default()
     }

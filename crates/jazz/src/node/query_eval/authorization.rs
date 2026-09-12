@@ -909,6 +909,59 @@ where
             authorization_keys.clone(),
             authorization_keys,
         );
+        #[cfg(feature = "testing")]
+        if std::env::var_os("JAZZ_AUTH_JOIN_ORDER_EXPERIMENT").is_some()
+            && let Some((binding, route_fields)) = &binding_routes
+        {
+            if !authorized.route_fields.is_subset(route_fields) {
+                return Err(Error::InvalidStoredValue(
+                    "authorization route missing from binding",
+                ));
+            }
+            // (wide rows x bindings) join proof -> wide rows join
+            // (proof join bindings). Keep every route predicate, but perform
+            // route matching on the compact proof before attaching row payloads.
+            let proof_keys = authorized.route_fields.iter().cloned().collect::<Vec<_>>();
+            let mut proof_fields = vec![ProjectField::renamed("left.row_uuid", "row_uuid")];
+            proof_fields.extend(
+                authorized
+                    .route_fields
+                    .iter()
+                    .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+            );
+            proof_fields.extend(
+                route_fields
+                    .iter()
+                    .filter(|field| !authorized.route_fields.contains(*field))
+                    .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+            );
+            let routed_proof = GraphBuilder::join(
+                authorized_graph,
+                binding.clone(),
+                proof_keys.clone(),
+                proof_keys,
+            )
+            .project_fields(proof_fields);
+            let mut fields = output_fields.clone();
+            fields.extend(
+                authorized
+                    .route_fields
+                    .iter()
+                    .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+            );
+            fields.extend(
+                route_fields
+                    .iter()
+                    .filter(|field| !authorized.route_fields.contains(*field))
+                    .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+            );
+            return Ok(PolicyAuthorizationGraph {
+                graph: GraphBuilder::join(base, routed_proof, ["row_uuid"], ["row_uuid"])
+                    .project_fields(fields),
+                route_fields: route_fields.clone(),
+                access_paths: BTreeMap::new(),
+            });
+        }
         let (base, binding_route_fields) =
             match binding_routes {
                 Some((binding, route_fields)) => (
