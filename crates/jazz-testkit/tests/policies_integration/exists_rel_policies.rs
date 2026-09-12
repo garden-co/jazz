@@ -1,5 +1,5 @@
 use jazz_server::JazzServer;
-use jazz_testkit::connect_ready_client;
+use jazz_testkit::{connect_ready_client, connect_ready_user};
 
 use super::*;
 
@@ -495,4 +495,61 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             server.shutdown().await;
         })
         .await;
+}
+
+/// Boolean clause order must not remove the owner check after an EXISTS-bearing OR.
+#[tokio::test]
+async fn exists_rel_disjunction_preserves_following_owner_predicate() {
+    tokio::task::LocalSet::new().run_until(async {
+        for owner_first in [false, true] {
+            let policies = permissions(|p| {
+                let owner = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
+                let alternative = pe::any_of([
+                    pe::eq("name", pe::literal("shortcut")),
+                    pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                        pe::rel::eq_outer("id", "admin_id"),
+                        pe::rel::eq_session("user_id", vec!["claims", "sub"]),
+                    ]))),
+                ]);
+                p.allow_insert().where_(pe::all_of(if owner_first {
+                    [owner, alternative]
+                } else {
+                    [alternative, owner]
+                }));
+            });
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("admins")
+                    .column("user_id", ColumnType::Text)
+                    .policies(permissions(|p| p.allow_read().always())))
+                .table(TableSchema::builder("projects")
+                    .column("name", ColumnType::Text)
+                    .column("owner_id", ColumnType::Text)
+                    .fk_column("admin_id", "admins")
+                    .policies(policies))
+                .build();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let backend = connect_ready_client(&server, &schema, "boolean-policy-seed", "projects", Duration::from_secs(30)).await;
+            let admin_id = backend.insert("admins", crate::row_input!("user_id" => super::ALICE_ID)).expect("seed admin").0;
+            let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "projects", Duration::from_secs(30)).await;
+            for name in ["shortcut", "admin path"] {
+                for (owner, allowed) in [(super::ALICE_ID, true), (super::CAROL_ID, false)] {
+                    let result = alice.insert("projects", crate::row_input!("name" => name, "owner_id" => owner, "admin_id" => admin_id));
+                    match result {
+                        Ok((_, _, transaction)) => {
+                            let transaction = transaction.expect("write requires authority settlement");
+                            let settled = alice.wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer).await;
+                            assert_eq!(settled.is_ok(), allowed, "owner_first={owner_first}, name={name}, owner={owner}: {settled:?}");
+                        }
+                        Err(error) if !allowed => assert_client_policy_denied(error, "projects", Operation::Insert),
+                        Err(error) => panic!("allowed write rejected: {error:?}"),
+                    }
+                }
+            }
+            alice.shutdown().await.expect("shutdown Alice");
+            backend.shutdown().await.expect("shutdown backend");
+            server.shutdown().await;
+        }
+    }).await;
 }

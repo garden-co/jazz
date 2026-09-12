@@ -1074,6 +1074,33 @@ fn append_policy_clause(
     expr: &PolicyExpr,
     native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
+    // A clause conjoins the entire policy accumulated so far, including every
+    // alternative created by an earlier OR. Appending only to the false base
+    // would let those alternatives bypass this clause.
+    if !query.policy_branches.is_empty() {
+        let alternatives = PolicyBranch::alternatives_from_query(query);
+        let mut combined = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
+        for alternative in alternatives {
+            let mut branch = Query::from(table.as_str());
+            branch.filters = alternative.filters;
+            branch.joins = alternative.joins;
+            branch.reachable = alternative.reachable;
+            branch.inherits = alternative.inherits;
+            let branch = append_policy_clause(
+                schema,
+                table_schema,
+                table,
+                path,
+                branch,
+                expr,
+                native_select_inherits,
+            )?;
+            for alternative in PolicyBranch::alternatives_from_query(branch) {
+                combined = combined.policy_branch(alternative);
+            }
+        }
+        return Ok(combined);
+    }
     match expr {
         PolicyExpr::And(exprs) => {
             let mut query = query;
@@ -1124,6 +1151,52 @@ fn append_policy_clause(
             condition,
         } => append_exists_policy_clause(schema, table, path, query, exists_table, condition),
         PolicyExpr::ExistsRel { rel } => append_exists_rel_policy_clause(table, path, query, rel),
+        PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
+            let existing_branches = PolicyBranch::alternatives_from_query(query);
+            let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
+
+            for (index, expr) in exprs.iter().enumerate() {
+                let branch_query = convert_policy_with_native_select_inherits(
+                    schema,
+                    table_schema,
+                    table,
+                    &format!("{path}.Or[{index}]"),
+                    expr,
+                    native_select_inherits,
+                )?;
+                for branch in PolicyBranch::alternatives_from_query(branch_query) {
+                    for existing in &existing_branches {
+                        query = query.policy_branch(PolicyBranch {
+                            filters: existing
+                                .filters
+                                .iter()
+                                .chain(branch.filters.iter())
+                                .cloned()
+                                .collect(),
+                            joins: existing
+                                .joins
+                                .iter()
+                                .chain(branch.joins.iter())
+                                .cloned()
+                                .collect(),
+                            reachable: existing
+                                .reachable
+                                .iter()
+                                .chain(branch.reachable.iter())
+                                .cloned()
+                                .collect(),
+                            inherits: existing
+                                .inherits
+                                .iter()
+                                .chain(branch.inherits.iter())
+                                .cloned()
+                                .collect(),
+                        });
+                    }
+                }
+            }
+            Ok(query)
+        }
         _ => Ok(append_predicate_filters(
             query,
             predicate_filters_for_expr(table, path, expr)?,
@@ -4419,6 +4492,101 @@ mod tests {
         assert_eq!(join.table, "chatMembers");
         assert_eq!(join.on_column, "chatId");
         assert_eq!(join.source_column.as_deref(), Some("chatId"));
+    }
+
+    #[test]
+    fn converts_nested_or_with_correlated_exists_under_and_to_policy_branches() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("rooms").column("archived", ColumnType::Boolean))
+            .table(
+                TableSchemaBuilder::new("roomParticipants")
+                    .fk_column("room_id", "rooms")
+                    .column("session_user_id", ColumnType::Text),
+            )
+            .table(
+                TableSchemaBuilder::new("roomMetadata")
+                    .fk_column("room_id", "rooms")
+                    .column("owner_id", ColumnType::Text)
+                    .column("is_admin", ColumnType::Boolean)
+                    .policies(TablePolicies::new().with_update(
+                        Some(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "owner_id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
+                            },
+                            PolicyExpr::And(vec![
+                                PolicyExpr::Exists {
+                                    table: "rooms".to_owned(),
+                                    condition: Box::new(PolicyExpr::And(vec![
+                                        PolicyExpr::Cmp {
+                                            column: "id".to_owned(),
+                                            op: CmpOp::Eq,
+                                            value: PolicyValue::SessionRef(vec![
+                                                "__jazz_outer_row".to_owned(),
+                                                "room_id".to_owned(),
+                                            ]),
+                                        },
+                                        PolicyExpr::Cmp {
+                                            column: "archived".to_owned(),
+                                            op: CmpOp::Eq,
+                                            value: PolicyValue::Literal(Value::Boolean(false)),
+                                        },
+                                    ])),
+                                },
+                                PolicyExpr::Or(vec![
+                                    PolicyExpr::Cmp {
+                                        column: "is_admin".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::Literal(Value::Boolean(true)),
+                                    },
+                                    PolicyExpr::Exists {
+                                        table: "roomParticipants".to_owned(),
+                                        condition: Box::new(PolicyExpr::And(vec![
+                                            PolicyExpr::Cmp {
+                                                column: "room_id".to_owned(),
+                                                op: CmpOp::Eq,
+                                                value: PolicyValue::SessionRef(vec![
+                                                    "__jazz_outer_row".to_owned(),
+                                                    "room_id".to_owned(),
+                                                ]),
+                                            },
+                                            PolicyExpr::Cmp {
+                                                column: "session_user_id".to_owned(),
+                                                op: CmpOp::Eq,
+                                                value: PolicyValue::SessionRef(vec![
+                                                    "claims".to_owned(),
+                                                    "sub".to_owned(),
+                                                ]),
+                                            },
+                                        ])),
+                                    },
+                                ]),
+                            ]),
+                        ])),
+                        PolicyExpr::True,
+                    )),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let metadata = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "roomMetadata")
+            .unwrap();
+        let policy = metadata.write_policies.update_using.as_ref().unwrap();
+
+        assert_eq!(policy.filters, vec![Predicate::Any(Vec::new())]);
+        assert_eq!(policy.policy_branches.len(), 2);
+        assert_eq!(policy.policy_branches[0].joins.len(), 1);
+        assert_eq!(policy.policy_branches[0].joins[0].table, "rooms");
+        assert_eq!(policy.policy_branches[1].joins.len(), 2);
+        assert_eq!(policy.policy_branches[1].joins[0].table, "rooms");
+        assert_eq!(policy.policy_branches[1].joins[1].table, "roomParticipants");
     }
 
     #[test]
