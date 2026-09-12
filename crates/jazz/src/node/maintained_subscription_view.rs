@@ -363,27 +363,31 @@ enum MaintainedTerminalKind {
     AggregateAppRows(AppRowSchema),
 }
 
+// Keep large result/proof carriers out of every version-event map slot. Box
+// comparison remains value-based; indirection must not change identity/order.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum EventIdentity {
-    Result(ResultMemberEntry),
+    Result(Box<ResultMemberEntry>),
     Version(ProgramSourceId, VersionIdentity),
     Replacement(ProgramSourceId, ReplacementKey, VersionIdentity),
-    ProgramFact(ProgramFactEntry),
+    ProgramFact(Box<ProgramFactEntry>),
     StructuredAppRow(RowUuid, Vec<u8>),
 }
 
 #[derive(Clone, Debug)]
 enum NetEvent {
-    Result(ResultMemberEntry, ResultMemberPayloadEntry),
+    Result(Box<(ResultMemberEntry, ResultMemberPayloadEntry)>),
     AggregateResult(
-        ResultMemberEntry,
-        ResultMemberPayloadEntry,
-        super::query_engine::SyntheticResultMembershipSchema,
-        Vec<String>,
+        Box<(
+            ResultMemberEntry,
+            ResultMemberPayloadEntry,
+            super::query_engine::SyntheticResultMembershipSchema,
+            Vec<String>,
+        )>,
     ),
     Version(ProgramSourceId, VersionIdentity, VersionRow),
     Replacement(ProgramSourceId, ReplacementKey, VersionIdentity, VersionRow),
-    ProgramFact(ProgramFactEntry),
+    ProgramFact(Box<ProgramFactEntry>),
     StructuredAppRow(RowUuid, OwnedRecord),
 }
 
@@ -706,14 +710,16 @@ impl MaintainedSubscriptionView {
             let (event, weight) = row?;
             let net_event = match event {
                 DecodedMaintainedEvent::ResultCurrent { member, payload } => {
-                    NetEvent::Result(member, payload)
+                    NetEvent::Result(Box::new((member, payload)))
                 }
                 DecodedMaintainedEvent::AggregateResult {
                     member,
                     payload,
                     synthetic,
                     value_fields,
-                } => NetEvent::AggregateResult(member, payload, synthetic, value_fields),
+                } => {
+                    NetEvent::AggregateResult(Box::new((member, payload, synthetic, value_fields)))
+                }
                 DecodedMaintainedEvent::VersionContent { source, row }
                 | DecodedMaintainedEvent::VersionDeletion { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
@@ -729,11 +735,11 @@ impl MaintainedSubscriptionView {
                     let key = ReplacementKey::for_row(&row, VersionLayer::Deletion);
                     NetEvent::Replacement(source, key, identity, row)
                 }
-                DecodedMaintainedEvent::ProgramSourceCoverage(coverage) => {
-                    NetEvent::ProgramFact(ProgramFactEntry::ProgramSourceCoverage(coverage))
-                }
+                DecodedMaintainedEvent::ProgramSourceCoverage(coverage) => NetEvent::ProgramFact(
+                    Box::new(ProgramFactEntry::ProgramSourceCoverage(coverage)),
+                ),
                 DecodedMaintainedEvent::RelationEdge(edge) => {
-                    NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
+                    NetEvent::ProgramFact(Box::new(ProgramFactEntry::RelationEdge(edge)))
                 }
                 DecodedMaintainedEvent::StructuredAppRow { root, record } => {
                     NetEvent::StructuredAppRow(root, record)
@@ -760,10 +766,12 @@ impl MaintainedSubscriptionView {
                 );
             }
             match event {
-                NetEvent::Result(entry, payload) => {
+                NetEvent::Result(result) => {
+                    let (entry, payload) = *result;
                     self.apply_result_delta(entry, payload, weight, &mut transitions);
                 }
-                NetEvent::AggregateResult(member, payload, synthetic, value_fields) => {
+                NetEvent::AggregateResult(result) => {
+                    let (member, payload, synthetic, value_fields) = *result;
                     self.apply_aggregate_result_delta(
                         member,
                         payload,
@@ -808,6 +816,7 @@ impl MaintainedSubscriptionView {
                     }
                 }
                 NetEvent::ProgramFact(fact) => {
+                    let fact = *fact;
                     if let Some(is_present) = self.apply_source_fact_delta(
                         SourceFactOrigin::ProgramFact,
                         fact.clone(),
@@ -3284,8 +3293,8 @@ impl ReplacementKey {
 impl NetEvent {
     fn identity(&self) -> EventIdentity {
         match self {
-            Self::Result(entry, _) => EventIdentity::Result(entry.clone()),
-            Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
+            Self::Result(result) => EventIdentity::Result(Box::new(result.0.clone())),
+            Self::AggregateResult(result) => EventIdentity::Result(Box::new(result.0.clone())),
             Self::Version(source, identity, _) => {
                 EventIdentity::Version(source.clone(), identity.clone())
             }
@@ -5136,4 +5145,16 @@ mod terminal_role_hash_tests {
 #[cfg(test)]
 std::thread_local! {
     pub(crate) static SOURCE_CLOSURE_TRAVERSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// This internal allocation budget is not observable through query equality:
+// rare proof/aggregate variants must not inflate every cold-load map entry.
+#[cfg(test)]
+#[test]
+fn maintained_event_map_entries_remain_compact() {
+    let identity = std::mem::size_of::<EventIdentity>();
+    let event = std::mem::size_of::<NetEvent>();
+    println!("LAYOUT EventIdentity {identity} NetEvent {event}");
+    assert!(identity <= 128, "event identity occupies {identity} bytes");
+    assert!(event <= 192, "net event occupies {event} bytes");
 }
