@@ -699,6 +699,8 @@ impl MaintainedSubscriptionView {
     ) -> Result<ResultTransitions, super::Error> {
         // Decode into the net-change accumulator directly. No retained state
         // changes until the complete input has decoded successfully.
+        #[cfg(feature = "cold-settle-attribution")]
+        let net_span = tracing::trace_span!("cold.phase.terminal_net").entered();
         let mut net = BTreeMap::<EventIdentity, (NetEvent, i64)>::new();
         for row in rows {
             let (event, weight) = row?;
@@ -743,6 +745,10 @@ impl MaintainedSubscriptionView {
                 .or_insert((net_event, weight));
         }
 
+        #[cfg(feature = "cold-settle-attribution")]
+        drop(net_span);
+        #[cfg(feature = "cold-settle-attribution")]
+        let _apply_span = tracing::trace_span!("cold.phase.terminal_apply").entered();
         let mut transitions = ResultTransitions::default();
         for (_, (event, weight)) in net {
             if weight == 0 {

@@ -625,6 +625,7 @@ where
         Ok(None)
     }
 
+    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.merge_heads_stage"))]
     pub(crate) async fn write_merge_heads_for_bulk_content_versions(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -719,6 +720,7 @@ where
         Ok(())
     }
 
+    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.merge_heads_rebuild"))]
     pub(crate) async fn rebuild_merge_heads_after_history_commit(
         &mut self,
         rows: &BTreeSet<(PhysicalTableId, String, BranchKey, RowUuid)>,
