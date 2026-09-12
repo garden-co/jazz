@@ -548,6 +548,24 @@ describe("JazzClient.updateCookieSession", () => {
       backend_session: refreshed,
     });
   });
+  it("clears backend session credentials when switching from cookie to bearer auth", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, {
+      ...makeContext(),
+      backendSecret: "backend-secret",
+      cookieSession: {
+        user_id: "alice",
+        claims: { role: "reader" },
+        issuer: "https://issuer.example",
+        authMode: "external",
+      },
+    });
+    client.updateAuthToken(makeSyntheticJwt("bearer"));
+    const payload = JSON.parse(runtime.updateAuth.mock.calls.at(-1)![0] as string);
+    expect(payload).not.toHaveProperty("backend_session");
+    expect(payload.backend_secret).toBe("backend-secret");
+  });
+
   it("keeps client transport credentials mode-exclusive across auth transitions", () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
