@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates, MergeableTxOps,
-    PeerIoPump, PreparedQuery, Propagation, ReadOpts, RestoreOptions, ResumeCursor,
+    CommitUnitTrust, Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates,
+    MergeableTxOps, PeerIoPump, PreparedQuery, Propagation, ReadOpts, RestoreOptions, ResumeCursor,
     SubscriptionEvent, SubscriptionStream, UpdateOptions, WireTransportAdapter, WriteIdentity,
     block_on,
 };
@@ -155,8 +155,14 @@ impl ResumeFixture {
 
         let (writer_transport, server_writer_transport, queues) = byte_duplex(1);
         let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
-        let writer_subscriber =
-            server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
+        // These fixture writes are database-authored SYSTEM work, admitted by
+        // the synthetic host as a backend rather than an ordinary user session.
+        let writer_subscriber = server.accept_subscriber_with_claims_and_trust(
+            server_writer_transport,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
         let writer_pump = block_on(writer_upstream.lock()).io_pump();
         let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
         let mut quiet_ticks = 0;
@@ -233,8 +239,12 @@ impl ResumeFixture {
         block_on(write.wait(DurabilityTier::Local)).expect("settle disconnected W1 task update");
         let (writer_transport, server_writer_transport, queues) = byte_duplex(3);
         let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
-        let writer_subscriber =
-            server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
+        let writer_subscriber = server.accept_subscriber_with_claims_and_trust(
+            server_writer_transport,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
         let writer_pump = block_on(writer_upstream.lock()).io_pump();
         let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
         let mut quiet_ticks = 0;
