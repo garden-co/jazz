@@ -24,3 +24,8 @@ pub mod schema;
 pub mod storage;
 
 pub use internment::Intern;
+
+/// Diagnostic capture switch; only present in the opt-in replay build.
+#[cfg(feature = "arrangement-replay")]
+pub static ARRANGEMENT_CAPTURE_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);

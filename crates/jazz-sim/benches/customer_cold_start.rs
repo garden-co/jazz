@@ -1896,6 +1896,8 @@ fn run_connect_and_subscribe(
         jazz::cold_settle_attribution::reset();
         jazz::groove::cold_settle_attribution::reset();
     }
+    #[cfg(feature = "arrangement-replay")]
+    jazz::groove::ARRANGEMENT_CAPTURE_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
     work_budget::start();
     alloc_metrics::reset_and_start();
     #[cfg(feature = "bench-perf-control")]
@@ -2071,6 +2073,8 @@ fn run_connect_and_subscribe(
     let settle_ms = settle_start.elapsed().as_millis();
     #[cfg(feature = "bench-perf-control")]
     perf_control.command("disable");
+    #[cfg(feature = "arrangement-replay")]
+    jazz::groove::ARRANGEMENT_CAPTURE_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
     // Match the readiness boundary: later one-shot verification and storage
     // sizing are diagnostics, not work needed to make subscriptions usable.
     let alloc_snapshot = alloc_metrics::stop();

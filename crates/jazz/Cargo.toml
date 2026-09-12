@@ -7,6 +7,7 @@ autobenches = false
 autotests = true
 
 [features]
+arrangement-replay = ["groove/arrangement-replay"]
 # Jazz is the common semantic library. Process and target shells select
 # storage, transport, compression, and runtime capabilities explicitly.
 default = []

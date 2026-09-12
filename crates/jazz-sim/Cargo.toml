@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+arrangement-replay = ["jazz/arrangement-replay"]
 default = []
 bench-alloc-metrics = []
 bench-perf-control = []

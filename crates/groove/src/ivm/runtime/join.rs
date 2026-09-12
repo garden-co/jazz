@@ -24,6 +24,9 @@ use super::{
     record_projection::{resolve_field_name, resolve_field_ref},
 };
 
+#[cfg(feature = "arrangement-replay")]
+mod replay;
+
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
 #[derive(Clone, Debug, Default)]
 struct JoinBucket {
@@ -600,6 +603,8 @@ impl ArrangementState {
         deltas: &[KeyedRecordDelta<'_>],
         update_mode: ArrangementUpdateMode,
     ) {
+        #[cfg(feature = "arrangement-replay")]
+        replay::capture_update(self, deltas, update_mode);
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
                 let mut buckets = HashMap::<JoinKey, JoinBucket>::default();
@@ -739,6 +744,8 @@ fn append_join_deltas(
     side: JoinProbeSide,
     sign: i64,
 ) -> Result<(), IvmRuntimeError> {
+    #[cfg(feature = "arrangement-replay")]
+    replay::capture_probe(stored, delta_records);
     for delta in delta_records {
         if delta.delta.weight == 0 {
             continue;
