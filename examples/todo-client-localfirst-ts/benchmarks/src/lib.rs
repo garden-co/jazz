@@ -318,14 +318,43 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         .unwrap();
     }
     pub fn verify(&mut self) {
-        verify_rows(
-            self.backend,
-            self.count,
-            self.foreground.as_mut().expect("loaded"),
-            &self.schema,
-            &self.peer,
-            self.changed,
-        );
+        if REPORT.get() {
+            verify_rows(
+                self.backend,
+                self.count,
+                self.foreground.as_mut().expect("loaded"),
+                &self.schema,
+                &self.peer,
+                self.changed,
+            );
+            return;
+        }
+        assert_eq!(self.read_result.len(), self.count);
+        let table = self
+            .schema
+            .tables
+            .iter()
+            .find(|table| table.name == "tasks")
+            .unwrap();
+        let actual = self
+            .read_result
+            .iter()
+            .map(|value| (value.row_uuid(), value))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(actual.len(), self.count);
+        for i in 0..self.count {
+            let value = actual
+                .get(&row(i))
+                .expect("expected task present in timed read");
+            assert_eq!(
+                value.cell(table, "title"),
+                Some(Value::String(format!("Task {i}")))
+            );
+            assert_eq!(
+                value.cell(table, "done"),
+                Some(Value::Bool(i < self.changed))
+            );
+        }
     }
     fn update_range(&mut self, range: std::ops::Range<usize>) {
         let backend = self.backend;
@@ -493,6 +522,26 @@ mod tests {
     #[test]
     fn batch_reopen_preserves_exact_rows() {
         correctness_smoke();
+    }
+    #[test]
+    fn updates_return_current_rows_before_reopen() {
+        for sequential in [false, true] {
+            let schema = schema();
+            let cfs = schema.column_families();
+            let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+            let memory = MemoryStorage::new(&refs).unwrap();
+            let mut f = Fixture::seeded("memory", 10, move || memory.clone());
+            f.reopen();
+            f.verify();
+            if sequential {
+                f.sequential_update(9);
+            } else {
+                f.batch_update(9);
+            }
+            f.verify();
+            f.reopen();
+            f.verify();
+        }
     }
     #[test]
     fn sequential_reopen_preserves_exact_rows() {
