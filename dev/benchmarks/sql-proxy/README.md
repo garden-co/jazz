@@ -81,3 +81,6 @@ Every conservative support ID and payload is checked against an independent
 Python graph traversal. Untimed rollback-scoped mutations check unaccepted and
 accepted successors and withdrawal of all permission seeds. Per-query hashes
 permit cross-engine equality checks. Timing is evidence, not a CI assertion.
+
+See [the Feldera IVM comparison](FELDERA.md) for the same fixture evaluated by
+an incremental SQL engine, both on one node and through Core → Edge → Client.
