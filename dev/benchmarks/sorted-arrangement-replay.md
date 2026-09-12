@@ -29,3 +29,28 @@ This capture currently covers ordinary join probes and arrangement updates. It
 does not capture every semijoin/antijoin lookup or the full arrangement lifetime.
 A favorable result would justify fuller integration and end-to-end measurement,
 not establish a product speedup on its own.
+
+## Replay result
+
+Five uncontended runs, optimized native `perf` profile, mimalloc. All 3,649 cases
+passed weighted-content, exact-probe and preserved-snapshot comparisons. Captured
+calls include 2,923 updates (2,252 replacements) and 2,606,965 probe keys.
+
+| Operation                                      | Existing maps median | Sorted batch median |
+| ---------------------------------------------- | -------------------: | ------------------: |
+| Replace                                        |            585.34 ms |            71.79 ms |
+| Accumulate                                     |             85.33 ms |            17.68 ms |
+| Probe                                          |             24.73 ms |            26.87 ms |
+| Reconstruct captured before-state (diagnostic) |             33.16 ms |            20.55 ms |
+
+The update saving is approximately 581 ms; it is not an end-to-end saving.
+99.62% of update-batch key groups contain one record (990,417 of 994,176 groups).
+Incoming records average 386.5 bytes, versus 21.2-byte keys. This supports testing
+compact per-bucket storage that avoids full-record hashing while retaining cheap
+bucket-local incremental updates. It does not justify a claim of faster probes.
+
+External receipts: `permissioned-profile/arrangement-replay/` contains the exact
+binary, capture, source patch, five raw logs, timing JSON and cardinality script.
+The comparison always times maps before sorted batches within a case; a production
+trial should use alternating process-level before/after runs and full correctness
+gates before retention. The synthetic cancellation test also passes.
