@@ -743,11 +743,132 @@ pub(crate) enum RawProjectionField {
     },
 }
 
+/// Physical access constants resolved once, rather than for every projected row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedFieldAccessor {
+    minimum_len: usize,
+    exact_len: bool,
+    start: PreparedFieldOffset,
+    end: PreparedFieldOffset,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreparedFieldOffset {
+    Constant(usize),
+    Slot(usize),
+    RecordEnd,
+}
+
+impl PreparedFieldOffset {
+    fn read(&self, record: &[u8]) -> Result<usize, Error> {
+        match *self {
+            Self::Constant(offset) => Ok(offset),
+            Self::Slot(slot) => Ok(read_u32_at(record, slot)? as usize),
+            Self::RecordEnd => Ok(record.len()),
+        }
+    }
+}
+
+impl PreparedFieldAccessor {
+    fn new(source: &RecordDescriptor, index: usize) -> Result<Self, Error> {
+        let layout = source
+            .layout
+            .fields
+            .get(index)
+            .ok_or(Error::FieldIndexOutOfBounds {
+                index,
+                len: source.fields.len(),
+            })?;
+        let fixed = source.fixed_size();
+        let count = source.variable_count();
+        let minimum_len = checked_add(fixed, count.saturating_sub(1) * 4)?;
+        let (start, end) = match *layout {
+            FieldLayout::Static { offset, width } => (
+                PreparedFieldOffset::Constant(offset),
+                PreparedFieldOffset::Constant(checked_add(offset, width)?),
+            ),
+            FieldLayout::Variable { variable_idx } => (
+                if variable_idx == 0 {
+                    PreparedFieldOffset::Constant(minimum_len)
+                } else {
+                    PreparedFieldOffset::Slot(fixed + (variable_idx - 1) * 4)
+                },
+                if variable_idx + 1 == count {
+                    PreparedFieldOffset::RecordEnd
+                } else {
+                    PreparedFieldOffset::Slot(fixed + variable_idx * 4)
+                },
+            ),
+        };
+        Ok(Self {
+            minimum_len,
+            exact_len: count == 0,
+            start,
+            end,
+        })
+    }
+
+    fn span(&self, record: &[u8]) -> Result<std::ops::Range<usize>, Error> {
+        if record.len() < self.minimum_len {
+            return Err(Error::UnexpectedEof);
+        }
+        if self.exact_len && record.len() != self.minimum_len {
+            return Err(Error::InvalidOffset);
+        }
+        let start = self.start.read(record)?;
+        let end = self.end.read(record)?;
+        if end < start || end > record.len() {
+            return Err(Error::InvalidOffset);
+        }
+        // A variable field must not point into the header or fixed-width fields.
+        if !matches!(self.end, PreparedFieldOffset::Constant(_)) && start < self.minimum_len {
+            return Err(Error::InvalidOffset);
+        }
+        Ok(start..end)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedProjectionField {
+    Copy(PreparedFieldAccessor),
+    WrapNullable(PreparedFieldAccessor),
+    Nested(Vec<PreparedFieldAccessor>),
+    Encoded(Vec<u8>),
+    Evaluate,
+    Error(Error),
+}
+
+impl PreparedProjectionField {
+    fn new(source: &RecordDescriptor, field: RawProjectionField) -> Self {
+        match field {
+            RawProjectionField::Copy { source_idx } => {
+                PreparedFieldAccessor::new(source, source_idx)
+                    .map(Self::Copy)
+                    .unwrap_or_else(Self::Error)
+            }
+            RawProjectionField::WrapNullable { source_idx } => {
+                PreparedFieldAccessor::new(source, source_idx)
+                    .map(Self::WrapNullable)
+                    .unwrap_or_else(Self::Error)
+            }
+            RawProjectionField::Nested { path } => path
+                .iter()
+                .map(|(descriptor, index)| PreparedFieldAccessor::new(descriptor, *index))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::Nested)
+                .unwrap_or_else(Self::Error),
+            RawProjectionField::Encoded { bytes } => Self::Encoded(bytes),
+            RawProjectionField::Evaluate => Self::Evaluate,
+            RawProjectionField::Error(error) => Self::Error(error),
+        }
+    }
+}
+
 /// Field plan with a once-proven byte-preserving case. Names and logical
 /// identities may differ; every physical field must occupy the same slot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreparedProjection {
-    pub(crate) fields: Vec<RawProjectionField>,
+    pub(crate) fields: Vec<PreparedProjectionField>,
     pub(crate) reuses_input: bool,
 }
 
@@ -771,7 +892,10 @@ impl PreparedProjection {
                 })
             });
         Self {
-            fields,
+            fields: fields
+                .into_iter()
+                .map(|field| PreparedProjectionField::new(&source, field))
+                .collect(),
             reuses_input,
         }
     }
@@ -931,7 +1055,7 @@ impl RecordDescriptor {
         &self,
         source: &RecordDescriptor,
         source_record: &[u8],
-        fields: &[RawProjectionField],
+        fields: &[PreparedProjectionField],
         output: &mut BytesMut,
         mut evaluate: impl FnMut(usize, &mut BytesMut) -> Result<(), E>,
     ) -> Result<std::ops::Range<usize>, E> {
@@ -1130,31 +1254,31 @@ impl RecordDescriptor {
 }
 
 fn append_projected_field<E: From<Error>>(
-    source: &RecordDescriptor,
+    _source: &RecordDescriptor,
     record: &[u8],
-    field: &RawProjectionField,
+    field: &PreparedProjectionField,
     target_idx: usize,
     output: &mut BytesMut,
     evaluate: &mut impl FnMut(usize, &mut BytesMut) -> Result<(), E>,
 ) -> Result<(), E> {
     match field {
-        RawProjectionField::Copy { source_idx } => {
-            output.extend_from_slice(&record[source.field_span(record, *source_idx)?]);
+        PreparedProjectionField::Copy(accessor) => {
+            output.extend_from_slice(&record[accessor.span(record)?]);
         }
-        RawProjectionField::WrapNullable { source_idx } => {
+        PreparedProjectionField::WrapNullable(accessor) => {
             output.extend_from_slice(&[1]);
-            output.extend_from_slice(&record[source.field_span(record, *source_idx)?]);
+            output.extend_from_slice(&record[accessor.span(record)?]);
         }
-        RawProjectionField::Nested { path } => {
+        PreparedProjectionField::Nested(path) => {
             let mut bytes = record;
-            for (descriptor, index) in path {
-                bytes = &bytes[descriptor.field_span(bytes, *index)?];
+            for accessor in path {
+                bytes = &bytes[accessor.span(bytes)?];
             }
             output.extend_from_slice(bytes);
         }
-        RawProjectionField::Encoded { bytes } => output.extend_from_slice(bytes),
-        RawProjectionField::Evaluate => evaluate(target_idx, output)?,
-        RawProjectionField::Error(error) => return Err(error.clone().into()),
+        PreparedProjectionField::Encoded(bytes) => output.extend_from_slice(bytes),
+        PreparedProjectionField::Evaluate => evaluate(target_idx, output)?,
+        PreparedProjectionField::Error(error) => return Err(error.clone().into()),
     }
     Ok(())
 }

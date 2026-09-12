@@ -2769,3 +2769,67 @@ fn compact_large_value_preserves_native_and_serde_encodings() {
         serde_json::json!({"Large": reference})
     );
 }
+
+// Internal byte-level oracle: public query results cannot distinguish malformed
+// offset boundaries. Keep the general decoder as the independent reference.
+#[test]
+fn prepared_field_accessors_match_general_spans_at_byte_boundaries() {
+    let cases = [
+        (
+            vec![ValueType::U64, ValueType::Bool],
+            vec![Value::U64(7), Value::Bool(true)],
+        ),
+        (
+            vec![
+                ValueType::String,
+                ValueType::U64,
+                ValueType::Bytes,
+                ValueType::String,
+            ],
+            vec![
+                Value::String("first".into()),
+                Value::U64(9),
+                Value::Bytes(vec![1, 2]),
+                Value::String("tail".into()),
+            ],
+        ),
+        (vec![ValueType::String], vec![Value::String(String::new())]),
+    ];
+    for (types, values) in cases {
+        let descriptor = descriptor(types);
+        let raw = descriptor.create(&values).unwrap();
+        for index in 0..values.len() {
+            let accessor = PreparedFieldAccessor::new(&descriptor, index).unwrap();
+            let check = |bytes: &[u8]| {
+                assert_eq!(
+                    accessor.span(bytes),
+                    descriptor.field_span(bytes, index),
+                    "field {index}, bytes {bytes:?}"
+                );
+            };
+            check(&raw);
+            for end in 0..raw.len() {
+                check(&raw[..end]);
+            }
+            let mut extended = raw.clone();
+            extended.push(0);
+            check(&extended);
+            for slot in 0..descriptor.variable_count().saturating_sub(1) {
+                for offset in [
+                    0,
+                    1,
+                    descriptor.fixed_size() as u32,
+                    raw.len() as u32,
+                    raw.len() as u32 + 1,
+                    u32::MAX,
+                ] {
+                    let mut invalid = raw.clone();
+                    let start = descriptor.fixed_size() + slot * 4;
+                    invalid[start..start + 4].copy_from_slice(&offset.to_le_bytes());
+                    check(&invalid);
+                }
+            }
+        }
+        assert!(PreparedFieldAccessor::new(&descriptor, values.len()).is_err());
+    }
+}
