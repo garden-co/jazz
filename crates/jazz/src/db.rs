@@ -5445,9 +5445,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
     let before = affected
         .iter()
         .filter_map(|occurrence_id| {
-            let index = occurrences
-                .iter()
-                .position(|current| current == occurrence_id)?;
+            let index = *snapshot_index.roots.get(occurrence_id)?;
             Some((occurrence_id.clone(), (index, snapshot.rows[index].clone())))
         })
         .collect::<BTreeMap<_, _>>();
@@ -5492,13 +5490,17 @@ fn apply_terminal_operations_to_subscription_snapshot(
         }
     }
 
+    // Membership remains valid across positional edits; positions do not.
+    // Avoid searching the growing vector for a provably fresh insertion.
+    let mut present = occurrences.iter().cloned().collect::<BTreeSet<_>>();
     for (occurrence_id, operation) in root_operations {
         match operation.edit {
             groove::ivm::TerminalEdit::Insert { index, value, .. } => {
-                if let Some(existing) = occurrences
-                    .iter()
-                    .position(|current| current == &occurrence_id)
-                {
+                if !present.insert(occurrence_id.clone()) {
+                    let existing = occurrences
+                        .iter()
+                        .position(|current| current == &occurrence_id)
+                        .expect("present occurrence has a snapshot position");
                     occurrences.remove(existing);
                     snapshot.rows.remove(existing);
                     snapshot.root_count -= 1;
@@ -5547,6 +5549,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
                         "terminal root removal addressed a missing result",
                     ));
                 };
+                present.remove(&occurrence_id);
                 occurrences.remove(index);
                 snapshot.rows.remove(index);
                 snapshot.root_count -= 1;
@@ -5599,10 +5602,10 @@ fn apply_terminal_operations_to_subscription_snapshot(
     let mut removed = Vec::new();
     for occurrence_id in affected {
         let previous = before.get(&occurrence_id);
-        let current = occurrences
-            .iter()
-            .position(|current| current == &occurrence_id)
-            .map(|index| (index, &snapshot.rows[index]));
+        let current = snapshot_index
+            .roots
+            .get(&occurrence_id)
+            .map(|&index| (index, &snapshot.rows[index]));
         match (previous, current) {
             (None, Some((index, row))) => added.push(SubscriptionOutputRow {
                 occurrence_id,
