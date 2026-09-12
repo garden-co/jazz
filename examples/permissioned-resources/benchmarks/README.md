@@ -7,7 +7,7 @@ access. Core, Edge and Client use RocksDB, and the client starts empty.
 
 Core seeding is outside the wall-time measurement. Receiver opening, connection,
 query preparation, subscription and settling until every expected row is present
-are inside. Post-read diagnostic scans and runtime teardown are outside. The
+are inside. Exact per-table row-ID verification, post-read diagnostic scans and runtime teardown are outside. The
 local profile driver uses the same fixture and execution path, then collects its
 additional phase, storage and memory diagnostics.
 
@@ -31,3 +31,9 @@ receipts must not be presented as clean wall-time measurements.
 comparison drivers and historical research receipts. No workload implementation
 remains in `crates/jazz-sim/benches` or `dev/benchmarks`; generic simulation helpers
 remain in `jazz-sim`.
+
+The clean wall-time transport performs one message encode, zstd streaming roundtrip,
+and message decode per delivery. It does not run diagnostic codec comparisons.
+The diagnostic profile preserves those historical probes; its `wall_ms` includes
+post-read diagnostic work and excludes receiver opening. Therefore profile
+`wall_ms` and CodSpeed first-sync duration are intentionally different receipts.

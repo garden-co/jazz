@@ -748,9 +748,12 @@ struct SeedWrite {
     cells: BTreeMap<String, Value>,
 }
 
+type VisibleRows = BTreeMap<String, BTreeSet<RowUuid>>;
 #[derive(Default)]
 pub struct RunSummary {
     _keepalive: Option<Box<dyn std::any::Any>>,
+    actual_rows: VisibleRows,
+    expected_rows_by_table: Option<Rc<VisibleRows>>,
     wall_ms: u128,
     tick_wall_us: [u128; 3],
     connect_ms: u128,
@@ -1138,6 +1141,7 @@ impl CodecProbe {
 }
 
 struct DuplexTransport {
+    clean_wire: Option<(WireStreamEncoder, WireStreamDecoder)>,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     metrics: Rc<TransportMetrics>,
@@ -1191,26 +1195,41 @@ impl Transport for DuplexTransport {
                 .known_state_subscribes
                 .set(self.metrics.known_state_subscribes.get() + 1);
         }
-        #[cfg(feature = "cold-settle-attribution")]
-        let probe_start = Instant::now();
-        let measurement = encoded_message_measurement(&message);
-        self.metrics
-            .bytes
-            .set(self.metrics.bytes.get() + measurement.bytes);
-        self.metrics
-            .compress_encode_ns
-            .set(self.metrics.compress_encode_ns.get() + measurement.compress_encode_ns);
-        self.metrics
-            .compress_decode_ns
-            .set(self.metrics.compress_decode_ns.get() + measurement.compress_decode_ns);
-        if let Some(payload) = measurement.raw_payload.as_deref() {
-            self.metrics.codec_probe.borrow_mut().record(payload);
-        }
-        #[cfg(feature = "cold-settle-attribution")]
-        self.metrics
-            .attribution
-            .borrow_mut()
-            .record(&measurement, probe_start.elapsed().as_nanos() as u64);
+        let message = if let Some((encoder, decoder)) = &mut self.clean_wire {
+            let bytes = jazz::wire::encode_sync_message(&message).expect("encode clean transport");
+            let bytes = encoder
+                .encode_message(&bytes)
+                .expect("compress clean transport");
+            self.metrics
+                .bytes
+                .set(self.metrics.bytes.get() + bytes.len() as u64);
+            let bytes = decoder
+                .decode_message(&bytes, FEATURE_PAYLOAD_ZSTD)
+                .expect("decompress clean transport");
+            jazz::wire::decode_sync_message(&bytes).expect("decode clean transport")
+        } else {
+            #[cfg(feature = "cold-settle-attribution")]
+            let probe_start = Instant::now();
+            let measurement = encoded_message_measurement(&message);
+            self.metrics
+                .bytes
+                .set(self.metrics.bytes.get() + measurement.bytes);
+            self.metrics
+                .compress_encode_ns
+                .set(self.metrics.compress_encode_ns.get() + measurement.compress_encode_ns);
+            self.metrics
+                .compress_decode_ns
+                .set(self.metrics.compress_decode_ns.get() + measurement.compress_decode_ns);
+            if let Some(payload) = measurement.raw_payload.as_deref() {
+                self.metrics.codec_probe.borrow_mut().record(payload);
+            }
+            #[cfg(feature = "cold-settle-attribution")]
+            self.metrics
+                .attribution
+                .borrow_mut()
+                .record(&measurement, probe_start.elapsed().as_nanos() as u64);
+            message
+        };
         self.outbound.borrow_mut().push_back(message);
         Ok(())
     }
@@ -1220,18 +1239,28 @@ impl Transport for DuplexTransport {
     }
 }
 
-fn duplex_counted() -> CountedDuplex {
+fn duplex_counted(diagnostics: bool) -> CountedDuplex {
+    let wire = || {
+        (!diagnostics).then(|| {
+            (
+                WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD).unwrap(),
+                WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap(),
+            )
+        })
+    };
     let left = Rc::new(RefCell::new(VecDeque::new()));
     let right = Rc::new(RefCell::new(VecDeque::new()));
     let left_to_right = Rc::new(TransportMetrics::default());
     let right_to_left = Rc::new(TransportMetrics::default());
     CountedDuplex {
         left_transport: Box::new(DuplexTransport {
+            clean_wire: wire(),
             outbound: Rc::clone(&left),
             inbound: Rc::clone(&right),
             metrics: Rc::clone(&left_to_right),
         }),
         right_transport: Box::new(DuplexTransport {
+            clean_wire: wire(),
             outbound: Rc::clone(&right),
             inbound: Rc::clone(&left),
             metrics: Rc::clone(&right_to_left),
@@ -1926,8 +1955,8 @@ fn run_connect_and_subscribe(
     #[cfg(feature = "bench-perf-control")]
     let mut perf_control = PerfControl::start();
     let start = Instant::now();
-    let relay_core = duplex_counted();
-    let client_relay = duplex_counted();
+    let relay_core = duplex_counted(config.diagnostics);
+    let client_relay = duplex_counted(config.diagnostics);
     if let Some(root) = std::env::var_os("JAZZ_CUSTOMER_CAPTURE_SYNC") {
         assert_eq!(label, "cold", "capture requires only the cold phase");
         eprintln!("SQL sync capture enabled: discard this run's timing");
@@ -2095,14 +2124,6 @@ fn run_connect_and_subscribe(
     }
     let settle_ms = settle_start.elapsed().as_millis();
     if !config.diagnostics {
-        let expected_sets = expected_visible_rows(seeded, config.identity);
-        for subscription in &subscriptions {
-            assert_eq!(
-                &subscription.rows, &expected_sets[&subscription.name],
-                "{}",
-                subscription.name
-            );
-        }
         let rows_materialized = subscriptions.iter().map(|s| s.rows.len()).sum();
         let expected_rows = expected.values().sum();
         assert_eq!(rows_materialized, expected_rows);
@@ -2115,6 +2136,11 @@ fn run_connect_and_subscribe(
             expected_rows,
             subscriptions: subscriptions.len(),
             ticks,
+            actual_rows: subscriptions
+                .iter_mut()
+                .map(|s| (s.name.clone(), std::mem::take(&mut s.rows)))
+                .collect(),
+            expected_rows_by_table: None,
             _keepalive: Some(Box::new((
                 relay,
                 client,
@@ -2320,6 +2346,8 @@ fn run_connect_and_subscribe(
     }
     RunSummary {
         _keepalive: None,
+        actual_rows: BTreeMap::new(),
+        expected_rows_by_table: None,
         tick_wall_us,
         wall_ms: start.elapsed().as_millis(),
         connect_ms,
@@ -3320,6 +3348,7 @@ fn peak_rss_bytes() -> u64 {
 /// Fresh state for one repetition. Core is seeded outside timing; receivers
 /// are opened, connected and subscribed inside `first_sync`.
 pub struct Fixture {
+    expected_rows_by_table: Rc<VisibleRows>,
     schema: JazzSchema,
     seeded: Seeded,
     expected: BTreeMap<String, usize>,
@@ -3350,6 +3379,7 @@ impl Fixture {
             assert_eq!(expected.values().sum::<usize>(), 27_518);
         }
         Self {
+            expected_rows_by_table: Rc::new(expected_visible_rows(&seeded, config.identity)),
             schema,
             seeded,
             expected,
@@ -3357,8 +3387,10 @@ impl Fixture {
         }
     }
     #[inline(never)]
-    pub fn first_sync(&mut self) -> RunSummary {
-        run_cold(&self.schema, &self.seeded, &self.expected, &self.config)
+    pub fn first_sync(&mut self) -> CompletedSync {
+        let mut result = run_cold(&self.schema, &self.seeded, &self.expected, &self.config);
+        result.expected_rows_by_table = Some(Rc::clone(&self.expected_rows_by_table));
+        CompletedSync(result)
     }
 }
 impl RunSummary {
@@ -3367,6 +3399,28 @@ impl RunSummary {
     }
     pub fn verify(&self) {
         assert_eq!(self.rows_materialized, self.expected_rows);
+        if let Some(expected) = &self.expected_rows_by_table {
+            for (table, actual) in &self.actual_rows {
+                assert_eq!(actual, &expected[table], "{table}");
+            }
+            assert_eq!(self.actual_rows.len(), self.subscriptions);
+        }
+    }
+}
+
+// Divan drops returned outputs after the measured interval, before fixture teardown.
+pub struct CompletedSync(RunSummary);
+impl std::ops::Deref for CompletedSync {
+    type Target = RunSummary;
+    fn deref(&self) -> &RunSummary {
+        &self.0
+    }
+}
+impl Drop for CompletedSync {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            self.0.verify();
+        }
     }
 }
 

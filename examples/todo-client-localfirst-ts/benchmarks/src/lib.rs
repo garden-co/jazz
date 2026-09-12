@@ -143,6 +143,7 @@ fn receiver(schema: &JazzSchema, peer: &PeerState) -> NodeState<MemoryStorage> {
     );
     node
 }
+#[allow(clippy::too_many_arguments)]
 fn deliver(
     backend: &str,
     count: usize,
@@ -170,8 +171,20 @@ fn deliver(
         support::apply_and_settle(node, message)
     });
     emit_node_metrics(node, backend, count, &format!("{name}_receiver_metrics"));
+    if REPORT.get() {
+        verify_rows(backend, count, node, schema, peer, changed);
+    }
+}
+fn verify_rows(
+    backend: &str,
+    count: usize,
+    node: &mut NodeState<MemoryStorage>,
+    schema: &JazzSchema,
+    peer: &PeerState,
+    changed: usize,
+) {
     let (shape, binding, _) = support::table_subscription(schema, "tasks", peer.identity());
-    let rows = phase(backend, count, &format!("{name}_receiver_query"), || {
+    let rows = phase(backend, count, "receiver_query", || {
         block_on(node.query_rows(&shape, &binding, DurabilityTier::Local)).unwrap()
     });
     assert_eq!(rows.len(), count);
@@ -190,7 +203,7 @@ fn deliver(
     let done_binding = done_shape.bind(BTreeMap::new()).unwrap();
     let done_rows =
         block_on(node.query_rows(&done_shape, &done_binding, DurabilityTier::Local)).unwrap();
-    let expected = if name == "initial" { 0 } else { changed };
+    let expected = changed;
     assert_eq!(
         done_rows
             .iter()
@@ -205,12 +218,13 @@ pub struct Fixture<S: OrderedKvStorage + ReopenableStorage + 'static> {
     backend: &'static str,
     count: usize,
     schema: JazzSchema,
-    storage: Box<dyn FnMut() -> S>,
     seed: jazz::tx::TxId,
     worker: Option<NodeState<S>>,
     foreground: Option<NodeState<MemoryStorage>>,
     peer: PeerState,
     changed: usize,
+    read_result: Vec<jazz::node::CurrentRow>,
+    storage: Box<dyn FnMut() -> S>,
 }
 impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
     fn seeded(
@@ -242,6 +256,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             foreground: None,
             peer: PeerState::new(),
             changed: 0,
+            read_result: Vec::new(),
         }
     }
     #[inline(never)]
@@ -268,12 +283,18 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         );
         self.worker = Some(worker);
         self.foreground = Some(foreground);
+        if !REPORT.get() {
+            self.read_all();
+        }
     }
     #[inline(never)]
     pub fn batch_update(&mut self, changed: usize) {
         assert!(self.changed == 0 && changed <= self.count);
         self.update_range(0..changed);
         self.changed = changed;
+        if !REPORT.get() {
+            self.read_all();
+        }
     }
     #[inline(never)]
     pub fn sequential_update(&mut self, changed: usize) {
@@ -282,6 +303,29 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             self.update_range(i..i + 1);
         }
         self.changed = changed;
+        if !REPORT.get() {
+            self.read_all();
+        }
+    }
+    fn read_all(&mut self) {
+        let (shape, binding, _) =
+            support::table_subscription(&self.schema, "tasks", self.peer.identity());
+        self.read_result = block_on(self.foreground.as_mut().expect("loaded").query_rows(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+        ))
+        .unwrap();
+    }
+    pub fn verify(&mut self) {
+        verify_rows(
+            self.backend,
+            self.count,
+            self.foreground.as_mut().expect("loaded"),
+            &self.schema,
+            &self.peer,
+            self.changed,
+        );
     }
     fn update_range(&mut self, range: std::ops::Range<usize>) {
         let backend = self.backend;
@@ -307,7 +351,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         phase(backend, count, "batch_persist", || {
             support::settle_transaction(foreground, publication)
         });
-        emit_node_metrics(&foreground, backend, count, "batch_author_metrics");
+        emit_node_metrics(foreground, backend, count, "batch_author_metrics");
         let unit = phase(backend, count, "batch_upload_build", || {
             block_on(foreground.commit_unit_for(update_tx)).unwrap()
         });
@@ -324,12 +368,12 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         phase(backend, count, "batch_worker_ingest", || {
             block_on(worker.ingest_relay_commit_unit(tx, versions)).unwrap()
         });
-        emit_node_metrics(&worker, backend, count, "batch_worker_ingest_metrics");
+        emit_node_metrics(worker, backend, count, "batch_worker_ingest_metrics");
         worker.reset_storage_read_metrics();
         let message = phase(backend, count, "batch_publish", || {
             publish(worker, peer, schema, false)
         });
-        emit_node_metrics(&worker, backend, count, "batch_publish_metrics");
+        emit_node_metrics(worker, backend, count, "batch_publish_metrics");
         deliver(
             backend, count, "batch", message, foreground, schema, peer, range.end,
         );
@@ -361,6 +405,7 @@ fn run<S: OrderedKvStorage + ReopenableStorage + 'static>(
     fixture.reopen();
     fixture.batch_update(count * percent / 100);
     fixture.reopen();
+    fixture.verify();
 }
 fn emit_node_metrics<S: OrderedKvStorage>(
     node: &NodeState<S>,
@@ -459,5 +504,6 @@ mod tests {
         f.reopen();
         f.sequential_update(9);
         f.reopen();
+        f.verify();
     }
 }

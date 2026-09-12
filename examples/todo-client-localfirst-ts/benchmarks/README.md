@@ -14,10 +14,10 @@ The three wall-time cases use 1,500 tasks:
 
 Setup is outside each measured closure. RocksDB uses WAL without fsync. This is
 an in-process native worker/foreground workload, not browser or IndexedDB timing;
-it excludes JS scheduling and authentication bootstrap. The driver verifies exact
-row IDs and completed IDs. It currently includes these queries/checks in each
-operation, including each sequential update; do not compare it directly with the
-browser sequential-write receipt.
+it excludes JS scheduling and authentication bootstrap. Each measured operation
+ends with one read of all tasks, including after the entire sequential update.
+Exact row-ID/completed-ID verification happens when Divan drops the fixture,
+outside timing. The diagnostic profile retains its per-delivery verification.
 
 ```sh
 cargo test -p jazz-example-todo-benchmark --lib

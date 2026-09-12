@@ -1,6 +1,6 @@
 # CPU profiling through cold-load readiness
 
-The `customer_cold_start` benchmark's `bench-perf-control` feature uses external
+The example-owned `permissioned-resources-profile` binary's `bench-perf-control` feature uses external
 Linux perf control/ack FIFOs. Sampling starts before connect/subscribe and ends
 when every subscription has its expected rows. Post-readiness diagnostic queries
 are excluded. JSON reports `cpu_profile_scope: connect_subscribe_settle`.
