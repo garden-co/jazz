@@ -37,6 +37,18 @@ use crate::tx::TxId;
 type TableSchemas = BTreeMap<String, TableSchema>;
 type VersionDecodePlanCache = BTreeMap<(String, VersionLayer), VersionDecodePlan>;
 
+#[cfg(feature = "testing")]
+#[derive(Clone, Debug, Default)]
+struct SharedWitnessDecode {
+    entries: Vec<(
+        VersionWitnessSchema,
+        RecordDescriptor,
+        std::collections::HashMap<Vec<u8>, VersionRow>,
+    )>,
+    hits: usize,
+    misses: usize,
+}
+
 /// Coalesce source-closure changes emitted by independently drained terminals.
 ///
 /// The first observation supplies the state before this drain, and each later
@@ -177,6 +189,8 @@ pub(crate) struct MaintainedSubscriptionView {
     #[cfg(feature = "testing")]
     witness_overlap:
         Option<BTreeMap<(ProgramSourceId, VersionIdentity), (VersionRow, usize, usize)>>,
+    #[cfg(feature = "testing")]
+    shared_witness_decode: Option<SharedWitnessDecode>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -205,6 +219,8 @@ impl Default for MaintainedSubscriptionView {
             selected_deletion_witnesses: BTreeMap::new(),
             #[cfg(feature = "testing")]
             witness_overlap: None,
+            #[cfg(feature = "testing")]
+            shared_witness_decode: None,
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
         }
@@ -468,7 +484,73 @@ impl MaintainedSubscriptionView {
         let mut decode_plan_cache = VersionDecodePlanCache::new();
         let mut payload_plans = std::collections::HashMap::new();
         let read_view = self.read_view;
+        #[cfg(feature = "testing")]
+        let mut shared = self.shared_witness_decode.take();
+        #[cfg(feature = "testing")]
+        let shared_index = shared.as_mut().and_then(|shared| {
+            let schema = match kind {
+                MaintainedTerminalKind::VersionContent(s)
+                | MaintainedTerminalKind::VersionDeletion(s)
+                | MaintainedTerminalKind::ReplacementContent(s)
+                | MaintainedTerminalKind::ReplacementDeletion(s) => s,
+                _ => return None,
+            };
+            let index = shared
+                .entries
+                .iter()
+                .position(|(s, descriptor, _)| s == schema && *descriptor == deltas.descriptor)
+                .unwrap_or_else(|| {
+                    shared
+                        .entries
+                        .push((schema.clone(), deltas.descriptor, Default::default()));
+                    shared.entries.len() - 1
+                });
+            Some((schema, index))
+        });
         let decoded = deltas.iter().map(|(record, weight)| {
+            #[cfg(feature = "testing")]
+            if let Some(shared) = shared.as_mut() {
+                if let Some((schema, index)) = shared_index {
+                    let cache = &mut shared.entries[index].2;
+                    let row = if let Some(row) = cache.remove(record.raw()) {
+                        shared.hits += 1;
+                        row
+                    } else {
+                        shared.misses += 1;
+                        let expected = match kind {
+                            MaintainedTerminalKind::VersionContent(_)
+                            | MaintainedTerminalKind::ReplacementContent(_) => "version_content",
+                            _ => "version_deletion",
+                        };
+                        validate_witness_event_kind(record, expected)?;
+                        let row = decode_typed_version_witness(
+                            record,
+                            schema,
+                            tables,
+                            &mut decode_plan_cache,
+                        )?;
+                        cache.insert(record.raw().to_vec(), row.clone());
+                        row
+                    };
+                    let source = schema.source.clone();
+                    let event = match kind {
+                        MaintainedTerminalKind::VersionContent(_) => {
+                            DecodedMaintainedEvent::VersionContent { source, row }
+                        }
+                        MaintainedTerminalKind::VersionDeletion(_) => {
+                            DecodedMaintainedEvent::VersionDeletion { source, row }
+                        }
+                        MaintainedTerminalKind::ReplacementContent(_) => {
+                            DecodedMaintainedEvent::ReplacementContent { source, row }
+                        }
+                        MaintainedTerminalKind::ReplacementDeletion(_) => {
+                            DecodedMaintainedEvent::ReplacementDeletion { source, row }
+                        }
+                        _ => unreachable!(),
+                    };
+                    return Ok((event, weight));
+                }
+            }
             decode_typed_terminal_record(
                 record,
                 kind,
@@ -480,7 +562,12 @@ impl MaintainedSubscriptionView {
             )
             .map(|event| (event, weight))
         });
-        let mut transitions = self.apply_decoded_delta_results(decoded, node_aliases)?;
+        let decoded_result = self.apply_decoded_delta_results(decoded, node_aliases);
+        #[cfg(feature = "testing")]
+        {
+            self.shared_witness_decode = shared;
+        }
+        let mut transitions = decoded_result?;
         if observed_result_delta_batch {
             transitions.observed_result_delta_batches += 1;
         }
@@ -504,6 +591,12 @@ impl MaintainedSubscriptionView {
         {
             self.witness_overlap =
                 std::env::var_os("JAZZ_WITNESS_OVERLAP").map(|_| BTreeMap::new());
+        }
+        #[cfg(feature = "testing")]
+        {
+            self.shared_witness_decode = (std::env::var("JAZZ_SHARED_WITNESS").as_deref()
+                == Ok("both"))
+            .then(SharedWitnessDecode::default);
         }
         let mut transitions = ResultTransitions::default();
         // A single IVM drain may touch the same source fact through more than
@@ -669,6 +762,15 @@ impl MaintainedSubscriptionView {
                 eprintln!(
                     "WITNESS_OVERLAP versions={versions} replacements={replacements} paired={paired} unique={}",
                     overlap.len()
+                );
+            }
+        }
+        #[cfg(feature = "testing")]
+        if let Some(shared) = self.shared_witness_decode.take() {
+            if std::env::var_os("JAZZ_WITNESS_CACHE_STATS").is_some() {
+                eprintln!(
+                    "WITNESS_CACHE hits={} misses={}",
+                    shared.hits, shared.misses
                 );
             }
         }
@@ -2741,6 +2843,16 @@ fn validate_witness_event_kind(
     record: BorrowedRecord<'_>,
     expected: &str,
 ) -> Result<(), super::Error> {
+    #[cfg(feature = "testing")]
+    let expected = if std::env::var_os("JAZZ_SHARED_WITNESS").is_some() {
+        match expected {
+            "replacement_content" => "version_content",
+            "replacement_deletion" => "version_deletion",
+            other => other,
+        }
+    } else {
+        expected
+    };
     match record.get_idx(field_idx(record, "event_kind")?)? {
         Value::String(value) if value == expected => Ok(()),
         Value::String(_) => Err(super::Error::InvalidStoredValue(

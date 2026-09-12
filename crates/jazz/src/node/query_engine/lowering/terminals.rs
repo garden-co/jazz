@@ -3575,7 +3575,10 @@ fn prefixed_version_witness_fields_for_tagged_rows(
         }));
     };
     let mut fields = vec![
-        ProjectField::literal("event_kind", Value::String(event_kind.to_owned())),
+        ProjectField::literal(
+            "event_kind",
+            Value::String(shared_witness_event_kind(event_kind).to_owned()),
+        ),
         ProjectField::literal(
             "table_name",
             Value::String(source.table_schema.name.clone()),
@@ -3623,7 +3626,10 @@ fn inline_version_witness_fields_for_tagged_rows(
 ) -> CapabilityResult<Vec<ProjectField>> {
     let version = version_witness_fields(&source.row_shape)?;
     let mut fields = vec![
-        ProjectField::literal("event_kind", Value::String(event_kind.to_owned())),
+        ProjectField::literal(
+            "event_kind",
+            Value::String(shared_witness_event_kind(event_kind).to_owned()),
+        ),
         ProjectField::literal(
             "table_name",
             Value::String(source.table_schema.name.clone()),
@@ -3662,7 +3668,10 @@ fn deletion_witness_fields_for_tagged_rows(
     event_kind: &str,
 ) -> CapabilityResult<Vec<ProjectField>> {
     let mut fields = vec![
-        ProjectField::literal("event_kind", Value::String(event_kind.to_owned())),
+        ProjectField::literal(
+            "event_kind",
+            Value::String(shared_witness_event_kind(event_kind).to_owned()),
+        ),
         ProjectField::literal(
             "table_name",
             Value::String(source.table_schema.name.clone()),
@@ -4068,4 +4077,18 @@ mod publication_schema_tests {
         let error = validate_app_row_publication_schema(&schema).unwrap_err();
         assert!(format!("{error:?}").contains("has no publication binding"));
     }
+}
+
+// Research control: terminal role stays in the compiled sink schema; identical
+// payload graphs can share their computation even when their roles differ.
+fn shared_witness_event_kind(kind: &str) -> &str {
+    #[cfg(feature = "testing")]
+    if std::env::var_os("JAZZ_SHARED_WITNESS").is_some() {
+        return match kind {
+            "replacement_content" => "version_content",
+            "replacement_deletion" => "version_deletion",
+            other => other,
+        };
+    }
+    kind
 }

@@ -194,3 +194,50 @@ not deleting either semantic role. The previous instrumented decode phase was
 about 0.65 s, so eliminating half of decoding alone suggests only about 0.3 s
 of potential savings, before reuse overhead. Upstream computation and downstream
 identity-copy savings remain unmeasured. No speedup is claimed.
+
+## Shared witness execution trial
+
+Changed premise versus #2830: avoid the second decoding of an identical
+payload rather than implementing a faster metadata encoder. The testing-only
+`JAZZ_SHARED_WITNESS=graph` control normalizes the internal event-kind literal
+for version/replacement witnesses, retaining the role in each compiled sink.
+This permits structurally equal payload graphs to reuse evaluation. `both`
+also caches the decoded payload within one multisink drain. Cache identity
+includes the complete witness schema, actual record descriptor and raw payload;
+role counts, signed weights and publication lifetimes remain separate. No
+wire/storage encoding changes. This is a disabled-by-default research trial.
+
+The first implementation achieved 104125 cache hits / 104128 misses and
+reduced median decoding time from 633 to 323 ms, but cold-settle medians were
+11315 ms baseline, 11446 ms graph-only, and 11220 ms combined (three fresh
+processes each, rotated order). This was not a convincing overall gain.
+
+The refined cache selects its schema bucket once per terminal and moves a
+cached row out on a hit, avoiding repeated schema comparison and a second
+clone. It still clones the first decoded row for the cache; this is not global
+immutable record interning. A fresh alternating three-pair comparison gave:
+
+| Native all-memory cold scenario         | Baseline            | Refined combined    |
+| --------------------------------------- | ------------------- | ------------------- |
+| Individual settle times (ms)            | 11420, 11603, 11621 | 11131, 11064, 10940 |
+| Median settle (ms)                      | 11603               | 11064               |
+| Median whole harness wall (ms)          | 14045               | 13457               |
+| Witness decodes                         | 208253              | 104128              |
+| Median exclusive witness decode (ms)    | 655.2               | 323.9               |
+| Median exclusive IVM update (ms)        | 1808.5              | 1767.0              |
+| Median exclusive result collection (ms) | 620.3               | 684.0               |
+
+Every run passed all 39 subscriptions / 27518 expected rows. All comparisons
+use the same optimized native binary with phase attribution enabled; they are
+not browser measurements or uninstrumented production latency. The 539 ms
+(4.6%) median settle improvement exceeds the approximately 0.3 s decoding-only
+expectation, but phase medians are not additive and the remaining difference
+should not be attributed entirely to this mechanism from three pairs. The
+measured decoding reduction is strong; broader magnitude needs replication.
+Graph computations fell from 15484 to 14795 across the three nodes, explaining
+why computation sharing alone cannot produce a dramatic change.
+
+The focused `recursive_reachability_subscription_grants_and_revokes_incrementally`
+regression passed with `JAZZ_SHARED_WITNESS=both` (1 passed, 2010 filtered out).
+This does not replace broader correctness review, peak-memory measurements, or
+an optimized browser checkpoint before enabling the trial by default.
