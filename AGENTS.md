@@ -19,6 +19,15 @@ a durable contract.
 
 ## Work style
 
+### Performance experiment preflight
+
+Before implementing a performance trial, read
+[`dev/benchmarks/rejected-experiments.md`](dev/benchmarks/rejected-experiments.md)
+and search preserved branches plus open/closed PR descriptions for the same
+mechanism. Record the changed premise before repeating a rejected experiment.
+Do not infer an end-to-end win from reduced allocation requests or a local
+phase alone; preserve comparable workload and source/binary receipts.
+
 ### Durable follow-up and WIP visibility
 
 GitHub Issues are the durable follow-up system. Before an orchestrator session
