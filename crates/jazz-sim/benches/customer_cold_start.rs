@@ -12,6 +12,9 @@ use jazz::db::{
     SubscriptionEvent, SubscriptionStream, Transport,
 };
 use jazz::groove::records::Value;
+use jazz::groove::storage::{
+    BoxedStorage, MemoryStorage, OrderedKvStorage, OwnedWriteOperation, ScanRequest, collect_scan,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::MergeableCommit;
 use jazz::protocol::{SubscriptionKey, SyncMessage};
@@ -573,6 +576,13 @@ fn main() {
         export_sql_fixture(&config, std::path::Path::new(&path));
         return;
     }
+    if storage_mode() != "rocks" {
+        assert_eq!(
+            config.phases,
+            vec!["cold"],
+            "memory modes currently measure cold loading only; set JAZZ_CUSTOMER_PHASES=cold"
+        );
+    }
     let schema = schema();
     let seeded = seed_core(&schema, &config);
     let expected = expected_visible_counts(&seeded, config.identity);
@@ -701,7 +711,7 @@ enum BenchIdentity {
 
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
-    core: Node<RocksDbStorage>,
+    core: Node<BoxedStorage>,
     ordinary_user: RowUuid,
     visible_groups: BTreeSet<RowUuid>,
     table_rows: BTreeMap<String, Vec<RowUuid>>,
@@ -890,12 +900,12 @@ struct SubscriptionTimeline {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db<BoxedStorage>,
 }
 
 struct DbClient {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db<BoxedStorage>,
 }
 
 struct OpenSubscription {
@@ -1369,7 +1379,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
         }
         fs::create_dir_all(&tmp_cache).expect("create temporary customer seed cache");
         {
-            let storage = open_storage(&tmp_cache, schema);
+            let storage = BoxedStorage::new(open_storage(&tmp_cache, schema));
             let state = block_on(jazz::node::NodeState::new_history_complete(
                 node(1),
                 schema.clone(),
@@ -1386,7 +1396,12 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
 
     let core_dir = tempfile::tempdir().unwrap();
     copy_dir_contents(&cache_dir, core_dir.path()).expect("copy cached customer seed store");
-    let storage = open_storage(core_dir.path(), schema);
+    let rocks = open_storage(core_dir.path(), schema);
+    let storage = if storage_mode() == "all-memory" {
+        BoxedStorage::new(copy_seed_to_memory(&rocks))
+    } else {
+        BoxedStorage::new(rocks)
+    };
     let state = block_on(jazz::node::NodeState::new_history_complete(
         node(1),
         schema.clone(),
@@ -1648,7 +1663,7 @@ fn export_sql_fixture(config: &Config, path: &std::path::Path) {
     .unwrap();
 }
 
-fn write_seed_plan(core: &Node<RocksDbStorage>, plan: &SeedPlan) {
+fn write_seed_plan(core: &Node<BoxedStorage>, plan: &SeedPlan) {
     for write in &plan.writes {
         seed_db(core, &write.table, write.row, write.cells.clone());
     }
@@ -2386,7 +2401,7 @@ fn subscription_tables() -> Vec<String> {
     tables
 }
 
-fn seed_db(core: &Node<RocksDbStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
+fn seed_db(core: &Node<BoxedStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
     let node = core.node();
     let mut node = block_on(node.lock());
     let (tx_id, _) = jazz_sim::fixture::commit_mergeable_unit_settled(
@@ -2408,7 +2423,7 @@ fn open_db_node(
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbNode {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
-    let storage = open_storage(dir.path(), &schema);
+    let storage = open_receiver_storage(dir.path(), &schema);
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -2430,7 +2445,7 @@ fn open_client_db(
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbClient {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
-    let storage = open_storage(dir.path(), &schema);
+    let storage = open_receiver_storage(dir.path(), &schema);
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -2446,6 +2461,59 @@ fn open_client_db(
             .unwrap();
     }
     DbClient { _dir: dir, db }
+}
+
+fn storage_mode() -> String {
+    let mode = std::env::var("JAZZ_CUSTOMER_STORAGE").unwrap_or_else(|_| "rocks".to_owned());
+    assert!(
+        matches!(mode.as_str(), "rocks" | "memory-receivers" | "all-memory"),
+        "unknown storage mode {mode}"
+    );
+    mode
+}
+
+fn open_receiver_storage(path: &Path, schema: &JazzSchema) -> BoxedStorage {
+    if storage_mode() == "rocks" {
+        BoxedStorage::new(open_storage(path, schema))
+    } else {
+        let families = schema.column_families();
+        let names = families.iter().map(String::as_str).collect::<Vec<_>>();
+        BoxedStorage::new(MemoryStorage::new(&names).unwrap())
+    }
+}
+
+// Preload identical physical seed state, including aliases and acceptance
+// metadata. This is setup, not measured synchronization or reseeding work.
+fn copy_seed_to_memory(source: &RocksDbStorage) -> MemoryStorage {
+    let families = source
+        .column_family_names()
+        .expect("RocksDB enumerates families");
+    let names = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let memory = MemoryStorage::new(&names).unwrap();
+    for family in families {
+        let entries = block_on(collect_scan(
+            block_on(source.scan(ScanRequest::prefix(family.clone(), Vec::new()))).unwrap(),
+        ))
+        .unwrap();
+        let operations = entries
+            .iter()
+            .map(|(key, value)| OwnedWriteOperation::Set {
+                cf: family.clone(),
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect();
+        block_on(memory.write_many(operations)).unwrap();
+        let restored = block_on(collect_scan(
+            block_on(memory.scan(ScanRequest::prefix(family, Vec::new()))).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            entries, restored,
+            "in-memory seed differs from persisted seed"
+        );
+    }
+    memory
 }
 
 fn open_storage(path: &std::path::Path, schema: &JazzSchema) -> RocksDbStorage {
@@ -2647,6 +2715,7 @@ fn pending_description(subscriptions: &[OpenSubscription]) -> String {
 
 fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     let mut fields = metadata_fields("customer_cold_start", "native", config.seed, "full");
+    fields.insert("storage_mode".to_owned(), json!(storage_mode()));
     fields.insert(
         "node_tick_wall_us_core_edge_client".to_owned(),
         json!(summary.tick_wall_us),
