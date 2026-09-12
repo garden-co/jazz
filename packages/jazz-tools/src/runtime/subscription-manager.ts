@@ -330,8 +330,20 @@ export class SubscriptionManager<T extends { id: string }> {
         }
       }
       const wireResult = this.handleDecodedDelta(decoded, transform, reset);
+      // Complete roots already include this frame's descendant edits. Replaying
+      // those edits would remove children twice or apply moves to the new order.
+      // Earlier deferred edits still replay when their root hydration arrives.
+      const completeRoots = new Set(
+        decoded
+          .filter((change) => change.kind !== RowChangeKind.Removed)
+          .map((change) => change.id),
+      );
       const terminalOperations = this.readyTerminalOperations(
-        delta.terminalOperations ?? [],
+        (delta.terminalOperations ?? []).filter(
+          (operation) =>
+            operation.path.length === 0 ||
+            !completeRoots.has(this.terminalAddress(operation.root_key)),
+        ),
         removedRoots,
       );
       if (terminalOperations.length > 0) {
@@ -417,28 +429,35 @@ export class SubscriptionManager<T extends { id: string }> {
       const values = target;
       if ("Insert" in edit) {
         const id = terminalPayloadRowId(edit.Insert.key);
+        const key = terminalChildAddress(edit.Insert.key);
         if (edit.Insert.row.id !== id) {
           throw new Error("terminal insert row key does not match its edit key");
         }
         const value: Value = { type: "Row", value: cloneTerminalRow(edit.Insert.row) };
-        removeTerminalValue(values, id);
+        setTerminalChildAddress(value, key);
+        removeTerminalValue(values, key);
         values.splice(Math.max(0, Math.min(edit.Insert.index, values.length)), 0, value);
       } else if ("Update" in edit) {
         const id = terminalPayloadRowId(edit.Update.key);
-        const index = terminalValueIndex(values, id);
+        const key = terminalChildAddress(edit.Update.key);
+        const index = terminalValueIndex(values, key);
         if (index === -1) throw new Error(`terminal child update addressed missing key ${id}`);
         if (edit.Update.row.id !== id) {
           throw new Error("terminal update row key does not match its edit key");
         }
-        values[index] = { type: "Row", value: cloneTerminalRow(edit.Update.row) };
+        const value: Value = { type: "Row", value: cloneTerminalRow(edit.Update.row) };
+        setTerminalChildAddress(value, key);
+        values[index] = value;
       } else if ("Remove" in edit) {
         const id = terminalPayloadRowId(edit.Remove.key);
-        if (!removeTerminalValue(values, id)) {
+        const key = terminalChildAddress(edit.Remove.key);
+        if (!removeTerminalValue(values, key)) {
           throw new Error(`terminal child removal addressed missing key ${id}`);
         }
       } else if ("Move" in edit) {
         const id = terminalPayloadRowId(edit.Move.key);
-        const index = terminalValueIndex(values, id);
+        const key = terminalChildAddress(edit.Move.key);
+        const index = terminalValueIndex(values, key);
         if (index === -1) throw new Error(`terminal child move addressed missing key ${id}`);
         const [value] = values.splice(index, 1);
         values.splice(Math.max(0, Math.min(edit.Move.index, values.length)), 0, value!);
@@ -843,8 +862,39 @@ function terminalEditKey(edit: RuntimeTerminalOperation["edit"]): readonly numbe
         : edit.Move.key;
 }
 
-function terminalValueIndex(values: Value[], id: string): number {
-  return values.findIndex((value) => value.type === "Row" && value.value.id === id);
+// Internal identity survives copy-on-write but is not a public row field.
+const terminalChildOccurrence = Symbol("jazz.terminalChildOccurrence.v1");
+type OccurrenceValue = Value & { [terminalChildOccurrence]?: string };
+
+function setTerminalChildAddress(value: Value, key: string): void {
+  Object.defineProperty(value, terminalChildOccurrence, { value: key, configurable: true });
+}
+
+/** Child occurrence key v1: UUID key, optionally ff + nonzero u64 BE ordinal. */
+function terminalChildAddress(encoded: readonly number[]): string {
+  const id = terminalPayloadRowId(encoded);
+  if (encoded.length === 17) return `${id}/0`;
+  if (encoded.length !== 26 || encoded[17] !== 0xff) {
+    throw new Error("invalid terminal child occurrence key v1");
+  }
+  const ordinal = new DataView(Uint8Array.from(encoded).buffer).getBigUint64(18, false);
+  if (ordinal === 0n) throw new Error("noncanonical zero terminal occurrence ordinal");
+  return `${id}/${ordinal}`;
+}
+
+function terminalValueIndex(values: Value[], key: string): number {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    if (value.type !== "Row") continue;
+    const id = value.value.id;
+    if (typeof id !== "string") throw new Error("terminal child must have a row id");
+    const ordinal = counts.get(id) ?? 0;
+    counts.set(id, ordinal + 1);
+    if ((value as OccurrenceValue)[terminalChildOccurrence] === undefined) {
+      setTerminalChildAddress(value, `${id}/${ordinal}`);
+    }
+  }
+  return values.findIndex((value) => (value as OccurrenceValue)[terminalChildOccurrence] === key);
 }
 
 function cloneTerminalRow(row: WasmRow): WasmRow {
@@ -911,9 +961,9 @@ function terminalCollection(
     if (index === path.length - 1) return values;
     const keySegment = path[++index];
     if (!keySegment || !("Key" in keySegment)) return undefined;
-    const childId = terminalPayloadRowId(keySegment.Key);
+    const childKey = terminalChildAddress(keySegment.Key);
     if (index === path.length - 1) return values;
-    const child = values.find((value) => value.type === "Row" && value.value.id === childId);
+    const child = values[terminalValueIndex(values, childKey)];
     if (child?.type !== "Row") return undefined;
     ownerValues = child.value.values;
   }

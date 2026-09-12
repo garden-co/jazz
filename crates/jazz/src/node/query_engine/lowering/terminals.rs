@@ -1074,6 +1074,8 @@ pub(super) struct CollectSlotLayout {
     pub(super) fields: Vec<CollectFlatField>,
     pub(super) row_id_input: String,
     pub(super) presence_input: String,
+    pub(super) reference_array_input: Option<String>,
+    pub(super) reference_order: bool,
     pub(super) order_cols: Vec<TopByOrder>,
     pub(super) tie_cols: Vec<String>,
     pub(super) offset: u64,
@@ -1392,7 +1394,7 @@ fn align_collect_join_key_types(
                 "collector child source {child_id:?} was not resolved"
             )))
         })?;
-        let (_, child_key) = lower_path_key_pair(
+        let (parent_key, child_key) = lower_path_key_pair(
             &path.correlation,
             parent_id,
             parent,
@@ -1406,11 +1408,34 @@ fn align_collect_join_key_types(
             .iter_mut()
             .find(|field| field.source_field.as_deref() == Some(child_key.as_str()))
         {
-            let mut payload = &field.value_type;
-            while let ValueType::Nullable(inner) = payload {
-                payload = inner.as_ref();
-            }
+            let payload = field.value_type.non_nullable();
             field.value_type = ValueType::Nullable(Box::new(payload.clone()));
+        }
+        let parent_type = source_field_type(parent, &parent_key).map(ValueType::non_nullable);
+        if parent_type.is_some_and(ValueType::is_array_fk)
+            && child_key == child.row_shape.row_uuid_field
+        {
+            let input = format!("{}_references", slot.row_id_input);
+            let value_type =
+                ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::Uuid))));
+            slot.fields.push(CollectFlatField {
+                input: input.clone(),
+                output: input.clone(),
+                value_type: value_type.clone(),
+                output_value_type: value_type,
+                source_field: Some(parent_key),
+                source_public_name: None,
+                origin: CollectFieldOrigin::Derived,
+                is_row_id: false,
+                is_presence: false,
+                is_output: false,
+            });
+            slot.reference_array_input = Some(input);
+            slot.reference_order = !path
+                .child
+                .steps
+                .iter()
+                .any(|step| matches!(step, LinearStep::OrderBy(_)));
         }
         for step in &path.child.steps {
             match step {

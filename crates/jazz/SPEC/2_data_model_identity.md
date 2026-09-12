@@ -137,6 +137,12 @@ the schema is a `JazzSchema { tables: Vec<TableSchema> }`; each table carries
 a `user_` prefix. A missing nullable user cell means the row version did not set
 that column.
 
+Every table exposes an automatically generated UUID `id`. The table-column
+name `id` is reserved: schema compilation rejects explicit declarations,
+including UUID and nullable declarations. Queries, joins, projections, and
+ordering resolve `id` to the physical row UUID. Nested enum payload fields
+named `id` are ordinary payload data.
+
 The default merge strategy is column last-writer-wins by HLC
 (`MergeStrategy::Lww`). A counter declaration is accepted only on a non-nullable
 integer column (`INV-DATA-9`). Public `Integer` and `BigInt` columns lower to

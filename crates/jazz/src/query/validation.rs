@@ -239,7 +239,29 @@ fn validate_query_canonical_parts(
     let mut params = BTreeMap::new();
     if let Some(relation) = &query.relation {
         validate_retained_relation_outer_query(query)?;
+        if relation_union_parts(&relation.rel).is_none() {
+            let mut resolved = relation_query_to_query(relation)?;
+            if resolved.table != query.table {
+                return Err(QueryError::UnsupportedRelationQuery(
+                    "relation query output table does not match its Query envelope".to_owned(),
+                ));
+            }
+            resolved.array_subqueries = query.array_subqueries.clone();
+            resolved.select = query.select.clone();
+            return validate_query_canonical_parts(&resolved, schema);
+        }
         validate_retained_relation_union(relation, &query.table, schema, &mut params)?;
+        validate_array_subqueries(
+            schema,
+            &root,
+            &mut resolved_query.array_subqueries,
+            &mut params,
+        )?;
+        if let Some(select) = &query.select {
+            for column in select {
+                validate_select_column(&root, column)?;
+            }
+        }
         let normalized = normalize_query(&resolved_query);
         let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
         return Ok((normalized, params, canonical));
@@ -332,9 +354,10 @@ fn validate_query_canonical_parts(
     Ok((normalized, params, canonical))
 }
 
-/// Relation output is already complete row-set syntax. Keeping ordinary query
-/// clauses beside it would make policy or result modifiers disappear behind
-/// the retained-relation validation fast path, so reject that unlowered mix.
+/// Relation syntax owns row membership and its terminal ordering/window. The
+/// outer Query envelope may still describe the returned row shape through
+/// select projections and array subqueries; reject other clauses because they
+/// would compete with or disappear behind the relation row-set syntax.
 fn validate_retained_relation_outer_query(query: &Query) -> Result<(), QueryError> {
     let has_outer_clause = !query.filters.is_empty()
         || !query.joins.is_empty()
@@ -343,8 +366,6 @@ fn validate_retained_relation_outer_query(query: &Query) -> Result<(), QueryErro
         || !query.reachable.is_empty()
         || !query.inherits.is_empty()
         || !query.includes.is_empty()
-        || !query.array_subqueries.is_empty()
-        || query.select.is_some()
         || !query.order_by.is_empty()
         || query.aggregate.is_some()
         || query.limit.is_some()
@@ -474,19 +495,15 @@ fn flat_join_filter_schema(
 ) -> Result<TableSchema, QueryError> {
     let mut columns = Vec::new();
     for (scope, table) in sources {
-        // `id` retains its normal effective-column semantics: a declared
-        // field wins, and only legacy tables expose their physical row UUID
-        // through that spelling. `_id` is the explicit physical-row alias.
+        // Both public identity spellings resolve to the physical row UUID.
         columns.push(JazzColumnSchema::new(
             format!("{scope}._id"),
             ColumnType::Uuid,
         ));
-        if !has_declared_id(table) {
-            columns.push(JazzColumnSchema::new(
-                format!("{scope}.id"),
-                ColumnType::Uuid,
-            ));
-        }
+        columns.push(JazzColumnSchema::new(
+            format!("{scope}.id"),
+            ColumnType::Uuid,
+        ));
         for magic in ["$createdBy", "$updatedBy", "$createdAt", "$updatedAt"] {
             columns.push(JazzColumnSchema::new(
                 format!("{scope}.{magic}"),
@@ -720,7 +737,28 @@ fn validate_join(
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
     let join_table = schema_table(schema, &join.table)?;
+    if join.target == JoinTarget::Uncorrelated {
+        if !join.on_column.is_empty()
+            || join.source_column.is_some()
+            || join.source_lookup.is_some()
+            || !join.correlated_filters.is_empty()
+        {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: join.table.clone(),
+                column: join.on_column.clone(),
+                target_table: "uncorrelated existence (no join keys)".to_owned(),
+            });
+        }
+        for predicate in &mut join.filters {
+            validate_predicate(&join_table, predicate, params)?;
+        }
+        for nested in &mut join.nested_joins {
+            validate_join(schema, &join_table, &join.table, nested, params)?;
+        }
+        return Ok(());
+    }
     match join.target {
+        JoinTarget::Uncorrelated => unreachable!("validated above"),
         JoinTarget::Column => {
             planner_column_type(&join_table, &join.on_column)?;
         }
@@ -747,13 +785,6 @@ fn validate_join(
             }
         }
         planner_column_type(&lookup_table, &lookup.value_column)?;
-        if lookup.value_column == "id"
-            && has_declared_id(&lookup_table)
-            && planner_column_type(&lookup_table, &lookup.value_column)?
-                != planner_column_type(&join_table, &join.on_column)?
-        {
-            return Err(QueryError::OperandTypeMismatch);
-        }
         if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: lookup.table.clone(),
@@ -776,12 +807,6 @@ fn validate_join(
         }
     } else if let Some(source_column) = &join.source_column {
         if source_column == "id" {
-            if has_declared_id(root)
-                && planner_column_type(root, source_column)?
-                    != planner_column_type(&join_table, &join.on_column)?
-            {
-                return Err(QueryError::OperandTypeMismatch);
-            }
             root_table.to_owned()
         } else {
             planner_column_type(root, source_column)?;
@@ -804,6 +829,7 @@ fn validate_join(
         }
     }
     match join.target {
+        JoinTarget::Uncorrelated => unreachable!("validated above"),
         JoinTarget::Column => match join_table.references.get(&join.on_column) {
             Some(target) if target == &target_table => {}
             None if join.on_column == "id" && join.table == target_table => {}
@@ -945,9 +971,6 @@ fn planner_column_type<'a>(
     table: &'a TableSchema,
     column: &str,
 ) -> Result<&'a ColumnType, QueryError> {
-    if let Ok(column_schema) = column_schema(table, column) {
-        return Ok(&column_schema.column_type);
-    }
     if column == "id" {
         return Ok(&ColumnType::Uuid);
     }
@@ -955,10 +978,6 @@ fn planner_column_type<'a>(
         return Ok(column_type);
     }
     Ok(&column_schema(table, column)?.column_type)
-}
-
-fn has_declared_id(table: &TableSchema) -> bool {
-    table.columns.iter().any(|column| column.name == "id")
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
@@ -1066,12 +1085,8 @@ fn validate_reachable(
     let access = schema_table(schema, &reachable.access_table)?;
     planner_column_type(&access, &reachable.access_row_column)?;
     planner_column_type(&access, &reachable.access_team_column)?;
-    let root_key_type = if has_declared_id(root) {
-        planner_column_type(root, "id")?
-    } else {
-        &ColumnType::Uuid
-    };
-    if reachable.access_row_column == "id" && !has_declared_id(&access) {
+    let root_key_type = &ColumnType::Uuid;
+    if reachable.access_row_column == "id" {
         if access.name != root.name {
             return Err(QueryError::JoinNotRefCompatible {
                 join_table: reachable.access_table.clone(),
@@ -1107,6 +1122,13 @@ fn validate_reachable(
         }
     }
     let team_table = match reachable.access_team_target {
+        JoinTarget::Uncorrelated => {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: reachable.access_table.clone(),
+                column: reachable.access_team_column.clone(),
+                target_table: "reachability requires a team reference".to_owned(),
+            });
+        }
         JoinTarget::Column => access
             .references
             .get(&reachable.access_team_column)
@@ -1129,7 +1151,7 @@ fn validate_reachable(
     let edge = schema_table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
         planner_column_type(&edge, column)?;
-        if *column == "id" && !has_declared_id(&edge) && edge.name == *team_table {
+        if *column == "id" && edge.name == *team_table {
             continue;
         }
         match edge.references.get(column) {
@@ -1429,12 +1451,14 @@ fn array_correlation_types_compatible(parent: &ColumnType, child: &ColumnType) -
     if in_operand_types_compatible(parent, child) {
         return true;
     }
-    // Array-subquery correlation expands the parent array into child lookup
-    // keys; it is distinct from whole-value `Predicate::In` membership.
-    match non_null_column_type(parent) {
+    // Array-subquery correlation expands array lookup keys on either side:
+    // forward references use a parent array, reverse references a child array.
+    // This is distinct from whole-value `Predicate::In` membership.
+    let forward = match non_null_column_type(parent) {
         ColumnType::Array(member) => column_types_comparable(&member, child),
         _ => false,
-    }
+    };
+    forward || array_element_type_compatible(child, parent)
 }
 
 fn in_literal_value_coercible(left: &ColumnType, value: &Operand) -> bool {

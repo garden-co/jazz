@@ -2156,7 +2156,13 @@ impl TickEvaluator<'_> {
         }
         let direct_tree_slot = match collect_by.slots.as_slice() {
             [] if collect_by.limit == TopByLimit::Unbounded => None,
-            [slot] if slot.slots.is_empty() && slot.limit == TopByLimit::Unbounded => Some(slot),
+            [slot]
+                if slot.slots.is_empty()
+                    && slot.limit == TopByLimit::Unbounded
+                    && slot.reference_array_field_index.is_none() =>
+            {
+                Some(slot)
+            }
             _ => None,
         };
         if collect_by.mode == CollectByMode::Root

@@ -834,12 +834,12 @@ Decision, Anselm 2026-08-07: the empty global aggregate row is **inside** the
 maintained surface, and follows SQL. A scalar global aggregate over no input
 rows delivers a present row reporting `0` for `count` and `NULL` for `sum`,
 `avg`, `min` and `max` — the same result a one-shot read produces, as ch. 6
-§6.4.2 requires. This chapter previously excluded it, which could not hold once
+§6.4.4 requires. This chapter previously excluded it, which could not hold once
 `groove/SPEC/3_queries_operators.md` specified the one-shot behaviour: a
 one-shot read would return a row where a subscription over the same query
 returned nothing.
 
-Its identity is the one already required by ch. 6 §6.4.3 `INV-QUERY-30`: a
+Its identity is the one already required by ch. 6 §6.4.4 `INV-QUERY-30`: a
 scalar global aggregate lowers to one fixed synthetic identity. That identity
 does not depend on a group key, so the empty case needs no special derivation —
 which is what makes the empty global row expressible at all. The empty row is

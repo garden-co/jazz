@@ -10,6 +10,18 @@ use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 
 use super::{IvmRuntimeError, RecordDeltas, encoded_record_key_part};
 
+/// Terminal child occurrence key v1: the first copy retains its typed row key;
+/// subsequent copies append 0xff and a nonzero u64 big-endian repeat ordinal.
+/// Ordinals count copies of the same row in the rendered sibling collection.
+/// This is an explicit byte contract, not a serializer-derived representation.
+pub fn terminal_occurrence_key(mut row_key: Vec<u8>, occurrence: u64) -> Vec<u8> {
+    if occurrence != 0 {
+        row_key.push(0xff);
+        row_key.extend_from_slice(&occurrence.to_be_bytes());
+    }
+    row_key
+}
+
 /// Incremental edits to a materialized terminal tree. Paths alternate public
 /// collection fields and stable descendant keys, starting below `root_key`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -189,7 +201,10 @@ fn diff_terminal_record(
         }
     }
     if scalar_changed {
-        let key = encoded_record_key_part(*after.descriptor(), after.raw(), &[0])?;
+        let key = match path.last() {
+            Some(TerminalPathSegment::Key(key)) => key.clone(),
+            _ => encoded_record_key_part(*after.descriptor(), after.raw(), &[0])?,
+        };
         operations.push(TerminalOperation {
             root_descriptor,
             root_key: root_key.to_vec(),
@@ -214,13 +229,17 @@ fn diff_terminal_collection(
     let children =
         |values: &[Value]| -> Result<BTreeMap<Vec<u8>, (usize, OwnedRecord)>, IvmRuntimeError> {
             let mut children = BTreeMap::new();
+            let mut occurrences = BTreeMap::<Vec<u8>, u64>::new();
             for (index, value) in values.iter().enumerate() {
                 let Value::Record(record) = value else {
                     return Err(IvmRuntimeError::InvalidCollectBy(
                         "structured terminal arrays must contain records".to_owned(),
                     ));
                 };
-                let key = encoded_record_key_part(*record.descriptor(), record.raw(), &[0])?;
+                let row_key = encoded_record_key_part(*record.descriptor(), record.raw(), &[0])?;
+                let occurrence = occurrences.entry(row_key.clone()).or_default();
+                let key = terminal_occurrence_key(row_key, *occurrence);
+                *occurrence += 1;
                 if children.insert(key, (index, record.clone())).is_some() {
                     return Err(IvmRuntimeError::DuplicateCollectByOccurrenceId);
                 }

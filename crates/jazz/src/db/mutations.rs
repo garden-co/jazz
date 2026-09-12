@@ -2478,7 +2478,7 @@ where
         // Raw Rust RowCells deliberately permit sparse rows. The typed
         // binding queue opts into complete insertion checks instead.
         if require_complete_insert && parents.is_empty() {
-            self.validate_complete_binding_insert(table, &cells)?;
+            self.validate_complete_insert(table, &cells)?;
         }
 
         self.write_mergeable_at_ms_with_authorship_in_branch(
@@ -3080,7 +3080,9 @@ where
             .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))
     }
 
-    pub(super) fn validate_complete_binding_insert(
+    /// Typed binding insertions must supply every required column without a
+    /// schema default. Raw Rust RowCells callers may still stage sparse rows.
+    pub(super) fn validate_complete_insert(
         &self,
         table: &str,
         cells: &RowCells,
@@ -3090,10 +3092,7 @@ where
             if !schema.branch_by.contains(&column.name)
                 && !cells.contains_key(&column.name)
                 && column.default.is_none()
-                && !matches!(
-                    column.column_type,
-                    GrooveColumnType::Nullable(_) | GrooveColumnType::Array(_)
-                )
+                && !matches!(column.column_type, GrooveColumnType::Nullable(_))
             {
                 return Err(Error::new(
                     ErrorCode::WriteRejected,

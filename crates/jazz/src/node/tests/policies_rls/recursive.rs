@@ -36,7 +36,6 @@ fn recursive_doc_policy_schema(select_policy: PublicPolicyExpr) -> JazzSchema {
             )
             .table(
                 PublicTableSchemaBuilder::new("teams")
-                    .column("id", PublicColumnType::Uuid)
                     .column("name", PublicColumnType::Text)
                     .policies(public_all_policies()),
             )
@@ -167,7 +166,6 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
         accept_global(
             &mut core,
             MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(team.0)),
                 ("name".to_owned(), Value::String(name.to_owned())),
             ])),
         );
@@ -280,7 +278,6 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
         accept_global(
             &mut core,
             MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(team.0)),
                 ("name".to_owned(), Value::String(name.to_owned())),
             ])),
         );
@@ -372,7 +369,6 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
         accept_global(
             &mut core,
             MergeableCommit::new("teams", team, 10).cells(BTreeMap::from([
-                ("id".to_owned(), Value::Uuid(team.0)),
                 ("name".to_owned(), Value::String(name.to_owned())),
             ])),
         );

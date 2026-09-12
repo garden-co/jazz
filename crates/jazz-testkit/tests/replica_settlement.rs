@@ -542,20 +542,26 @@ mod relay_topology {
         );
     }
 
-    /// Explicitly detaching the upstream is the definitive "no upstream"
-    /// signal: a previously held authority-tier subscription settles from the
-    /// local store exactly once — not zero times (loading forever), not twice.
-    ///
-    /// Actors: alice's node with one local row and a silent upstream.
+    /// Detaching preserves a held remote subscription. Alice can still read
+    /// her row locally, but Edge and Global subscriptions wait for a fresh
+    /// authority response and deliver the settled answer without duplication.
+    /// Public `Db` nodes let this test withhold authority processing across
+    /// the exact detach/reattach transition.
     ///
     /// ```text
-    /// alice ──subscribe(Global)──► (silent upstream)   [held]
-    ///   │        detach upstream
-    ///   ◄──exactly one local answer──┘
+    /// alice ──subscribe(Edge/Global)──► silent upstream [held]
+    ///   ├──detach──► Local read ✓, remote subscription held
+    ///   ├──reattach──► remote subscription still held
+    ///   ◄──one settled answer── authority confirms
     /// ```
     #[test]
-    #[ignore = "#1766: detaching the upstream never releases a held authority-tier subscription: no local settlement is delivered and the read stays pending forever instead of settling from the local store exactly once"]
-    fn detaching_the_upstream_settles_held_subscription_locally_exactly_once() {
+    fn detaching_the_upstream_keeps_subscription_held_until_reconnected_authority_confirms() {
+        for tier in [DurabilityTier::Edge, DurabilityTier::Global] {
+            assert_detached_subscription_waits_for_authority(tier);
+        }
+    }
+
+    fn assert_detached_subscription_waits_for_authority(tier: DurabilityTier) {
         let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
         let node = open_db(0x18, alice);
         let (upstream_transport, _held_far_end) = duplex();
@@ -563,7 +569,7 @@ mod relay_topology {
 
         let written = block_on(node.insert(
             "documents",
-            document_cells("local answer after detach"),
+            document_cells("local row awaiting authority confirmation"),
             Default::default(),
         ))
         .expect("insert local document");
@@ -574,49 +580,90 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier,
                 ..ReadOpts::default()
             },
         ))
-        .expect("subscribe at Global with a silent upstream");
+        .expect("subscribe at a remote tier with a silent upstream");
         for _ in 0..3 {
             tick(&node, "queue coverage for the silent upstream");
         }
         assert!(
             drain(&mut subscription).is_empty(),
-            "the subscription must stay held while the upstream is installed"
+            "{tier:?} subscription must stay held while the upstream is silent"
         );
 
         assert!(node.detach_connection(&upstream));
-        let mut events = Vec::new();
         for _ in 0..3 {
-            tick(&node, "settle the held subscription locally");
+            tick(&node, "process the detached connection");
+        }
+        assert!(
+            drain(&mut subscription).is_empty(),
+            "detaching must not release the held {tier:?} subscription"
+        );
+        let local_rows = node.read(&documents).expect("Local read after detach");
+        assert_eq!(local_rows.len(), 1);
+        assert_eq!(local_rows[0].row_uuid(), written.row_uuid());
+
+        let authority = open_authority(0x38);
+        let (replacement_transport, authority_transport) = duplex();
+        let _replacement = block_on(node.connect_upstream(replacement_transport));
+        let _subscriber = authority.accept_subscriber(authority_transport, alice);
+        for _ in 0..3 {
+            tick(
+                &node,
+                "queue replay and subscription without an authority response",
+            );
+        }
+        assert!(
+            drain(&mut subscription).is_empty(),
+            "reattaching alone must not settle the {tier:?} subscription"
+        );
+
+        let mut events = Vec::new();
+        for _ in 0..20 {
+            tick(
+                &authority,
+                "accept the replay and serve the authority result",
+            );
+            tick(&node, "receive the confirmed subscription result");
             events.extend(drain(&mut subscription));
         }
-        let deltas = events
+        let settled = events
             .iter()
             .filter_map(|event| match event {
-                SubscriptionEvent::Delta { added, .. } => Some(added),
+                SubscriptionEvent::Delta {
+                    settled: true,
+                    reset,
+                    tier,
+                    added,
+                    ..
+                } => Some((reset, tier, added)),
                 _ => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            deltas.len(),
+            settled.len(),
             1,
-            "detaching the upstream must deliver the local answer exactly \
-             once: {events:?}"
+            "authority confirmation must deliver one settled {tier:?} answer: {events:?}"
         );
-        assert!(
-            deltas[0]
-                .iter()
-                .any(|row| row.row.row_uuid() == written.row_uuid()),
-            "the local answer must carry the locally stored row: {events:?}"
+        let (reset, delivered_tier, added) = settled[0];
+        assert!(*reset, "the initial answer must replace prior membership");
+        assert!(*delivered_tier >= tier, "the answer must satisfy {tier:?}");
+        assert_eq!(
+            added.len(),
+            1,
+            "the confirmed answer must contain Alice's row"
         );
+        assert_eq!(added[0].row.row_uuid(), written.row_uuid());
 
-        tick(&node, "no further settlement after the local answer");
+        for _ in 0..3 {
+            tick(&authority, "no further authority changes");
+            tick(&node, "no further subscription changes");
+        }
         assert!(
             drain(&mut subscription).is_empty(),
-            "the local settlement must not be delivered twice"
+            "the confirmed {tier:?} answer must not be delivered twice"
         );
     }
 }

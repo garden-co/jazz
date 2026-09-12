@@ -212,7 +212,11 @@ export interface Runtime {
     session?: Session,
   ): Promise<PermissionAdvice>;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
-  waitForTransaction(txId: TxId | Promise<TxId>, tier: string): Promise<void>;
+  waitForTransaction(
+    txId: TxId | Promise<TxId>,
+    tier: string,
+    options?: RuntimeWriteWaitOptions,
+  ): Promise<void>;
   query(
     query_json: string,
     session_json?: string | null,
@@ -225,6 +229,7 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): number;
+  /** Install the subscription's callback and start delivery. May only be called once per handle. */
   executeSubscription(
     handle: number,
     onUpdate: (result: RuntimeSubscriptionDelta | Error) => void,
@@ -735,6 +740,32 @@ export class PersistedWriteRejectedError extends Error {
   }
 }
 
+/** Internal wait controls; not part of the public WriteHandle.wait options. */
+export interface RuntimeWriteWaitOptions {
+  ready?: Promise<void>;
+  observeOnly?: boolean;
+}
+
+const writeWaitReadiness = new WeakMap<object, (tier: DurabilityTier) => Promise<void>>();
+
+/** @internal Configure host readiness without delaying native wait registration. */
+export function setWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
+  handle: T,
+  ready: (tier: DurabilityTier) => Promise<void>,
+): T {
+  writeWaitReadiness.set(handle, ready);
+  return handle;
+}
+
+function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
+  source: object,
+  target: T,
+): T {
+  const ready = writeWaitReadiness.get(source);
+  if (ready) writeWaitReadiness.set(target, ready);
+  return target;
+}
+
 /**
  * Returned by upsert, update, delete, and transaction operations.
  * Allows waiting for the write to be persisted at a given durability tier.
@@ -756,7 +787,8 @@ export class WriteHandle<T = void, WaitResult = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<WaitResult> {
-    return this.#client.waitForTransaction(this.txId, options.tier) as Promise<WaitResult>;
+    const ready = writeWaitReadiness.get(this)?.(options.tier);
+    return this.#client.waitForTransaction(this.txId, options.tier, ready) as Promise<WaitResult>;
   }
 
   protected client(): JazzClient {
@@ -786,7 +818,10 @@ export class WriteResult<T> extends WriteHandle<T, T> {
   }
 
   mapValue<U>(transformValue: (value: T) => U): WriteResult<U> {
-    return new WriteResult(transformValue(this.value), this.txId, this.client());
+    return copyWriteWaitReadiness(
+      this,
+      new WriteResult(transformValue(this.value), this.txId, this.client()),
+    );
   }
 }
 
@@ -823,7 +858,10 @@ export class ExclusiveWriteResult<T> extends WriteResult<T> {
   }
 
   override mapValue<U>(transformValue: (value: T) => U): ExclusiveWriteResult<U> {
-    return new ExclusiveWriteResult(transformValue(this.value), this.txId, this.client());
+    return copyWriteWaitReadiness(
+      this,
+      new ExclusiveWriteResult(transformValue(this.value), this.txId, this.client()),
+    );
   }
 }
 
@@ -1738,9 +1776,18 @@ export class JazzClient {
     return this.runtime;
   }
 
-  async waitForTransaction(txId: TxId | Promise<TxId>, tier: DurabilityTier): Promise<void> {
+  async waitForTransaction(
+    txId: TxId | Promise<TxId>,
+    tier: DurabilityTier,
+    ready?: Promise<void>,
+  ): Promise<void> {
     try {
-      await this.runtime.waitForTransaction(txId, tier);
+      // Register before awaiting host readiness. Readiness still gates completion,
+      // including runtimes that do not themselves need to defer transport progress.
+      const completion = ready
+        ? this.runtime.waitForTransaction(txId, tier, { ready })
+        : this.runtime.waitForTransaction(txId, tier);
+      await Promise.all([ready, completion]);
     } catch (error) {
       throw this.normalizeTransactionWaitError(error);
     }

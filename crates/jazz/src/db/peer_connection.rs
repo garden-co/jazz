@@ -4,8 +4,11 @@
 //! a served subscriber. It applies and emits sync messages, tracks coverage,
 //! performs bounded repair, and preserves authenticated reconnect state.
 
+use super::mutation_errors::{
+    mutation_error_event, mutation_error_event_for, queue_mutation_error,
+};
 use super::node_runtime::{
-    refresh_subscriptions_in, retire_relay_upstream_subscription,
+    notify_write_state_waiters, refresh_subscriptions_in, retire_relay_upstream_subscription,
     route_upstream_subscription_rejection, take_relay_upstream_subscription_owner,
 };
 use super::*;
@@ -7469,23 +7472,6 @@ fn write_state_update_tx_id(message: &SyncMessage) -> Option<TxId> {
     }
 }
 
-fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) -> bool {
-    let Some(waiters) = waiters.borrow_mut().remove(&tx_id) else {
-        return false;
-    };
-    let mut handled_mutation_error = false;
-    for waiter in waiters {
-        match waiter.notify {
-            WriteStateWaiterNotify::Future(sender) => {
-                if sender.send(()).is_ok() {
-                    handled_mutation_error = true;
-                }
-            }
-        }
-    }
-    handled_mutation_error
-}
-
 fn handle_write_state_update<S>(
     node: &SharedNodeState<S>,
     waiters: &WriteStateWaiters,
@@ -7496,32 +7482,19 @@ fn handle_write_state_update<S>(
 ) where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let handled_by_waiter = notify_write_state_waiters(waiters, tx_id);
+    notify_write_state_waiters(waiters, tx_id);
     // Extract the owned rejection before deciding how to report it. Keeping a
     // `LocalMutex` guard in an `if let` scrutinee spans the entire body, which
     // used to reenter the suspended node when an acknowledged rejection was
     // discarded below.
     let rejected = node.borrow().rejected_transaction(tx_id);
     if let Some(rejected) = rejected {
-        if handled_by_waiter {
-            mutation_errors.borrow_mut().pending.remove(&tx_id);
-            if let Err(error) = crate::db::block_on(node.borrow_mut().discard_rejection(tx_id)) {
-                tracing::warn!(?tx_id, %error, "failed to acknowledge waited mutation error");
-            }
-            return;
-        }
-
-        let should_schedule = {
-            let mut state = mutation_errors.borrow_mut();
-            state
-                .pending
-                .entry(tx_id)
-                .or_insert_with(|| mutation_error_event(rejected));
-            state.callback.is_some()
-        };
-        if should_schedule {
-            schedule_tick_in(scheduler, TickUrgency::Immediate);
-        }
+        queue_mutation_error(
+            mutation_errors,
+            scheduler,
+            tx_id,
+            mutation_error_event(rejected),
+        );
         return;
     }
 
@@ -7549,92 +7522,16 @@ fn handle_write_state_update<S>(
     if !terminal || !browser_relay_recovered_tx_ids.borrow_mut().remove(&tx_id) {
         return;
     }
-    if handled_by_waiter {
-        return;
-    }
     let Fate::Rejected(reason) = record.fate else {
         return;
     };
 
-    let should_schedule = {
-        let mut state = mutation_errors.borrow_mut();
-        state
-            .pending
-            .entry(tx_id)
-            .or_insert_with(|| mutation_error_event_for(tx_id, record.kind, &reason));
-        state.callback.is_some()
-    };
-    if should_schedule {
-        schedule_tick_in(scheduler, TickUrgency::Immediate);
-    }
-}
-
-pub(super) fn take_pending_mutation_error_delivery(
-    mutation_errors: &SharedMutationErrors,
-) -> Option<(MutationErrorCallback, BTreeMap<TxId, MutationErrorEvent>)> {
-    let mut state = mutation_errors.borrow_mut();
-    let callback = state.callback.clone()?;
-    if state.pending.is_empty() {
-        return None;
-    }
-    Some((callback, std::mem::take(&mut state.pending)))
-}
-
-pub(super) fn mutation_error_event(rejected: crate::tx::RejectedTransaction) -> MutationErrorEvent {
-    let tx_id = rejected.tx_id();
-    mutation_error_event_for(tx_id, rejected.kind(), &rejected.reason())
-}
-
-fn mutation_error_event_for(
-    tx_id: TxId,
-    kind: TxKind,
-    rejection: &RejectionReason,
-) -> MutationErrorEvent {
-    let transaction_id = TransactionId::from_committed_tx(tx_id);
-    let (code, reason) = mutation_error_details(rejection);
-    MutationErrorEvent {
-        code: code.clone(),
-        reason: reason.clone(),
-        transaction: LocalTransactionRecord {
-            transaction_id,
-            kind: kind.into(),
-            sealed: true,
-            latest_settlement: TransactionFate::Rejected {
-                transaction_id,
-                code,
-                reason,
-            },
-        },
-    }
-}
-
-fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
-    match reason {
-        RejectionReason::ClientClockTooFarAhead => (
-            "client_clock_too_far_ahead".to_owned(),
-            "Client clock is too far ahead".to_owned(),
-        ),
-        RejectionReason::AuthorizationDenied => (
-            "permission_denied".to_owned(),
-            "Write rejected by server authorization".to_owned(),
-        ),
-        RejectionReason::ExclusiveConflict => (
-            "exclusive_conflict".to_owned(),
-            "Exclusive transaction conflicted with another write".to_owned(),
-        ),
-        RejectionReason::CausalityViolation => (
-            "causality_violation".to_owned(),
-            "Transaction violated causal ordering".to_owned(),
-        ),
-        RejectionReason::Cascade { root } => (
-            "cascade_rejected".to_owned(),
-            format!("Transaction was rejected because ancestor {root:?} was rejected"),
-        ),
-        RejectionReason::MalformedCommit(reason) => (
-            "write_rejected".to_owned(),
-            format!("Malformed transaction: {reason}"),
-        ),
-    }
+    queue_mutation_error(
+        mutation_errors,
+        scheduler,
+        tx_id,
+        mutation_error_event_for(tx_id, record.kind, &reason),
+    );
 }
 
 /// Bindings carry values positionally; the shape orders them by param name.

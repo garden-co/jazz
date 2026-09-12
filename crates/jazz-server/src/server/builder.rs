@@ -946,7 +946,6 @@ mod tests {
         jazz::tools::public_schema::SchemaBuilder::new()
             .table(
                 jazz::tools::public_schema::TableSchema::builder("notes")
-                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
                     .column("body", jazz::tools::public_schema::ColumnType::Text),
             )
             .build()
@@ -1573,7 +1572,6 @@ mod tests {
         let evolved_source = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
                 jazz::tools::public_schema::TableSchema::builder("notes")
-                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
                     .column("body", jazz::tools::public_schema::ColumnType::Text)
                     .column("extra", jazz::tools::public_schema::ColumnType::Text),
             )
@@ -2280,7 +2278,6 @@ mod tests {
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
                 jazz::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
                     .column("title", jazz::tools::public_schema::ColumnType::Text)
                     .column("workspace_id", jazz::tools::public_schema::ColumnType::Uuid)
                     .branch_by("workspace_id"),
@@ -2343,7 +2340,6 @@ mod tests {
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
                 jazz::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
                     .column("title", jazz::tools::public_schema::ColumnType::Text),
             )
             .build();
@@ -2427,10 +2423,7 @@ mod tests {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-aborted-shutdown");
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
-            .table(
-                jazz::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", jazz::tools::public_schema::ColumnType::Uuid),
-            )
+            .table(jazz::tools::public_schema::TableSchema::builder("todos"))
             .build();
         let built = ServerBuilder::new(app_id)
             .with_schema(schema.clone())
@@ -2485,10 +2478,7 @@ mod tests {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-foreign-shutdown");
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
-            .table(
-                jazz::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", jazz::tools::public_schema::ColumnType::Uuid),
-            )
+            .table(jazz::tools::public_schema::TableSchema::builder("todos"))
             .build();
         let (built, state, request) = {
             let first_runtime = tokio::runtime::Builder::new_current_thread()

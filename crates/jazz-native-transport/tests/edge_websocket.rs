@@ -38,9 +38,7 @@ async fn serve_built(
 
 fn schema() -> jazz::tools::Schema {
     jazz::tools::SchemaBuilder::new()
-        .table(
-            jazz::tools::TableSchema::builder("items").column("id", jazz::tools::ColumnType::Uuid),
-        )
+        .table(jazz::tools::TableSchema::builder("items"))
         .build()
 }
 

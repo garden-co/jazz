@@ -2276,6 +2276,11 @@ fn lower_join_key_pairs(
     right_source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    // A true join condition is an uncorrelated existence gate. Routing keys
+    // are added by the caller, so independent prepared sessions stay isolated.
+    if matches!(predicate, PredicateExpr::True) {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let pairs = match predicate {
         PredicateExpr::And(predicates) => predicates
             .iter()
@@ -2345,6 +2350,11 @@ fn lower_linear_join_key_pairs(
     accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    // A true join condition is an uncorrelated existence gate. Routing keys
+    // are added by the caller, so independent prepared sessions stay isolated.
+    if matches!(predicate, PredicateExpr::True) {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let pairs = match predicate {
         PredicateExpr::And(predicates) => predicates
             .iter()
@@ -2401,6 +2411,11 @@ pub(super) fn lower_root_to_relation_key_pairs(
     right_output: &LoweredRelationInput,
     request: &QueryProgramRequest,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
+    // A true join condition is an uncorrelated existence gate. Routing keys
+    // are added by the caller, so independent prepared sessions stay isolated.
+    if matches!(predicate, PredicateExpr::True) {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let pairs = match predicate {
         PredicateExpr::And(predicates) => predicates
             .iter()
@@ -3009,25 +3024,6 @@ fn lower_join_key_ref(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<String, UnsupportedReason> {
-    if let NormalizedValueRef::SourceField {
-        source: value_source,
-        field,
-    } = value
-        && value_source == source_id
-        && field == "id"
-    {
-        let declared_id = user_column_field(field);
-        if source
-            .row_shape
-            .descriptor
-            .fields()
-            .iter()
-            .any(|candidate| candidate.name.as_deref() == Some(declared_id.as_str()))
-        {
-            return Ok(declared_id);
-        }
-        return require_source_field(source, &source.row_shape.row_uuid_field);
-    }
     match lower_value_ref(value, source_id, source, request)? {
         LoweredValueRef::Field(field) => Ok(field),
         LoweredValueRef::Literal(_) => Err(UnsupportedReason::Operator(
@@ -3645,7 +3641,7 @@ fn coerce_literal_for_source_array_element(
     let Some(value_type) = source_field_type(source, field) else {
         return value;
     };
-    match non_null_value_type(value_type) {
+    match value_type.non_nullable() {
         ValueType::Array(member) => coerce_literal_for_value_type(value, member),
         _ => value,
     }
@@ -3660,13 +3656,6 @@ fn coerce_literal_for_source_field(
         return value;
     };
     coerce_literal_for_value_type(value, value_type)
-}
-
-fn non_null_value_type(mut value_type: &ValueType) -> &ValueType {
-    while let ValueType::Nullable(inner) = value_type {
-        value_type = inner.as_ref();
-    }
-    value_type
 }
 
 pub(super) fn coerce_literal_for_value_type(

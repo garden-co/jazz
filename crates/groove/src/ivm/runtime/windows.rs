@@ -990,11 +990,42 @@ fn render_collect_by_slots(
                     .entry(child_key_descriptor.create(&child_values)?.into())
                     .or_insert_with(|| record.clone());
             }
-            let selected = collect_by_slot_window_from_records(
-                input_desc,
-                candidates.into_values().collect(),
-                slot,
-            )?;
+            let mut candidates = candidates.into_values().collect::<Vec<_>>();
+            if let Some(array_index) = slot.reference_array_field_index {
+                let mut by_id = BTreeMap::new();
+                let mut references = None;
+                for record in &candidates {
+                    let values = BorrowedRecord::new(record, &input_desc)
+                        .to_values()
+                        .map_err(IvmRuntimeError::RecordEncoding)?;
+                    if references.is_none() {
+                        let mut array = &values[array_index];
+                        while let Value::Nullable(Some(inner)) = array {
+                            array = inner;
+                        }
+                        references = Some(match array {
+                            Value::Array(ids) => ids.clone(),
+                            _ => Vec::new(),
+                        });
+                    }
+                    let id = collect_by_projected_value(
+                        &BorrowedRecord::new(record, &input_desc),
+                        &slot.child_fields[0],
+                    )?;
+                    if let Value::Uuid(id) = id {
+                        by_id.insert(id, record.clone());
+                    }
+                }
+                candidates = references
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|value| match value {
+                        Value::Uuid(id) => by_id.get(&id).cloned(),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            let selected = collect_by_slot_window_from_records(input_desc, candidates, slot)?;
             let mut children = Vec::with_capacity(selected.len());
             for record in selected {
                 let source_input = BorrowedRecord::new(&record, &input_desc);
@@ -1044,7 +1075,9 @@ fn collect_by_slot_window_from_records(
             ))
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
-    ranked.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    if !slot.reference_order {
+        ranked.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    }
     let skip = usize::try_from(slot.offset).unwrap_or(usize::MAX);
     let take = match slot.limit {
         TopByLimit::Finite(limit) => usize::try_from(limit).unwrap_or(usize::MAX),
@@ -1182,10 +1215,7 @@ fn top_by_sort_value(
     if is_sql_null_value(&value) {
         return Ok(TopBySortKey::Null);
     }
-    let mut value_type = value_type;
-    while let ValueType::Nullable(inner) = value_type {
-        value_type = inner;
-    }
+    let value_type = value_type.non_nullable();
     loop {
         match value {
             Value::Nullable(Some(inner)) => value = *inner,

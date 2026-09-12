@@ -681,11 +681,7 @@ mod tests {
     #[tokio::test]
     async fn schema_handlers_return_hashes_and_requested_schema() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let schema_hash = SchemaHash::compute(&schema);
         let state = make_state_with_schema(schema.clone()).await;
@@ -757,7 +753,7 @@ mod tests {
     #[tokio::test]
     async fn publish_schema_rejects_obsolete_bare_table_map() {
         let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .table(TableSchema::builder("users"))
             .build();
         let legacy_tables = schema
             .iter()
@@ -834,7 +830,6 @@ mod tests {
                             Json(serde_json::json!({
                                 "users": {
                                     "columns": [
-                                        { "name": "id", "column_type": { "type": "Uuid" }, "nullable": false },
                                         { "name": "name", "column_type": { "type": "Text" }, "nullable": false }
                                     ]
                                 }
@@ -1030,11 +1025,7 @@ mod tests {
         });
 
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let state = make_edge_state_with_schema(
             schema.clone(),
@@ -1246,11 +1237,7 @@ mod tests {
         });
 
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let state = make_edge_state_with_schema(schema, format!("http://{authority_addr}")).await;
         let app = make_test_router(state);
@@ -1311,11 +1298,7 @@ mod tests {
         });
 
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let state = make_edge_state_with_schema(schema, format!("http://{authority_addr}")).await;
         let app = make_test_router(state);
@@ -1357,11 +1340,7 @@ mod tests {
     #[tokio::test]
     async fn permissions_handlers_publish_linear_head_and_reject_stale_parent() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let schema_hash = SchemaHash::compute(&schema);
         let state = make_state_with_schema(schema).await;
@@ -1530,11 +1509,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_permissions_publications_install_only_the_winning_runtime_head() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let schema_hash = SchemaHash::compute(&schema);
         let state = make_state_with_schema(schema).await;
@@ -1668,11 +1643,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn chained_permissions_runtime_reconciliation_never_installs_stale_head() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let schema_hash = SchemaHash::compute(&schema);
         let state = make_state_with_schema(schema).await;
@@ -1815,11 +1786,7 @@ mod tests {
     #[tokio::test]
     async fn permissions_handler_returns_nulls_before_any_publish() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let state = make_state_with_schema(schema).await;
         let app = make_test_router(state);
@@ -1846,18 +1813,10 @@ mod tests {
     #[tokio::test]
     async fn schema_connectivity_handler_reports_uploaded_migration_connectivity() {
         let v1 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("email", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("email", ColumnType::Text))
             .build();
         let v2 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("email_address", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("email_address", ColumnType::Text))
             .build();
 
         let v1_hash = SchemaHash::compute(&v1);
@@ -1978,11 +1937,7 @@ mod tests {
     #[tokio::test]
     async fn publish_schema_rejects_inline_permissions() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let state = make_state_with_schema(schema.clone()).await;
         let app = make_test_router(state);
@@ -2016,11 +1971,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
 
         let forwarded = Arc::new(Mutex::new(Vec::<ForwardedAdminRequest>::new()));
@@ -2097,18 +2048,10 @@ mod tests {
     #[tokio::test]
     async fn publish_migration_requires_admin_and_persists_lens() {
         let v1 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("email", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("email", ColumnType::Text))
             .build();
         let v2 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("email_address", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("email_address", ColumnType::Text))
             .build();
 
         let v1_hash = SchemaHash::compute(&v1);
@@ -2218,18 +2161,10 @@ mod tests {
     #[tokio::test]
     async fn publish_migration_persists_table_rename_ops() {
         let v1 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("email", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("email", ColumnType::Text))
             .build();
         let v2 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("people")
-                    .column("id", ColumnType::Uuid)
-                    .column("email_address", ColumnType::Text),
-            )
+            .table(TableSchema::builder("people").column("email_address", ColumnType::Text))
             .build();
 
         let v1_hash = SchemaHash::compute(&v1);
@@ -2301,27 +2236,17 @@ mod tests {
     #[tokio::test]
     async fn publish_migration_persists_added_and_removed_table_ops() {
         let v1 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("email", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("email", ColumnType::Text))
             .table(
                 TableSchema::builder("legacy_profiles")
-                    .column("id", ColumnType::Uuid)
                     .column("bio", ColumnType::Text)
                     .nullable_column("avatar_url", ColumnType::Text),
             )
             .build();
         let v2 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("email", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("email", ColumnType::Text))
             .table(
                 TableSchema::builder("profiles")
-                    .column("id", ColumnType::Uuid)
                     .column("bio", ColumnType::Text)
                     .nullable_column("avatar_url", ColumnType::Text),
             )
@@ -2403,11 +2328,7 @@ mod tests {
     #[tokio::test]
     async fn admin_subscription_introspection_requires_admin_secret_and_valid_app_id() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let state = make_state_with_schema(schema).await;
         let app = make_test_router(state.clone());
@@ -2486,11 +2407,7 @@ mod tests {
     #[tokio::test]
     async fn admin_subscription_introspection_returns_empty_core_shell() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let state = make_state_with_schema(schema).await;
 
@@ -2527,11 +2444,7 @@ mod tests {
     #[tokio::test]
     async fn connection_schema_diagnostics_reports_mismatched_schema() {
         let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
+            .table(TableSchema::builder("users").column("name", ColumnType::Text))
             .build();
         let current_hash = SchemaHash::compute(&schema);
         let declared_hash = SchemaHash::from_bytes([9; 32]);

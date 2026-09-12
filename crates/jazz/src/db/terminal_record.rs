@@ -99,13 +99,17 @@ impl TerminalRecordState {
             };
             // Decode this collection once, rather than scanning and allocating
             // keys for every already-retained child on each later edit.
+            let mut occurrences = BTreeMap::<Vec<u8>, u64>::new();
             for child in children.iter() {
                 let Value::Record(record) = child else {
                     return Err(invalid(
                         "terminal descendant collection contains a non-record child",
                     ));
                 };
-                let key = super::terminal_child_key(child)?;
+                let row_key = super::terminal_child_key(child)?;
+                let occurrence = occurrences.entry(row_key.clone()).or_default();
+                let key = groove::ivm::terminal_occurrence_key(row_key, *occurrence);
+                *occurrence += 1;
                 let state = Self::new(record.clone())?;
                 if collection.rows.insert(key.clone(), state).is_some() {
                     return Err(invalid(
@@ -195,7 +199,13 @@ impl TerminalCollectionState {
         match edit {
             TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
                 let record = OwnedRecord::new(value.clone(), self.descriptor);
-                if super::terminal_child_key(&Value::Record(record.clone()))? != *key {
+                let row_key = super::terminal_child_key(&Value::Record(record.clone()))?;
+                let valid_key = *key == row_key
+                    || (key.len() == row_key.len() + 9
+                        && key.starts_with(&row_key)
+                        && key[row_key.len()] == 0xff
+                        && key[row_key.len() + 1..].iter().any(|byte| *byte != 0));
+                if !valid_key {
                     return Err(invalid(
                         "terminal child payload key disagrees with edit key",
                     ));

@@ -661,103 +661,14 @@ fn one_shot_filtered_read_uses_primary_key_scan_for_id_equality() {
     assert_eq!(local_metrics.source_full_scans, 0);
 }
 
+/// Alice joins a child back to a parent by matching its foreign key to the
+/// parent's generated UUID `id`.
 #[test]
-fn declared_id_column_filter_uses_declared_value_not_physical_row_uuid() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("things")
-            .column("id", PublicColumnType::Uuid)
-            .column("label", PublicColumnType::Text),
-    ));
-    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
-    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    let physical_row = row(0x11);
-    let declared_id = row(0xaa);
-    commit_mergeable_global(
-        &mut writer,
-        &mut core,
-        MergeableCommit::new("things", physical_row, 10).cells(BTreeMap::from([
-            ("id".to_owned(), Value::Uuid(declared_id.0)),
-            ("label".to_owned(), Value::String("declared id".to_owned())),
-        ])),
-    );
-
-    let query = Query::from("things").filter(eq(col("id"), lit(Value::Uuid(declared_id.0))));
-    let (selected, _) = query_rows_by_uuid(&mut core, query, DurabilityTier::Global);
-
-    assert_eq!(selected, vec![physical_row]);
-}
-
-/// A declared `id` is an ordinary user column for IN and NULL predicates;
-/// Alice's physical row UUID must not leak into either predicate evaluation.
-#[test]
-fn declared_id_column_in_and_is_null_use_declared_values() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("things")
-            .nullable_column("id", PublicColumnType::Uuid)
-            .column("label", PublicColumnType::Text),
-    ));
-    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
-    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    let matching_row = row(0x12);
-    let null_row = row(0x13);
-    let declared_id = row(0xab);
-    commit_mergeable_global(
-        &mut writer,
-        &mut core,
-        MergeableCommit::new("things", matching_row, 10).cells(BTreeMap::from([
-            (
-                "id".to_owned(),
-                Value::Nullable(Some(Box::new(Value::Uuid(declared_id.0)))),
-            ),
-            ("label".to_owned(), Value::String("matching".to_owned())),
-        ])),
-    );
-    commit_mergeable_global(
-        &mut writer,
-        &mut core,
-        MergeableCommit::new("things", null_row, 11).cells(BTreeMap::from([
-            ("id".to_owned(), Value::Nullable(None)),
-            ("label".to_owned(), Value::String("null".to_owned())),
-        ])),
-    );
-
-    let (in_rows, _) = query_rows_by_uuid(
-        &mut core,
-        Query::from("things").filter(in_list(
-            col("id"),
-            [lit(Value::Nullable(Some(Box::new(Value::Uuid(declared_id.0)))) )],
-        )),
-        DurabilityTier::Global,
-    );
-    let (null_rows, _) = query_rows_by_uuid(
-        &mut core,
-        Query::from("things").filter(is_null(col("id"))),
-        DurabilityTier::Global,
-    );
-    assert_eq!(in_rows, vec![matching_row]);
-    assert_eq!(null_rows, vec![null_row]);
-
-    let missing_id_schema = build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("without_declared_id")
-                .column("label", PublicColumnType::Text),
-        ),
-    );
-    assert!(Query::from("without_declared_id")
-        .filter(is_null(col("id")))
-        .validate(&missing_id_schema)
-        .is_err());
-}
-
-/// Alice joins a child back to a parent through the parent's declared `id`,
-/// rather than accidentally comparing the child FK with the physical row UUID.
-#[test]
-fn inverse_join_via_column_uses_root_declared_id() {
+fn inverse_join_via_column_uses_root_row_id() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
                 PublicTableSchemaBuilder::new("parents")
-                    .column("id", PublicColumnType::Uuid)
                     .column("label", PublicColumnType::Text),
             )
             .table(
@@ -770,12 +681,10 @@ fn inverse_join_via_column_uses_root_declared_id() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let parent = row(0x21);
     let child = row(0x22);
-    let declared_parent_id = row(0xac);
     commit_mergeable_global(
         &mut writer,
         &mut core,
         MergeableCommit::new("parents", parent, 10).cells(BTreeMap::from([
-            ("id".to_owned(), Value::Uuid(declared_parent_id.0)),
             ("label".to_owned(), Value::String("parent".to_owned())),
         ])),
     );
@@ -783,7 +692,7 @@ fn inverse_join_via_column_uses_root_declared_id() {
         &mut writer,
         &mut core,
         MergeableCommit::new("children", child, 11).cells(BTreeMap::from([
-            ("parent".to_owned(), Value::Uuid(declared_parent_id.0)),
+            ("parent".to_owned(), Value::Uuid(parent.0)),
             ("label".to_owned(), Value::String("child".to_owned())),
         ])),
     );
@@ -794,56 +703,6 @@ fn inverse_join_via_column_uses_root_declared_id() {
         DurabilityTier::Global,
     );
     assert_eq!(rows, vec![parent]);
-}
-
-/// Alice's declared IDs control final one-shot ordering and multi-row
-/// pagination, even when their physical row UUID order is the opposite.
-#[test]
-fn declared_id_order_and_pagination_use_declared_values() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("things")
-            .column("id", PublicColumnType::Uuid)
-            .column("label", PublicColumnType::Text),
-    ));
-    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
-    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    let physically_first = row(0x31);
-    let physically_second = row(0x32);
-    let physically_third = row(0x33);
-    commit_mergeable_global(
-        &mut writer,
-        &mut core,
-        MergeableCommit::new("things", physically_first, 10).cells(BTreeMap::from([
-            ("id".to_owned(), Value::Uuid(row(0xf1).0)),
-            ("label".to_owned(), Value::String("later".to_owned())),
-        ])),
-    );
-    commit_mergeable_global(
-        &mut writer,
-        &mut core,
-        MergeableCommit::new("things", physically_third, 12).cells(BTreeMap::from([
-            ("id".to_owned(), Value::Uuid(row(0x80).0)),
-            ("label".to_owned(), Value::String("middle".to_owned())),
-        ])),
-    );
-    commit_mergeable_global(
-        &mut writer,
-        &mut core,
-        MergeableCommit::new("things", physically_second, 11).cells(BTreeMap::from([
-            ("id".to_owned(), Value::Uuid(row(0x01).0)),
-            ("label".to_owned(), Value::String("earlier".to_owned())),
-        ])),
-    );
-
-    let (rows, _) = query_rows_by_uuid(
-        &mut core,
-        Query::from("things")
-            .order_by("id", OrderDirection::Asc)
-            .offset(1)
-            .limit(2),
-        DurabilityTier::Global,
-    );
-    assert_eq!(rows, vec![physically_third, physically_first]);
 }
 
 #[test]

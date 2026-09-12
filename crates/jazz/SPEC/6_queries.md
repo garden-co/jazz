@@ -646,32 +646,46 @@ source resolver already applies source authorization and schema projection
 before lowered query composition (`crates/jazz/src/node/query_eval.rs:537-1066`,
 `2036-2184`); this target relies on that existing source boundary.
 
-### 6.4.2 Default result ordering
+### 6.4.2 Uncorrelated policy existence
+
+`Exists` and `ExistsRel` may test a relation without referencing the
+protected row. Lowering represents this as `JoinTarget::Uncorrelated`. A semijoin
+with no data keys retains each protected row once while the filtered proof relation
+is nonempty. Removing the last matching proof retracts the result.
+
+### 6.4.3 Default result ordering
 
 Ordering is a core-owned query semantic: it must be expressed in the lowered
 plan and carried through delivered results and delta positions, never
 re-derived by binding layers (ch. 13 §13.13).
 
-Decision, Anselm 2026-07-18: when a relation-valued result has no explicit
-`order_by`, its default order is ascending row id (`RowUuid`). This applies at
-every relation-valued result boundary: root query rows, relation payloads from
-`array_subqueries`, and nested include/relation subtrees. A parent row's child
-relation is therefore ordered by child row id unless that child relation carries
-its own explicit `order_by`. The default is intentionally cheap: it matches
-primary-index scan order for row tables, is stable under updates because row ids
-are immutable, and for uuidv7-generated ids approximates creation-time order.
+Without explicit `order_by`, root rows and reverse-relation includes default to
+ascending row id (`RowUuid`). Forward array-FK includes instead hydrate the stored
+reference sequence, preserving its order and repeated references at every nesting
+level. For example, `[B, A, B]` becomes `[rowB, rowA, rowB]`; all copies expose the
+same original child `id`. Filtering and unavailable or unreadable children omit
+all affected occurrences without modifying the stored array. Thus filtering out A
+produces `[rowB, rowB]`, while a missing B produces `[rowA]`.
 
-Explicit `order_by` overrides the row-id primary ordering for the result boundary
+Explicit `order_by` overrides the default primary ordering for the result boundary
 where it appears. Ordered row-valued results remain total and replay-stable:
 after the user-declared order terms, ties are broken by ascending row id unless
 the query surface later exposes an explicit, stable tie policy. Child-local
 `order_by` overrides only that child relation's ordering and does not reorder
-parents or sibling relation payloads. A child relation's default and tie row id
+parents or sibling relation payloads. The row id used for relation defaults and explicit ordering ties
 is the child source row id, and its ordering is independently evaluated within
 each parent/correlation group before that child's `offset` and `limit`; it never
 uses parent order or another group’s child rows. This same comparator is required
 for one-shot snapshots, maintained hydration, resets, and whole-parent
 replacements.
+
+Explicit child `order_by` sorts the hydrated occurrences (including repeats) by
+the requested fields with child row-id ties. Offset and limit apply after
+filtering and ordering, and count occurrences: `[B, A, B]` with offset 1 and limit
+2 produces `[rowA, rowB]`. Without explicit ordering, these modifiers operate on
+the surviving stored sequence. Snapshot, subscription hydration, reset, and live
+edits MUST agree. Reverse relations retain distinct child rows in ascending row-id
+order by default, even if a child's FK array mentions the parent repeatedly.
 
 For a flat joined result, `order_by` is the only cross-source ordering contract:
 its qualified fields order output occurrences and the complete occurrence id is
@@ -709,7 +723,7 @@ receiver-local collector alone turns them into application positions. This is
 what lets the same query remain meaningful when a local-first receiver also has
 eligible pending inputs that were absent from the authority's evaluation.
 
-### 6.4.3 Aggregate result representation
+### 6.4.4 Aggregate result representation
 
 An aggregate or grouped query returns its results through the same row-shaped
 surface as any other query, because a caller should not need a second result
@@ -792,7 +806,7 @@ delivery otherwise follows ch. 16 §16.6.
 These are representation requirements, not delivery-strategy requirements: a
 one-shot read, an initial snapshot, a maintained delta, and a settled subscriber
 read of the same aggregate at the same frontier MUST all reduce to the same
-represented result, per §6.4.2.
+represented result, per §6.4.3.
 
 Decision, Anselm 2026-08-07: a scalar global aggregate over no input rows
 delivers a present row — `0` for `count`, `NULL` for `sum`, `avg`, `min` and
@@ -908,8 +922,8 @@ surface. The test plan below records additional intended coverage.
   `packages/jazz-tools/tests/ts-dsl/query-api.test.ts` so result arrays that
   currently sort ids before comparison become ordered-equality assertions. Add
   explicit cases for
-  default root ordering, reverse/forward relation include arrays ordered by
-  child id, nested structured arrays, and explicit `orderBy` preserving its
+  default root ordering, reverse relation include arrays ordered by
+  child id, forward array-FK reference order and repeats, nested structured arrays, and explicit `orderBy` preserving its
   override with row-id tie-breaks.
 - Add grouped/aggregate conformance cases for default group-key ordering:
   scalar/global aggregate output, single-column groups, and composite groups
@@ -928,7 +942,7 @@ surface. The test plan below records additional intended coverage.
   `row_input!`, and public query/subscription APIs. Do not introduce JSON-like
   schema, permission, or query definitions for this ordering coverage.
 
-### 6.11 Subsumed query and SQL notes
+### 6.8 Subsumed query and SQL notes
 
 The old QueryManager notes are now treated as migration context for this
 chapter's stable query vocabulary. Jazz keeps one normalized query AST for

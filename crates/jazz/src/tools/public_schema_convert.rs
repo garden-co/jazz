@@ -501,6 +501,12 @@ fn convert_table(
     let mut merge_strategies = BTreeMap::new();
     let mut column_names = BTreeSet::new();
     for column in &table.columns.columns {
+        if column.name.as_str() == "id" {
+            return Err(err(
+                format!("$.{}.columns.id", name.as_str()),
+                "column name \"id\" is reserved for the automatically generated UUID row ID",
+            ));
+        }
         if column
             .name
             .as_str()
@@ -1341,38 +1347,42 @@ fn append_exists_policy_clause(
         }
     }
 
-    if outer_correlations.is_empty() {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "core schema policies require EXISTS to include an equality against __jazz_outer_row",
+    let query = if outer_correlations.is_empty() {
+        let mut query = query;
+        query.joins.push(uncorrelated_exists_join(
+            exists_table.to_owned(),
+            filters,
+            Vec::new(),
         ));
-    }
-    let primary_index = outer_correlations
-        .iter()
-        .position(|correlation| correlation.join_column == "id")
-        .unwrap_or(0);
-    let primary = outer_correlations.remove(primary_index);
-    let join_column = primary.join_column;
-    let source_column = primary.source_column;
-    let correlated_filters = outer_correlations;
-
-    let query = if join_column == "id" {
-        query.join_via_row_id_with_correlations(
-            exists_table,
-            source_column,
-            correlated_filters,
-            filters,
-        )
-    } else if correlated_filters.is_empty() {
-        query.join_via_column(exists_table, join_column, source_column, filters)
+        query
     } else {
-        query.join_via_column_with_correlations(
-            exists_table,
-            join_column,
-            source_column,
-            correlated_filters,
-            filters,
-        )
+        let primary_index = outer_correlations
+            .iter()
+            .position(|correlation| correlation.join_column == "id")
+            .unwrap_or(0);
+        let primary = outer_correlations.remove(primary_index);
+        let join_column = primary.join_column;
+        let source_column = primary.source_column;
+        let correlated_filters = outer_correlations;
+
+        if join_column == "id" {
+            query.join_via_row_id_with_correlations(
+                exists_table,
+                source_column,
+                correlated_filters,
+                filters,
+            )
+        } else if correlated_filters.is_empty() {
+            query.join_via_column(exists_table, join_column, source_column, filters)
+        } else {
+            query.join_via_column_with_correlations(
+                exists_table,
+                join_column,
+                source_column,
+                correlated_filters,
+                filters,
+            )
+        }
     };
 
     // Legacy `Exists` has one outer-row scope, even when an all-of nests
@@ -1520,6 +1530,67 @@ fn validate_exists_rel_policy_join_conditions(
     }
 }
 
+// Outer references inside boolean predicates must not be mistaken for an
+// independent proof merely because no top-level equality could be extracted.
+fn rel_has_outer_references(rel: &RelExpr) -> bool {
+    fn value_is_outer(value: &RelValueRef) -> bool {
+        matches!(
+            value,
+            RelValueRef::OuterColumn(_) | RelValueRef::RowId(RowIdRef::Outer)
+        )
+    }
+    fn predicate_has_outer(predicate: &RelPredicateExpr) -> bool {
+        match predicate {
+            RelPredicateExpr::Cmp { right, .. } | RelPredicateExpr::Contains { right, .. } => {
+                value_is_outer(right)
+            }
+            RelPredicateExpr::In { values, .. } => values.iter().any(value_is_outer),
+            RelPredicateExpr::And(children) | RelPredicateExpr::Or(children) => {
+                children.iter().any(predicate_has_outer)
+            }
+            RelPredicateExpr::Not(child) | RelPredicateExpr::EnumMatch { payload: child, .. } => {
+                predicate_has_outer(child)
+            }
+            _ => false,
+        }
+    }
+    match rel {
+        RelExpr::TableScan { .. } => false,
+        RelExpr::Filter { input, predicate } => {
+            rel_has_outer_references(input) || predicate_has_outer(predicate)
+        }
+        RelExpr::Project { input, .. } => rel_has_outer_references(input),
+        RelExpr::Join { left, right, .. } => {
+            rel_has_outer_references(left) || rel_has_outer_references(right)
+        }
+        RelExpr::Union { inputs } => inputs
+            .iter()
+            .any(|arm| rel_has_outer_references(&arm.input)),
+        RelExpr::Gather { .. } => true,
+    }
+}
+
+fn join_has_outer_correlations(join: &JoinVia) -> bool {
+    !join.correlated_filters.is_empty() || join.nested_joins.iter().any(join_has_outer_correlations)
+}
+
+fn uncorrelated_exists_join(
+    table: String,
+    filters: Vec<Predicate>,
+    nested_joins: Vec<JoinVia>,
+) -> JoinVia {
+    JoinVia {
+        table,
+        on_column: String::new(),
+        target: JoinTarget::Uncorrelated,
+        source_column: None,
+        source_lookup: None,
+        correlated_filters: Vec::new(),
+        filters,
+        nested_joins,
+    }
+}
+
 fn append_exists_rel_policy_clause(
     table: &TableName,
     path: &str,
@@ -1539,13 +1610,35 @@ fn append_exists_rel_policy_clause(
                 .filters
                 .iter()
                 .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
-        })
-        .ok_or_else(|| {
+        });
+    let Some(correlation_index) = correlation_index else {
+        if rel_has_outer_references(rel)
+            || !lowered.reachable.is_empty()
+            || lowered.pending_reachable.is_some()
+            || lowered.joins.iter().any(join_has_outer_correlations)
+        {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "uncorrelated ExistsRel cannot contain unresolved outer references or reachability",
+            ));
+        }
+        let proof_table = lowered.table.ok_or_else(|| {
             err(
                 format!("$.{}.{}", table.as_str(), path),
-                "core schema ExistsRel policies must include an outer row equality",
+                "uncorrelated ExistsRel requires a table relation",
             )
         })?;
+        query.joins.push(uncorrelated_exists_join(
+            proof_table,
+            lowered
+                .filters
+                .into_iter()
+                .map(|filter| filter.predicate)
+                .collect(),
+            lowered.joins,
+        ));
+        return Ok(query);
+    };
     let correlation = lowered.filters.remove(correlation_index);
     let Some(correlation_column) = correlation.column.clone() else {
         return Err(err(
@@ -2501,6 +2594,15 @@ fn inherited_parent_branch_to_child_query(
             .map(|lookup| lookup.row_id_source_column.clone())
             .or(source_column);
         query = match target {
+            JoinTarget::Uncorrelated => {
+                // An independent parent proof still requires the referenced
+                // parent row to exist. It cannot authorize a dangling FK.
+                query = query.join_via_row_id(parent_table.as_str(), via_column, Vec::new());
+                query
+                    .joins
+                    .push(uncorrelated_exists_join(join_table, filters, nested_joins));
+                query
+            }
             JoinTarget::Column => {
                 if let Some(source_column) = source_column {
                     let source_lookup = JoinSourceLookup {

@@ -392,7 +392,38 @@ pub(super) fn collect_by_slots(
             }
             validate_collect_by_key_types(input, &order_field_indices)?;
             validate_collect_by_key_types(input, &tie_field_indices)?;
+            let reference_array_field_index = builder
+                .reference_array_col
+                .as_ref()
+                .map(|field| resolve_field_ref(input, field))
+                .transpose()?;
+            if let Some(index) = reference_array_field_index {
+                let ty = input.fields()[index].value_type.non_nullable();
+                if !ty.is_array_fk() {
+                    return Err(IvmRuntimeError::InvalidCollectBy(
+                        "reference sequence must be a UUID array".into(),
+                    ));
+                }
+            }
             let child_descriptor = collect_by_slot_descriptor(input, builder, depth)?;
+            if builder.reference_order && reference_array_field_index.is_none() {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "reference ordering requires a reference array".into(),
+                ));
+            }
+            if reference_array_field_index.is_some()
+                && !matches!(
+                    child_descriptor
+                        .fields()
+                        .first()
+                        .map(|field| &field.value_type),
+                    Some(ValueType::Uuid)
+                )
+            {
+                return Err(IvmRuntimeError::InvalidCollectBy(
+                    "a reference collection must project its child UUID first".into(),
+                ));
+            }
             let child_indices = child_fields
                 .iter()
                 .map(|field| field.field_idx)
@@ -443,6 +474,8 @@ pub(super) fn collect_by_slots(
                     .map(|field| field_name_at(input, *field))
                     .collect::<Result<Vec<_>, _>>()?,
                 presence_field_index,
+                reference_array_field_index,
+                reference_order: builder.reference_order,
                 sort_field_indices: order_field_indices
                     .iter()
                     .chain(&tie_field_indices)

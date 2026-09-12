@@ -3,14 +3,30 @@
 //! The node runtime owns shared connection state, scheduling, pending uploads,
 //! subscription refresh, write-state notification, and connection lifecycle.
 
+use super::mutation_errors::{
+    MutationErrorWait, mutation_error_event, queue_mutation_error, queued_mutation_error_event,
+    take_pending_mutation_error_delivery,
+};
 use super::peer_connection::{
     ConnectionLink, PeerConnection, SubscriberConnectionState, UpstreamConnectionState,
-    coverage_group_subscription_key, mutation_error_event, take_pending_mutation_error_delivery,
+    coverage_group_subscription_key,
 };
 use super::*;
 
 type PeerOwnerGuards<'a, S> = BTreeMap<usize, futures::lock::MutexGuard<'a, PeerConnection<S>>>;
 use crate::time::TxTime;
+
+/// Wake observers after any transaction-state transition, whether produced by
+/// a queued mutation, local persistence, or an upstream acknowledgement.
+pub(super) fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) {
+    let Some(waiters) = waiters.borrow_mut().remove(&tx_id) else {
+        return;
+    };
+    for waiter in waiters {
+        let WriteStateWaiterNotify::Future(sender) = waiter.notify;
+        let _ = sender.send(());
+    }
+}
 
 /// Test-only rendezvous after refresh has detached a public stream's local
 /// maintained subscription. It makes the cancellation/finalization handoff
@@ -339,6 +355,7 @@ where
             mutation_errors: Rc::new(RefCell::new(MutationErrorState {
                 callback: None,
                 pending: pending_mutation_errors,
+                application_waiters: BTreeMap::new(),
             })),
             browser_relay_recovered_tx_ids: Rc::new(RefCell::new(BTreeSet::new())),
             next_write_state_waiter_id: Cell::new(1),
@@ -427,7 +444,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: Some(tx_id),
+                transaction: Some((tx_id, TxKind::Mergeable)),
                 open_tx_id: None,
                 future,
                 status: Some(Rc::clone(&status)),
@@ -446,7 +463,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: None,
+                transaction: None,
                 open_tx_id: Some(open_tx_id),
                 future,
                 status: None,
@@ -492,7 +509,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: None,
+                transaction: None,
                 open_tx_id,
                 future: Box::pin(async move {
                     let result = read.await;
@@ -518,6 +535,7 @@ where
         &self,
         open_tx_id: OpenTransactionId,
         tx_id: TxId,
+        kind: TxKind,
         future: QueuedMutationFuture,
     ) -> Rc<RefCell<QueuedMutationStatus>> {
         let status = Rc::new(RefCell::new(QueuedMutationStatus::Pending));
@@ -525,7 +543,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: Some(tx_id),
+                transaction: Some((tx_id, kind)),
                 open_tx_id: Some(open_tx_id),
                 future,
                 status: Some(Rc::clone(&status)),
@@ -547,7 +565,7 @@ where
         self.queued_mutations
             .borrow_mut()
             .push_back(QueuedMutationOperation {
-                tx_id: None,
+                transaction: None,
                 open_tx_id: None,
                 future,
                 status: None,
@@ -615,7 +633,7 @@ where
         if let Some(completion) = operation.completion.take() {
             completion(result.clone());
         }
-        if let Some(tx_id) = operation.tx_id {
+        if let Some((tx_id, _)) = operation.transaction {
             self.reserved_mutations.borrow_mut().remove(&tx_id);
         }
         if let Err(error) = &result
@@ -626,23 +644,27 @@ where
                 .entry(open_tx_id)
                 .or_insert_with(|| error.clone());
         }
-        if let (Some(tx_id), Some(status)) = (operation.tx_id, operation.status) {
+        if let (Some((tx_id, kind)), Some(status)) = (operation.transaction, operation.status) {
             let terminal_failed = result.is_err();
             match result {
                 Ok(()) => *status.borrow_mut() = QueuedMutationStatus::Published,
                 Err(error) => {
                     *status.borrow_mut() = QueuedMutationStatus::Failed(error.clone());
+                    // Validation can fail before any durable transaction exists.
+                    // Retain a live fallback event as well as the wait result; do
+                    // not manufacture a persisted rejection for an unpublished write.
+                    queue_mutation_error(
+                        &self.mutation_errors,
+                        &self.scheduler,
+                        tx_id,
+                        queued_mutation_error_event(tx_id, kind, &error),
+                    );
                     self.queued_mutation_failures
                         .borrow_mut()
                         .insert(tx_id, error);
                 }
             }
-            if let Some(waiters) = self.write_state_waiters.borrow_mut().remove(&tx_id) {
-                for waiter in waiters {
-                    let WriteStateWaiterNotify::Future(sender) = waiter.notify;
-                    let _ = sender.send(());
-                }
-            }
+            notify_write_state_waiters(&self.write_state_waiters, tx_id);
             if terminal_failed && let Some(open_tx_id) = operation.open_tx_id {
                 let node = Rc::clone(&self.node);
                 self.enqueue_transaction_cleanup(Box::pin(async move {
@@ -654,7 +676,7 @@ where
                 }));
             }
         }
-        if operation.tx_id.is_some()
+        if operation.transaction.is_some()
             && let Some(open_tx_id) = operation.open_tx_id
         {
             self.queued_open_transaction_failures
@@ -850,6 +872,10 @@ where
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(tx_id)) => {
                     debug_assert_eq!(pending.published.tx_id(), tx_id);
+                    // Persistence has now advanced durability from None to
+                    // Local. Wake waits registered before this receipt; merely
+                    // polling their futures cannot advance a pending state-change channel.
+                    notify_write_state_waiters(&self.write_state_waiters, tx_id);
                     self.queue_pending_upload(tx_id, pending.upload_unit);
                 }
             }
@@ -1444,14 +1470,13 @@ where
         }
     }
 
-    async fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
-        let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
+    fn consume_mutation_error(&self, tx_id: TxId) {
+        self.mutation_errors.borrow_mut().pending.remove(&tx_id);
         let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
         if retained {
             self.deferred_rejection_discards.borrow_mut().insert(tx_id);
             self.schedule_tick(TickUrgency::Immediate);
         }
-        Ok(pending.is_some() || retained)
     }
 
     #[cfg(test)]
@@ -1519,12 +1544,7 @@ where
         };
         let satisfied = transaction_satisfies_wait(&fate, global_time, durability, tier);
         match fate {
-            Fate::Rejected(reason) => {
-                if let Err(error) = self.consume_mutation_error(tx_id).await {
-                    tracing::warn!(?tx_id, %error, "failed to consume waited mutation error");
-                }
-                Some(Err(write_rejected(tx_id, reason)))
-            }
+            Fate::Rejected(reason) => Some(Err(write_rejected(tx_id, reason))),
             Fate::Pending | Fate::Accepted if satisfied => Some(Ok(tx_id)),
             Fate::Pending | Fate::Accepted => None,
         }
@@ -1576,16 +1596,19 @@ where
     }
 
     pub(super) fn take_queued_mutation_failure(&self, tx_id: TxId) -> Option<Error> {
-        self.queued_mutation_failures.borrow_mut().remove(&tx_id)
+        let error = self.queued_mutation_failures.borrow_mut().remove(&tx_id)?;
+        // A binding returning the failure synchronously has already reported it.
+        self.consume_mutation_error(tx_id);
+        Some(error)
     }
 
     pub(super) fn wait_for_transaction_with(
         self: &Rc<Self>,
         tx_id: TxId,
-        tier: DurabilityTier,
+        options: WriteWaitOptions,
         callback: Box<dyn FnOnce(Result<TxId, Error>)>,
     ) {
-        self.wait_for_write_with(tx_id, None, tier, callback);
+        self.wait_for_write_with(tx_id, None, options, callback);
     }
 
     /// Callback wait for a binding-owned write handle. A queued empty update
@@ -1597,7 +1620,7 @@ where
         self: &Rc<Self>,
         tx_id: TxId,
         alias: Option<QueuedMutationAlias>,
-        tier: DurabilityTier,
+        options: WriteWaitOptions,
         callback: Box<dyn FnOnce(Result<TxId, Error>)>,
     ) {
         if self.mutation_owner_lifecycle.get() == MutationOwnerLifecycle::Closing {
@@ -1608,22 +1631,46 @@ where
             return;
         }
         let node = Rc::clone(self);
+        let error_wait = self.register_mutation_error_wait(tx_id, options);
         self.transaction_wait_observers
             .borrow_mut()
             .push(Box::pin(async move {
-                callback(node.wait_for_write(tx_id, alias, tier).await);
+                callback(node.wait_for_write(tx_id, alias, options, error_wait).await);
             }));
         self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    fn register_mutation_error_wait(
+        &self,
+        tx_id: TxId,
+        options: WriteWaitOptions,
+    ) -> Option<MutationErrorWait> {
+        (!options.observe_only)
+            .then(|| MutationErrorWait::new(&self.mutation_errors, &self.scheduler, tx_id))
     }
 
     async fn wait_for_write(
         &self,
         tx_id: TxId,
         alias: Option<QueuedMutationAlias>,
+        options: WriteWaitOptions,
+        _error_wait: Option<MutationErrorWait>,
+    ) -> Result<TxId, Error> {
+        let outcome = self.observe_write(tx_id, alias, options.tier).await;
+        if outcome.is_err() && !options.observe_only {
+            self.consume_mutation_error(tx_id);
+        }
+        outcome
+    }
+
+    async fn observe_write(
+        &self,
+        tx_id: TxId,
+        alias: Option<QueuedMutationAlias>,
         tier: DurabilityTier,
     ) -> Result<TxId, Error> {
         let Some(alias) = alias else {
-            return self.wait_for_transaction(tx_id, tier).await;
+            return self.observe_transaction(tx_id, tier).await;
         };
         loop {
             let target_tx_id = { *alias.borrow() };
@@ -1687,8 +1734,13 @@ where
     pub(super) async fn wait_for_transaction(
         &self,
         tx_id: TxId,
-        tier: DurabilityTier,
+        options: WriteWaitOptions,
     ) -> Result<TxId, Error> {
+        let error_wait = self.register_mutation_error_wait(tx_id, options);
+        self.wait_for_write(tx_id, None, options, error_wait).await
+    }
+
+    async fn observe_transaction(&self, tx_id: TxId, tier: DurabilityTier) -> Result<TxId, Error> {
         loop {
             if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier).await {
                 return outcome;
@@ -1757,16 +1809,16 @@ where
         .await
     }
 
-    fn deliver_pending_mutation_errors(&self) {
+    /// Deliver only at the start of the outer Db turn, before queued mutations
+    /// can produce new failures. All origins get the same following-turn
+    /// opportunity for an application wait to claim the error.
+    pub(super) fn deliver_pending_mutation_errors(&self) {
         let Some((callback, events)) = take_pending_mutation_error_delivery(&self.mutation_errors)
         else {
             return;
         };
         for (tx_id, event) in events {
-            if let Err(error) = crate::db::block_on(self.node.borrow_mut().discard_rejection(tx_id))
-            {
-                tracing::warn!(?tx_id, %error, "failed to acknowledge delivered mutation error");
-            }
+            self.consume_mutation_error(tx_id);
             callback(&event);
         }
     }
@@ -3130,7 +3182,6 @@ where
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
         self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
-        self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
@@ -3628,7 +3679,7 @@ struct DetachedSubscriptionRefresh {
     snapshot_index: RelationSnapshotIndex,
     snapshot_source: SubscriptionSnapshotSource,
     settled: bool,
-    sender: UnboundedSender<SubscriptionEvent>,
+    sender: SubscriptionSender,
     local_subscription_cleanup: Rc<Cell<Option<(u64, groove::ivm::SubscriptionId)>>>,
 }
 
@@ -4059,6 +4110,12 @@ where
                 *publishable = settled || !added.is_empty() || !removed.is_empty();
             }
             let mut state_ref = state.borrow_mut();
+            let publication_before = state_ref.sender.checkpoint(
+                read_tier,
+                settled,
+                &state_ref.snapshot,
+                &state_ref.snapshot_index,
+            )?;
             state_ref.groove_runtime_token = groove_runtime_token;
             state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
             state_ref.snapshot_index = RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
@@ -4083,9 +4140,17 @@ where
             // Do not enqueue that provisional frame merely for the stream
             // facade to discard later: raw/poll consumers must not observe a
             // stale empty opening before the authoritative reset.
-            if subscription_event_is_publishable(&event)
-                && state_ref.sender.unbounded_send(event).is_ok()
-            {
+            let materialized =
+                state_ref
+                    .sender
+                    .materialized(&node.borrow(), shape.query(), &event)?;
+            if state_ref.sender.publish(
+                event,
+                publication_before,
+                &state_ref.snapshot,
+                &state_ref.snapshot_index,
+                materialized,
+            )? {
                 changed += 1;
             }
             drop(state_ref);
@@ -4361,6 +4426,12 @@ where
                         .await;
                     refresh.maintained = Some(maintained);
                     let materialized = materialized?;
+                    let publication_before = refresh.sender.checkpoint(
+                        read_tier,
+                        false,
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                    )?;
                     let replacement = materialized.snapshot;
                     refresh.snapshot = relation_snapshot_with_delta_slack(&replacement);
                     refresh.snapshot_index = relation_snapshot_index_with_root_occurrences(
@@ -4413,7 +4484,17 @@ where
                         );
                     }
                     retained.push(Rc::downgrade(&state));
-                    if refresh.sender.unbounded_send(event).is_ok() {
+                    let materialized =
+                        refresh
+                            .sender
+                            .materialized(&node.borrow(), shape.query(), &event)?;
+                    if refresh.sender.publish(
+                        event,
+                        publication_before,
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                        materialized,
+                    )? {
                         changed += 1;
                     }
                     continue;
@@ -4459,6 +4540,12 @@ where
                                         )
                                     })
                                     .transpose()?;
+                                let publication_before = refresh.sender.checkpoint(
+                                    read_tier,
+                                    settled,
+                                    &refresh.snapshot,
+                                    &refresh.snapshot_index,
+                                )?;
                                 let event = apply_terminal_operations_to_subscription_snapshot(
                                     &mut refresh.snapshot,
                                     &mut refresh.snapshot_index,
@@ -4502,7 +4589,18 @@ where
                                 }
                                 refresh.settled = settled;
                                 retained.push(Rc::downgrade(&state));
-                                if refresh.sender.unbounded_send(event).is_ok() {
+                                let materialized = refresh.sender.materialized(
+                                    &node.borrow(),
+                                    shape.query(),
+                                    &event,
+                                )?;
+                                if refresh.sender.publish(
+                                    event,
+                                    publication_before,
+                                    &refresh.snapshot,
+                                    &refresh.snapshot_index,
+                                    materialized,
+                                )? {
                                     changed += 1;
                                 }
                                 continue;
@@ -4520,6 +4618,12 @@ where
                             ..
                         }) => {
                             let state_ref = &mut refresh;
+                            let publication_before = state_ref.sender.checkpoint(
+                                read_tier,
+                                false,
+                                &state_ref.snapshot,
+                                &state_ref.snapshot_index,
+                            )?;
                             let previous_snapshot = materialized_subscription_snapshot(
                                 &state_ref.snapshot,
                                 &state_ref.snapshot_index,
@@ -4580,7 +4684,18 @@ where
                             }
                             state_ref.settled = settled;
                             retained.push(Rc::downgrade(&state));
-                            if state_ref.sender.unbounded_send(event).is_ok() {
+                            let materialized = state_ref.sender.materialized(
+                                &node.borrow(),
+                                shape.query(),
+                                &event,
+                            )?;
+                            if state_ref.sender.publish(
+                                event,
+                                publication_before,
+                                &state_ref.snapshot,
+                                &state_ref.snapshot_index,
+                                materialized,
+                            )? {
                                 changed += 1;
                             }
                             continue;
@@ -4593,6 +4708,12 @@ where
                         .as_ref()
                         .is_some_and(LocalMaintainedViewSubscription::has_covered_input_sources)
                 {
+                    let publication_before = refresh.sender.checkpoint(
+                        read_tier,
+                        false,
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                    )?;
                     // Local-first may already have published the exact same
                     // collector state from its provisional local input. The
                     // first authority closure still becomes installed below,
@@ -4663,7 +4784,17 @@ where
                     refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                     refresh.settled = settled;
                     retained.push(Rc::downgrade(&state));
-                    let delivered = refresh.sender.unbounded_send(event).is_ok();
+                    let materialized =
+                        refresh
+                            .sender
+                            .materialized(&node.borrow(), shape.query(), &event)?;
+                    let delivered = refresh.sender.publish(
+                        event,
+                        publication_before,
+                        &refresh.snapshot,
+                        &refresh.snapshot_index,
+                        materialized,
+                    )?;
                     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=covered_reset_delivery delivered={delivered}"
@@ -4797,6 +4928,12 @@ where
         }
         if force_reset_event || snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
+            let publication_before = state.sender.checkpoint(
+                read_tier,
+                settled,
+                &state.snapshot,
+                &state.snapshot_index,
+            )?;
             let event = if force_reset_event {
                 subscription_delta_event_with_reset(
                     snapshot_tier,
@@ -4832,7 +4969,17 @@ where
                 .unwrap_or_default();
             state.snapshot_source = snapshot_source;
             state.settled = settled;
-            if state.sender.unbounded_send(event).is_ok() {
+            let SubscriptionKind::Prepared { shape, .. } = &state.kind;
+            let materialized = state
+                .sender
+                .materialized(&node.borrow(), shape.query(), &event)?;
+            if state.sender.publish(
+                event,
+                publication_before,
+                &state.snapshot,
+                &state.snapshot_index,
+                materialized,
+            )? {
                 changed += 1;
             }
         }

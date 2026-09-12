@@ -52,9 +52,7 @@ pub(super) fn collect_layout(
         FieldProjection::Fields(fields) => selected_root.extend(
             fields
                 .iter()
-                .filter(|field| {
-                    !crate::query::is_implicit_row_id_alias(&root_source.table_schema, field)
-                })
+                .filter(|field| field.as_str() != "id")
                 .map(|field| collect_projection_source_field(root_source, field)),
         ),
     }
@@ -212,7 +210,7 @@ fn collect_slot_layouts(
                     fields
                         .iter()
                         .filter(|field| {
-                            !crate::query::is_implicit_row_id_alias(&source.table_schema, field)
+                            field.as_str() != "id"
                         })
                         .map(|field| {
                             collect_projection_source_field(source, field)
@@ -277,6 +275,8 @@ fn collect_slot_layouts(
                 fields,
                 row_id_input,
                 presence_input,
+                reference_array_input: None,
+                reference_order: false,
                 order_cols: Vec::new(),
                 tie_cols: Vec::new(),
                 offset: 0,
@@ -488,37 +488,44 @@ fn collect_flat_projection(
     for slot in collect_all_slots(&layout.slots) {
         let is_current = current_slot.is_some_and(|current| current.path == slot.path);
         for field in &slot.fields {
-            fields.push(if is_current {
-                let source = right_field(
-                    field
-                        .source_field
-                        .as_ref()
-                        .expect("collector child fields retain their source field"),
-                );
-                if field.is_row_id {
-                    ProjectField::renamed(source, &field.input)
-                } else {
-                    // Anchor rows have no child, so collector child payload
-                    // fields are nullable. Preserve that descriptor on actual
-                    // child rows as well, rather than making the union depend
-                    // on whether this particular source column is nullable.
-                    if field.value_type == field.output_value_type {
-                        // A nullable application field needs a distinct outer
-                        // anchor wrapper when the current-row source does not
-                        // already carry one. CollectBy removes only that
-                        // wrapper, preserving an inner application NULL.
-                        ProjectField::nullable(source, &field.input)
+            fields.push(
+                if is_current && slot.reference_array_input.as_ref() == Some(&field.input) {
+                    ProjectField::nullable_flat(
+                        left_field(field.source_field.as_ref().expect("reference source")),
+                        &field.input,
+                    )
+                } else if is_current {
+                    let source = right_field(
+                        field
+                            .source_field
+                            .as_ref()
+                            .expect("collector child fields retain their source field"),
+                    );
+                    if field.is_row_id {
+                        ProjectField::renamed(source, &field.input)
                     } else {
-                        // Current-row storage already carries the exact outer
-                        // wrapper required around the logical output type.
-                        ProjectField::nullable_flat(source, &field.input)
+                        // Anchor rows have no child, so collector child payload
+                        // fields are nullable. Preserve that descriptor on actual
+                        // child rows as well, rather than making the union depend
+                        // on whether this particular source column is nullable.
+                        if field.value_type == field.output_value_type {
+                            // A nullable application field needs a distinct outer
+                            // anchor wrapper when the current-row source does not
+                            // already carry one. CollectBy removes only that
+                            // wrapper, preserving an inner application NULL.
+                            ProjectField::nullable(source, &field.input)
+                        } else {
+                            // Current-row storage already carries the exact outer
+                            // wrapper required around the logical output type.
+                            ProjectField::nullable_flat(source, &field.input)
+                        }
                     }
-                }
-            } else if inherited_flat_fields.contains(&field.input) {
-                ProjectField::renamed(left_field(&field.input), &field.input)
-            } else {
-                collect_flat_default(field)?
-            });
+                } else if inherited_flat_fields.contains(&field.input) {
+                    ProjectField::renamed(left_field(&field.input), &field.input)
+                } else {
+                    collect_flat_default(field)?
+                },
+            );
         }
         fields.push(if is_current {
             ProjectField::literal(&slot.presence_input, Value::Bool(true))
@@ -593,7 +600,7 @@ pub(super) fn collect_slot_builder(
     parent_row_id: &str,
     route_fields: &BTreeSet<String>,
 ) -> CollectBySlotBuilder {
-    CollectBySlotBuilder::new(
+    let mut builder = CollectBySlotBuilder::new(
         std::iter::once(parent_row_id.to_owned()).chain(route_fields.iter().cloned()),
         slot.fields
             .iter()
@@ -619,7 +626,13 @@ pub(super) fn collect_slot_builder(
     // grandchild can still group by the same binding without exposing them in
     // the nested descriptor.
     .with_owner_key_cols(route_fields.iter().cloned())
-    .with_presence_col(&slot.presence_input)
+    .with_presence_col(&slot.presence_input);
+    builder.reference_array_col = slot
+        .reference_array_input
+        .as_ref()
+        .map(groove::ivm::FieldRef::name);
+    builder.reference_order = slot.reference_order;
+    builder
 }
 
 pub(super) fn collect_output_descriptor(

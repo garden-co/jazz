@@ -2118,11 +2118,80 @@ impl ClientDbInner {
                     CoreSubscriptionEvent::Delta {
                         reset,
                         added,
-                        updated,
+                        mut updated,
                         removed,
+                        terminal_operations,
                         settled,
                         ..
                     } => {
+                        // This compatibility stream exposes complete changed rows.
+                        // Fold descendant edits from the core stream; do not rerun a
+                        // query or discard changes whose root fields stayed equal.
+                        let complete = added
+                            .iter()
+                            .chain(&updated)
+                            .map(|row| row.occurrence_id.clone())
+                            .chain(removed.iter().map(|row| row.occurrence_id.clone()))
+                            .collect::<BTreeSet<_>>();
+                        let mut changed = BTreeMap::new();
+                        let folded = (|| -> std::result::Result<(), crate::db::Error> {
+                            for operation in terminal_operations
+                                .iter()
+                                .filter(|operation| !operation.path.is_empty())
+                            {
+                                // The tools Query AST cannot have a root UNION ALL.
+                                let occurrence =
+                                    crate::db::terminal_root_occurrence_id_with_root_union(
+                                        &operation.root_key,
+                                        false,
+                                    )?;
+                                if complete.contains(&occurrence) {
+                                    continue;
+                                }
+                                let previous = current_rows
+                                    .iter()
+                                    .find(|row| row.occurrence_id == occurrence)
+                                    .ok_or_else(|| crate::db::Error {
+                                        code: crate::db::ErrorCode::Protocol,
+                                        message: "terminal edit addressed a missing tools subscription root".into(),
+                                    })?;
+                                if !changed.contains_key(&occurrence) {
+                                    let (descriptor, raw) = previous.row.encoded_record();
+                                    changed.insert(
+                                        occurrence.clone(),
+                                        crate::db::terminal_record::TerminalRecordState::new(
+                                            groove::records::OwnedRecord::new(
+                                                raw.to_vec(),
+                                                *descriptor,
+                                            ),
+                                        )?,
+                                    );
+                                }
+                                changed
+                                    .get_mut(&occurrence)
+                                    .expect("initialized")
+                                    .apply(operation)?;
+                            }
+                            for (occurrence, state) in changed {
+                                let previous = current_rows
+                                    .iter()
+                                    .find(|row| row.occurrence_id == occurrence)
+                                    .expect("retained root");
+                                let mut next = previous.clone();
+                                next.previous_index = Some(previous.index);
+                                next.row = crate::node::CurrentRow::new_with_publication_fields(
+                                    previous.row.table().to_owned(),
+                                    state.record()?,
+                                    previous.row.publication_fields().to_vec(),
+                                );
+                                updated.push(next);
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = folded {
+                            tracing::error!(%error, "failed to apply tools subscription terminal edits");
+                            break;
+                        }
                         // A reset carries the complete replacement snapshot.
                         // Core may omit explicit removals because the reset bit
                         // already makes absence authoritative, but the public
@@ -3179,6 +3248,9 @@ impl PublicQueryDecoder {
                 let values = columns
                     .iter()
                     .map(|column| {
+                        if column == "id" {
+                            return Ok(Value::Uuid(row_id));
+                        }
                         if let Some(value) = self.core_magic_value(table, &row, column)? {
                             return Ok(value);
                         }
@@ -6217,6 +6289,55 @@ mod tests {
                 Some(&Value::Text(expected.to_owned()))
             );
         }
+    }
+
+    /// Alice filters, orders, and projects the generated UUID with explicitly assigned row IDs.
+    #[tokio::test]
+    async fn generated_id_queries_use_the_row_uuid() {
+        use crate::query::{OrderDirection, Query, col, eq, lit};
+        let alice = JazzClient::test_client(
+            SchemaBuilder::new()
+                .table(TableSchema::builder("items").column("label", ColumnType::Text))
+                .build(),
+        )
+        .await;
+        for (id, label) in [(1, "z"), (2, "a")] {
+            alice
+                .insert_with_id(
+                    "items",
+                    Uuid::from_u128(id),
+                    crate::row_input!("label" => label),
+                )
+                .expect("insert with explicit row UUID");
+        }
+        let rows = alice
+            .query_results_with_read_tier(
+                Query::from("items")
+                    .order_by("id", OrderDirection::Desc)
+                    .select(["id", "label"]),
+                ReadTier::LocalFirst,
+            )
+            .await
+            .expect("order by generated UUID");
+        assert_eq!(rows.len(), 2);
+        for (row, id) in rows.iter().zip([2, 1]) {
+            assert_eq!(
+                row.get("id"),
+                Some(&Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(id))))
+            );
+        }
+        assert_eq!(rows[0].get("label"), Some(&Value::Text("a".to_owned())));
+        assert_eq!(rows[1].get("label"), Some(&Value::Text("z".to_owned())));
+        let selected = alice
+            .query_results_with_read_tier(
+                Query::from("items")
+                    .filter(eq(col("id"), lit(Uuid::from_u128(1))))
+                    .select(["id", "label"]),
+                ReadTier::LocalFirst,
+            )
+            .await
+            .expect("filter by generated UUID");
+        assert_eq!(selected, vec![rows[1].clone()]);
     }
 
     #[tokio::test]

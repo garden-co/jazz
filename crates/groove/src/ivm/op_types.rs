@@ -412,6 +412,8 @@ pub struct CollectBySlot {
     /// Optional boolean field that distinguishes a real association row from
     /// a parent anchor retained solely to render an empty collection.
     pub presence_field_index: Option<usize>,
+    pub reference_array_field_index: Option<usize>,
+    pub reference_order: bool,
     pub sort_field_indices: Vec<usize>,
     pub sort_directions: Vec<TopByDirection>,
     pub offset: u64,

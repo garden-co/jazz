@@ -327,7 +327,7 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
         .unwrap();
     let mut borrowing_stream =
         prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let _ = block_on(borrowing_stream.next_raw()).unwrap();
+    assert!(borrowing_stream.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
@@ -737,7 +737,7 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     let mut second_subscription =
         prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(first_subscription.try_next_event().is_none());
-    assert!(opened_rows(block_on(second_subscription.next_raw()).unwrap()).is_empty());
+    assert!(second_subscription.try_next_event().is_none());
 
     client.tick().unwrap();
     server.tick().unwrap();
@@ -1013,7 +1013,7 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
 
     let query = Query::from("chats");
     let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+    assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();

@@ -4339,9 +4339,7 @@ where
         // and its deletion register. The point source is only incrementally
         // complete for an unscoped row: inside a policy graph, its content cap
         // can strand the deletion-driven membership transition.
-        let has_declared_id = table.columns.iter().any(|column| column.name == "id");
         if !table.has_any_policy()
-            && !has_declared_id
             && let Some(value) = equalities.get("id").cloned()
         {
             access_paths.insert(
@@ -5474,22 +5472,9 @@ pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -
 mod tests {
     use super::*;
 
-    /// This is an internal planner assertion because the selected physical
-    /// access path is not observable through the public query result. A
-    /// declared `id` must never be mistaken for the storage row UUID.
+    /// The generated `id` selects the physical row primary-key access path.
     #[test]
-    fn declared_id_filter_does_not_select_the_physical_primary_key() {
-        let table = TableSchema::new("things", [ColumnSchema::new("id", ColumnType::Uuid)]);
-        let declared_id = uuid::Uuid::from_u128(0x99);
-        let equalities = BTreeMap::from([("id".to_owned(), Value::Uuid(declared_id))]);
-
-        assert!(select_current_access_path(&table, &equalities).is_none());
-    }
-
-    /// A table without a declared `id` retains the legacy physical row-id
-    /// primary-key access path.
-    #[test]
-    fn missing_declared_id_filter_selects_the_physical_primary_key() {
+    fn id_filter_selects_the_physical_primary_key() {
         let table = TableSchema::new("things", [ColumnSchema::new("label", ColumnType::String)]);
         let row_id = uuid::Uuid::from_u128(0x9a);
         let equalities = BTreeMap::from([("id".to_owned(), Value::Uuid(row_id))]);
