@@ -1142,6 +1142,128 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
         .await;
 }
 
+/// A maintained grouped AVG keeps a finite maximum when two distinct rows each
+/// contain `f64::MAX`, and retracts the aggregate as both rows are deleted.
+///
+/// writer ──insert max──► server ──AVG update──► subscriber
+/// writer ──delete rows──► server ──retract group──► subscriber
+#[tokio::test(flavor = "current_thread")]
+async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = double_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
+                schema.clone(),
+                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa20",
+            ))
+            .await
+            .expect("connect writer");
+            let client = jazz_testkit::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa21"),
+            )
+            .await
+            .expect("connect client");
+            let avg_query = jazz::query::Query::from("metrics")
+                .avg("score")
+                .group_by("bucket");
+            let mut avg_stream = ObservedSubscription::new(
+                client
+                    .subscribe(avg_query.clone())
+                    .await
+                    .expect("subscribe grouped double avg"),
+                &avg_query,
+                aggregate_descriptor([
+                    ("bucket", ValueType::String),
+                    ("avg_score", ValueType::F64),
+                ]),
+            );
+
+            let first_delivery = avg_stream.delivered_deltas + 1;
+            let max = f64::MAX;
+            let (first, _, tx) = writer
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "same", "score" => Value::Double(max)),
+                )
+                .expect("insert first maximum metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            avg_stream
+                .wait_for_values_since(
+                    first_delivery,
+                    vec![vec![Value::Text("same".to_owned()), Value::Double(max)]],
+                    "AVG of the first maximum is finite",
+                )
+                .await;
+            let second_delivery = avg_stream.delivered_deltas + 1;
+
+            let (second, _, tx) = writer
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "same", "score" => Value::Double(max)),
+                )
+                .expect("insert second maximum metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            avg_stream
+                .assert_values_remain(
+                    vec![vec![Value::Text("same".to_owned()), Value::Double(max)]],
+                    Duration::from_millis(250),
+                    "AVG of two maximum values remains exactly MAX",
+                )
+                .await;
+            let visible_avg = match avg_stream.values().as_slice() {
+                [row] => match row.as_slice() {
+                    [Value::Text(_), Value::Double(value)] => *value,
+                    other => panic!("unexpected AVG row: {other:?}"),
+                },
+                rows => panic!("unexpected AVG rows: {rows:?}"),
+            };
+            assert!(visible_avg.is_finite(), "AVG must remain finite");
+            assert_eq!(visible_avg, max, "AVG must equal f64::MAX exactly");
+
+            let first_delete_delivery = avg_stream.delivered_deltas + 1;
+            let tx = writer.delete(first).expect("delete first maximum metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            avg_stream
+                .assert_values_remain(
+                    vec![vec![Value::Text("same".to_owned()), Value::Double(max)]],
+                    Duration::from_millis(250),
+                    "AVG remains MAX after deleting one maximum",
+                )
+                .await;
+
+            let last_delete_delivery = avg_stream.delivered_deltas + 1;
+            let tx = writer.delete(second).expect("delete second maximum metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            avg_stream
+                .wait_for_values_since(
+                    last_delete_delivery,
+                    Vec::new(),
+                    "AVG group is retracted after last deletion",
+                )
+                .await;
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
     tokio::task::LocalSet::new()
