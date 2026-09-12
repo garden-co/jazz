@@ -174,6 +174,9 @@ pub(crate) struct MaintainedSubscriptionView {
     /// ordered operation.
     source_fact_weights: BTreeMap<ProgramFactEntry, [i64; 3]>,
     selected_deletion_witnesses: BTreeMap<ProgramFactEntry, VersionRow>,
+    #[cfg(feature = "testing")]
+    witness_overlap:
+        Option<BTreeMap<(ProgramSourceId, VersionIdentity), (VersionRow, usize, usize)>>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -200,6 +203,8 @@ impl Default for MaintainedSubscriptionView {
             inline_content_branch_keys: BTreeSet::new(),
             source_fact_weights: BTreeMap::new(),
             selected_deletion_witnesses: BTreeMap::new(),
+            #[cfg(feature = "testing")]
+            witness_overlap: None,
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
         }
@@ -495,6 +500,11 @@ impl MaintainedSubscriptionView {
         tables: &TableSchemas,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
+        #[cfg(feature = "testing")]
+        {
+            self.witness_overlap =
+                std::env::var_os("JAZZ_WITNESS_OVERLAP").map(|_| BTreeMap::new());
+        }
         let mut transitions = ResultTransitions::default();
         // A single IVM drain may touch the same source fact through more than
         // one terminal. Record only the first pre-state and final post-state
@@ -650,6 +660,18 @@ impl MaintainedSubscriptionView {
                 transitions.terminal_operations.len(),
             );
         }
+        #[cfg(feature = "testing")]
+        if let Some(overlap) = self.witness_overlap.take() {
+            let versions: usize = overlap.values().map(|e| e.1).sum();
+            let replacements: usize = overlap.values().map(|e| e.2).sum();
+            let paired: usize = overlap.values().map(|e| e.1.min(e.2)).sum();
+            if versions + replacements > 0 {
+                eprintln!(
+                    "WITNESS_OVERLAP versions={versions} replacements={replacements} paired={paired} unique={}",
+                    overlap.len()
+                );
+            }
+        }
         Ok(transitions)
     }
 
@@ -701,9 +723,39 @@ impl MaintainedSubscriptionView {
         // changes until the complete input has decoded successfully.
         #[cfg(feature = "cold-settle-attribution")]
         let net_span = tracing::trace_span!("cold.phase.terminal_net").entered();
+        #[cfg(feature = "testing")]
+        let mut witness_overlap = self.witness_overlap.take();
         let mut net = BTreeMap::<EventIdentity, (NetEvent, i64)>::new();
         for row in rows {
             let (event, weight) = row?;
+            #[cfg(feature = "testing")]
+            if let Some(overlap) = witness_overlap.as_mut() {
+                let witness = match &event {
+                    DecodedMaintainedEvent::VersionContent { source, row }
+                    | DecodedMaintainedEvent::VersionDeletion { source, row } => {
+                        Some((source, row, false))
+                    }
+                    DecodedMaintainedEvent::ReplacementContent { source, row }
+                    | DecodedMaintainedEvent::ReplacementDeletion { source, row } => {
+                        Some((source, row, true))
+                    }
+                    _ => None,
+                };
+                if let Some((source, row, replacement)) = witness {
+                    let entry = overlap
+                        .entry((source.clone(), VersionIdentity::for_row(row)))
+                        .or_insert_with(|| (row.clone(), 0, 0));
+                    assert_eq!(
+                        &entry.0, row,
+                        "overlap key must imply complete decoded equality"
+                    );
+                    if replacement {
+                        entry.2 += 1;
+                    } else {
+                        entry.1 += 1;
+                    }
+                }
+            }
             let net_event = match event {
                 DecodedMaintainedEvent::ResultCurrent { member, payload } => {
                     NetEvent::Result(member, payload)
@@ -745,6 +797,10 @@ impl MaintainedSubscriptionView {
                 .or_insert((net_event, weight));
         }
 
+        #[cfg(feature = "testing")]
+        {
+            self.witness_overlap = witness_overlap;
+        }
         #[cfg(feature = "cold-settle-attribution")]
         drop(net_span);
         #[cfg(feature = "cold-settle-attribution")]

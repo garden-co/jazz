@@ -140,3 +140,57 @@ all the same route fields, then join that compact relation to source rows by
 row identity. Proof deduplication, route predicates, output identities and
 multiplicity remain required. This is a guarded, unvalidated experiment, not
 permission bypass or permission-result caching.
+
+## Daytime checkpoint: full topology and fresh profile
+
+At b060e7e234, six clean optimized all-memory Core → Edge → Client
+cold-load runs gave baseline 11418/11305/11567 ms and authorization-join
+experiment 11414/11280/11462 ms. Medians 11418 versus 11414 ms show no
+meaningful end-to-end benefit. All runs verified 27518 output rows. The
+retained-root policy-scope routing regression also passed. This remains a
+research experiment, not a reviewed production change.
+
+A fresh instrumented baseline captured 4188 cycle samples and 653960 phase
+intervals without timeline drops. Exclusive wall spans across the three nodes
+include approximately 1.74 s IVM update, 1.38 s storage apply/persist, 1.02 s
+ingest outside nested phases, and 0.65 s witness decoding. These are
+instrumented phase times, not clean benchmark comparisons. Sampled leaves
+show byte hashing, comparison/copying, join index construction, field access
+and allocation across several phases rather than one dominant winner walk.
+Symbolization has substantial unknown frames; phase attribution is stronger
+evidence than precise function percentages. A complete no-inline export was
+used after the inline symbolizer proved slow and emitted addr2line warnings.
+
+A next hypothesis, not yet implemented: version and replacement witnesses
+repeatedly carry/decode static table and event-role information already known
+by the terminal. Measure overlap and test a compact terminal representation
+before proposing a broader ingest redesign. Existing counts suggest repeated
+work but do not prove identical payloads or safely reusable decoded objects.
+
+## Exact witness overlap measurement
+
+`JAZZ_WITNESS_OVERLAP=1` is a testing-only diagnostic, not an optimization.
+It compares complete decoded VersionRows keyed by query source and full
+encoded version identity across one multisink delivery. It retains separate
+version/replacement counts; equality includes the branch and record descriptor.
+The map is discarded after each delivery. Diagnostic timings are unsuitable
+for estimating a speedup because the comparison itself copies and indexes data.
+
+The full all-memory cold scenario passed its 39-subscription output checks.
+Across 109 nonempty multisink deliveries it decoded 104125 version witnesses
+and 104128 replacement witnesses. All 104125 version witnesses had an exactly
+equal replacement witness in the same delivery and source. The only unmatched
+items were three replacement-only witnesses, each in a separate delivery.
+Thus 104125 of 208253 decodes (approximately 50%) repeated a complete payload.
+The first diagnostic, scoped to individual terminals, found zero overlap: the
+two roles arrive in separate terminal batches. Any reuse must span those batches.
+
+Code inspection agrees: the covered-source content terminals call the same
+graph constructor with the same visible source and routing fields but different
+event-kind literals. Both then use decode_typed_version_witness. Role lifetimes
+remain independent (SourceFactOrigin); payload equality does not justify merging
+add/remove state. This evidence supports sharing payload computation/decoding,
+not deleting either semantic role. The previous instrumented decode phase was
+about 0.65 s, so eliminating half of decoding alone suggests only about 0.3 s
+of potential savings, before reuse overhead. Upstream computation and downstream
+identity-copy savings remain unmeasured. No speedup is claimed.
