@@ -1401,8 +1401,16 @@ where
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
-        self.rebuild_merge_heads_after_history_commit(&content_rows)
-            .await?;
+        // Counterfactual benchmark only: price the post-write history reread.
+        // This is not a supported ingestion mode or a proof of redundancy.
+        #[cfg(feature = "testing")]
+        let skip_head_rebuild = std::env::var_os("JAZZ_HISTORY_SKIP_HEAD_REBUILD").is_some();
+        #[cfg(not(feature = "testing"))]
+        let skip_head_rebuild = false;
+        if !skip_head_rebuild {
+            self.rebuild_merge_heads_after_history_commit(&content_rows)
+                .await?;
+        }
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
             self.persist_storage_consistency_marker_through(tx_time).await?;
         }

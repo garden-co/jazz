@@ -84,3 +84,19 @@ explicit-history median **306.623 ms**. Edge-sized decode/install rises from
 Query times remain roughly 30 ms per node. The reference adds approximately
 38 ms total for its explicit shallow-history bookkeeping. This does not price
 Jazz's general semantics or prove they can be replaced by this reference.
+
+## Counterfactual: omit post-write merge-head rebuilding
+
+A `testing`-only flag, `JAZZ_HISTORY_SKIP_HEAD_REBUILD=1`, deliberately skips the
+post-write history reread. This is not a supported mode and does not prove it is
+safe to remove: #2883 explains the partial/out-of-order history obligations.
+The changed experiment premise is a fresh memory receiver without application
+subscriptions, rather than the earlier full-topology phase instrumentation.
+
+Six fresh processes in baseline/skip/skip/baseline/baseline/skip order all passed
+the shallow fixture's output checks. The median sum of the two measured install
+phases was 2,587 ms baseline versus 2,434 ms skipped (~6%). Individual sums ranged
+2,565–2,902 ms versus 2,179–2,458 ms, so the effect is noisy. Client-sized install
+medians were 992 versus 845 ms; Core-sized medians 1,595 versus 1,589 ms. Do not
+claim a precise universal speedup from this small experiment. Even this deliberate
+omission leaves seconds of installer work; it is not the structural unlock.
