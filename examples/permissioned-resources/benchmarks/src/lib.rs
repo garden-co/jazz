@@ -1957,7 +1957,9 @@ fn run_connect_and_subscribe(
     let start = Instant::now();
     let relay_core = duplex_counted(config.diagnostics);
     let client_relay = duplex_counted(config.diagnostics);
-    if let Some(root) = std::env::var_os("JAZZ_CUSTOMER_CAPTURE_SYNC") {
+    if config.diagnostics
+        && let Some(root) = std::env::var_os("JAZZ_CUSTOMER_CAPTURE_SYNC")
+    {
         assert_eq!(label, "cold", "capture requires only the cold phase");
         eprintln!("SQL sync capture enabled: discard this run's timing");
         fs::create_dir_all(&root).unwrap();
@@ -3378,8 +3380,11 @@ impl Fixture {
         if scale == 1.0 {
             assert_eq!(expected.values().sum::<usize>(), 27_518);
         }
+        let mut expected_rows_by_table = expected_visible_rows(&seeded, config.identity);
+        let tables = subscription_tables();
+        expected_rows_by_table.retain(|table, _| tables.contains(table));
         Self {
-            expected_rows_by_table: Rc::new(expected_visible_rows(&seeded, config.identity)),
+            expected_rows_by_table: Rc::new(expected_rows_by_table),
             schema,
             seeded,
             expected,
@@ -3400,6 +3405,10 @@ impl RunSummary {
     pub fn verify(&self) {
         assert_eq!(self.rows_materialized, self.expected_rows);
         if let Some(expected) = &self.expected_rows_by_table {
+            assert!(
+                self.actual_rows.keys().eq(expected.keys()),
+                "complete planned subscription inventory"
+            );
             for (table, actual) in &self.actual_rows {
                 assert_eq!(actual, &expected[table], "{table}");
             }
