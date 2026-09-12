@@ -378,7 +378,9 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
                         })),
                 )
                 .build();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let admin = connect_ready_client(
                 &server,
                 &schema,
