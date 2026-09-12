@@ -1,3 +1,7 @@
+#[path = "customer_cold_start/slim_memory.rs"]
+mod slim_memory;
+#[path = "customer_cold_start/work_budget.rs"]
+mod work_budget;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -568,6 +572,10 @@ fn main() {
         "phase attribution enabled: compare elapsed time only with the same instrumentation; disable this feature for absolute latency"
     );
     let config = Config::from_env();
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_SLIM_MEMORY") {
+        slim_memory::run(Path::new(&path));
+        return;
+    }
     if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_DECODE_CAPTURE") {
         measure_capture_decode(Path::new(&path));
         return;
@@ -1402,6 +1410,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     } else {
         BoxedStorage::new(rocks)
     };
+    let storage = work_budget::wrap(storage, "core");
     let state = block_on(jazz::node::NodeState::new_history_complete(
         node(1),
         schema.clone(),
@@ -1881,6 +1890,7 @@ fn run_connect_and_subscribe(
         jazz::cold_settle_attribution::reset();
         jazz::groove::cold_settle_attribution::reset();
     }
+    work_budget::start();
     alloc_metrics::reset_and_start();
     #[cfg(feature = "bench-perf-control")]
     let mut perf_control = PerfControl::start();
@@ -2058,6 +2068,10 @@ fn run_connect_and_subscribe(
     // Match the readiness boundary: later one-shot verification and storage
     // sizing are diagnostics, not work needed to make subscriptions usable.
     let alloc_snapshot = alloc_metrics::stop();
+    let budget = work_budget::stop();
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_WORK_BUDGET") {
+        fs::write(path, serde_json::to_vec_pretty(&budget).unwrap()).unwrap();
+    }
     #[cfg(feature = "cold-settle-attribution")]
     let projection_nodes_at_readiness = jazz::groove::cold_settle_attribution::map_node_work();
     #[cfg(feature = "cold-settle-attribution")]
@@ -2423,7 +2437,7 @@ fn open_db_node(
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbNode {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
-    let storage = open_receiver_storage(dir.path(), &schema);
+    let storage = work_budget::wrap(open_receiver_storage(dir.path(), &schema), "edge");
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -2445,7 +2459,7 @@ fn open_client_db(
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbClient {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
-    let storage = open_receiver_storage(dir.path(), &schema);
+    let storage = work_budget::wrap(open_receiver_storage(dir.path(), &schema), "client");
     let db = block_on(Db::open(DbConfig {
         schema,
         storage,
