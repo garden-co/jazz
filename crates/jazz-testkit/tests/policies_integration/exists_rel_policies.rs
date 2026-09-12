@@ -288,7 +288,6 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
 /// Verifies that relation predicates compare NULL literals correctly inside
 /// EXISTS_REL, allowing active rows and denying revoked rows.
 #[tokio::test]
-#[ignore = "#1759: schema conversion requires ExistsRel policies to include an outer-row equality"]
 async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
     tokio::task::LocalSet::new()
         .run_until(local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_inner())
@@ -299,6 +298,7 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                pe::rel::eq_outer("id", "admin_id"),
                 pe::rel::eq_session("user_id", vec!["claims", "sub"]),
                 pe::rel::eq_literal("revoked_at", Value::Null),
             ]))));
@@ -313,6 +313,7 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
         .table(
             TableSchema::builder("projects")
                 .column("name", ColumnType::Text)
+                .fk_column("admin_id", "admins")
                 .policies(projects_policies),
         )
         .build();
@@ -328,30 +329,70 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
     )
     .await;
 
-    client
+    let alice_admin_id = client
         .insert(
             "admins",
             crate::row_input!("user_id" => super::ALICE_ID, "revoked_at" => Value::Null),
         )
-        .expect("seed active admin row");
-    client
+        .expect("seed active admin row")
+        .0;
+    let carol_admin_id = client
         .insert(
             "admins",
             crate::row_input!("user_id" => super::CAROL_ID, "revoked_at" => "2026-03-30T12:00:00Z"),
         )
-        .expect("seed revoked admin row");
+        .expect("seed revoked admin row")
+        .0;
 
-    client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
-        .insert("projects", crate::row_input!("name" => "alice project"))
-        .expect("active admin row should satisfy revoked_at = NULL predicate");
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
+    let carol = connect_ready_user(
+        &server,
+        &schema,
+        super::CAROL_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
 
-    let carol_err = client
-        .for_session(Session::new("urn:jazz:test", super::CAROL_ID))
-        .insert("projects", crate::row_input!("name" => "carol project"))
-        .expect_err("revoked admin row should fail revoked_at = NULL predicate");
-    assert_client_policy_denied(carol_err, "projects", Operation::Insert);
+    let alice_transaction = alice
+        .insert(
+            "projects",
+            crate::row_input!("name" => "alice project", "admin_id" => alice_admin_id),
+        )
+        .expect("active admin row should satisfy revoked_at = NULL predicate")
+        .2;
+    if let Some(transaction) = alice_transaction {
+        alice
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .expect("active admin row should satisfy revoked_at = NULL predicate");
+    }
 
+    let carol_transaction = carol
+        .insert(
+            "projects",
+            crate::row_input!("name" => "carol project", "admin_id" => carol_admin_id),
+        )
+        .expect("revoked admin insert should be accepted optimistically")
+        .2
+        .expect("revoked admin insert should be pending server policy evaluation");
+    assert!(
+        carol
+            .wait_for_transaction(carol_transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .is_err(),
+        "revoked admin row should fail revoked_at = NULL predicate"
+    );
+
+    alice.shutdown().await.expect("shutdown Alice client");
+    carol.shutdown().await.expect("shutdown Carol client");
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }
@@ -359,7 +400,6 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
 /// Verifies local DELETE enforcement for an EXISTS_REL admin policy, including
 /// that an already-deleted row cannot be deleted a second time.
 #[tokio::test]
-#[ignore = "#1759: schema conversion requires ExistsRel policies to include an outer-row equality"]
 async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
     tokio::task::LocalSet::new()
         .run_until(local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner())
@@ -368,9 +408,12 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin()
 
 async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner() {
     let protected_policies = permissions(|p| {
-        p.allow_delete().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
-        ));
+        p.allow_read().always();
+        p.allow_delete()
+            .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                pe::rel::eq_outer("id", "admin_id"),
+                pe::rel::eq_session("user_id", vec!["claims", "sub"]),
+            ]))));
     });
     let schema = SchemaBuilder::new()
         .table(
@@ -381,6 +424,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
         .table(
             TableSchema::builder("protected")
                 .column("data", ColumnType::Text)
+                .fk_column("admin_id", "admins")
                 .policies(protected_policies),
         )
         .build();
@@ -396,30 +440,62 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
     )
     .await;
 
-    client
+    let admin_id = client
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
-        .expect("seed admin row");
+        .expect("seed admin row")
+        .0;
     let protected = client
-        .insert("protected", crate::row_input!("data" => "initial"))
+        .insert(
+            "protected",
+            crate::row_input!("data" => "initial", "admin_id" => admin_id),
+        )
         .expect("seed protected row")
         .0;
 
-    let bob_err = client
-        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
-        .delete(protected)
-        .expect_err("non-admin delete should be denied");
-    assert_client_policy_denied(bob_err, "protected", Operation::Delete);
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
 
-    client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
+    let bob_transaction = bob
         .delete(protected)
-        .expect("admin delete should be allowed");
-    let second_delete = client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
+        .expect("non-admin delete should be accepted optimistically")
+        .expect("non-admin delete should be pending server policy evaluation");
+    assert!(
+        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .is_err(),
+        "non-admin delete should be denied"
+    );
+
+    let alice_transaction = alice
+        .delete(protected)
+        .expect("admin delete should be accepted optimistically");
+    if let Some(transaction) = alice_transaction {
+        alice
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .expect("admin delete should be allowed");
+    }
+    let second_delete = alice
         .delete(protected)
         .expect_err("deleted row should not be deleted again");
     assert!(format!("{second_delete:?}").contains("row already deleted"));
 
+    bob.shutdown().await.expect("shutdown Bob client");
+    alice.shutdown().await.expect("shutdown Alice client");
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }

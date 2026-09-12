@@ -2358,6 +2358,30 @@ fn rel_predicate_to_policy(
             }])
         }
         RelPredicateExpr::Cmp { left, op, right } => {
+            if matches!(right, RelValueRef::Literal(Value::Null)) {
+                let predicate = match op {
+                    RelPredicateCmpOp::Eq => {
+                        Predicate::IsNull(Operand::Column(left.column.clone()))
+                    }
+                    RelPredicateCmpOp::Ne => Predicate::Not(Box::new(Predicate::IsNull(
+                        Operand::Column(left.column.clone()),
+                    ))),
+                    RelPredicateCmpOp::Lt
+                    | RelPredicateCmpOp::Le
+                    | RelPredicateCmpOp::Gt
+                    | RelPredicateCmpOp::Ge => {
+                        return Err(err(
+                            format!("$.{}.{}", table.as_str(), path),
+                            "core schema ExistsRel NULL comparisons only support equality and inequality",
+                        ));
+                    }
+                };
+                return Ok(vec![LoweredRelPredicate {
+                    predicate,
+                    column: Some(left.column.clone()),
+                    value: None,
+                }]);
+            }
             let value = rel_value_to_policy_operand(table, path, right)?;
             let predicate = match (&value, op) {
                 (LoweredRelValue::Operand(operand), RelPredicateCmpOp::Eq) => {
