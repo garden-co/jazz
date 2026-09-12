@@ -645,6 +645,12 @@ fn convert_column_default(
         )
     })?;
     if matches!(value, Value::Null) {
+        if !column.nullable {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), column.name.as_str()),
+                "null default requires a nullable column",
+            ));
+        }
         return Ok(GrooveValue::Nullable(None));
     }
     // Record cells carry logical signed values. Groove applies its separate
