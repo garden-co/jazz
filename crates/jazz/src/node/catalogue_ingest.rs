@@ -53,6 +53,159 @@ fn next_schema_version_alias_in_catalogue(
     ))
 }
 
+/// Adopt the authority's UUIDs without changing local enum tags. A node can
+/// have persisted rows before its first trusted snapshot, so replacing only
+/// the manifest leaves those rows' registries referring to provisional UUIDs.
+/// The two manifests describe the same authored schema: their occurrence and
+/// ordinal coordinates identify the corresponding cases, including UUIDs in
+/// nested payload paths. Registry order and introduction coordinates stay put.
+fn rebind_provisional_mapping_identities(
+    mapping: &mut SchemaPhysicalMapping,
+    identities: PhysicalIdentityManifest,
+) -> Result<
+    BTreeMap<crate::ids::GlobalPhysicalEnumVariantId, crate::ids::GlobalPhysicalEnumVariantId>,
+    Error,
+> {
+    if mapping.identities == identities {
+        return Ok(BTreeMap::new());
+    }
+    let mut replacements = BTreeMap::new();
+    let mut origins = BTreeMap::new();
+    for (table_name, table) in &mapping.identities.tables {
+        let authority_table =
+            identities
+                .tables
+                .get(table_name)
+                .ok_or(Error::InvalidCatalogueUpdate(
+                    "snapshot identity table missing",
+                ))?;
+        for (column_name, column) in &table.columns {
+            let authority_column =
+                authority_table
+                    .columns
+                    .get(column_name)
+                    .ok_or(Error::InvalidCatalogueUpdate(
+                        "snapshot identity column missing",
+                    ))?;
+            for (path, cases) in &column.enum_variants {
+                let authority_cases = authority_column.enum_variants.get(path).ok_or(
+                    Error::InvalidCatalogueUpdate("snapshot enum identity occurrence missing"),
+                )?;
+                if cases.len() != authority_cases.len() {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "snapshot enum identity occurrence width differs",
+                    ));
+                }
+                for (old, new) in cases.iter().copied().zip(authority_cases.iter().copied()) {
+                    if replacements
+                        .insert(old, new)
+                        .is_some_and(|previous| previous != new)
+                        || origins
+                            .insert(new, old)
+                            .is_some_and(|previous| previous != old)
+                    {
+                        return Err(Error::InvalidCatalogueUpdate(
+                            "snapshot enum identity rebind is ambiguous",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if replacements
+        .iter()
+        .any(|(old, new)| old != new && replacements.contains_key(new))
+    {
+        return Err(Error::InvalidCatalogueUpdate(
+            "snapshot enum identity rebind overlaps provisional identities",
+        ));
+    }
+    rebind_mapping_enum_cases(mapping, &replacements)?;
+    mapping.identities = identities;
+    Ok(replacements)
+}
+
+fn rebind_mapping_enum_cases(
+    mapping: &mut SchemaPhysicalMapping,
+    replacements: &BTreeMap<
+        crate::ids::GlobalPhysicalEnumVariantId,
+        crate::ids::GlobalPhysicalEnumVariantId,
+    >,
+) -> Result<(), Error> {
+    if replacements.is_empty() {
+        return Ok(());
+    }
+    let path_replacements = replacements
+        .iter()
+        .map(|(old, new)| (old.0.simple().to_string(), new.0.simple().to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let rebind_path = |path: String| {
+        let mut previous = "";
+        path.split('/')
+            .map(|component| {
+                let rebound = if previous == "case" {
+                    path_replacements
+                        .get(component)
+                        .map(String::as_str)
+                        .unwrap_or(component)
+                } else {
+                    component
+                };
+                previous = component;
+                rebound
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    for table in mapping.tables.values_mut() {
+        for cases in table.scalar_enum_cases.values_mut() {
+            for case in cases {
+                if let Some(id) = replacements.get(&case.id) {
+                    case.id = *id;
+                }
+            }
+        }
+        for cases in table.payload_enum_cases.values_mut() {
+            for case in cases {
+                if let Some(id) = replacements.get(&case.id) {
+                    case.id = *id;
+                }
+            }
+        }
+        for paths in table.nested_scalar_enum_cases.values_mut() {
+            let previous = std::mem::take(paths);
+            for (path, mut cases) in previous {
+                for case in &mut cases {
+                    if let Some(id) = replacements.get(&case.id) {
+                        case.id = *id;
+                    }
+                }
+                if paths.insert(rebind_path(path), cases).is_some() {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "snapshot enum occurrence rebind collides",
+                    ));
+                }
+            }
+        }
+        for paths in table.nested_payload_enum_cases.values_mut() {
+            let previous = std::mem::take(paths);
+            for (path, mut cases) in previous {
+                for case in &mut cases {
+                    if let Some(id) = replacements.get(&case.id) {
+                        case.id = *id;
+                    }
+                }
+                if paths.insert(rebind_path(path), cases).is_some() {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "snapshot enum occurrence rebind collides",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -411,8 +564,18 @@ where
         // snapshot genesis manifest before validating descendant publications.
         // Otherwise a valid authority lineage would be compared to freshly
         // minted local UUIDs and rejected during snapshot planning.
-        if let Some(mapping) = planned.physical_mappings.get_mut(genesis_id) {
-            mapping.identities = genesis_physical_identities.clone();
+        let genesis_rebindings = planned
+            .physical_mappings
+            .get_mut(genesis_id)
+            .map(|mapping| {
+                rebind_provisional_mapping_identities(mapping, genesis_physical_identities.clone())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        for (schema, mapping) in &mut planned.physical_mappings {
+            if schema != genesis_id {
+                rebind_mapping_enum_cases(mapping, &genesis_rebindings)?;
+            }
         }
 
         for (catalogue_seq, publication) in lineages {
@@ -548,7 +711,11 @@ where
             // Preserve only below-semantic-layer aliases. The authority
             // manifest is the global identity source of truth and replaces
             // any provisional UUIDs minted while the receiver was offline.
-            local_mapping.identities = authority_identities;
+            let anchor_rebindings =
+                rebind_provisional_mapping_identities(&mut local_mapping, authority_identities)?;
+            for mapping in planned.physical_mappings.values_mut() {
+                rebind_mapping_enum_cases(mapping, &anchor_rebindings)?;
+            }
             planned.schema_version_aliases.insert(anchor, local_alias);
             planned.physical_mappings.insert(anchor, local_mapping);
 
@@ -658,6 +825,26 @@ where
             .schema_version_aliases
             .get(&planned.current_schema_version_id)
             .copied();
+        // Validate the complete graph before replacing the runtime or writing
+        // its receipt. Exact lineage replay can retain existing mappings, so
+        // checking only freshly imported manifests misses inherited conflicts.
+        Self::validate_durable_physical_identity_bindings(
+            &planned.catalogue_schemas,
+            &planned.physical_mappings,
+            &planned.staged_lineages,
+            &planned.active_lineages_by_target,
+            &planned.pending_lineages,
+            Some(*genesis_id),
+            CatalogueBootstrapState::Ready,
+        )?;
+        validate_scalar_enum_case_provenance(
+            &planned.physical_mappings,
+            &planned.schema_version_aliases,
+        )?;
+        validate_payload_enum_case_provenance(
+            &planned.physical_mappings,
+            &planned.schema_version_aliases,
+        )?;
         Ok(PlannedCatalogueSnapshot {
             catalogue: planned,
             activated_lineages,
