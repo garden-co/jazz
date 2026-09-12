@@ -2007,7 +2007,18 @@ export class NativeRuntimeAdapter implements Runtime {
           while (this.serverReplacementRetirement) {
             const retirement = this.serverReplacementRetirement;
             this.serverReplacementRetirement = null;
-            await retirement;
+            try {
+              await retirement;
+            } catch (error) {
+              // A failed close still owns its predecessor. Future connect()
+              // calls must not erase that failure and admit another transport.
+              this.serverReplacementRetirement = joinServerTransportRetirements(
+                this.serverReplacementRetirement,
+                retirement,
+              );
+              this.serverReplacementRetirement.catch(() => undefined);
+              throw error;
+            }
           }
           const latest = this.serverReplacementIntent;
           if (!latest || this.closed) throw new Error("server transport disconnected");
@@ -2281,7 +2292,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.networkRetryCount = 0;
     }
     this.clearServerReconnectTimer();
-    this.serverTransportError = null;
+    if (!this.serverReplacementRetirement) this.serverTransportError = null;
     if (options.rejectWaiters) {
       this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
     } else if (!options.preserveRemoteWaiters) {
