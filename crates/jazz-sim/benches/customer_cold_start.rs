@@ -565,6 +565,10 @@ fn main() {
         "phase attribution enabled: compare elapsed time only with the same instrumentation; disable this feature for absolute latency"
     );
     let config = Config::from_env();
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_EXPORT_SQL") {
+        export_sql_fixture(&config, std::path::Path::new(&path));
+        return;
+    }
     let schema = schema();
     let seeded = seed_core(&schema, &config);
     let expected = expected_visible_counts(&seeded, config.identity);
@@ -1465,6 +1469,71 @@ fn push_seed(
         row,
         cells,
     });
+}
+
+// Research export only: JSON is an interchange artifact, not a Jazz storage codec.
+fn export_sql_fixture(config: &Config, path: &std::path::Path) {
+    let plan = build_seed_plan(config);
+    let mut expected = plan.table_rows.clone();
+    let mut resources = Vec::new();
+    let mut child_slot = 0;
+    for spec in RESOURCE_SPECS {
+        let visible = plan.access[spec.table]
+            .iter()
+            .filter_map(|(row, group)| plan.visible_groups.contains(group).then_some(*row))
+            .collect::<BTreeSet<_>>();
+        expected.insert(spec.table.to_owned(), visible.iter().copied().collect());
+        let child = spec.child_rows.map(|_| {
+            let table = spec.child_table(child_slot);
+            child_slot += 1;
+            expected.insert(
+                table.clone(),
+                plan.child_parent[&table]
+                    .iter()
+                    .filter_map(|(row, parent)| visible.contains(parent).then_some(*row))
+                    .collect(),
+            );
+            table
+        });
+        resources.push(
+            serde_json::json!({"table": spec.table, "access": spec.access_table(), "child": child}),
+        );
+    }
+    for slot in 0..CHILD_TABLES {
+        expected.entry(format!("empty_child_{slot}")).or_default();
+    }
+    expected.retain(|table, _| subscription_tables().contains(table));
+    let writes = plan
+        .writes
+        .iter()
+        .map(|write| {
+            serde_json::json!({
+                "table": write.table, "id": write.row.0.to_string(), "cells": write.cells
+            })
+        })
+        .collect::<Vec<_>>();
+    let expected = expected
+        .into_iter()
+        .map(|(table, rows)| {
+            (
+                table,
+                rows.into_iter()
+                    .map(|row| row.0.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let document = serde_json::json!({
+        "fixture": SEED_CACHE_VERSION, "scale": config.scale,
+        "account": AuthorSubject::for_test_uuid(plan.ordinary_user.0).account_id().unwrap().0.to_string(),
+        "resources": resources, "expected": expected, "writes": writes,
+        "history": "one accepted mergeable transaction and one version per application row; no prior row versions"
+    });
+    serde_json::to_writer(
+        std::io::BufWriter::new(fs::File::create(path).unwrap()),
+        &document,
+    )
+    .unwrap();
 }
 
 fn write_seed_plan(core: &Node<RocksDbStorage>, plan: &SeedPlan) {
