@@ -565,6 +565,10 @@ fn main() {
         "phase attribution enabled: compare elapsed time only with the same instrumentation; disable this feature for absolute latency"
     );
     let config = Config::from_env();
+    if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_DECODE_CAPTURE") {
+        measure_capture_decode(Path::new(&path));
+        return;
+    }
     if let Some(path) = std::env::var_os("JAZZ_CUSTOMER_EXPORT_SQL") {
         export_sql_fixture(&config, std::path::Path::new(&path));
         return;
@@ -724,6 +728,7 @@ struct SeedWrite {
 
 struct RunSummary {
     wall_ms: u128,
+    tick_wall_us: [u128; 3],
     connect_ms: u128,
     subscribe_ms: u128,
     settle_ms: u128,
@@ -905,6 +910,7 @@ struct OpenSubscription {
 
 #[derive(Default)]
 struct TransportMetrics {
+    capture: RefCell<Option<SyncCapture>>,
     messages: Cell<u64>,
     view_updates: Cell<u64>,
     bytes: Cell<u64>,
@@ -915,6 +921,109 @@ struct TransportMetrics {
     #[cfg(feature = "cold-settle-attribution")]
     attribution: RefCell<ProbeAttribution>,
     view_updates_by_subscription: RefCell<BTreeMap<SubscriptionKey, ViewUpdateSummary>>,
+}
+
+// Diagnostic capture is intentionally outside clean timing receipts. The SQL
+// replay persists the actual immutable bytes, not a smaller synthetic payload.
+struct SyncCapture {
+    writer: std::io::BufWriter<fs::File>,
+    schema: JazzSchema,
+}
+
+impl SyncCapture {
+    fn record(&mut self, message: &SyncMessage) {
+        use std::io::Write;
+        let (carriers, supporting) = match message {
+            SyncMessage::ViewUpdate(view) | SyncMessage::AuthorizationScopeView { view, .. } => {
+                (&view.version_carriers, view.supporting_rows.len())
+            }
+            SyncMessage::CurrentRowsReceipt(receipt) => (&receipt.version_carriers, 0),
+            SyncMessage::CommitUnit { .. } | SyncMessage::AuthorityPublication(_) => panic!(
+                "extend SQL capture for non-view version delivery before comparing this fixture"
+            ),
+            _ => return,
+        };
+        let bundles = version_bundle_refs(carriers).map(|bundle| {
+            let versions = bundle.versions.iter().map(|version| {
+                let table = self.schema.tables.iter().find(|t| t.name == version.table()).unwrap();
+                let cells = table.columns.iter().enumerate().map(|(position, column)|
+                    (column.name().to_owned(), version.cell_at(position).expect("fixture cell present")))
+                    .collect::<BTreeMap<_, _>>();
+                json!({"table": version.table(), "row": version.row_uuid().0.to_string(),
+                    "schema": version.schema_version(), "branch": version.branch_key(),
+                    "parents": version.parents(), "cells": cells,
+                    "wire_hex": capture_hex(&postcard::to_allocvec(version).unwrap())})
+            }).collect::<Vec<_>>();
+            json!({"tx": bundle.tx, "tx_hex": capture_hex(&postcard::to_allocvec(bundle.tx).unwrap()),
+                "scope": bundle.scope, "fate": bundle.fate, "global_time": bundle.global_time,
+                "durability": bundle.durability, "versions": versions})
+        }).collect::<Vec<_>>();
+        serde_json::to_writer(
+            &mut self.writer,
+            &json!({"supporting_count": supporting, "bundles": bundles}),
+        )
+        .unwrap();
+        writeln!(&mut self.writer).unwrap();
+    }
+}
+
+fn measure_capture_decode(path: &Path) {
+    use std::io::BufRead;
+    let decode_hex = |value: &JsonValue| {
+        value
+            .as_str()
+            .unwrap()
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let mut encoded = Vec::new();
+    for line in std::io::BufReader::new(fs::File::open(path).unwrap()).lines() {
+        let frame: JsonValue = serde_json::from_str(&line.unwrap()).unwrap();
+        for bundle in frame["bundles"].as_array().unwrap() {
+            assert_eq!(bundle["versions"].as_array().unwrap().len(), 1);
+            encoded.push((
+                decode_hex(&bundle["tx_hex"]),
+                decode_hex(&bundle["versions"][0]["wire_hex"]),
+            ));
+        }
+    }
+    let schema = schema();
+    for round in 0..3 {
+        let started = Instant::now();
+        let mut decoded = Vec::with_capacity(encoded.len());
+        for (tx, version) in &encoded {
+            let tx: jazz::tx::Transaction = postcard::from_bytes(tx).unwrap();
+            let version: jazz::protocol::VersionRecord = postcard::from_bytes(version).unwrap();
+            let table = schema
+                .tables
+                .iter()
+                .find(|table| table.name == version.table())
+                .unwrap();
+            let cells = (0..table.columns.len())
+                .map(|index| version.cell_at(index).unwrap())
+                .collect::<Vec<_>>();
+            decoded.push((tx, version, cells));
+        }
+        let elapsed = started.elapsed();
+        std::hint::black_box(&decoded);
+        println!(
+            "{}",
+            json!({"round": round, "bundles": decoded.len(), "decode_and_extract_ms": elapsed.as_secs_f64()*1000.0,
+            "encoded_bytes": encoded.iter().map(|(tx, row)| tx.len()+row.len()).sum::<usize>()})
+        );
+    }
+}
+
+fn capture_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 15) as usize] as char);
+    }
+    output
 }
 
 #[cfg(feature = "cold-settle-attribution")]
@@ -1024,6 +1133,9 @@ impl Transport for DuplexTransport {
         tracing::instrument(skip_all, name = "cold.phase.benchmark_transport")
     )]
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if let Some(capture) = self.metrics.capture.borrow_mut().as_mut() {
+            capture.record(&message);
+        }
         self.metrics.messages.set(self.metrics.messages.get() + 1);
         if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription,
@@ -1760,6 +1872,27 @@ fn run_connect_and_subscribe(
     let start = Instant::now();
     let relay_core = duplex_counted();
     let client_relay = duplex_counted();
+    if let Some(root) = std::env::var_os("JAZZ_CUSTOMER_CAPTURE_SYNC") {
+        assert_eq!(label, "cold", "capture requires only the cold phase");
+        eprintln!("SQL sync capture enabled: discard this run's timing");
+        fs::create_dir_all(&root).unwrap();
+        for (name, metrics) in [
+            ("core-edge", &relay_core.right_to_left),
+            ("edge-client", &client_relay.right_to_left),
+        ] {
+            let path = Path::new(&root).join(format!("{name}.jsonl"));
+            *metrics.capture.borrow_mut() = Some(SyncCapture {
+                writer: std::io::BufWriter::new(
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(path)
+                        .unwrap(),
+                ),
+                schema: schema(),
+            });
+        }
+    }
     let _relay_upstream = block_on(relay.db.connect_upstream(relay_core.left_transport));
     let _core_sub = seeded
         .core
@@ -1798,6 +1931,7 @@ fn run_connect_and_subscribe(
 
     let settle_start = Instant::now();
     let mut ticks = 0_usize;
+    let mut tick_wall_us = [0_u128; 3];
     #[allow(unused_mut)]
     let mut attribution = AttributionSummary::default();
     while !subscriptions
@@ -1825,7 +1959,6 @@ fn run_connect_and_subscribe(
         let before_core_to_relay = relay_core.right_to_left.messages.get();
         #[cfg(feature = "cold-settle-attribution")]
         let core_operators_before = jazz::groove::cold_settle_attribution::snapshot();
-        #[cfg(feature = "cold-settle-attribution")]
         let core_tick_start = Instant::now();
         #[cfg(feature = "cold-settle-attribution")]
         tracing::trace_span!("cold.phase.core")
@@ -1833,6 +1966,7 @@ fn run_connect_and_subscribe(
             .unwrap();
         #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(seeded.core.tick()).unwrap();
+        tick_wall_us[0] += core_tick_start.elapsed().as_micros();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.core_tick_ns += core_tick_start.elapsed().as_nanos() as u64;
@@ -1848,7 +1982,6 @@ fn run_connect_and_subscribe(
         let relay_to_client_before = client_relay.right_to_left.messages.get();
         #[cfg(feature = "cold-settle-attribution")]
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
-        #[cfg(feature = "cold-settle-attribution")]
         let relay_tick_start = Instant::now();
         #[cfg(feature = "cold-settle-attribution")]
         tracing::trace_span!("cold.phase.relay")
@@ -1856,6 +1989,7 @@ fn run_connect_and_subscribe(
             .unwrap();
         #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(relay.db.tick()).unwrap();
+        tick_wall_us[1] += relay_tick_start.elapsed().as_micros();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.relay_tick_ns += relay_tick_start.elapsed().as_nanos() as u64;
@@ -1871,7 +2005,6 @@ fn run_connect_and_subscribe(
         let client_to_relay_before = client_relay.left_to_right.messages.get();
         #[cfg(feature = "cold-settle-attribution")]
         let client_operators_before = jazz::groove::cold_settle_attribution::snapshot();
-        #[cfg(feature = "cold-settle-attribution")]
         let client_tick_start = Instant::now();
         #[cfg(feature = "cold-settle-attribution")]
         tracing::trace_span!("cold.phase.client")
@@ -1879,6 +2012,7 @@ fn run_connect_and_subscribe(
             .unwrap();
         #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(client.db.tick()).unwrap();
+        tick_wall_us[2] += client_tick_start.elapsed().as_micros();
         #[cfg(feature = "cold-settle-attribution")]
         {
             attribution.client_tick_ns += client_tick_start.elapsed().as_nanos() as u64;
@@ -2091,6 +2225,7 @@ fn run_connect_and_subscribe(
         attribution.selected_payload_bytes = counters.selected_payload_bytes;
     }
     RunSummary {
+        tick_wall_us,
         wall_ms: start.elapsed().as_millis(),
         connect_ms,
         subscribe_ms,
@@ -2512,6 +2647,14 @@ fn pending_description(subscriptions: &[OpenSubscription]) -> String {
 
 fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     let mut fields = metadata_fields("customer_cold_start", "native", config.seed, "full");
+    fields.insert(
+        "node_tick_wall_us_core_edge_client".to_owned(),
+        json!(summary.tick_wall_us),
+    );
+    fields.insert(
+        "sync_capture_enabled".to_owned(),
+        json!(std::env::var_os("JAZZ_CUSTOMER_CAPTURE_SYNC").is_some()),
+    );
     fields.insert(
         "allocation_instrumented".to_owned(),
         json!(cfg!(any(

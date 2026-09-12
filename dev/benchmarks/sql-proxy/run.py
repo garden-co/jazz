@@ -20,6 +20,40 @@ def quoted(name):
     return '"' + name.replace('"', '""') + '"'
 
 
+def reference_query(data, columns, table, history, witnesses):
+    resources = {r["table"]: r for r in data["resources"]}
+    children = {r["child"]: r for r in data["resources"] if r["child"]}
+    prefix = 'v_' if history else 'c_'
+    q = lambda t: quoted(prefix+t)
+    resource = resources.get(table) or children.get(table)
+    if not resource:
+        if witnesses:
+            return f'SELECT b.* FROM {q(table)} r JOIN bundles b ON b.version=r.version'
+        return f'SELECT id{"," if columns[table] else ""}{",".join(map(quoted,columns[table]))} FROM {q(table)}'
+    # Gather is bounded at depth 8 and deduplicates reached group IDs.
+    # UNION(id,depth) deliberately retains depth to honor the bound, then DISTINCT id.
+    cte = f'''WITH RECURSIVE reach(id,depth) AS (
+        SELECT group_id,0 FROM {q('group_access_edges')} WHERE user_id='{data['account']}'
+        UNION SELECT e.target_id,r.depth+1 FROM reach r JOIN {q('group_entry')} e ON e.member_id=r.id
+            JOIN {q('group')} g ON g.id=e.target_id WHERE e.administrator=0 AND r.depth<8
+    ), reached AS (SELECT DISTINCT id FROM reach),
+    allowed AS (SELECT DISTINCT a.resource FROM {q(resource['access'])} a JOIN reached g ON g.id=a.team WHERE a.administrator=0),
+    output AS (SELECT r.* FROM {q(table)} r WHERE EXISTS (
+        SELECT 1 FROM allowed a WHERE a.resource=r.{"parent_id" if table in children else "id"}))'''
+    if not witnesses:
+        return cte + f' SELECT id,{",".join(map(quoted,columns[table]))} FROM output'
+    # Conservative, readable supporting set: output, parent, matching grants,
+    # and the reachable permission graph. Not a claim of Jazz-identical provenance.
+    parent_select = f"SELECT p.version FROM {q(resource['table'])} p JOIN output o ON o.parent_id=p.id" if table in children else 'SELECT version FROM output'
+    parent_ids = 'SELECT DISTINCT parent_id FROM output' if table in children else 'SELECT id FROM output'
+    return cte + f''', needed(version) AS (
+        SELECT version FROM output UNION {parent_select}
+        UNION SELECT a.version FROM {q(resource['access'])} a JOIN reached g ON a.team=g.id WHERE a.administrator=0 AND a.resource IN ({parent_ids})
+        UNION SELECT s.version FROM {q('group_access_edges')} s WHERE s.user_id='{data['account']}'
+        UNION SELECT e.version FROM {q('group_entry')} e JOIN reach r ON e.member_id=r.id WHERE e.administrator=0 AND r.depth<8
+        UNION SELECT g.version FROM {q('group')} g JOIN reached r ON r.id=g.id
+    ) SELECT b.* FROM needed n JOIN bundles b ON b.version=n.version'''
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('fixture', type=Path)
@@ -83,36 +117,7 @@ def main():
     resources = {r['table']: r for r in data['resources']}
     children = {r['child']: r for r in data['resources'] if r['child']}
     def query(table, history, witnesses):
-        prefix = 'v_' if history else 'c_'
-        q = lambda t: quoted(prefix+t)
-        resource = resources.get(table) or children.get(table)
-        if not resource:
-            if witnesses:
-                return f'SELECT b.* FROM {q(table)} r JOIN bundles b ON b.version=r.version'
-            return f'SELECT id{"," if columns[table] else ""}{",".join(map(quoted,columns[table]))} FROM {q(table)}'
-        # Gather is bounded at depth 8 and deduplicates reached group IDs.
-        # UNION(id,depth) deliberately retains depth to honor the bound, then DISTINCT id.
-        cte = f'''WITH RECURSIVE reach(id,depth) AS (
-            SELECT group_id,0 FROM {q('group_access_edges')} WHERE user_id='{data['account']}'
-            UNION SELECT e.target_id,r.depth+1 FROM reach r JOIN {q('group_entry')} e ON e.member_id=r.id
-                JOIN {q('group')} g ON g.id=e.target_id WHERE e.administrator=0 AND r.depth<8
-        ), reached AS (SELECT DISTINCT id FROM reach),
-        allowed AS (SELECT DISTINCT a.resource FROM {q(resource['access'])} a JOIN reached g ON g.id=a.team WHERE a.administrator=0),
-        output AS (SELECT r.* FROM {q(table)} r WHERE EXISTS (
-            SELECT 1 FROM allowed a WHERE a.resource=r.{"parent_id" if table in children else "id"}))'''
-        if not witnesses:
-            return cte + f' SELECT id,{",".join(map(quoted,columns[table]))} FROM output'
-        # Conservative, readable supporting set: output, parent, matching grants,
-        # and the reachable permission graph. Not a claim of Jazz-identical provenance.
-        parent_select = f"SELECT p.version FROM {q(resource['table'])} p JOIN output o ON o.parent_id=p.id" if table in children else 'SELECT version FROM output'
-        parent_ids = 'SELECT DISTINCT parent_id FROM output' if table in children else 'SELECT id FROM output'
-        return cte + f''', needed(version) AS (
-            SELECT version FROM output UNION {parent_select}
-            UNION SELECT a.version FROM {q(resource['access'])} a JOIN reached g ON a.team=g.id WHERE a.administrator=0 AND a.resource IN ({parent_ids})
-            UNION SELECT s.version FROM {q('group_access_edges')} s WHERE s.user_id='{data['account']}'
-            UNION SELECT e.version FROM {q('group_entry')} e JOIN reach r ON e.member_id=r.id WHERE e.administrator=0 AND r.depth<8
-            UNION SELECT g.version FROM {q('group')} g JOIN reached r ON r.id=g.id
-        ) SELECT b.* FROM needed n JOIN bundles b ON b.version=n.version'''
+        return reference_query(data, columns, table, history, witnesses)
     receipts=[]
     expected_ids = {t: set(ids) for t,ids in data['expected'].items()}
     expected = {t: {i: tuple([i]+[c[k] for k in columns[t]]) for i,v,c in rows if i in expected_ids[t]} for t,rows in tables.items()}
