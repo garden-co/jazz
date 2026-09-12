@@ -132,6 +132,213 @@ async fn local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inn
     server.shutdown().await;
 }
 
+/// Verifies UPDATE USING enforcement for a correlated EXISTS_REL policy.
+#[tokio::test]
+async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
+    tokio::task::LocalSet::new()
+        .run_until(local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner())
+        .await;
+}
+
+async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner() {
+    let protected_policies = permissions(|p| {
+        p.allow_read().always();
+        p.allow_update()
+            .where_old(pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                pe::rel::eq_outer("id", "admin_id"),
+                pe::rel::eq_session("user_id", vec!["claims", "sub"]),
+            ]))))
+            .where_new(pe::always());
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(permissions(|p| p.allow_read().always())),
+        )
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .fk_column("admin_id", "admins")
+                .policies(protected_policies),
+        )
+        .build();
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
+    let client = connect_ready_client(
+        &server,
+        &schema,
+        "exists-rel-admin",
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let admin_id = client
+        .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
+        .expect("seed admin row")
+        .0;
+    let protected = client
+        .insert(
+            "protected",
+            crate::row_input!("data" => "initial", "admin_id" => admin_id),
+        )
+        .expect("seed protected row")
+        .0;
+
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let bob_transaction = bob
+        .update(
+            protected,
+            vec![("data".into(), Value::Text("bob update".into()))],
+        )
+        .expect("non-admin update should be accepted optimistically")
+        .expect("non-admin update should be pending server policy evaluation");
+    assert!(
+        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .is_err(),
+        "non-admin update should be denied"
+    );
+
+    let alice_transaction = alice
+        .update(
+            protected,
+            vec![("data".into(), Value::Text("alice update".into()))],
+        )
+        .expect("admin update should be accepted optimistically");
+    if let Some(transaction) = alice_transaction {
+        alice
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .expect("admin update should be allowed");
+    }
+
+    bob.shutdown().await.expect("shutdown Bob client");
+    alice.shutdown().await.expect("shutdown Alice client");
+    client.shutdown().await.expect("shutdown client");
+    server.shutdown().await;
+}
+
+/// Verifies SELECT enforcement for a correlated EXISTS_REL policy traversing
+/// from the protected outer row through a declared foreign key in reverse.
+#[tokio::test]
+async fn local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non_admin() {
+    tokio::task::LocalSet::new()
+        .run_until(
+            local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non_admin_inner(),
+        )
+        .await;
+}
+
+async fn local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non_admin_inner() {
+    let admins_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::exists(pe::table("protected").where_(pe::rel::all_of(
+                [
+                    pe::rel::eq_outer("admin_id", "id"),
+                    pe::rel::eq_session("owner_id", vec!["claims", "sub"]),
+                ],
+            ))));
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(admins_policies),
+        )
+        .table(
+            TableSchema::builder("protected")
+                .column("owner_id", ColumnType::Text)
+                .fk_column("admin_id", "admins")
+                .policies(permissions(|p| p.allow_read().always())),
+        )
+        .build();
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
+    let client = connect_ready_client(
+        &server,
+        &schema,
+        "exists-rel-admin",
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let admin_id = client
+        .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
+        .expect("seed admin row")
+        .0;
+    client
+        .insert(
+            "protected",
+            crate::row_input!("owner_id" => super::ALICE_ID, "admin_id" => admin_id),
+        )
+        .expect("seed protected row");
+
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "admins",
+        Duration::from_secs(30),
+    )
+    .await;
+    wait_for_query(
+        &alice,
+        Query::from("admins")
+            .filter(eq(col("id"), lit(*admin_id.uuid())))
+            .select(["user_id"]),
+        Some(jazz::tools::DurabilityTier::EdgeServer),
+        Duration::from_secs(5),
+        "Alice admin row becomes visible",
+        |rows| (rows == [(admin_id, vec![Value::Text(super::ALICE_ID.into())])]).then_some(()),
+    )
+    .await;
+
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "admins",
+        Duration::from_secs(30),
+    )
+    .await;
+    let bob_rows = bob
+        .query_with_read_tier(
+            Query::from("admins")
+                .filter(eq(col("id"), lit(*admin_id.uuid())))
+                .select(["user_id"]),
+            jazz::tools::ReadTier::Remote,
+        )
+        .await
+        .expect("query admins as Bob");
+    assert!(bob_rows.is_empty(), "Bob should not see Alice's admin row");
+
+    bob.shutdown().await.expect("shutdown Bob client");
+    alice.shutdown().await.expect("shutdown Alice client");
+    client.shutdown().await.expect("shutdown client");
+    server.shutdown().await;
+}
+
 /// Verifies local INSERT enforcement for an EXISTS_REL admin policy: sessions
 /// without a matching admin row are denied and admins are allowed.
 #[tokio::test]
