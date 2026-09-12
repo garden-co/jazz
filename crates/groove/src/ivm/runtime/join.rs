@@ -25,7 +25,7 @@ use super::{
 };
 
 #[cfg(feature = "arrangement-replay")]
-mod replay;
+pub(crate) mod replay;
 
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
 #[derive(Clone, Debug, Default)]

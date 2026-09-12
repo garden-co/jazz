@@ -29,3 +29,9 @@ pub use internment::Intern;
 #[cfg(feature = "arrangement-replay")]
 pub static ARRANGEMENT_CAPTURE_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// Run the opt-in arrangement replay benchmark from its captured input file.
+#[cfg(feature = "arrangement-replay")]
+pub fn replay_captured_arrangements() {
+    ivm::runtime::join::replay::run();
+}

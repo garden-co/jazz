@@ -46,3 +46,8 @@ harness = false
 [[bench]]
 name = "record_validation"
 harness = false
+
+[[bench]]
+name = "arrangement_replay"
+harness = false
+required-features = ["arrangement-replay"]

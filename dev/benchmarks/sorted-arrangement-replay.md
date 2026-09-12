@@ -54,3 +54,15 @@ binary, capture, source patch, five raw logs, timing JSON and cardinality script
 The comparison always times maps before sorted batches within a case; a production
 trial should use alternating process-level before/after runs and full correctness
 gates before retention. The synthetic cancellation test also passes.
+
+## Run the replay
+
+```sh
+GROOVE_ARRANGEMENT_REPLAY=/path/to/cases.bin cargo bench -p groove \
+  --bench arrangement_replay --profile perf \
+  --features arrangement-replay,jazz-benchmark-guard/mimalloc
+```
+
+The initial receipts used an equivalent manual test runner. The maintained entry
+point is an explicit opt-in benchmark, so it does not add an ignored test to the
+canonical correctness inventory.

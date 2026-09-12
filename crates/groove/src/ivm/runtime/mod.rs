@@ -48,7 +48,7 @@ use thiserror::Error;
 
 mod aggregate;
 pub(crate) mod evaluation_session;
-mod join;
+pub(crate) mod join;
 mod persist;
 mod recursion;
 mod state;

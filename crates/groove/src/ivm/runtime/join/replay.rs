@@ -86,13 +86,10 @@ pub(super) fn capture_probe(a: &JoinLookup<'_>, deltas: &[KeyedRecordDelta<'_>])
     });
 }
 
-#[cfg(test)]
-mod tests {
+mod engine {
     use super::*;
-    use std::time::{Duration, Instant};
-    #[global_allocator]
-    static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
     use std::io::{BufReader, Read};
+    use std::time::{Duration, Instant};
     #[derive(Clone)]
     struct Sorted {
         keys: Vec<JoinKey>,
@@ -210,9 +207,7 @@ mod tests {
     }
     // This test deliberately targets the private representation: public queries
     // cannot distinguish equivalent containers or isolate their operation costs.
-    #[test]
-    #[ignore = "manual synthetic arrangement capture replay; no production behavior change"]
-    fn replay_captured_arrangements() {
+    pub(super) fn run() {
         let path = std::env::var("GROOVE_ARRANGEMENT_REPLAY").expect("capture path");
         let mut reader = BufReader::new(std::fs::File::open(path).unwrap());
         let mut count = 0usize;
@@ -311,14 +306,8 @@ mod tests {
             count += 1;
         }
         println!(
-            "updates={updates} replacements={replacements} probes={probes} allocator={} cases={count} rows={total_rows} baseline_build={:?} sorted_build={:?} baseline_update={:?} sorted_update={:?} baseline_probe={:?} sorted_probe={:?}",
-            jazz_benchmark_guard::ALLOCATOR_NAME,
-            times[0],
-            times[1],
-            times[2],
-            times[3],
-            times[4],
-            times[5]
+            "updates={updates} replacements={replacements} probes={probes} cases={count} rows={total_rows} baseline_build={:?} sorted_build={:?} baseline_update={:?} sorted_update={:?} baseline_probe={:?} sorted_probe={:?}",
+            times[0], times[1], times[2], times[3], times[4], times[5]
         );
         println!(
             "replace baseline={:?} sorted={:?}; accumulate baseline={:?} sorted={:?}",
@@ -326,4 +315,8 @@ mod tests {
         );
         assert!(count > 0);
     }
+}
+
+pub(crate) fn run() {
+    engine::run();
 }
