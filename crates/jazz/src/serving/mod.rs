@@ -1043,6 +1043,10 @@ impl InMemoryServerShell {
         )
     }
 
+    pub(crate) fn runtime_catalogue_contains_schema(&self, schema: SchemaVersionId) -> bool {
+        self.db.catalogue_schema(schema).is_some()
+    }
+
     fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {
         let schema_id = schema.version_id();
         let current = self.db.current_write_schema()?;

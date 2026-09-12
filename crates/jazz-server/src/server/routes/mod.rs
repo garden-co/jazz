@@ -147,20 +147,13 @@ mod tests {
     use axum::response::Json;
 
     use jazz::tools::AppId;
-    use jazz::tools::public_schema::{SchemaHash, TableName};
+    use jazz::tools::public_schema::{
+        ColumnType, PolicyExpr, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies,
+        TableSchema,
+    };
     use jazz::tools::schema_lens::LensOp;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    use crate::server::catalogue::ConnectionSchemaDiagnostics;
-    use axum::body;
-    use axum::routing::{get, post};
-    use futures::{SinkExt as _, StreamExt as _};
-    use jazz::ids::AuthorSubject;
-    use jazz::tools::public_schema::{
-        ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies, TableSchema,
-    };
-    use serde_json::Value;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use tower::ServiceExt;
 
@@ -173,6 +166,13 @@ mod tests {
         FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
         WirePeerRole, decode_frame, encode_frame,
     };
+
+    use crate::server::catalogue::ConnectionSchemaDiagnostics;
+    use axum::body;
+    use axum::routing::{get, post};
+    use futures::{SinkExt as _, StreamExt as _};
+    use jazz::ids::AuthorSubject;
+    use serde_json::Value;
 
     #[tokio::test]
     async fn backend_admission_requires_exact_service_secret_and_application() {
