@@ -1084,6 +1084,9 @@ pub(crate) struct AuthorityResultState {
     /// Exact authoritative membership and an occurrence index for replacement.
     /// Non-row facts paired with the membership.
     settled_program_facts: BTreeSet<ViewFactEntry>,
+    /// Derived physical predecessor for complete received manifests. Invalidate
+    /// before settled-fact mutation; never recover it as authority evidence.
+    supporting_snapshot: Option<std::sync::Arc<views::OrderedSupportingSnapshot>>,
     /// O(changed) admission indexes for the exact source closure. These are
     /// receiver-local indexes over `settled_program_facts`, rebuilt on reopen;
     /// they never replace the durable closure itself.
