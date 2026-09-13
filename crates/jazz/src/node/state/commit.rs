@@ -1577,9 +1577,20 @@ where
                 let g = global.record();
                 let a = ahead.record();
                 let key = |record: BorrowedRecord<'_>| -> Result<_, Error> {
+                    let malformed = |error| {
+                        Self::malformed_current_query_error(
+                            &table.name,
+                            row_uuid,
+                            GrooveDbError::RecordEncoding(error),
+                        )
+                    };
                     Ok((
-                        record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?,
-                        record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
+                        record
+                            .get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
+                            .map_err(malformed)?,
+                        record
+                            .get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                            .map_err(malformed)?,
                     ))
                 };
                 // Arg-max compares the stored node alias, then breaks ties
