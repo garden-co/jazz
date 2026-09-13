@@ -1535,7 +1535,22 @@ where
             )) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let sources = self.compiled_covered_input_sources_for_subscription(update.subscription)?;
+        // Admission already retains this compiler-owned set under the exact
+        // authority receipt. Normalization must not rediscover the same source
+        // capabilities on every successor's complete physical manifest.
+        let discovered_sources;
+        let sources = if let Some(compiled) = self
+            .query
+            .authority_results
+            .get(&key)
+            .and_then(|state| state.compiled_covered_input_sources.as_ref())
+        {
+            compiled
+        } else {
+            discovered_sources =
+                self.compiled_covered_input_sources_for_subscription(update.subscription)?;
+            &discovered_sources
+        };
         let mut source_tables = BTreeMap::new();
         for source in sources {
             let physical = self
@@ -1547,7 +1562,7 @@ where
                     "compiled source physical table mapping missing",
                 ))?
                 .id;
-            source_tables.insert(source, physical);
+            source_tables.insert(source.clone(), physical);
         }
         let snapshot = std::sync::Arc::new(OrderedSupportingSnapshot::new(
             update.subscription,

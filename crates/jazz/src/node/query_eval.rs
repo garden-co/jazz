@@ -107,6 +107,12 @@ const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 #[cfg(test)]
 thread_local! {
     static CLIENT_PHYSICAL_ROW_QUERY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COVERED_INPUT_SOURCE_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_covered_input_source_discoveries_for_test() -> usize {
+    COVERED_INPUT_SOURCE_DISCOVERIES.with(|calls| calls.replace(0))
 }
 
 #[cfg(test)]
@@ -306,6 +312,8 @@ where
         &self,
         subscription: SubscriptionKey,
     ) -> Result<BTreeSet<ProgramSourceId>, Error> {
+        #[cfg(test)]
+        COVERED_INPUT_SOURCE_DISCOVERIES.with(|calls| calls.set(calls.get() + 1));
         let registered = self
             .unique_registered_binding_for_subscription(subscription)
             .ok_or(Error::InvalidStoredValue(
