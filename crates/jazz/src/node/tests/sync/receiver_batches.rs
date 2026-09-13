@@ -144,6 +144,138 @@ fn cold_and_warm_complete_snapshots_ingest_same_versions() {
     assert_currency_tables_match_storage(&mut incremental_reader, "todos");
 }
 
+/// Receiver-level coverage pins the reset fast path and its fallback. Public
+/// row/history APIs check results; public work counters establish the proof
+/// was selected, which row equality alone cannot demonstrate.
+#[test]
+fn empty_history_reset_heads_match_history_and_populated_table_falls_back() {
+    // Raw current records contain node-local transaction aliases. Compare the
+    // complete application payload and public row identity across replicas.
+    let public_rows = |rows: Vec<CurrentRow>| rows.into_iter()
+        .map(|record| (record.row_uuid(), record.cell(&schema().tables[0], "title")))
+        .collect::<BTreeMap<_, _>>();
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(2));
+    let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+    for (id, time, title) in [(1, 10, "one"), (2, 11, "two"), (1, 12, "newer")] {
+        commit_mergeable_global(&mut writer, &mut core,
+            MergeableCommit::new("todos", row(id), time).cells(title_cells(title)));
+    }
+    register_whole_table_receiver(&mut reader, "todos");
+    let mut peer = PeerState::new();
+    let update = peer.rehydrate_current_rows(&mut core, "todos").unwrap();
+    reader.apply_sync_message_settled(update.clone()).unwrap();
+    assert!(reader.sync_metrics().receiver_history_table_probes > 0);
+    // Row 1's newer version needs a missing parent and follows per-bundle
+    // ingestion; only parentless row 2 enters the empty-table bulk proof.
+    assert_eq!(reader.sync_metrics().receiver_history_rebuild_rows_avoided, 1);
+    assert!(reader.sync_metrics().receiver_per_bundle_ingests > 0);
+    assert_currency_tables_match_storage(&mut reader, "todos");
+    assert_eq!(public_rows(reader.current_rows("todos", DurabilityTier::Global).unwrap()),
+        public_rows(core.current_rows("todos", DurabilityTier::Global).unwrap()));
+    let expected = reader.query_all_versions().unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
+    assert_eq!(reader.query_all_versions().unwrap(), expected);
+    assert_eq!(reader.sync_metrics().receiver_history_rebuild_rows_avoided, 1);
+
+    drop(reader);
+    let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+    assert_eq!(reader.query_all_versions().unwrap(), expected);
+    assert_currency_tables_match_storage(&mut reader, "todos");
+    register_whole_table_receiver(&mut reader, "todos");
+    commit_mergeable_global(&mut writer, &mut core,
+        MergeableCommit::new("todos", row(3), 13).cells(title_cells("three")));
+    // Explicitly exercise bulk reset against a nonempty table: a reopened
+    // ordinary subscription may resume its retained receiver state instead.
+    // Persisted sibling history defeats the proof despite the new row's absence.
+    let update = PeerState::new().rehydrate_current_rows(&mut core, "todos").unwrap();
+    let bundles = version_bundles_for_update(&update);
+    let refs = bundles.iter().map(VersionBundle::as_ref).collect::<Vec<_>>();
+    assert_eq!(reader.ingest_reset_view_bundle_refs_in_bulk(&refs, None).unwrap().len(), 1);
+    reader.apply_sync_message_settled(update).unwrap();
+    assert!(reader.sync_metrics().receiver_history_table_probes > 0);
+    assert_eq!(reader.sync_metrics().receiver_history_rebuild_rows_avoided, 0);
+    assert_currency_tables_match_storage(&mut reader, "todos");
+    assert_eq!(public_rows(reader.current_rows("todos", DurabilityTier::Global).unwrap()),
+        public_rows(core.current_rows("todos", DurabilityTier::Global).unwrap()));
+}
+
+/// The exact derived head set is internal metadata, and ordinary subscription
+/// projections may omit concurrent history. Drive the internal reset-bundle
+/// seam to pin the bulk algorithm, then compare its durable head/history
+/// oracle and cancellation boundaries rather than a timing-only counter.
+#[test]
+fn empty_history_reset_concurrent_heads_are_atomic_across_cancellation() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    let schema = schema();
+    let bundles = (0..3).map(|i| {
+        let tx_id = TxId::new(TxTime::from(100 + i), node(0xe1));
+        let mut bundle = reset_scope_bundle(
+            reset_scope_tx(tx_id, 1),
+            crate::protocol::VersionBundleScope::CompleteTransaction,
+            vec![version_record(row(1), Vec::new(), title_cells(&format!("head {i}")), None)],
+        );
+        bundle.global_time = Some(GlobalTime(i + 1));
+        bundle
+    }).collect::<Vec<_>>();
+    let bundle_refs = bundles.iter().map(VersionBundle::as_ref).collect::<Vec<_>>();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut completed = false;
+    for allowed_writes in 0..12 {
+        let (storage, control) = TestStorage::controlled(&refs);
+        let reopen_handle = storage.clone();
+        let mut reader = NodeState::new_with_shared_test_catalogue(node(0xe2), schema.clone(), storage).unwrap();
+        control.take_observed();
+        control.pause_on(TestStorageOperation::WriteMany);
+        let mut ingest = Box::pin(reader.ingest_reset_view_bundle_refs_in_bulk(&bundle_refs, None));
+        let mut released = 0;
+        let mut stopped = false;
+        for _ in 0..50_000 {
+            match std::future::Future::poll(ingest.as_mut(), &mut std::task::Context::from_waker(std::task::Waker::noop())) {
+                std::task::Poll::Ready(result) => {
+                    assert_eq!(result.unwrap().len(), bundles.len());
+                    completed = true;
+                    stopped = true;
+                    break;
+                }
+                std::task::Poll::Pending => {}
+            }
+            let writes = control.observed().iter().filter(|operation| **operation == TestStorageOperation::WriteMany).count();
+            if writes > allowed_writes {
+                stopped = true;
+                break;
+            }
+            if writes > released {
+                control.release_one();
+                released = writes;
+            }
+        }
+        assert!(stopped, "reset did not reach a bounded persistence boundary");
+        drop(ingest);
+        if completed {
+            assert_eq!(reader.sync_metrics().receiver_history_table_probes, 1);
+            assert_eq!(reader.sync_metrics().receiver_history_rebuild_rows_avoided, 1);
+        }
+        drop(reader);
+        control.resume();
+        let storage = crate::db::block_on(reopen_handle.reopen(families.clone())).unwrap();
+        let mut reopened = NodeState::new_with_shared_test_catalogue(node(0xe2), schema.clone(), storage).unwrap();
+        let present = bundles.iter().filter(|bundle| reopened.query_transaction(bundle.tx.tx_id).unwrap().is_some()).count();
+        assert!(present == 0 || present == bundles.len(), "accepted prefix after {allowed_writes} writes");
+        if present != 0 {
+            assert_eq!(reopened.query_all_versions().unwrap().len(), bundles.len());
+            reopened.assert_merge_heads_match_history_for_test("todos", row(1)).unwrap();
+            let heads = reopened.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+            assert_eq!(heads.len(), 1);
+            assert_eq!(merge_heads_from_value(heads[0].record().get_idx(3).unwrap()).unwrap(),
+                bundles.iter().map(|bundle| bundle.tx.tx_id).collect());
+        }
+        if completed { break; }
+    }
+    assert!(completed, "include a completed reset, not only canceled attempts");
+}
+
 /// Receiver-level coverage pins the optimized reset path as well as ordinary
 /// ingestion. A high-level transport test cannot require that batching choice.
 #[test]

@@ -3,6 +3,74 @@
 use super::*;
 
 #[futures_test::test]
+async fn table_existence_is_bounded_and_observes_applied_resident_state() {
+    for count in [1, 1024] {
+        let storage = MemoryStorage::new(&["albums"]).unwrap();
+        let mut database = Database::new(albums_schema(), storage).await.unwrap();
+        assert!(!database.table_has_stored_rows("albums").await.unwrap());
+        assert!(database.table_has_stored_rows("missing").await.is_err());
+        let mut batch = database.open_batch();
+        for id in 0..count {
+            batch.insert(
+                "albums",
+                vec![Value::U64(id), Value::String("record".into())],
+            );
+        }
+        assert!(
+            !database.table_has_stored_rows("albums").await.unwrap(),
+            "unapplied batch is not resident"
+        );
+        let applied = database.apply_batch(batch).await.unwrap();
+        database.reset_storage_read_metrics();
+        assert!(database.table_has_stored_rows("albums").await.unwrap());
+        let reads = database.storage_read_metrics();
+        assert_eq!(
+            reads.total.reads, 1,
+            "one candidate regardless of cardinality"
+        );
+        assert_eq!(reads.total.ranges, 1);
+        let persisted = applied.persist().await;
+        database.finish_persistence(persisted).unwrap();
+        database.reset_storage_read_metrics();
+        assert!(database.table_has_stored_rows("albums").await.unwrap());
+        assert_eq!(database.storage_read_metrics().total.reads, 1);
+
+        let mut batch = database.open_batch();
+        for id in 0..count {
+            batch.delete("albums", PrimaryKeyValue::U64(id));
+        }
+        assert!(database.table_has_stored_rows("albums").await.unwrap());
+        let applied = database.apply_batch(batch).await.unwrap();
+        assert!(
+            !database.table_has_stored_rows("albums").await.unwrap(),
+            "resident tombstones hide persisted rows"
+        );
+        let persisted = applied.persist().await;
+        database.finish_persistence(persisted).unwrap();
+        assert!(!database.table_has_stored_rows("albums").await.unwrap());
+    }
+}
+
+#[futures_test::test]
+async fn table_existence_rejects_poisoned_storage_after_failed_persistence() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("record".into())],
+    );
+    let applied = database.apply_batch(batch).await.unwrap();
+    control.fail_next(TestStorageOperation::WriteMany);
+    let persisted = applied.persist().await;
+    assert!(database.finish_persistence(persisted).is_err());
+    assert!(matches!(
+        database.table_has_stored_rows("albums").await,
+        Err(Error::DatabasePoisoned)
+    ));
+}
+
+#[futures_test::test]
 async fn database_creation_dedups_schema_indices_as_durable_nodes() {
     let storage =
         MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");

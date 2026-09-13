@@ -631,6 +631,24 @@ where
         batch: &mut DatabaseBatch,
         versions: &[VersionRow],
     ) -> Result<(), Error> {
+        self.write_merge_heads_for_bulk_content_versions_with_empty_history(
+            batch,
+            versions,
+            &BTreeSet::new(),
+        )
+        .await
+    }
+
+    /// `empty_history_tables` is a local, pre-batch physical storage proof,
+    /// never a sender claim or absence inferred from a derived current index.
+    /// Only reset ingest passes it: every supplied version belongs to a new
+    /// Accepted transaction, and the same canonical batch installs all rows.
+    async fn write_merge_heads_for_bulk_content_versions_with_empty_history(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        versions: &[VersionRow],
+        empty_history_tables: &BTreeSet<PhysicalTableId>,
+    ) -> Result<(), Error> {
         let mut by_row = BTreeMap::<(PhysicalTableId, BranchKey, RowUuid), Vec<&VersionRow>>::new();
         for version in versions {
             if version.layer() == VersionLayer::Content {
@@ -642,6 +660,23 @@ where
             }
         }
         for ((table_id, branch_key, row_uuid), mut row_versions) in by_row {
+            if empty_history_tables.contains(&table_id) {
+                // Preserve the final staged value of each physical history
+                // primary key (branch, row, TxId), including schema aliases.
+                // There are no other persisted versions or fates to consult.
+                let mut by_tx = BTreeMap::new();
+                for version in row_versions {
+                    by_tx.insert(self.version_tx_id(version)?, version);
+                }
+                let versions = by_tx.into_values().cloned().collect::<Vec<_>>();
+                let candidates = (0..versions.len()).collect::<Vec<_>>();
+                let heads = content_head_indices(&versions, &candidates, &self.node_aliases)
+                    .into_iter()
+                    .map(|index| self.version_tx_id(&versions[index]))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                Self::write_merge_heads(batch, table_id, &branch_key, row_uuid, &heads)?;
+                continue;
+            }
             row_versions.sort_by_key(|version| {
                 let tx_id = self
                     .version_tx_id(version)
