@@ -7561,6 +7561,10 @@ mod tests {
                 .foreground_client(foreground)
                 .unwrap()
                 .clone();
+            let operation = match request {
+                ForegroundDbCommandRequest::Poll { operation } => operation,
+                _ => unreachable!("each unfinished read retains its pending operation"),
+            };
             let diagnostic = client.relay.run(move |worker| {
                 let state = worker.foreground_client(client.id)?;
                 let queue_len = |queue: &Arc<Mutex<BoundedMessageQueue>>| {
@@ -7570,7 +7574,7 @@ mod tests {
                         .messages
                         .len()
                 };
-                Ok(format!(
+                let scheduling = format!(
                     "upstream_attached={} transition={} socket={} persistent_tick={} \
                      admission={} foreground_tick={} pending_subscriptions={} \
                      subscriptions={} pending_operations={} coverage={:?} \
@@ -7590,12 +7594,31 @@ mod tests {
                     queue_len(&state.wire.outbound),
                     queue_len(&worker.upstream_io.wire.inbound),
                     queue_len(&worker.upstream_io.wire.outbound),
-                ))
+                );
+                let foreground_db = Rc::clone(&state.db);
+                eprintln!(
+                    "NATIVE_READ_DIAGNOSTIC foreground before repoll:\n{}",
+                    foreground_db.query_delivery_diagnostics_for_test()
+                );
+                eprintln!(
+                    "NATIVE_READ_DIAGNOSTIC owner before repoll:\n{}",
+                    worker.persistent.query_delivery_diagnostics_for_test()
+                );
+                foreground_db.set_query_coverage_trace_for_test(true);
+                eprintln!("NATIVE_READ_DIAGNOSTIC repoll operation={operation} begin");
+                let repoll = match worker.poll_foreground_operation(client.id, operation) {
+                    Ok(ForegroundOperationPoll::Pending { .. }) => "pending",
+                    Ok(ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(_))) => {
+                        "ready_rows"
+                    }
+                    Ok(ForegroundOperationPoll::Ready(_)) => "ready_other",
+                    Ok(ForegroundOperationPoll::Error { .. }) => "operation_error",
+                    Err(_) => "relay_error",
+                };
+                foreground_db.set_query_coverage_trace_for_test(false);
+                eprintln!("NATIVE_READ_DIAGNOSTIC repoll operation={operation} result={repoll}");
+                Ok(format!("{scheduling} diagnostic_repoll={repoll}"))
             });
-            let operation = match request {
-                ForegroundDbCommandRequest::Poll { operation } => operation,
-                _ => unreachable!("each unfinished read retains its pending operation"),
-            };
             panic!(
                 "foreground read did not settle after bounded native relay ticks \
                  at {stage}: operation={operation}; owner={diagnostic:?}"

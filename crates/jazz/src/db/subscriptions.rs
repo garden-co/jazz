@@ -516,12 +516,31 @@ where
     /// With Full propagation, memory-only foregrounds first receive their
     /// owner's local query answer; remote reads also require an authority receipt.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
+        #[cfg(any(test, feature = "testing"))]
+        let trace = self.node.trace_query_coverage.get();
+        #[cfg(any(test, feature = "testing"))]
+        if trace {
+            eprintln!(
+                "QUERY_COVERAGE_TRACE entered requires_delivery={} requires_authority={} subscriptions={:?}",
+                attachment.requires_delivery_receipt,
+                attachment.requires_current_authority_receipt,
+                attachment.subscriptions
+            );
+        }
         // Local propagation does not gate a durable node's local knowledge.
         // A foreground's empty memory is not yet its durable owner's answer.
         if !attachment.requires_delivery_receipt {
+            #[cfg(any(test, feature = "testing"))]
+            if trace {
+                eprintln!("QUERY_COVERAGE_TRACE result=true reason=no_delivery_prerequisite");
+            }
             return true;
         }
         let Some(node) = self.node.node.try_lock() else {
+            #[cfg(any(test, feature = "testing"))]
+            if trace {
+                eprintln!("QUERY_COVERAGE_TRACE result=false reason=node_owner_unavailable");
+            }
             return false;
         };
         let active_receipts = self.node.active_authority_view_receipts.borrow();
@@ -560,6 +579,34 @@ where
                     && !node.opening_pending_for_authority_result(&receipt)
             })
             && (!attachment.requires_current_authority_receipt || has_current_authority_receipt);
+        #[cfg(any(test, feature = "testing"))]
+        if trace {
+            eprintln!(
+                "QUERY_COVERAGE_TRACE result={covered} current_authority_receipt={has_current_authority_receipt} required={:?}",
+                attachment.required_after
+            );
+            for (binding_view, threshold) in &attachment.required_after {
+                for subscription in &attachment.subscriptions {
+                    match node.authority_result_key_for_subscription(*subscription) {
+                        Ok(key) => eprintln!(
+                            "QUERY_COVERAGE_TRACE subscription={subscription:?} binding={:?} policy_digest={:?} binding_matches={} threshold={threshold} current={} live_settled={} opening_pending={} publication_deferred={}",
+                            key.binding_view,
+                            key.policy_binding
+                                .as_ref()
+                                .map(|policy| policy.directory_digest()),
+                            key.binding_view == *binding_view,
+                            node.applied_authority_result_generation(&key),
+                            node.has_settled_authority_result(&key),
+                            node.opening_pending_for_authority_result(&key),
+                            node.publication_deferred_for_authority_result(&key)
+                        ),
+                        Err(_) => eprintln!(
+                            "QUERY_COVERAGE_TRACE subscription={subscription:?} threshold={threshold} reason=missing_receipt_binding"
+                        ),
+                    }
+                }
+            }
+        }
         drop(node);
         drop(active_receipts);
         if covered {
@@ -571,6 +618,176 @@ where
             }
         }
         covered
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Enable one caller-controlled diagnostic poll without changing scheduling.
+    pub fn set_query_coverage_trace_for_test(&self, enabled: bool) {
+        self.node.trace_query_coverage.set(enabled);
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Scheduling and receipt state only: never row values or admitted claims.
+    pub fn query_delivery_diagnostics_for_test(&self) -> String {
+        use std::fmt::Write;
+        let mut output = String::new();
+        let node = self.node.node.try_lock();
+        let receipt = |subscription| {
+            let Some(node) = node.as_ref() else {
+                return "node_owner_unavailable".to_owned();
+            };
+            match node.authority_result_key_for_subscription(subscription) {
+                Ok(key) => format!(
+                    "binding={:?} policy_digest={:?} generation={} live={} opening={} deferred={}",
+                    key.binding_view,
+                    key.policy_binding
+                        .as_ref()
+                        .map(|policy| policy.directory_digest()),
+                    node.applied_authority_result_generation(&key),
+                    node.has_settled_authority_result(&key),
+                    node.opening_pending_for_authority_result(&key),
+                    node.publication_deferred_for_authority_result(&key)
+                ),
+                Err(_) => "missing_receipt_binding".to_owned(),
+            }
+        };
+        let _ = writeln!(
+            output,
+            "node_owner_available={} pending_upstream={} awaiting_initial={} finalizations={}",
+            node.is_some(),
+            self.node.upstream_subscriptions.borrow().len(),
+            self.node.awaiting_initial_authority_coverage.borrow().len(),
+            self.node.pending_subscription_finalizations.borrow().len()
+        );
+        if let Some(node) = node.as_ref() {
+            let _ = writeln!(
+                output,
+                "permissions_ready={} runtime_token={}",
+                node.permissions_ready(),
+                node.groove_runtime_token()
+            );
+        }
+        for (subscription, registration) in self.node.query_coverage_registrations.borrow().iter() {
+            let _ = writeln!(
+                output,
+                "registration={subscription:?} refs={} refresh_threshold={:?} {}",
+                registration.ref_count,
+                self.node
+                    .coverage_refresh_generations
+                    .borrow()
+                    .get(&registration.coverage),
+                receipt(*subscription)
+            );
+        }
+        for state in self
+            .node
+            .subscriptions
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
+            let Ok(state) = state.try_borrow() else {
+                let _ = writeln!(output, "stream=borrowed");
+                continue;
+            };
+            let Ok(publication) = state.sender.publication.try_borrow() else {
+                let _ = writeln!(output, "stream_publication=borrowed");
+                continue;
+            };
+            let _ = writeln!(
+                output,
+                "stream tier={:?} remote_tier={:?} settled={} closed={} source={:?} roots={} cold_replacement={} publication_opened={} publication_deferred={} unresolved={}",
+                state.read_tier,
+                state.remote_read_tier,
+                state.settled,
+                state.closed.get(),
+                state.snapshot_source,
+                state.snapshot.root_count,
+                state.cold_runtime_replacement,
+                publication.opened,
+                publication.deferred.is_some(),
+                publication.unresolved.len()
+            );
+            for handle in &state.upstream_subscription_handles {
+                let _ = writeln!(
+                    output,
+                    "stream_subscription={:?} {}",
+                    handle.subscription,
+                    receipt(handle.subscription)
+                );
+            }
+        }
+        for connection in self.node.connections.borrow().iter() {
+            let Some(connection) = connection.try_lock() else {
+                let _ = writeln!(output, "connection=owner_unavailable");
+                continue;
+            };
+            match &connection.link {
+                ConnectionLink::Upstream(upstream) => {
+                    let _ = writeln!(
+                        output,
+                        "upstream staged={} pending={} sent={} awaiting_support={}",
+                        connection.staged_inbound.len(),
+                        upstream.pending.len(),
+                        upstream.sent_subscriptions.len(),
+                        upstream.awaiting_support_snapshots.len()
+                    );
+                    for subscription in upstream.sent_subscriptions.keys() {
+                        let _ = writeln!(
+                            output,
+                            "sent_subscription={subscription:?} {}",
+                            receipt(*subscription)
+                        );
+                    }
+                }
+                ConnectionLink::Subscriber(subscriber) => {
+                    let _ = writeln!(
+                        output,
+                        "subscriber staged={} serve_dirty={} pending_catalogue={} groups={}",
+                        connection.staged_inbound.len(),
+                        subscriber.serve_dirty,
+                        subscriber.pending_catalogue_subscriptions.len(),
+                        subscriber.coverage_groups.len()
+                    );
+                    for (coverage, group) in &subscriber.coverage_groups {
+                        let selected = subscriber.peer.subscription_authority_result_source(
+                            peer_connection::coverage_group_subscription_key(coverage),
+                        );
+                        let selected_progress = selected.and_then(|key| {
+                            node.as_ref().map(|node| {
+                                (
+                                    key.binding_view,
+                                    key.policy_binding
+                                        .as_ref()
+                                        .map(|policy| policy.directory_digest()),
+                                    node.applied_authority_result_generation(key),
+                                    node.has_settled_authority_result(key),
+                                    node.opening_pending_for_authority_result(key),
+                                )
+                            })
+                        });
+                        let _ = writeln!(
+                            output,
+                            "group tier={:?} selected_source_binding_digest_generation_live_opening={selected_progress:?}",
+                            coverage.opts.tier
+                        );
+                        let _ = writeln!(
+                            output,
+                            "group subscribers={:?} pending_initial={:?} initialized={} awaiting_upstream={} pending_initial_update={} pending_incrementals={} source_subscription={:?} {}",
+                            group.subscribers,
+                            group.pending_initial_subscribers,
+                            group.initialized,
+                            group.awaiting_upstream_settlement,
+                            group.pending_initial_update.is_some(),
+                            group.pending_incremental_updates.len(),
+                            group.authority_result_subscription,
+                            receipt(group.authority_result_subscription)
+                        );
+                    }
+                }
+            }
+        }
+        output
     }
 
     #[cfg(any(test, feature = "testing"))]
