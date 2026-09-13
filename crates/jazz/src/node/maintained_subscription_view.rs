@@ -1007,7 +1007,7 @@ impl MaintainedSubscriptionView {
                 })
                 .sum::<usize>();
         let journal_bytes = self.unpublished_source_facts.as_ref().map_or(0, |facts| {
-            btree_set_bytes(facts.len()) + facts.len() * mem::size_of::<ProgramFactEntry>()
+            btree_set_bytes(facts.len()) + facts.iter().map(peer_source_fact_bytes).sum::<usize>()
         });
         let versions_bytes = journal_bytes
             + self.versions.footprint_bytes()
@@ -3242,6 +3242,42 @@ fn vec_bytes<T>(value: &[T]) -> usize {
 
 fn option_vec_bytes<T>(value: &Option<Vec<T>>) -> usize {
     value.as_deref().map(vec_bytes).unwrap_or_default()
+}
+
+// Count the journal's owned copies, not allocations shared through interned
+// table handles. Inline fields are counted once; Vec/String capacities include
+// their owned buffers. Peer source facts contain no shared record payloads.
+fn peer_source_fact_bytes(fact: &ProgramFactEntry) -> usize {
+    use crate::protocol::ProgramSourceRole;
+
+    let (source, version_buffers) = match fact {
+        ProgramFactEntry::ProgramSourceCoverage(coverage) => (&coverage.source, 0),
+        ProgramFactEntry::CoveredInput(input) => (
+            &input.source,
+            input
+                .version
+                .branch_or_prefix
+                .as_ref()
+                .map_or(0, Vec::capacity)
+                + input.version.row_digest.as_ref().map_or(0, Vec::capacity),
+        ),
+        _ => return mem::size_of_val(fact),
+    };
+    mem::size_of_val(fact)
+        + source.path.capacity() * mem::size_of::<ProgramSourceRole>()
+        + source
+            .path
+            .iter()
+            .map(|role| match role {
+                ProgramSourceRole::Root => 0,
+                ProgramSourceRole::Alias(name)
+                | ProgramSourceRole::RecursiveSeed(name)
+                | ProgramSourceRole::RecursiveStep(name)
+                | ProgramSourceRole::CorrelatedChild(name)
+                | ProgramSourceRole::Policy(name) => name.capacity(),
+            })
+            .sum::<usize>()
+        + version_buffers
 }
 
 fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {

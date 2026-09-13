@@ -1364,7 +1364,6 @@ impl PeerState {
             );
         }
         self.metrics.maintained_subscription_view.hits_out += 1;
-        self.refresh_maintained_subscription_view_footprint(subscription);
         // Advance the predecessor and retire the journal only after the
         // fallible bundle construction succeeds. Failed/cancelled attempts
         // leave every changed identity available to the next drain.
@@ -1386,6 +1385,7 @@ impl PeerState {
                 view.maintained.acknowledge_peer_source_closure();
             }
         }
+        self.refresh_maintained_subscription_view_footprint(subscription);
         Ok(Some(MaintainedCanonicalUpdate {
             changed: true,
             update,
