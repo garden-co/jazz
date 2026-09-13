@@ -213,6 +213,34 @@ importers:
         specifier: catalog:default
         version: 6.0.2
 
+  dev/perf-timeline:
+    dependencies:
+      next:
+        specifier: catalog:default
+        version: 16.2.11(@babel/core@7.29.0)(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      react:
+        specifier: 19.2.4
+        version: 19.2.4
+      react-dom:
+        specifier: 19.2.4
+        version: 19.2.4(react@19.2.4)
+    devDependencies:
+      '@types/node':
+        specifier: catalog:default
+        version: 22.19.13
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.0
+        version: 19.2.3(@types/react@19.2.14)
+      typescript:
+        specifier: catalog:default
+        version: 6.0.2
+      playwright:
+        specifier: 1.58.2
+        version: 1.58.2
+
   dev/rn-device-acceptance:
     dependencies:
       expo:

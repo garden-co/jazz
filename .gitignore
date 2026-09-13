@@ -71,3 +71,4 @@ data-multi/
 /.cache/android-device-acceptance/
 # Generated browser benchmark phase receipts.
 packages/jazz-tools/.vitest-browser-bench/
+/.vercel/

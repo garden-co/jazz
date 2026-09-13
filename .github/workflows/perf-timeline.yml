@@ -1,0 +1,37 @@
+name: Performance timeline app
+
+on:
+  pull_request:
+    paths:
+      - "dev/perf-timeline/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/perf-timeline.yml"
+  push:
+    branches: [main]
+    paths:
+      - "dev/perf-timeline/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/perf-timeline.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts --filter jazz-perf-timeline...
+      - run: pnpm --filter jazz-perf-timeline test
+      - run: pnpm --filter jazz-perf-timeline build
+      - run: pnpm --filter jazz-perf-timeline exec playwright install --with-deps chromium
+      - run: pnpm --filter jazz-perf-timeline test:e2e
