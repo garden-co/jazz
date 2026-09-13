@@ -154,7 +154,9 @@ The concrete v1 byte contracts are:
 - Immutable-version row blob: ASCII `JVRR`, byte `1`, descriptor byte length as
   little-endian `U32`, exactly that many Groove persisted-descriptor bytes, then
   canonical row bytes consuming the remainder. The enclosing sync message owns
-  the blob length and retains, in its declared order, table, schema UUID, branch,
+  the blob length (canonical Postcard unsigned varint followed by exactly that
+  many raw bytes; identical for a byte blob and a sequence of `u8`) and retains,
+  in its declared order, table, schema UUID, branch,
   this row blob, and authored-column set. The row blob is not a serde tuple of
   `RecordDescriptor` and bytes. Both unknown versions and the former incidental
   `OwnedRecord` representation are rejected.
