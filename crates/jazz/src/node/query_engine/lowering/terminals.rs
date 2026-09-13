@@ -9,6 +9,100 @@ use crate::node::CurrentRowPublicationField;
 use crate::node::query_eval::coerce_prepared_binding_value;
 use groove::records::{DescriptorField, FieldIdentity};
 
+/// Share execution only after proving the complete typed source/routing schema
+/// and graph equal, except for the explicitly known terminal role literal.
+/// Logical sinks remain separate contracts; no per-row identity cache is needed.
+pub(super) fn shared_witness_sinks(terminals: &[LoweredTerminal]) -> BTreeMap<String, String> {
+    let mut shared = BTreeMap::new();
+    for replacement in terminals {
+        let OutputTerminalSchema::Fact(ProgramFactOutput {
+            key: ProgramFactKey::ReplacementWitnesses,
+            terminal: replacement_role,
+            schema: ProgramFactSchema::ReplacementWitnesses(replacement_schema),
+        }) = &replacement.output
+        else {
+            continue;
+        };
+        let (version_role, version_tag, replacement_tag) = match replacement_role {
+            ProgramFactTerminal::ReplacementWitnessContent => (
+                ProgramFactTerminal::VersionWitnessContent,
+                "version_content",
+                "replacement_content",
+            ),
+            ProgramFactTerminal::ReplacementWitnessDeletion => (
+                ProgramFactTerminal::VersionWitnessDeletion,
+                "version_deletion",
+                "replacement_deletion",
+            ),
+            _ => continue,
+        };
+        for version in terminals {
+            if shared.values().any(|sink| sink == &version.sink) {
+                continue;
+            }
+            let OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::VersionWitnesses,
+                terminal,
+                schema: ProgramFactSchema::VersionWitnesses(version_schema),
+            }) = &version.output
+            else {
+                continue;
+            };
+            if *terminal != version_role || version_schema != replacement_schema {
+                continue;
+            }
+            let (
+                GraphBuilder::Project {
+                    input: version_input,
+                    fields: version_fields,
+                },
+                GraphBuilder::Project {
+                    input: replacement_input,
+                    fields: replacement_fields,
+                },
+            ) = (&version.graph, &replacement.graph)
+            else {
+                continue;
+            };
+            if version_input != replacement_input
+                || version_fields.len() != replacement_fields.len()
+            {
+                continue;
+            }
+            let mut role_fields = 0;
+            let equal = version_fields
+                .iter()
+                .zip(replacement_fields)
+                .all(|(left, right)| {
+                    if left.output_name == version_schema.role_field {
+                        role_fields += 1;
+                        left.output_name == right.output_name
+                            && left.output_identity == right.output_identity
+                            && left.expression
+                                == ProjectField::literal(
+                                    "event_kind",
+                                    Value::String(version_tag.into()),
+                                )
+                                .expression
+                            && right.expression
+                                == ProjectField::literal(
+                                    "event_kind",
+                                    Value::String(replacement_tag.into()),
+                                )
+                                .expression
+                    } else {
+                        left == right
+                    }
+                });
+            if equal && role_fields == 1 {
+                shared.insert(replacement.sink.clone(), version.sink.clone());
+                break;
+            }
+        }
+    }
+    shared
+}
+
 fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<String> {
     source
         .row_shape

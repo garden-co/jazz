@@ -5,6 +5,55 @@ use crate::legacy_test_future::FutureResolveExt as _;
 use crate::peer::PeerState;
 use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey, ReadViewSourceSpec, SnapshotRef};
 
+/// Internal compiler boundary: public rows cannot reveal whether two logical
+/// witness roles have one executable payload producer. Alice's maintained
+/// program must retain both contracts while sharing their proven execution.
+#[test]
+fn maintained_program_shares_identical_witness_execution() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    commit_global_issue(&mut node, 0, "open", alice, 1);
+    let shape = Query::from("issues").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let program = node
+        .compile_current_query_program_for_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            alice,
+            CurrentQueryProgramOutput::MaintainedView,
+            &ReadViewSpec::default(),
+        )
+        .unwrap();
+    assert!(!program.lowered.shared_witness_sinks.is_empty());
+    assert_eq!(
+        program.lowered.execution_terminals().count() + program.lowered.shared_witness_sinks.len(),
+        program.lowered.terminals.len(),
+    );
+    for (replacement, version) in &program.lowered.shared_witness_sinks {
+        assert_ne!(replacement, version);
+        assert!(
+            program
+                .lowered
+                .terminals
+                .iter()
+                .any(|terminal| &terminal.sink == replacement)
+        );
+        assert!(
+            program
+                .lowered
+                .execution_terminals()
+                .any(|terminal| &terminal.sink == version)
+        );
+        assert!(
+            !program
+                .lowered
+                .execution_terminals()
+                .any(|terminal| &terminal.sink == replacement)
+        );
+    }
+}
+
 #[test]
 fn maintained_snapshot_view_compiles_remote_delivery_witnesses() {
     let (_dir, mut node) = open_node();

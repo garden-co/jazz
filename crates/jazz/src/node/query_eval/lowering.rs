@@ -149,8 +149,7 @@ pub(super) fn lowered_materialization_app_rows_graph(
 pub(super) fn lowered_program_sinks(program: &QueryProgram) -> Vec<(String, GraphBuilder)> {
     program
         .lowered
-        .terminals
-        .iter()
+        .execution_terminals()
         .map(|terminal| (terminal.sink.clone(), terminal.graph.clone()))
         .collect()
 }
@@ -952,12 +951,7 @@ where
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_params = prepared_route_param_names(&program.lowered.parameters);
         if params.is_empty() {
-            let sinks: Vec<(String, GraphBuilder)> = program
-                .lowered
-                .terminals
-                .into_iter()
-                .map(|terminal| (terminal.sink, terminal.graph))
-                .collect();
+            let sinks = lowered_program_sinks(&program);
             return self
                 .database
                 .subscribe_with_waker(sinks, progress_waker)
@@ -988,8 +982,7 @@ where
         )?;
         let terminals = program
             .lowered
-            .terminals
-            .into_iter()
+            .execution_terminals()
             .map(|terminal| {
                 let public_fields = terminal_public_fields(&terminal.output)?;
                 let route_fields = terminal_route_fields(
@@ -998,8 +991,8 @@ where
                 );
                 let route_value_indices = prepared_route_value_indices(&params, &route_fields);
                 Ok(RoutedMultisinkTerminal::new(
-                    terminal.sink,
-                    terminal.graph,
+                    terminal.sink.clone(),
+                    terminal.graph.clone(),
                     route_fields,
                     public_fields,
                 )
