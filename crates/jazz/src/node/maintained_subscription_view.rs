@@ -240,8 +240,12 @@ pub(crate) struct MaintainedSubscriptionViewFootprint {
 
 #[derive(Clone, Debug, Default)]
 struct WeightedVersionIndex {
-    by_identity: BTreeMap<VersionIdentity, WeightedVersion>,
-    by_tx: BTreeMap<TxId, BTreeMap<VersionSortKey, BTreeSet<VersionIdentity>>>,
+    // The sort key contains the complete version identity. Transaction and
+    // row UUID are derived from that same immutable record, so a second global
+    // identity map and singleton identity sets add no distinguishing power.
+    by_tx: BTreeMap<TxId, BTreeMap<VersionSortKey, WeightedVersion>>,
+    entry_count: usize,
+    entry_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -860,7 +864,7 @@ impl MaintainedSubscriptionView {
                     let covered_input =
                         self.covered_input_for_version(source, &row, node_aliases)?;
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
-                    self.versions.apply_delta(identity, payload, weight);
+                    self.versions.apply_delta(payload, weight);
                     if let Some(is_present) = self.apply_source_fact_delta(
                         SourceFactOrigin::Version,
                         ProgramFactEntry::CoveredInput(covered_input.clone()),
@@ -896,8 +900,7 @@ impl MaintainedSubscriptionView {
                         self.covered_input_for_version(source, &row, node_aliases)?;
                     let key = ReplacementKey::for_row(&row, identity.layer);
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
-                    self.versions
-                        .apply_delta(identity.clone(), Arc::clone(&payload), weight);
+                    self.versions.apply_delta(Arc::clone(&payload), weight);
                     self.replacements
                         .apply_delta(key, identity, payload, weight);
                     for origin in [SourceFactOrigin::Version, SourceFactOrigin::Replacement] {
@@ -1177,15 +1180,8 @@ impl MaintainedSubscriptionView {
                 .map(|records| records.values().filter(|weight| **weight > 0).count())
                 .sum::<usize>()
                 + self.structured_terminal_records.len(),
-            version_identities: self.versions.by_identity.len()
-                + self.selected_deletion_witnesses.len(),
-            version_tx_entries: self
-                .versions
-                .by_tx
-                .values()
-                .flat_map(|by_sort_key| by_sort_key.values())
-                .map(BTreeSet::len)
-                .sum(),
+            version_identities: self.versions.entry_count + self.selected_deletion_witnesses.len(),
+            version_tx_entries: self.versions.entry_count,
             replacement_entries: self.replacements.entry_count(),
             result_weights_bytes,
             result_payloads_bytes,
@@ -1599,7 +1595,14 @@ impl MaintainedSubscriptionView {
             // fact, so it has no Stream B history-row witness.
             return true;
         };
-        self.versions_by_tx(tx_id).iter().any(|version| {
+        // Existence does not require owning or deduplicating the transaction's
+        // rows. Keep selected deletion witnesses in the same candidate union.
+        self.versions.rows_by_tx(tx_id).chain(
+            self.selected_deletion_witnesses.iter().filter_map(|(fact, version)| {
+                matches!(fact, ProgramFactEntry::CoveredInput(input) if input.version.tx == tx_id)
+                    .then_some(version)
+            }),
+        ).any(|version| {
             version.table() == table.as_str()
                 && version.row_uuid() == row_uuid
                 && version.deletion().is_none()
@@ -3226,94 +3229,59 @@ fn field_idx_in_descriptor(
 
 impl WeightedVersionIndex {
     fn footprint_bytes(&self) -> usize {
-        btree_map_bytes(self.by_identity.len())
-            + self
-                .by_identity
-                .iter()
-                .map(|(identity, version)| {
-                    version_identity_bytes(identity) + weighted_version_bytes(version)
-                })
-                .sum::<usize>()
-            + btree_map_bytes(self.by_tx.len())
-            + self
-                .by_tx
-                .values()
-                .map(|by_sort_key| {
-                    btree_map_bytes(by_sort_key.len())
-                        + by_sort_key
-                            .iter()
-                            .map(|(sort_key, identities)| {
-                                version_sort_key_bytes(sort_key)
-                                    + btree_set_bytes(identities.len())
-                                    + identities.iter().map(version_identity_bytes).sum::<usize>()
-                            })
-                            .sum::<usize>()
-                })
-                .sum::<usize>()
+        btree_map_bytes(self.by_tx.len()) + btree_map_bytes(self.entry_count) + self.entry_bytes
     }
 
-    fn apply_delta(
-        &mut self,
-        identity: VersionIdentity,
-        payload: Arc<VersionPayload>,
-        weight: i64,
-    ) {
-        let old = self
-            .by_identity
-            .get(&identity)
-            .map(|version| version.weight)
-            .unwrap_or(0);
+    fn apply_delta(&mut self, payload: Arc<VersionPayload>, weight: i64) {
+        use std::collections::btree_map::Entry;
+
         let tx_id = payload.tx_id;
-        let new = old + weight;
+        let rows = match self.by_tx.entry(tx_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) if weight > 0 => entry.insert(BTreeMap::new()),
+            Entry::Vacant(_) => return,
+        };
+        match rows.entry(payload.sort_key.clone()) {
+            Entry::Occupied(mut entry) => {
+                let new = entry.get().weight + weight;
+                self.entry_bytes -= weighted_version_bytes(entry.get());
+                if new > 0 {
+                    let version = WeightedVersion {
+                        payload,
+                        weight: new,
+                    };
+                    self.entry_bytes += weighted_version_bytes(&version);
+                    entry.insert(version);
+                } else {
+                    self.entry_bytes -= version_sort_key_bytes(entry.key());
+                    self.entry_count -= 1;
+                    entry.remove();
+                }
+            }
+            Entry::Vacant(entry) if weight > 0 => {
+                let version = WeightedVersion { payload, weight };
+                self.entry_bytes +=
+                    version_sort_key_bytes(entry.key()) + weighted_version_bytes(&version);
+                self.entry_count += 1;
+                entry.insert(version);
+            }
+            Entry::Vacant(_) => {}
+        }
+        if rows.is_empty() {
+            self.by_tx.remove(&tx_id);
+        }
+    }
 
-        if old <= 0 && new > 0 {
-            self.by_tx
-                .entry(tx_id)
-                .or_default()
-                .entry(payload.sort_key.clone())
-                .or_default()
-                .insert(identity.clone());
-        }
-        if old > 0
-            && new <= 0
-            && let Some(existing) = self.by_identity.get(&identity)
-        {
-            remove_tx_identity(
-                &mut self.by_tx,
-                existing.tx_id,
-                &existing.sort_key,
-                &identity,
-            );
-        }
-
-        if new > 0 {
-            self.by_identity.insert(
-                identity,
-                WeightedVersion {
-                    payload,
-                    weight: new,
-                },
-            );
-        } else {
-            self.by_identity.remove(&identity);
-        }
+    fn rows_by_tx(&self, tx_id: TxId) -> impl Iterator<Item = &VersionRow> {
+        self.by_tx
+            .get(&tx_id)
+            .into_iter()
+            .flat_map(|rows| rows.values())
+            .map(|version| &version.row)
     }
 
     fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
-        let Some(by_sort_key) = self.by_tx.get(&tx_id) else {
-            return Vec::new();
-        };
-        by_sort_key
-            .values()
-            .flat_map(|identities| {
-                identities.iter().filter_map(|identity| {
-                    self.by_identity
-                        .get(identity)
-                        .filter(|version| version.weight > 0)
-                        .map(|version| version.row.clone())
-                })
-            })
-            .collect()
+        self.rows_by_tx(tx_id).cloned().collect()
     }
 }
 
@@ -3568,26 +3536,6 @@ impl NetEvent {
                 EventIdentity::StructuredAppRow(*root, record.raw().to_vec())
             }
         }
-    }
-}
-
-fn remove_tx_identity(
-    by_tx: &mut BTreeMap<TxId, BTreeMap<VersionSortKey, BTreeSet<VersionIdentity>>>,
-    tx_id: TxId,
-    sort_key: &VersionSortKey,
-    identity: &VersionIdentity,
-) {
-    let Some(by_sort_key) = by_tx.get_mut(&tx_id) else {
-        return;
-    };
-    if let Some(identities) = by_sort_key.get_mut(sort_key) {
-        identities.remove(identity);
-        if identities.is_empty() {
-            by_sort_key.remove(sort_key);
-        }
-    }
-    if by_sort_key.is_empty() {
-        by_tx.remove(&tx_id);
     }
 }
 
@@ -4964,6 +4912,8 @@ mod tests {
             };
             let identity = VersionIdentity::for_row(&record);
             let key = ReplacementKey::for_row(&record, identity.layer);
+            let sort_key = VersionSortKey::for_row(&record, &identity);
+            let tx_id = version_tx_id_from_aliases(&record, &aliases()).unwrap();
             let shared = DecodedMaintainedEvent::SharedVersion {
                 source: test_source(),
                 row: record.clone(),
@@ -4977,13 +4927,11 @@ mod tests {
             } else {
                 &maintained.replacements.content_by_key
             };
-            let version_payload = &maintained.versions.by_identity[&identity].payload;
+            let version_payload = &maintained.versions.by_tx[&tx_id][&sort_key].payload;
             let replacement_payload = &replacements[&key][&identity].payload;
             assert!(Arc::ptr_eq(version_payload, replacement_payload));
             assert!(Arc::ptr_eq(
-                &maintained
-                    .versions
-                    .by_identity
+                &maintained.versions.by_tx[&tx_id]
                     .keys()
                     .next()
                     .unwrap()
@@ -5004,7 +4952,7 @@ mod tests {
                 .apply_decoded_deltas([(replacement_event.clone(), -1)], &aliases())
                 .unwrap();
             assert!(withdrew.program_fact_removes.is_empty());
-            assert_eq!(maintained.versions.by_identity[&identity].weight, 1);
+            assert_eq!(maintained.versions.by_tx[&tx_id][&sort_key].weight, 1);
             assert_eq!(maintained.replacements.entry_count(), 0);
             maintained
                 .apply_decoded_deltas(
@@ -5013,7 +4961,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(maintained.active_peer_source_closure_facts().len(), 1);
-            assert!(maintained.versions.by_identity.is_empty());
+            assert!(maintained.versions.by_tx.is_empty());
             assert_eq!(maintained.replacements.entry_count(), 1);
             let removed = maintained
                 .apply_decoded_deltas([(replacement_event, -1)], &aliases())
@@ -5025,7 +4973,7 @@ mod tests {
                 .unwrap();
             assert!(cancelled.program_fact_adds.is_empty());
             assert!(cancelled.program_fact_removes.is_empty());
-            assert!(maintained.versions.by_identity.is_empty());
+            assert!(maintained.versions.by_tx.is_empty());
             assert_eq!(maintained.replacements.entry_count(), 0);
         }
     }
@@ -5604,6 +5552,111 @@ mod tests {
         assert!(inactive.adds.is_empty());
         assert_eq!(inactive.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    // Internal differential/accounting oracle: public row equality cannot
+    // establish exact private footprint counters or retained index ownership.
+    fn transaction_version_index_matches_identity_oracle_and_footprint() {
+        let aliases = aliases();
+        let mut records = (0..32)
+            .map(|i| {
+                let row_uuid = row(i % 4 + 1);
+                let time = u64::from(10 + i / 8);
+                if i % 8 < 4 {
+                    version(row_uuid, time, "content")
+                } else {
+                    deletion(row_uuid, time)
+                }
+            })
+            .collect::<Vec<_>>();
+        // Same row/transaction/layer, distinct encoded identity.
+        records.push(version(row(1), 10, "other content"));
+        let payloads = records
+            .iter()
+            .map(|record| {
+                VersionPayload::prepare(record.clone(), &VersionIdentity::for_row(record), &aliases)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut index = WeightedVersionIndex::default();
+        let mut oracle = BTreeMap::<VersionIdentity, WeightedVersion>::new();
+        let mut seed = 17_u64;
+        for step in 0..600 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let payload = Arc::clone(&payloads[(seed >> 32) as usize % payloads.len()]);
+            let weight = [1, 2, -1, -4, 0, 3, -2][step % 7];
+            let identity = VersionIdentity::for_row(&payload.row);
+            let new = oracle.get(&identity).map_or(0, |version| version.weight) + weight;
+            if new > 0 {
+                oracle.insert(
+                    identity,
+                    WeightedVersion {
+                        payload: Arc::clone(&payload),
+                        weight: new,
+                    },
+                );
+            } else {
+                oracle.remove(&identity);
+            }
+            index.apply_delta(payload, weight);
+
+            assert_eq!(index.entry_count, oracle.len(), "step {step}");
+            assert!(index.by_tx.values().all(|rows| !rows.is_empty()));
+            let entry_bytes = index
+                .by_tx
+                .values()
+                .flat_map(|rows| rows.iter())
+                .map(|(key, value)| version_sort_key_bytes(key) + weighted_version_bytes(value))
+                .sum::<usize>();
+            assert_eq!(index.entry_bytes, entry_bytes, "step {step}");
+            assert_eq!(
+                index.footprint_bytes(),
+                btree_map_bytes(index.by_tx.len()) + btree_map_bytes(oracle.len()) + entry_bytes
+            );
+            for time in 10..=14 {
+                let tx_id = tx(1, time);
+                let mut expected = oracle
+                    .values()
+                    .filter(|version| version.tx_id == tx_id)
+                    .collect::<Vec<_>>();
+                expected.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
+                assert_eq!(
+                    index.versions_by_tx(tx_id),
+                    expected
+                        .iter()
+                        .map(|version| version.row.clone())
+                        .collect::<Vec<_>>()
+                );
+                for version in expected {
+                    let actual = &index.by_tx[&tx_id][&version.sort_key];
+                    assert_eq!(actual.weight, version.weight);
+                    assert!(Arc::ptr_eq(&actual.payload, &version.payload));
+                }
+            }
+        }
+        // Removing the current view must not mutate a retained clone. A later
+        // positive weight revives from zero, not from a discarded negative.
+        let retained = index.clone();
+        for version in oracle.values() {
+            index.apply_delta(Arc::clone(&version.payload), -version.weight - 1);
+        }
+        assert!(index.by_tx.is_empty());
+        assert_eq!(index.entry_count, 0);
+        assert_eq!(index.footprint_bytes(), 0);
+        assert_eq!(retained.entry_count, oracle.len());
+        for version in oracle.values() {
+            assert_eq!(
+                retained.by_tx[&version.tx_id][&version.sort_key].weight,
+                version.weight
+            );
+        }
+        index.apply_delta(Arc::clone(&payloads[0]), 1);
+        assert_eq!(index.entry_count, 1);
+        assert_eq!(
+            index.by_tx[&payloads[0].tx_id][&payloads[0].sort_key].weight,
+            1
+        );
     }
 
     #[test]
