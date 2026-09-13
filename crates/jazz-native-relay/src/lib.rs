@@ -7506,6 +7506,10 @@ mod tests {
         }
 
         fn rows_after_sync(&self, foreground: u64) -> Vec<u8> {
+            self.rows_after_sync_at_stage(foreground, "foreground read")
+        }
+
+        fn rows_after_sync_at_stage(&self, foreground: u64, stage: &str) -> Vec<u8> {
             // Local-first reads are allowed to finish with their current
             // local knowledge. Drive the ordinary relay loop before starting
             // the read, rather than treating an initial empty local snapshot
@@ -7546,7 +7550,56 @@ mod tests {
                     }
                 }
             }
-            panic!("foreground read did not settle after bounded native relay ticks");
+            eprintln!("foreground read exhausted bounded native relay ticks at {stage}");
+            // Inspect only native scheduling state, never row values, session
+            // claims, or credentials. A hosted failure must distinguish an
+            // opening blocked on its owner from a live read awaiting delivery.
+            let client = unsafe { &*self.host }
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(foreground)
+                .unwrap()
+                .clone();
+            let diagnostic = client.relay.run(move |worker| {
+                let state = worker.foreground_client(client.id)?;
+                let queue_len = |queue: &Arc<Mutex<BoundedMessageQueue>>| {
+                    queue
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .messages
+                        .len()
+                };
+                Ok(format!(
+                    "upstream_attached={} transition={} socket={} persistent_tick={} \
+                     admission={} foreground_tick={} pending_subscriptions={} \
+                     subscriptions={} pending_operations={} coverage={:?} \
+                     foreground_inbound={} foreground_outbound={} \
+                     upstream_inbound={} upstream_outbound={}",
+                    worker.upstream_attached,
+                    worker.upstream_transition.is_some(),
+                    worker.socket_wire.is_some(),
+                    worker.persistent_tick.is_some(),
+                    state.admission.is_some(),
+                    state.tick.is_some(),
+                    state.pending_subscriptions.len(),
+                    state.subscriptions.len(),
+                    state.pending_operations.len(),
+                    state.db.query_coverage_attachment_counts_for_test(),
+                    queue_len(&state.wire.inbound),
+                    queue_len(&state.wire.outbound),
+                    queue_len(&worker.upstream_io.wire.inbound),
+                    queue_len(&worker.upstream_io.wire.outbound),
+                ))
+            });
+            let operation = match request {
+                ForegroundDbCommandRequest::Poll { operation } => operation,
+                _ => unreachable!("each unfinished read retains its pending operation"),
+            };
+            panic!(
+                "foreground read did not settle after bounded native relay ticks \
+                 at {stage}: operation={operation}; owner={diagnostic:?}"
+            );
         }
     }
 
@@ -7571,7 +7624,7 @@ mod tests {
         stage: &str,
     ) {
         for _ in 0..120 {
-            let rows = fixture.rows_after_sync(foreground);
+            let rows = fixture.rows_after_sync_at_stage(foreground, stage);
             if !postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(&rows)
                 .expect("foreground row bytes decode")
                 .is_empty()
