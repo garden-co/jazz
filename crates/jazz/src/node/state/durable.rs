@@ -662,6 +662,8 @@ where
         // after invalidation can strand a read already waiting for > one.
         // Keep only this process-local counter; no membership, settlement,
         // predecessor, compiled source, or pending publication survives.
+        #[cfg(any(test, feature = "testing"))]
+        crate::delivery_diagnostics::record(|| format!("invalidate_scopes runtime={} receipts={}", self.groove_runtime_token(), self.query.authority_results.len()));
         for state in self.query.authority_results.values_mut() {
             *state = AuthorityResultState {
                 applied_view_update_generation: state.applied_view_update_generation,

@@ -2144,6 +2144,8 @@ where
                                         "upstream send subscribe {}",
                                         summarize_subscription_key(subscribe.subscription)
                                     ));
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("upstream_subscribe_apply runtime={} subscription={:?}", self.node.borrow().groove_runtime_token(), subscribe.subscription));
                                     let outcome = self
                                         .node
                                         .lock()
@@ -2173,6 +2175,8 @@ where
                                         }
                                         return Err(transport_error(error));
                                     }
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("upstream_subscribe_sent runtime={} subscription={:?}", self.node.borrow().groove_runtime_token(), pending_subscription.subscription));
                                     sent_subscriptions.insert(pending_subscription.subscription, pending_subscription.clone());
                                 }
                                 PendingUpstreamCommand::Unsubscribe(subscription) => {
@@ -2868,6 +2872,8 @@ where
                                 settled_through,
                                 ..
                             }) => {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("foreground_view_received runtime={} subscription={subscription:?} eligible={authority_receipt_eligible}", self.node.borrow().groove_runtime_token()));
                                 if let Some(minimum_cut) = awaiting_support_snapshots.get_mut(&subscription) {
                                     if !authority_receipt_eligible {
                                         *minimum_cut = (*minimum_cut).max(settled_through);
@@ -4335,6 +4341,8 @@ where
                             // machine than ordinary peer messages. Keep that state on the heap
                             // so a commit uploaded on this same connection does not carry the
                             // inactive Subscribe arm on a normal two-megabyte executor stack.
+                            #[cfg(any(test, feature = "testing"))]
+                            crate::delivery_diagnostics::record(|| format!("owner_subscribe_received runtime={} subscription={:?}", self.node.borrow().groove_runtime_token(), subscribe.subscription));
                             let should_continue = Box::pin(async {
                             let subscription_has_delegated_session = subscribe.delegated_session.is_some();
                             let session_claim_binding = parked_policy_binding.or_else(|| admitted_request_policy_binding(
@@ -4347,6 +4355,8 @@ where
                                 // A relay's transport is not a user. It may
                                 // only carry the topology-assigned immutable
                                 // session snapshot for this request.
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4354,12 +4364,16 @@ where
                                 validate_known_state_declaration(&subscribe.known_state)
                             {
                                 let _ = message;
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
                             if shape_id != subscription.shape_id {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4379,6 +4393,8 @@ where
                             let Some(registration) =
                                 shape_registrations.get(&registration_key).cloned()
                             else {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             };
@@ -4427,11 +4443,15 @@ where
                                     });
                                     return Ok(true);
                                 } else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                     drop_peer_request(&self.node);
                                 }
                                 return Ok::<bool, Error>(true);
                             };
                             if values.len() != shape.params().len() {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4444,6 +4464,8 @@ where
                             let binding = match shape.bind(value_map) {
                                 Ok(binding) => binding,
                                 Err(_) => {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                     drop_peer_request(&self.node);
                                     return Ok::<bool, Error>(true);
                                 }
@@ -4456,6 +4478,8 @@ where
                             )
                             .is_err()
                             {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4480,6 +4504,8 @@ where
                             if let Some(existing_coverage) = served.get(&subscription)
                                 && existing_coverage != &coverage
                             {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4504,6 +4530,8 @@ where
                                 let expected = match expected_result {
                                     Ok(expected) => expected,
                                     Err(_) => {
+                                        #[cfg(any(test, feature = "testing"))]
+                                        crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                         drop_peer_request(&self.node);
                                         return Ok::<bool, Error>(true);
                                     }
@@ -4523,6 +4551,8 @@ where
                                         },
                                     );
                                 if !exact_support {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                     drop_peer_request(&self.node);
                                     return Ok::<bool, Error>(true);
                                 }
@@ -4545,6 +4575,8 @@ where
                                 && let Some(existing) = scope_purposes.get(&subscription)
                                 && existing != purpose
                             {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4815,6 +4847,8 @@ where
                                         (shape.shape_id(), binding.binding_id()),
                                     )
                                 {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                     drop_peer_request(&self.node);
                                     return Ok::<bool, Error>(true);
                                 }
@@ -4847,6 +4881,8 @@ where
                                 });
                             group.subscribers.insert(subscription);
                             group.pending_initial_subscribers.insert(subscription);
+                            #[cfg(any(test, feature = "testing"))]
+                            crate::delivery_diagnostics::record(|| format!("owner_subscribe_admitted runtime={} subscription={subscription:?}", self.node.borrow().groove_runtime_token()));
                             if let Some(selected) = selected_authority_result_key {
                                 // Keep the policy-scoped U source selected at
                                 // admission. A later owner-loop lookup must
@@ -7254,6 +7290,18 @@ where
             payload.supporting_rows.added_rows().len(),
             payload.version_carriers.len()
         );
+    }
+    #[cfg(any(test, feature = "testing"))]
+    if let SyncMessage::ViewUpdate(payload) = &message {
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "owner_view_send runtime={} subscription={:?} snapshot={} opening={}",
+                node.borrow().groove_runtime_token(),
+                payload.subscription,
+                payload.supporting_rows.is_snapshot(),
+                payload.peer_payload_inventory.opening_pending
+            )
+        });
     }
     send_sync_message_chunked(transport, message)
 }

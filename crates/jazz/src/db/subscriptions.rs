@@ -380,6 +380,13 @@ where
             None => AuthorityResultKey::unscoped(binding_view),
         };
         let required_after = node.applied_authority_result_generation(&authority_key);
+        #[cfg(any(test, feature = "testing"))]
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "attach runtime={} binding={binding_view:?} threshold={required_after}",
+                node.groove_runtime_token()
+            )
+        });
         // All live usages pin one stream. One-shot freshness is a newer
         // receipt on that stream, not another stream with the same inputs.
         if self
@@ -410,6 +417,14 @@ where
             };
             self.register_query_coverage(coverage.clone(), pending_subscription.clone());
             let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
+            #[cfg(any(test, feature = "testing"))]
+            crate::delivery_diagnostics::record(|| {
+                format!(
+                    "refresh runtime={} subscription={subscription:?} threshold={required_after} enqueue={}",
+                    node.groove_runtime_token(),
+                    refreshes.get(&coverage).copied() != Some(required_after)
+                )
+            });
             if refreshes.get(&coverage).copied() != Some(required_after) {
                 refreshes.insert(coverage.clone(), required_after);
                 self.node

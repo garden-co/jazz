@@ -7510,6 +7510,7 @@ mod tests {
         }
 
         fn rows_after_sync_at_stage(&self, foreground: u64, stage: &str) -> Vec<u8> {
+            let _delivery_recording = jazz::delivery_diagnostics::start();
             // Local-first reads are allowed to finish with their current
             // local knowledge. Drive the ordinary relay loop before starting
             // the read, rather than treating an initial empty local snapshot
@@ -7551,6 +7552,10 @@ mod tests {
                 }
             }
             eprintln!("foreground read exhausted bounded native relay ticks at {stage}");
+            eprintln!(
+                "NATIVE_DELIVERY_FLIGHT_RECORDER\n{}",
+                jazz::delivery_diagnostics::snapshot()
+            );
             // Inspect only native scheduling state, never row values, session
             // claims, or credentials. A hosted failure must distinguish an
             // opening blocked on its owner from a live read awaiting delivery.

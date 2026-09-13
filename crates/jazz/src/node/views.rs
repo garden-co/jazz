@@ -2241,6 +2241,16 @@ where
             .entry(authority_result_key.clone())
             .or_default();
         state.applied_view_update_generation = state.applied_view_update_generation.wrapping_add(1);
+        #[cfg(any(test, feature = "testing"))]
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "view_applied runtime={} subscription={subscription:?} generation_before={} generation_after={} live={} opening={opening_pending} deferred={defer_settlement}",
+                self.groove_runtime_token,
+                state.applied_view_update_generation.wrapping_sub(1),
+                state.applied_view_update_generation,
+                state.live_settled
+            )
+        });
         // In the current wire contract, a non-deferred reset is the single
         // frame that claims a complete replacement frontier.  Do not infer an
         // empty closure from an opened result container or an incremental

@@ -1697,6 +1697,8 @@ where
     /// generation, whereas an unsubscribe or ownerless-recovery invalidation
     /// must not leave a settled stamp that could satisfy the next usage site.
     fn retire_authority_result_view(&mut self, authority_result_key: AuthorityResultKey) {
+        #[cfg(any(test, feature = "testing"))]
+        crate::delivery_diagnostics::record(|| format!("retire_receipt runtime={} binding={:?} generation={}", self.groove_runtime_token(), authority_result_key.binding_view, self.applied_authority_result_generation(&authority_result_key)));
         self.query.authority_results.remove(&authority_result_key);
         self.query
             .retained_root_window_sources
