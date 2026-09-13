@@ -1616,6 +1616,8 @@ pub struct DbMaintainedSubscriptionFootprint {
     pub result_payloads_bytes: usize,
     /// Approximate heap bytes retained by WeightedVersionIndex.
     pub versions_bytes: usize,
+    /// Approximate heap bytes retained by the physical support frontier and journal.
+    pub supporting_frontier_bytes: usize,
     /// Approximate heap bytes retained by ReplacementIndex.
     pub replacements_bytes: usize,
     /// Approximate heap bytes retained by maintained-view indexes.
@@ -1651,6 +1653,7 @@ impl DbMaintainedSubscriptionFootprint {
             result_weights_bytes: footprint.maintained.result_weights_bytes,
             result_payloads_bytes: footprint.maintained.result_payloads_bytes,
             versions_bytes: footprint.maintained.versions_bytes,
+            supporting_frontier_bytes: footprint.maintained.supporting_frontier_bytes,
             replacements_bytes: footprint.maintained.replacements_bytes,
             maintained_heap_bytes: footprint.maintained.total_heap_bytes,
             terminal_schemas: footprint.terminal_schemas.terminal_schemas,

@@ -174,6 +174,7 @@ pub(crate) struct MaintainedSubscriptionViewFootprint {
     pub(crate) result_payloads_bytes: usize,
     pub(crate) structured_app_rows_bytes: usize,
     pub(crate) versions_bytes: usize,
+    pub(crate) supporting_frontier_bytes: usize,
     pub(crate) replacements_bytes: usize,
     pub(crate) total_heap_bytes: usize,
 }
@@ -1103,9 +1104,8 @@ impl MaintainedSubscriptionView {
             + self.published_result_payloads.footprint_bytes();
         #[cfg(test)]
         self.assert_incremental_footprint_matches_full_scan();
-        let journal_bytes = self.supporting.retained_bytes();
-        let versions_bytes = journal_bytes
-            + self.versions.footprint_bytes()
+        let supporting_frontier_bytes = self.supporting.retained_bytes();
+        let versions_bytes = self.versions.footprint_bytes()
             + btree_map_bytes(self.selected_deletion_witnesses.len())
             + self
                 .selected_deletion_witnesses
@@ -1159,11 +1159,13 @@ impl MaintainedSubscriptionView {
             result_payloads_bytes,
             structured_app_rows_bytes,
             versions_bytes,
+            supporting_frontier_bytes,
             replacements_bytes,
             total_heap_bytes: result_weights_bytes
                 + result_payloads_bytes
                 + structured_app_rows_bytes
                 + versions_bytes
+                + supporting_frontier_bytes
                 + replacements_bytes
                 + witness_table_names_bytes,
         }

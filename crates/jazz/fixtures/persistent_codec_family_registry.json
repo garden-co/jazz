@@ -327,7 +327,7 @@
       "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/16_maintained_subscription_views.md",
-        "anchor": "#### Durable source closure facts"
+        "anchor": "#### Durable physical scope inputs"
       },
       "semantic_fixture": {
         "path": "crates/jazz/src/node/tests/sync/known_state.rs",
@@ -335,7 +335,7 @@
       },
       "rejection_receipt": {
         "path": "crates/jazz/src/node/codec.rs",
-        "anchor": "source_closure_storage_rejects_unknown_tags_and_malformed_bytes"
+        "anchor": "physical_scope_storage_v1_has_exact_bytes_and_rejects_malformed_records"
       },
       "evidence": [
         {
