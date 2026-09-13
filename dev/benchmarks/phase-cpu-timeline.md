@@ -1,6 +1,6 @@
 # Match CPU samples to benchmark phases
 
-Build `customer_cold_start` with `cold-settle-attribution,bench-perf-control`.
+Build the example-owned `permissioned-resources-profile` binary with `cold-settle-attribution,bench-perf-control`.
 Set `JAZZ_PHASE_TIMELINE` to an output prefix, alongside the existing perf control
 and acknowledgement FIFO variables. The benchmark writes `<prefix>.cold.json`
 or `<prefix>.warm.json` after readiness. Capture with `perf record --clockid mono`

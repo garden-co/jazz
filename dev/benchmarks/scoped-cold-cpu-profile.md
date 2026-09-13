@@ -1,13 +1,13 @@
 # CPU profiling through cold-load readiness
 
-The `customer_cold_start` benchmark's `bench-perf-control` feature uses external
+The example-owned `permissioned-resources-profile` binary's `bench-perf-control` feature uses external
 Linux perf control/ack FIFOs. Sampling starts before connect/subscribe and ends
 when every subscription has its expected rows. Post-readiness diagnostic queries
 are excluded. JSON reports `cpu_profile_scope: connect_subscribe_settle`.
 Ordinary benchmark builds reject the control variables. Profiling timings are
 not clean performance receipts.
 
-Build with `cargo build -p jazz-sim --bench customer_cold_start --profile perf
+Build with `cargo build -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --profile perf
 --features cold-settle-attribution,bench-perf-control`. Use the emitted benchmark
 executable under `target/perf/deps/` in this shell pattern:
 

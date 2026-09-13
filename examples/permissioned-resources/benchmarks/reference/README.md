@@ -42,14 +42,14 @@ transaction protocol.
 Build the existing native benchmark using the normal optimized perf profile:
 
 ```sh
-cargo build -p jazz-sim --bench customer_cold_start --profile perf \
+cargo build -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --profile perf \
   --features jazz/testing,jazz/transport-compression-zstd,jazz-benchmark-guard/mimalloc
 JAZZ_CUSTOMER_EXPORT_SQL=/tmp/sql-fixture.json \
-  target/perf/deps/customer_cold_start-<build hash>
-python3 dev/benchmarks/sql-proxy/run.py /tmp/sql-fixture.json \
+  target/perf/permissioned-resources-profile
+python3 examples/permissioned-resources/benchmarks/reference/run.py /tmp/sql-fixture.json \
   --sqlite /tmp/fresh-reference.sqlite --out /tmp/sqlite-receipt.json
 # Requires psycopg 3. Use a dedicated disposable PostgreSQL database.
-python3 dev/benchmarks/sql-proxy/run.py /tmp/sql-fixture.json \
+python3 examples/permissioned-resources/benchmarks/reference/run.py /tmp/sql-fixture.json \
   --postgres 'host=/tmp port=55439 dbname=reference user=ubuntu' \
   --out /tmp/postgres-receipt.json
 ```

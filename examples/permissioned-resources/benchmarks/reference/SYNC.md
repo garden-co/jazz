@@ -104,11 +104,11 @@ machinery is removable overhead.
 ## Run
 
 ```sh
-python3 dev/benchmarks/sql-proxy/ingest.py /tmp/sql-fixture.json /tmp/capture \
+python3 examples/permissioned-resources/benchmarks/reference/ingest.py /tmp/sql-fixture.json /tmp/capture \
   --rounds 3 --durability relaxed --out /tmp/sqlite-sync.json
 # psycopg 3 required; use an isolated cluster. The harness creates and deletes
 # only uniquely named sql_sync_* databases that it owns.
-python3 dev/benchmarks/sql-proxy/ingest.py /tmp/sql-fixture.json /tmp/capture \
+python3 examples/permissioned-resources/benchmarks/reference/ingest.py /tmp/sql-fixture.json /tmp/capture \
   --postgres 'host=/tmp port=55439 dbname=postgres user=ubuntu' \
   --rounds 3 --durability durable --out /tmp/postgres-sync.json
 ```

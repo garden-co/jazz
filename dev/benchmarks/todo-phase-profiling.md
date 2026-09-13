@@ -1,6 +1,6 @@
 # Attribute CPU to a todo phase
 
-`local_batch_phases` already reports monotonic start/end timestamps for each
+The example-owned `todo-profile` binary reports monotonic start/end timestamps for each
 phase. Its optional external-perf control now bounds capture to one backend and
 phase, with acknowledgements before starting the phase timer and after stopping
 it. `cpu_profiled` explicitly identifies the selected phase. Profiled runs are
