@@ -669,6 +669,7 @@ where
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
+            absent_node_alias: None,
             ahead_current_keys: FxHashSet::default(),
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
