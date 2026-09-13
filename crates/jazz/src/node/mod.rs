@@ -1274,6 +1274,37 @@ struct RejectionTracking {
     rejected_transactions: BTreeMap<TxId, RejectedTransaction>,
     /// Pending child transactions grouped by pending parent transaction.
     child_txs_by_parent: BTreeMap<TxId, BTreeSet<TxId>>,
+    /// Includes Accepted partial-child constraints, unlike `child_txs_by_parent`.
+    /// The shared pending-edge staging helper advances this before inserting a row.
+    /// Deletes/failed batches never lower it; recovery recomputes it from every
+    /// durable edge. Unknown during startup cannot prove absence.
+    pending_parent_time_bound: PendingParentTimeBound,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum PendingParentTimeBound {
+    #[default]
+    Unknown,
+    Empty,
+    Through(TxTime),
+}
+
+impl PendingParentTimeBound {
+    fn observe(&mut self, time: TxTime) {
+        match self {
+            Self::Unknown => {}
+            Self::Empty => *self = Self::Through(time),
+            Self::Through(ceiling) => *ceiling = (*ceiling).max(time),
+        }
+    }
+
+    fn excludes(self, time: TxTime) -> bool {
+        match self {
+            Self::Unknown => false,
+            Self::Empty => true,
+            Self::Through(ceiling) => time > ceiling,
+        }
+    }
 }
 
 /// Authenticated identity attached to an inbound commit-unit upload.
