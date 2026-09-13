@@ -462,6 +462,121 @@ fn accepted_view_scoped_child_for_parent(
 }
 
 #[test]
+fn pending_parent_time_proof_skips_newer_but_checks_equal_and_older_parents() {
+    // Internal seam: pin the absence proof's storage work and fallback before
+    // parent persistence; application rows alone cannot expose these scans.
+    let (_dir, mut reader) = open_node_with_uuid(node(0xc1));
+    let parent = TxId::new(TxTime::from(70), node(0xc2));
+    let mut batch = reader.database.open_batch();
+    reader.database.reset_storage_read_metrics();
+    reader.preflight_complete_parent_constraints(&mut batch, parent, &[]).unwrap();
+    reader.reject_mismatched_pending_children_for_parent(parent).unwrap();
+    assert_eq!(reader.database.storage_read_metrics().total.ranges, 0);
+    // Startup's Unknown state is fail-closed even if the physical table is empty.
+    reader.rejections.pending_parent_time_bound = PendingParentTimeBound::Unknown;
+    reader.preflight_complete_parent_constraints(&mut batch, parent, &[]).unwrap();
+    assert_eq!(reader.database.storage_read_metrics().total.ranges, 1);
+    drop(batch);
+    let mut reader = reader.reopen_in_place().unwrap();
+    // Use the real ingestion entry point: Accepted partial children are not in
+    // the Pending-only rejection graph, but must advance the time ceiling.
+    reader.ingest_view_scoped_transaction_with_current_indexes(
+        reset_scope_tx(TxId::new(TxTime::from(80), node(0xc3)), 1),
+        vec![version_record(row(1), vec![parent], title_cells("partial child"), None)],
+        Fate::Accepted, None, DurabilityTier::Edge,
+    ).unwrap();
+    for (time, parent_node, should_scan) in [(71, node(0xc2), false), (70, node(0xc4), true), (69, node(0xc2), true)] {
+        let probe = TxId::new(TxTime::from(time), parent_node);
+        let mut batch = reader.database.open_batch();
+        reader.database.reset_storage_read_metrics();
+        reader.preflight_complete_parent_constraints(&mut batch, probe, &[]).unwrap();
+        assert_eq!(reader.database.storage_read_metrics().total.ranges, usize::from(should_scan));
+    }
+    let mut batch = reader.database.open_batch();
+    let wrong = version_record(row(2), Vec::new(), title_cells("wrong coordinate"), None);
+    assert!(matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[wrong]).resolve(),
+        Err(Error::ConflictingCommitUnit(id)) if id == parent));
+    assert_eq!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().len(), 1);
+}
+
+#[test]
+fn pending_parent_time_proof_includes_staged_constraints_and_recovers_after_drop() {
+    // Internal protocol constraint staging is necessary to observe an edge
+    // before commit and to prove that dropping it only makes the bound stale.
+    let (_dir, mut reader) = open_node_with_uuid(node(0xc5));
+    let parent = TxId::new(TxTime::from(70), node(0xc6));
+    let child = TxId::new(TxTime::from(80), node(0xc7));
+    accepted_view_scoped_child_for_parent(&mut reader, parent, child, row(1));
+    let coordinate = {
+        let rows = reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap();
+        pending_edge_coordinate_from_record(rows[0].record()).unwrap()
+    };
+    let future_parent = TxId::new(TxTime(u64::MAX), parent.node);
+    let mut batch = reader.database.open_batch();
+    reader.stage_pending_parent_constraint(
+        &mut batch, (reader.node_aliases[&child.node], child),
+        (reader.node_aliases[&parent.node], future_parent), &coordinate, false,
+    ).unwrap();
+    let wrong = version_record(row(2), Vec::new(), title_cells("wrong coordinate"), None);
+    assert!(matches!(reader.preflight_complete_parent_constraints(&mut batch, future_parent, &[wrong]).resolve(),
+        Err(Error::ConflictingCommitUnit(id)) if id == future_parent));
+    drop(batch);
+    assert_eq!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().len(), 1);
+    let probe = TxId::new(TxTime::from(90), parent.node);
+    let mut batch = reader.database.open_batch();
+    reader.database.reset_storage_read_metrics();
+    reader.preflight_complete_parent_constraints(&mut batch, probe, &[]).unwrap();
+    assert_eq!(reader.database.storage_read_metrics().total.ranges, 1, "abandoned future edge leaves a safe conservative ceiling");
+    drop(batch);
+    let mut reader = reader.reopen_in_place().unwrap();
+    let mut batch = reader.database.open_batch();
+    reader.database.reset_storage_read_metrics();
+    reader.preflight_complete_parent_constraints(&mut batch, probe, &[]).unwrap();
+    assert_eq!(reader.database.storage_read_metrics().total.ranges, 0, "reopen recovers the exact durable ceiling");
+    let wrong = version_record(row(2), Vec::new(), title_cells("wrong after reopen"), None);
+    assert!(matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[wrong]).resolve(),
+        Err(Error::ConflictingCommitUnit(id)) if id == parent));
+}
+
+#[test]
+fn pending_parent_time_proof_tracks_locally_authored_update_constraints() {
+    // Author through the normal local commit API; the internal read counter
+    // proves that the shared staging helper also covers this second writer.
+    let (_dir, mut writer) = open_node_with_uuid(node(0xca));
+    let (parent, _) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("before")),
+    ).unwrap();
+    writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row(1), 11).parents(vec![parent]).cells(title_cells("after")),
+    ).unwrap();
+    let mut batch = writer.database.open_batch();
+    writer.database.reset_storage_read_metrics();
+    writer.preflight_complete_parent_constraints(&mut batch, parent, &[]).unwrap();
+    // Child transaction lookup may do additional transaction-index reads;
+    // pending-edge storage belongs to the `other` destination bucket.
+    assert_eq!(writer.database.storage_read_metrics().other.ranges, 1);
+    assert!(!writer.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().is_empty());
+}
+
+#[test]
+fn pending_parent_time_proof_preserves_poisoned_database_errors() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    let schema = schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let mut reader = NodeState::new_with_shared_test_catalogue(node(0xc8), schema, storage).unwrap();
+    control.fail_next(TestStorageOperation::WriteMany);
+    assert!(reader.ensure_node_alias(node(0xc9)).resolve().is_err());
+    let mut batch = reader.database.open_batch();
+    let parent = TxId::new(TxTime::from(100), node(0xc9));
+    assert!(matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[]).resolve(),
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))));
+    assert!(matches!(reader.reject_mismatched_pending_children_for_parent(parent).resolve(),
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))));
+}
+
+#[test]
 fn complete_parent_batch_scans_empty_constraints_once_at_scale() {
     // Internal seam: application results cannot distinguish one empty storage
     // scan from one scan per parent before persistence.
