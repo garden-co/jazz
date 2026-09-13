@@ -19,6 +19,79 @@ use crate::protocol::{
 };
 use std::borrow::Borrow;
 
+fn peer_source_fact_delta(
+    current: &BTreeSet<ProgramFactEntry>,
+    previous: &BTreeSet<ProgramFactEntry>,
+) -> (Vec<ProgramFactEntry>, Vec<ProgramFactEntry>) {
+    // Current is constructed exclusively from peer-safe source facts. Broader
+    // settled predecessor state can also contain receiver-local facts, which
+    // must never become peer-source removals.
+    (
+        current.difference(previous).cloned().collect(),
+        previous
+            .difference(current)
+            .filter(|fact| fact.is_peer_source_closure_fact())
+            .cloned()
+            .collect(),
+    )
+}
+
+#[test]
+fn borrowed_peer_delta_matches_filtered_predecessor_without_removing_local_facts() {
+    // Internal set-projection contract: the public Db API cannot inject local
+    // non-peer bookkeeping into a claimed authority predecessor. Protocol-level
+    // receiver tests separately cover application, reset and atomic rejection.
+    use crate::protocol::{
+        ProgramSourceCoverageEntry, ProgramSourceId, ProgramSourceRole, ReadFrontierSettledEntry,
+    };
+    let source = |table: &str| {
+        ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+            source: ProgramSourceId {
+                table: table.to_owned().into(),
+                path: vec![ProgramSourceRole::Root],
+            },
+            complete: true,
+        })
+    };
+    let local = ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
+        scope: "local-only".into(),
+        tier: DurabilityTier::Local,
+        stream: None,
+        frontier: vec![],
+    });
+    let subsets = [
+        BTreeSet::new(),
+        BTreeSet::from([source("tasks")]),
+        BTreeSet::from([source("projects")]),
+        BTreeSet::from([source("tasks"), source("projects")]),
+    ];
+    for current in &subsets {
+        for predecessor in &subsets {
+            for include_local in [false, true] {
+                let mut previous = predecessor.clone();
+                if include_local {
+                    previous.insert(local.clone());
+                }
+                let before = previous.clone();
+                let filtered = previous
+                    .iter()
+                    .filter(|fact| fact.is_peer_source_closure_fact())
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let expected: (Vec<_>, Vec<_>) = (
+                    current.difference(&filtered).cloned().collect(),
+                    filtered.difference(current).cloned().collect(),
+                );
+                assert_eq!(peer_source_fact_delta(current, &previous), expected);
+                assert_eq!(
+                    previous, before,
+                    "comparison must not mutate the predecessor"
+                );
+            }
+        }
+    }
+}
+
 fn apply_covered_input_closure_admission_delta(
     state: &mut AuthorityResultState,
     cleared: bool,
@@ -865,24 +938,21 @@ where
             }
         }
 
-        let previous = prior_snapshots.get(&key).cloned().or_else(|| {
+        let previous = prior_snapshots.get(&key).or_else(|| {
             self.query.authority_results.get(&key).and_then(|state| {
-                matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. }).then(|| {
-                    state
-                        .settled_program_facts
-                        .iter()
-                        .filter(|fact| fact.is_peer_source_closure_fact())
-                        .cloned()
-                        .collect()
-                })
+                matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
+                    .then_some(&state.settled_program_facts)
             })
         });
         if let Some(previous) = previous {
             // Complete wire snapshots become one atomic local input transition.
             // Replacing the dataset does not reopen the application's subscription.
             update.reset_input_set = false;
-            update.program_fact_adds = facts.difference(&previous).cloned().collect();
-            update.program_fact_removes = previous.difference(&facts).cloned().collect();
+            // Incoming facts are exclusively peer-safe. Other settled facts
+            // cannot match an addition and must not become removals. Borrow
+            // the broader predecessor rather than clone/filter its full set.
+            (update.program_fact_adds, update.program_fact_removes) =
+                peer_source_fact_delta(&facts, previous);
         } else {
             update.reset_input_set = true;
             update.program_fact_adds = facts.iter().cloned().collect();
