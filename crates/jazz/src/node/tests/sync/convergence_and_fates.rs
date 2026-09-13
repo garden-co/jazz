@@ -265,15 +265,16 @@ fn authority_complete_empty_snapshot_replaces_prior_inputs() {
         receiver
             .scalar_authority_input_rows(&authority_result, "todos")
             .is_empty(),
-        "empty snapshot clears both self-join scan inputs"
+        "empty snapshot clears the input shared by both self-join scans"
     );
 }
 
 #[test]
 fn authority_same_batch_snapshots_compare_each_successor_and_replay() {
     // Internal ingress is required to put several complete snapshots for the
-    // same authority into exactly one receive batch and inspect both compiler
-    // self-join roles. Public transport scheduling does not expose that control.
+    // same authority into exactly one receive batch and inspect the physical
+    // input shared by both roles. Public transport scheduling does not expose
+    // that control. The replacement deliberately removes role-sized state.
     let (_dir, mut receiver, authority_result, initial, mut successor) =
         covered_input_receiver_fixture();
     let expected = successor.supporting_rows.added_rows()[0].clone();
@@ -290,8 +291,8 @@ fn authority_same_batch_snapshots_compare_each_successor_and_replay() {
     .expect("replacement, empty, refill and replay compare adjacent snapshots");
 
     let state = &receiver.query.authority_results[&authority_result];
-    assert_eq!(state.covered_input_sources.len(), 2);
-    assert_eq!(state.covered_input_versions.len(), 2);
+    assert_eq!(state.covered_input_sources.len(), 1);
+    assert_eq!(state.covered_input_versions.len(), 1);
     for input in state.covered_input_versions.values() {
         assert_eq!(input.source_row, expected.row);
         assert_eq!(input.version, expected.version);

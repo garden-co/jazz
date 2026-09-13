@@ -798,8 +798,8 @@ where
         Ok(rows)
     }
 
-    // v2 sends physical membership transitions. Source roles are expanded only
-    // for changed rows, using this receiver's compiled program, never peer roles.
+    // v2 sends physical membership transitions. Retain one table membership
+    // per row in this authority scope; query occurrences share that input.
     fn normalize_supporting_update(
         &mut self,
         update: &mut ViewUpdateParts,
@@ -869,7 +869,7 @@ where
                 self.compiled_covered_input_sources_for_subscription(update.subscription)?;
             &discovered
         };
-        let mut physical_sources = BTreeMap::<_, Vec<_>>::new();
+        let mut physical_sources = BTreeMap::new();
         for source in sources {
             let physical = self
                 .catalogue
@@ -880,41 +880,45 @@ where
                     "compiled source physical table mapping missing",
                 ))?
                 .id;
-            physical_sources.entry(physical).or_default().push(source);
+            if physical_sources.insert(physical, source).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "receiver schema maps multiple logical tables to one physical table",
+                ));
+            }
         }
-        let expand = |rows: &[SupportingRow]| -> Result<Vec<ProgramFactEntry>, Error> {
-            let mut facts = Vec::new();
-            let mut seen = BTreeSet::new();
+        let normalize = |rows: &[SupportingRow]| -> Result<Vec<ProgramFactEntry>, Error> {
+            let mut rows = rows.iter().collect::<Vec<_>>();
+            rows.sort_unstable();
+            let mut previous = None;
+            let mut facts = Vec::with_capacity(rows.len());
             for row in rows {
-                if !row.is_wire_valid() || !seen.insert(row) {
+                if !row.is_wire_valid() || previous == Some(row) {
                     return Err(Error::InvalidAuthoritySourceClosure {
                         subscription: update.subscription,
                         transition: "invalid or duplicate supporting physical row version"
                             .to_owned(),
                     });
                 }
-                let roles = physical_sources.get(&row.physical_table).ok_or_else(|| {
+                previous = Some(row);
+                let source = physical_sources.get(&row.physical_table).ok_or_else(|| {
                     Error::InvalidAuthoritySourceClosure {
                         subscription: update.subscription,
                         transition: "supporting row physical table is outside the query dataset"
                             .to_owned(),
                     }
                 })?;
-                for source in roles {
-                    facts.push(ProgramFactEntry::CoveredInput(CoveredInputEntry {
-                        source: (*source).clone(),
-                        version_table: row.version_table,
-                        source_row: row.row,
-                        version: row.version.clone(),
-                    }));
-                }
+                facts.push(ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                    source: (*source).clone(),
+                    version_table: row.version_table,
+                    source_row: row.row,
+                    version: row.version.clone(),
+                }));
             }
-            facts.sort_unstable();
             Ok(facts)
         };
         update.reset_input_set = wire.is_snapshot();
-        update.program_fact_adds = expand(wire.added_rows())?;
-        update.program_fact_removes = expand(wire.removed_rows())?;
+        update.program_fact_adds = normalize(wire.added_rows())?;
+        update.program_fact_removes = normalize(wire.removed_rows())?;
         if wire.is_snapshot() {
             update
                 .program_fact_adds

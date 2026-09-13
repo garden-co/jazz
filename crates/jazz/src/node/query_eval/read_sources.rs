@@ -22,10 +22,10 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-    /// Receiver-local mutable inputs for one exact authority-covered program
-    /// closure. The mapping is keyed by normalized source identity, never by
-    /// a table name, sink, collector, or storage prefix.
-    pub(super) covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+    /// Per-occurrence projections of receiver-local shared scope/table inputs.
+    /// The compiler grants each occurrence its exact row shape; sharing an
+    /// input never combines different authority scopes or downstream operators.
+    pub(super) covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
     /// The exact compiler-owned descriptor registered for each receiver
     /// source. Input lowering must reuse it rather than reconstructing an
     /// authored descriptor after the physical catalogue has selected a
@@ -186,7 +186,7 @@ where
         let (covered_input_source, covered_input_descriptor) =
             if request.visibility == RowVisibility::Visible {
                 (
-                    self.covered_input_sources.get(&request.source).copied(),
+                    self.covered_input_sources.get(&request.source).cloned(),
                     self.covered_input_descriptors.get(&request.source).cloned(),
                 )
             } else {
@@ -212,7 +212,7 @@ where
                 self.covered_input_sources.keys().collect::<Vec<_>>(),
             );
         }
-        if let Some(input_source) = covered_input_source
+        if let Some(input_source) = covered_input_source.as_ref()
             && (matches!(source, SourceExpr::SettledBindingView { .. })
                 // Strict remote source occurrences have no eligible local
                 // alternative. Aggregate output is synthetic, so its raw
@@ -240,7 +240,7 @@ where
             return Ok(ResolvedSource {
                 stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
-                graph: GraphBuilder::input_source(input_source, descriptor.clone()),
+                graph: input_source.clone(),
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
                     descriptor,
@@ -1639,8 +1639,8 @@ where
         let graph = if let Some(input_source) = covered_input_source {
             // Online remote-if-possible composes the authority closure with the
             // eligible local-current overlay before it enters the same
-            // maintained program. The union is per normalized source
-            // occurrence; table-level union would conflate aliases/self-joins.
+            // maintained program. The input is shared, but overlay composition
+            // remains downstream of each occurrence's metadata projection.
             // Both sides can carry the same already-admitted version (the
             // local store retains received authority data), so select their
             // single current winner by the normal version identity before
@@ -1653,9 +1653,7 @@ where
                     request.source,
                 );
             }
-            let covered_descriptor = covered_input_descriptor
-                .expect("checked alongside compiler-owned covered input source");
-            let covered = GraphBuilder::input_source(input_source, covered_descriptor.clone());
+            let covered = input_source;
             let graph = if receiver_local_overlay {
                 // Existing cached rows outside this exact source occurrence
                 // cannot enter merely because they have a pending edit.
@@ -4972,8 +4970,8 @@ pub(super) fn covered_input_source_metadata(
 }
 
 /// Encode one already-authorized current row for a receiver-owned covered
-/// input. The descriptor comes from the exact compiled source occurrence;
-/// callers must never synthesize it from a table or result collector.
+/// input. Its descriptor is the compiler's union of metadata required by that
+/// table's consumers within this authority scope, not a result collector.
 pub(super) fn covered_input_record(
     table: &TableSchema,
     descriptor: &RecordDescriptor,

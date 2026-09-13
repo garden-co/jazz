@@ -15,10 +15,20 @@ datasets. Aliases, filters, schema projections, branch semantics and local
 overlays remain explicit downstream graph operations. Never share authority
 membership across different query/identity/read-view scopes.
 
-Initial/recovery snapshots and predecessor-checked physical deltas retain the
-v2 encoding pinned in #2952. The experiment is not an additional wire version
-or a compatibility mode. Any necessary durable-state change must be separately
-specified and byte-pinned; no incidental serializer encoding is authoritative.
+The target covers the entire sender -> wire -> receiver chain, not just receiver
+allocation. Sender support maintenance should yield one physical membership
+frontier and its net deltas directly, without a second occurrence-fact-to-scope
+aggregation in publication. The receiver should consume that frontier directly,
+not translate it back into occurrence-shaped facts (including fake Root roles).
+Query/policy proof dependencies remain internal to evaluation; they are not a
+second sync membership representation.
+
+Exact equivalence to #2952's v2 wire is NOT an acceptance constraint. Its physical
+snapshot/delta vocabulary looks compatible with this model, but may change if
+end-to-end simplification requires it. Preserve exact authority scope, atomic
+publication, predecessor/recovery and missing-body correctness, not incidental
+layout. Any wire or durable-state encoding change must be explicitly specified,
+versioned appropriately and byte-pinned; serializer defaults are not contracts.
 
 ## Changed premise and preflight
 
@@ -42,6 +52,8 @@ specific larger cold win is established yet.
 
 Compare production/test diff size, retained scope indexes, normalization paths,
 and per-physical-row versus per-occurrence materializations, not just raw LOC.
+Also compare sender membership/reference-count layers and publication adapters;
+a receiver-only simplification is an intermediate checkpoint, not completion.
 Tests must cover self-joins/repeated paths, permissions, lens/branch boundaries,
 pending local writes, scope retirement/reconnect, and atomic missing-body repair.
 An internal work-bound test is justified only for input/source allocation and

@@ -76,6 +76,21 @@ mod prepared_bindings;
 mod query_read_sets;
 mod query_result_rows;
 mod unavailable_inputs;
+
+/// Internal table key for a single receiver authority scope. The existing
+/// durable fact carrier uses ProgramSourceId; Root is its canonical table key,
+/// not a claim that the row belongs to a particular query occurrence. Sender
+/// proof facts continue to use full occurrence paths. This key is never sent
+/// on the v2 wire, which identifies physical tables directly.
+pub(super) fn receiver_scope_table_source(
+    table: impl Into<groove::Intern<String>>,
+) -> ProgramSourceId {
+    ProgramSourceId {
+        table: table.into(),
+        path: vec![ProgramSourceRole::Root],
+    }
+}
+
 pub(crate) use local_availability_receipts::{
     LocalAvailabilityRecord, LocalAvailabilityWatermark, LocalRowAvailability,
     local_availability_record_descriptor,
@@ -354,7 +369,7 @@ where
                         Some(SourceExpr::SettledBindingView { .. })
                     )
             })
-            .map(|source_request| source_request.source.program_source_id())
+            .map(|source_request| receiver_scope_table_source(source_request.source.table))
             .collect())
     }
 
@@ -1141,7 +1156,7 @@ where
         request: &QueryProgramRequest,
     ) -> Result<
         (
-            BTreeMap<SourceId, InputSourceId>,
+            BTreeMap<SourceId, GraphBuilder>,
             BTreeMap<SourceId, RecordDescriptor>,
             BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
         ),
@@ -1150,6 +1165,11 @@ where
         let mut runtime_sources = BTreeMap::new();
         let mut runtime_source_descriptors = BTreeMap::new();
         let mut sources = BTreeMap::new();
+        // Share only within this exact receiver authority scope/read schema.
+        // Occurrences retain their own row shapes and downstream operators;
+        // the input carries the union of their metadata, encoded once per row.
+        let mut table_metadata = BTreeMap::<_, BTreeMap<_, _>>::new();
+        let mut occurrences = Vec::new();
         for source_request in query_program_source_requests(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?
         {
@@ -1181,25 +1201,37 @@ where
                 read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
                     &table, &metadata,
                 );
-            let input = self.database.allocate_input_source(descriptor.clone());
-
-            let source_id = source_request.source.program_source_id();
-            if sources
-                .insert(
-                    source_id,
-                    maintained_views::CoveredInputSource {
-                        id: input,
-                        descriptor,
-                    },
-                )
-                .is_some()
-            {
-                return Err(Error::InvalidStoredValue(
-                    "duplicate compiled receiver program source identity",
-                ));
+            table_metadata
+                .entry(source_request.source.table.clone())
+                .or_default()
+                .extend(metadata);
+            occurrences.push((source_request.source, descriptor));
+        }
+        for (table_name, metadata) in table_metadata {
+            let table = self.table_in_schema(&table_name, request.reads.primary.read_schema)?;
+            let descriptor =
+                read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
+                    &table, &metadata,
+                );
+            let id = self.database.allocate_input_source(descriptor.clone());
+            sources.insert(
+                receiver_scope_table_source(table_name),
+                maintained_views::CoveredInputSource { id, descriptor },
+            );
+        }
+        for (occurrence, descriptor) in occurrences {
+            let shared = &sources[&receiver_scope_table_source(occurrence.table.clone())];
+            let mut graph = GraphBuilder::input_source(shared.id, shared.descriptor.clone());
+            if shared.descriptor != descriptor {
+                graph = graph.project(
+                    descriptor
+                        .fields()
+                        .iter()
+                        .map(|field| field.name.clone().expect("covered input fields are named")),
+                );
             }
-            runtime_sources.insert(source_request.source.clone(), input);
-            runtime_source_descriptors.insert(source_request.source.clone(), descriptor);
+            runtime_sources.insert(occurrence.clone(), graph);
+            runtime_source_descriptors.insert(occurrence, descriptor);
         }
         Ok((runtime_sources, runtime_source_descriptors, sources))
     }
