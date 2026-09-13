@@ -146,10 +146,24 @@ where
         let raw_constraints = self
             .database
             .primary_key_scan_raw_in_batch(batch, "jazz_pending_edges", &[])
-            .await?;
+            .await?
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
+        self.preflight_complete_parent_records(batch, parent, complete_versions, raw_constraints)
+            .await
+    }
+
+    async fn preflight_complete_parent_records(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        parent: TxId,
+        complete_versions: &[VersionRecord],
+        raw_constraints: Vec<OwnedRecord>,
+    ) -> Result<(), Error> {
         let mut constraints = Vec::with_capacity(raw_constraints.len());
         for raw in raw_constraints {
-            let record = raw.record();
+            let record = raw.borrowed();
             let parent_alias = NodeAlias(
                 record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?,
             );
@@ -219,9 +233,42 @@ where
         batch: &mut DatabaseBatch,
         complete_parents: &[(TxId, Vec<VersionRecord>)],
     ) -> Result<(), Error> {
+        if complete_parents.is_empty() {
+            return Ok(());
+        }
+        let raw_constraints = self
+            .database
+            .primary_key_scan_raw_in_batch(batch, "jazz_pending_edges", &[])
+            .await?;
+        if raw_constraints.is_empty() {
+            return Ok(());
+        }
+        let parents = complete_parents.iter().map(|(parent, _)| *parent).collect::<BTreeSet<_>>();
+        let mut by_parent = BTreeMap::<TxId, Vec<OwnedRecord>>::new();
+        for raw in raw_constraints {
+            let record = raw.record();
+            let alias = NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
+            let parent = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
+                self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
+                    "pending edge parent alias must exist",
+                ))?,
+            );
+            if parents.contains(&parent) {
+                by_parent.entry(parent).or_default().push(raw.owned_record());
+            }
+        }
+        // This boundary only reads constraints and stages matching deletes;
+        // no parent/child transaction or new constraint is published between
+        // groups. Retain the caller's parent order and defer child/coordinate
+        // decoding until that parent's turn. A repeated parent has no new work:
+        // its Accepted constraints were deleted, and Pending children were left
+        // unchanged for post-persistence settlement.
         for (parent, versions) in complete_parents {
-            self.preflight_complete_parent_constraints(batch, *parent, versions)
-                .await?;
+            if let Some(records) = by_parent.remove(parent) {
+                self.preflight_complete_parent_records(batch, *parent, versions, records)
+                    .await?;
+            }
         }
         Ok(())
     }
