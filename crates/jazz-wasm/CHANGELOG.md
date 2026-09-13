@@ -1,5 +1,7 @@
 # jazz-wasm
 
+## 2.0.0-alpha.55
+
 ## 2.0.0-alpha.54
 
 ### Patch Changes

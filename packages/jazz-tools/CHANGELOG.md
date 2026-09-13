@@ -1,5 +1,47 @@
 # jazz-tools
 
+## 2.0.0-alpha.55
+
+### Patch Changes
+
+- 194df87: Fix live synchronization of deleted rows protected by account-based ownership permissions, so other clients remove the deleted row without requiring a reload.
+- bf942bf: Reduce validation overhead when reading inline scalar values without changing their storage encoding.
+- 72fad2f: Avoid full-table reads when staging browser transaction updates, and prevent failed write-merge reads from leaving patches staged for a later commit.
+- b082ff8: Reclaim obsolete IndexedDB pages during writes under exclusive ownership, and safely retire browser runtime storage handles during schema changes and reconnects. Existing unused pages are not automatically collected.
+- 9d69a5b: Fix browser startup freezing when restoring pending uploads requires a cold IndexedDB read. Recovery now yields to asynchronous storage instead of blocking its callbacks.
+- 69e26c2: Reduce browser storage lookup overhead by copying only the requested row value instead of unrelated values in the same page.
+- dd491a8: Avoid opening a competing browser worker generation when runtime startup is slow; preserve a bounded initialization deadline and explicit worker handoff.
+- f8ace50: Reject intentional WebSocket closes before server hello.
+- 2cdb74e: Reject browser reconnect readiness waiters after terminal worker failure.
+- 06314ba: Keep native transport credentials mode-exclusive across live auth transitions.
+- fa458a8: Serialize native transport retirement before admitting replacements.
+- 6fcf012: Reduce CPU work and allocations when validating nested records during local query delivery, without changing storage encoding or accepted values.
+- 80fe6b1: Add regression coverage for allowed and denied inserts governed by correlated relationship policies, including server validation of optimistic writes.
+- 3833c7c: Handle comparisons with null correctly inside correlated relationship policies, and cover allowed and denied deletes under those policies.
+- 178a4b8: Add regression coverage for correlated relationship policies on updates and reverse-relationship reads, including allowed and denied operations.
+- 05eea99: Fix browser subscriptions remaining stale after a transaction commits with deferred local persistence.
+- 5b64a9d: Avoid scanning every sibling version in a large transaction when validating an existing exact parent row. Preserve branch, layer, identity and incomplete-parent checks.
+- bf79ef4: Keep averages of large finite numbers finite when their intermediate sum overflows, while preserving cancellation, subscription updates and retractions.
+- 42eb629: Keep overlapping subscription hydration pending until earlier shared-node snapshots are installed, avoiding internal subscription failures while those dependencies resolve.
+- 0afb098: Keep other clients responsive when a loopback WebSocket client is backpressured, while preserving message delivery order.
+- 020bd39: Support nested correlated relationship checks inside permission policies. Private dependency rows can authorize an operation without becoming readable to the caller.
+- d064481: Fix deployment of policies with correlated `exists` clauses nested in boolean branches.
+- 5825187: Recover permissions publication when a schema migration is already durable but missing from the running server. Reject missing or ambiguous lineage before advancing the permissions head, so publication can be retried safely.
+- 64a449b: Avoid synchronous transaction preflight reads that can block the host while queued database work holds the owner lock.
+- e4460da: Reject null defaults for required columns during schema validation, before publishing the schema.
+- b5692a6: Preserve nullable parent correlation keys when required nested includes filter rows, avoiding collector descriptor mismatches without changing required-match eligibility.
+- b6eda5a: Reuse the complete supporting-row set during subscription publication bookkeeping instead of reconstructing it again.
+- 2359534: Avoid repeatedly reading transaction status for writes already acknowledged locally while waiting for server confirmation, improving offline bulk-write performance.
+- a26a596: Reduce cold-load and large-transaction overhead by avoiding repeated ancestry scans, record conversions, and unused query payloads. Preserve complete subscription results when recursive evaluation or data hydration resumes across runtime turns.
+
+  Check subscription completeness against its typed schema view, including views registered on an initially empty owner.
+
+  Keep provisional enum registries coherent when adopting the authority catalogue, preserving offline enum values and preventing provenance failures on subsequent reopen.
+
+- 678c2ed: Reduce transaction-status polling cost by reading fate and durability fields without decoding unrelated transaction payloads. Preserve pending-persistence and rejection checks.
+  - jazz-wasm@2.0.0-alpha.55
+  - jazz-rn@2.0.0-alpha.55
+
 ## 2.0.0-alpha.54
 
 ### Patch Changes
