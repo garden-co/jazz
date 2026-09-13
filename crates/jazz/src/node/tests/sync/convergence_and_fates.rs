@@ -251,7 +251,7 @@ fn authority_complete_empty_snapshot_replaces_prior_inputs() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
     let generation = receiver.applied_authority_result_generation(&authority_result);
-    successor.supporting_rows.added_rows_mut().clear();
+    successor.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(Vec::new());
     successor.version_carriers.clear();
     receiver
         .apply_sync_message_settled(successor.into_view_update())
@@ -274,11 +274,12 @@ fn authority_same_batch_snapshots_compare_each_successor_and_replay() {
     // Internal ingress is required to put several complete snapshots for the
     // same authority into exactly one receive batch and inspect both compiler
     // self-join roles. Public transport scheduling does not expose that control.
-    let (_dir, mut receiver, authority_result, initial, successor) =
+    let (_dir, mut receiver, authority_result, initial, mut successor) =
         covered_input_receiver_fixture();
     let expected = successor.supporting_rows.added_rows()[0].clone();
+    successor.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(vec![expected.clone()]);
     let mut empty = successor.clone();
-    empty.supporting_rows.added_rows_mut().clear();
+    empty.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(Vec::new());
     empty.version_carriers.clear();
     crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
         payload_view_update_parts(successor.clone()),

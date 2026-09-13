@@ -7831,3 +7831,5 @@ mod tests {
         assert_ne!(lens.content_id(), changed.content_id());
     }
 }
+#[cfg(test)]
+pub(crate) mod supporting_set_test_oracle;

@@ -521,6 +521,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
 
 #[test]
 fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_derivations() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let reader = user(0xa1);
     let other = user(0xb2);
     let container = row(0xc1);
@@ -613,11 +614,13 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
 
     let mut peer = PeerState::client_link(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let initial = wire_membership.observe(&initial);
     assert_eq!(
         canonical_view_update_rows_for_table(&initial, "entries"),
         vec![("entries".to_owned().into(), entry, entry_tx)]
     );
     let _stable = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let _stable = wire_membership.observe(&_stable);
 
     accept_global(
         &mut core,
@@ -625,6 +628,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
             .deletion(DeletionEvent::Deleted),
     );
     let first_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let first_revoke = wire_membership.observe(&first_revoke);
     let first_revoke_entries =
         canonical_view_update_rows_for_table(&first_revoke, "entries");
     assert_eq!(first_revoke_entries, vec![("entries".to_owned().into(), entry, entry_tx)]);
@@ -643,6 +647,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
             .deletion(DeletionEvent::Deleted),
     );
     let last_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let last_revoke = wire_membership.observe(&last_revoke);
     assert!(canonical_view_update_rows_for_table(&last_revoke, "entries").is_empty());
     assert!(
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
@@ -658,6 +663,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
         ])),
     );
     let regrant = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let regrant = wire_membership.observe(&regrant);
     let regrant_entry_adds = canonical_view_update_rows_for_table(&regrant, "entries");
     assert_eq!(
         regrant_entry_adds
@@ -678,6 +684,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
 
 #[test]
 fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_incremental() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let (_core_dir, mut core) = open_node_with_schema(node(9), priority_schema());
     let first = row(0x11);
     let second = row(0x22);
@@ -709,6 +716,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
 
     let mut peer = PeerState::new();
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let initial = wire_membership.observe(&initial);
     assert_view_update_rows(
         initial,
         [("todos", second, second_tx), ("todos", third, third_tx)],
@@ -721,6 +729,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
         MergeableCommit::new("todos", zeroth, 14).cells(priority_cells("zeroth", 5)),
     );
     let shifted_down = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let shifted_down = wire_membership.observe(&shifted_down);
     assert_view_update_rows(
         shifted_down,
         [("todos", first, first_tx), ("todos", second, second_tx)],
@@ -733,6 +742,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
             .deletion(DeletionEvent::Deleted),
     );
     let shifted_back = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let shifted_back = wire_membership.observe(&shifted_back);
     assert_view_update_rows(
         shifted_back,
         [("todos", second, second_tx), ("todos", third, third_tx)],
@@ -745,6 +755,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
             .deletion(DeletionEvent::Deleted),
     );
     let fill_from_tail = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let fill_from_tail = wire_membership.observe(&fill_from_tail);
     assert_view_update_rows(
         fill_from_tail,
         [("todos", third, third_tx), ("todos", fourth, fourth_tx)],

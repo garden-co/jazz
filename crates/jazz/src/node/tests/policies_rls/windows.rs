@@ -67,6 +67,7 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
 
 #[test]
 fn authorization_proofs_are_existential_before_top_by_windows() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let reader = user(0xa1);
     let documents_policy = PublicPolicyExpr::Or(vec![
         public_outer_exists(
@@ -139,6 +140,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
 
     let mut peer = PeerState::client_link(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let initial = wire_membership.observe(&initial);
     let initial_adds =
         canonical_view_update_rows_for_table(&initial, "documents");
     assert_eq!(
@@ -158,6 +160,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
         ])),
     );
     let duplicate = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let duplicate = wire_membership.observe(&duplicate);
     assert_eq!(
         canonical_view_update_rows_for_table(&duplicate, "documents"),
         initial_adds
@@ -170,6 +173,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             .deletion(DeletionEvent::Deleted),
     );
     let partial_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let partial_revoke = wire_membership.observe(&partial_revoke);
     assert_eq!(
         canonical_view_update_rows_for_table(&partial_revoke, "documents"),
         initial_adds
@@ -182,6 +186,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             .deletion(DeletionEvent::Deleted),
     );
     let overlapping_branch = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let overlapping_branch = wire_membership.observe(&overlapping_branch);
     assert_eq!(
         canonical_view_update_rows_for_table(&overlapping_branch, "documents"),
         initial_adds
@@ -198,6 +203,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             ])),
     );
     let final_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let final_revoke = wire_membership.observe(&final_revoke);
     assert_eq!(
         canonical_view_update_rows_for_table(&final_revoke, "documents"),
         initial_adds.into_iter().filter(|(_, row_id, _)| *row_id != row(99)).collect::<Vec<_>>()

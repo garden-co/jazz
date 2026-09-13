@@ -2857,12 +2857,6 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         .unwrap();
     accept_global(&mut core, delete_first_tx, 3);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let expected_update = update.clone();
-    assert_view_update_rows(&mut expected_snapshots,
-        expected_update,
-        vec![("todos", second_row, second_tx)],
-        vec![("todos", first_row, first_tx)],
-    );
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         supporting_rows: program_fact_adds,
         ..
@@ -4094,6 +4088,7 @@ fn maintained_subscription_view_ne_param_stays_maintained() {
 
 #[test]
 fn maintained_subscription_view_range_literal_stays_maintained() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let (_dir, mut core) = open_node_with_uuid(node(0xa1));
     let initial = core
         .commit_mergeable_settled(
@@ -4111,7 +4106,7 @@ fn maintained_subscription_view_range_literal_stays_maintained() {
     let subscription = subscription_key(&shape, &binding);
     let mut peer = PeerState::new();
 
-    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    wire_membership.observe(&peer.rehydrate_query(&mut core, &shape, &binding).unwrap());
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
@@ -4128,12 +4123,14 @@ fn maintained_subscription_view_range_literal_stays_maintained() {
     accept_global(&mut core, still_excluded, 4);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let update = wire_membership.observe(&update);
     assert_eq!(view_update_added_rows(update), BTreeSet::from([row(0x81), row(0x83)]));
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
 }
 
 #[test]
 fn maintained_subscription_view_reversed_range_literal_stays_maintained() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let (_dir, mut core) = open_node_with_uuid(node(0xa2));
     let initial = core
         .commit_mergeable_settled(
@@ -4151,7 +4148,7 @@ fn maintained_subscription_view_reversed_range_literal_stays_maintained() {
     let subscription = subscription_key(&shape, &binding);
     let mut peer = PeerState::new();
 
-    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    wire_membership.observe(&peer.rehydrate_query(&mut core, &shape, &binding).unwrap());
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
@@ -4168,12 +4165,14 @@ fn maintained_subscription_view_reversed_range_literal_stays_maintained() {
     accept_global(&mut core, still_excluded, 4);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let update = wire_membership.observe(&update);
     assert_eq!(view_update_added_rows(update), BTreeSet::from([row(0x85), row(0x87)]));
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
 }
 
 #[test]
 fn maintained_subscription_view_any_literal_stays_maintained() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let (_dir, mut core) = open_node_with_uuid(node(0xa4));
     let initial = core
         .commit_mergeable_settled(
@@ -4185,7 +4184,7 @@ fn maintained_subscription_view_any_literal_stays_maintained() {
     let subscription = subscription_key(&shape, &binding);
     let mut peer = PeerState::new();
 
-    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    wire_membership.observe(&peer.rehydrate_query(&mut core, &shape, &binding).unwrap());
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
@@ -4196,12 +4195,14 @@ fn maintained_subscription_view_any_literal_stays_maintained() {
     accept_global(&mut core, added, 2);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let update = wire_membership.observe(&update);
     assert_eq!(view_update_added_rows(update), BTreeSet::from([row(0x89), row(0x8a)]));
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
 }
 
 #[test]
 fn maintained_subscription_view_in_literal_stays_maintained() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let (_dir, mut core) = open_node_with_uuid(node(0xa5));
     let initial = core
         .commit_mergeable_settled(
@@ -4213,7 +4214,7 @@ fn maintained_subscription_view_in_literal_stays_maintained() {
     let subscription = subscription_key(&shape, &binding);
     let mut peer = PeerState::new();
 
-    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    wire_membership.observe(&peer.rehydrate_query(&mut core, &shape, &binding).unwrap());
     assert!(maintained_subscription_id(&peer, subscription).is_some());
 
     let added = core
@@ -4224,6 +4225,7 @@ fn maintained_subscription_view_in_literal_stays_maintained() {
     accept_global(&mut core, added, 2);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let update = wire_membership.observe(&update);
     assert_eq!(view_update_added_rows(update), BTreeSet::from([row(0x8b), row(0x8c)]));
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
 }
@@ -4298,6 +4300,7 @@ fn maintained_subscription_view_any_with_bound_param_stays_maintained() {
 
 #[test]
 fn maintained_subscription_view_null_predicates_stay_maintained() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     for (case, non_null) in [(0xa3, false), (0xa4, true)] {
         let (_dir, mut core) = open_node_with_schema(node(case), nullable_title_schema());
         let initial = core
@@ -4316,7 +4319,7 @@ fn maintained_subscription_view_null_predicates_stay_maintained() {
         let subscription = subscription_key(&shape, &binding);
         let mut peer = PeerState::new();
 
-        peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        wire_membership.observe(&peer.rehydrate_query(&mut core, &shape, &binding).unwrap());
         assert!(maintained_subscription_id(&peer, subscription).is_some());
 
         let added_row = row(case + 2);
@@ -4338,6 +4341,7 @@ fn maintained_subscription_view_null_predicates_stay_maintained() {
         }
 
         let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let update = wire_membership.observe(&update);
         assert_eq!(view_update_added_rows(update), BTreeSet::from([row(case), added_row]));
         assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
     }
@@ -5530,6 +5534,7 @@ fn peer_state_sends_result_removes_after_deletes() {
     let mut peer = PeerState::new();
 
     let initial = peer.current_rows_update(&mut core, "todos").unwrap();
+    remember_supporting_snapshot(&mut expected_snapshots, initial.clone());
     register_whole_table_receiver(&mut reader, "todos");
     reader.apply_sync_message_settled(initial).unwrap();
     assert_eq!(
@@ -5756,8 +5761,10 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     let mut peer = PeerState::new();
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    remember_supporting_snapshot(&mut expected_snapshots, initial.clone());
     reader
-        .apply_sync_message_settled(peer.rehydrate_query(&mut core, &shape, &binding).unwrap())
+        .apply_sync_message_settled(initial)
         .unwrap();
     assert_eq!(
         row_result_set(&peer, subscription),
@@ -6200,8 +6207,7 @@ fn apply_test_result_delta(peer: &mut PeerState, update: &(SubscriptionKey, bool
 
 #[test]
 fn maintained_publication_reuses_complete_successor_closure() {
-    // The traversal bound is internal bookkeeping, not a wire delta promise.
-    // Assert full supporting-row manifests as well as the cost boundary.
+    // Ordinary publication must not traverse the retained closure or resend it.
     use crate::node::maintained_subscription_view::SOURCE_CLOSURE_TRAVERSALS;
     let (_dir, mut core) = open_node_with_uuid(node(0x93));
     let mut expected = BTreeSet::new();
@@ -6217,7 +6223,9 @@ fn maintained_publication_reuses_complete_successor_closure() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let subscription = subscription_key(&shape, &binding);
     let mut peer = PeerState::new();
-    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
+    wire_membership.observe(&initial);
     let tx = core.commit_mergeable_settled(
         MergeableCommit::new("todos", row_from_u64(0), 2_000).cells(title_cells("updated")),
     ).unwrap();
@@ -6225,10 +6233,12 @@ fn maintained_publication_reuses_complete_successor_closure() {
     SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(0));
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let traversals = SOURCE_CLOSURE_TRAVERSALS.with(|count| count.get());
-    assert_eq!(traversals, 1, "only the complete wire manifest traverses the closure; transition bookkeeping uses changed identities");
+    assert_eq!(traversals, 0, "ordinary delta publication never traverses the retained closure");
+    let reconstructed = wire_membership.observe(&update);
     let SyncMessage::ViewUpdate(view) = update else { panic!("expected complete manifest") };
-    assert_eq!(view.supporting_rows.added_rows().iter().map(|row| row.row).collect::<BTreeSet<_>>(), expected);
-    assert_eq!(view.supporting_rows.added_rows().len(), 150, "complete manifest has no duplicate rows");
+    assert_eq!(view.supporting_rows.added_rows().len(), 1);
+    assert_eq!(view.supporting_rows.removed_rows().len(), 1);
+    assert_eq!(view_update_added_rows(reconstructed), expected, "all 150 rows remain after applying the one-row delta");
     assert_eq!(view.supporting_rows.added_rows().iter().find(|row| row.row == row_from_u64(0)).unwrap().version.tx, tx, "changed row carries its current exact version");
     let state = &peer.publication_states[&subscription];
     assert_eq!(state.program_fact_set, state.maintained_subscription_view.as_ref().unwrap().maintained.active_peer_source_closure_facts());

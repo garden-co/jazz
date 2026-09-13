@@ -26,6 +26,18 @@ Pending native-body repair retains dependent deltas; a new snapshot may supersed
 them. Reconnect/reopen uses a fresh snapshot, not recovered transport authority.
 Scope removal is neither global cached-row deletion nor an access-denial claim.
 
+Authority fallback reissues the original admitted subscription, preserving its
+binding and policy context. Preselection arrivals cannot settle it, and their
+observed cut is a lower bound on the new snapshot. A stalled repair chain is
+limited to 64 pending transitions per subscription; overflowing it requests a
+fresh snapshot and retires superseded unsent repairs. An already-sent repair
+remains correlated until its reply arrives, but cannot install superseded state.
+
+An unchanged confirmation preserves its revision, so dropping an empty poll
+does not break the next predecessor. A nonempty out-of-order or replayed delta
+does not install against a different revision; recovery requires a snapshot.
+This experiment does not add an unordered/retransmitting transport protocol.
+
 The implementation must avoid full retained-map cloning for atomic staging and
 full-manifest construction/comparison on ordinary delta updates. Initial and
 recovery snapshots intentionally remain scope-sized.
@@ -38,3 +50,8 @@ storage and sample counts unchanged. Confirm through CodSpeed and full GQL
 profiles. Prediction: 10–20% lower sequential todo latency; no cold-load win is
 promised. Format retention is a separate user decision after correctness and
 performance evidence.
+
+Initial matched local receipt: inserts −14.2%/−15.7%, updates −25.4%/−26.7%,
+cold first sync +1.1%/+0.6% (paired three-sample ABBA medians). Exact binaries,
+source hashes, validation status, caveats and further findings are recorded in
+[#2913](https://github.com/garden-co/jazz/issues/2913#issuecomment-5654627498).

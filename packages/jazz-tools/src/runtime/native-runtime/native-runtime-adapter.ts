@@ -71,6 +71,7 @@ import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
 import {
   WebSocketCarrier,
+  WIRE_PROTOCOL_VERSION,
   isRetryablePreHelloWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
@@ -867,7 +868,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerUpstreamAttached = true;
     if (authority)
       return this.connectNegotiatedUpstream({
-        protocolVersion: 1,
+        protocolVersion: WIRE_PROTOCOL_VERSION,
         features: authority.features,
         authority,
       });

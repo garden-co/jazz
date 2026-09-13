@@ -573,6 +573,7 @@ fn maintained_subscription_view_multi_segment_inner_include_payload_references_v
 
 #[test]
 fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let schema = multi_segment_required_include_rls_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xa1);
@@ -581,6 +582,7 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut peer = PeerState::client_link(reader);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let initial = wire_membership.observe(&initial);
     let mut expected = canonical_view_update_rows(&initial).into_iter().collect::<BTreeSet<_>>();
     expected.retain(|(table, id, _)| table.as_str() != "roots" || *id != row(0xd2));
 
@@ -597,6 +599,7 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     core.accept_global_for_test(update_tx).unwrap();
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let update = wire_membership.observe(&update);
     let adds = canonical_view_update_rows(&update);
     expected.insert(("roots".to_owned().into(), row(0xd2), update_tx));
     assert_eq!(adds.into_iter().collect::<BTreeSet<_>>(), expected);

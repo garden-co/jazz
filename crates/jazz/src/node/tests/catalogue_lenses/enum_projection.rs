@@ -819,6 +819,7 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
 
 #[test]
 fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     // This is an internal subscription-boundary regression. PeerState is the
     // server-side maintained subscription driver; public clients receive its
     // ViewUpdates, but cannot themselves install a catalogue lineage.
@@ -872,6 +873,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let initial = title_peer
         .rehydrate_query(&mut core, &title_only, &title_binding)
         .expect("old-schema title subscription opens over known case");
+    let initial = wire_membership.observe(&initial);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory, ..
     }) = &initial
@@ -886,6 +888,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let unchanged = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("identical projection target remains registered");
+    let unchanged = wire_membership.observe(&unchanged);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory, ..
     }) = &unchanged
@@ -909,6 +912,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let update = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("unused unknown enum must not break maintained title output");
+    let update = wire_membership.observe(&update);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory, ..
     }) = &update
@@ -957,6 +961,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
             status_options.clone(),
         )
         .expect("required unknown enum case is a row exclusion");
+    let update = wire_membership.observe(&update);
     assert_eq!(covered_input_rows(&update).len(), 1);
     assert!(
         covered_input_rows(&update)
@@ -984,6 +989,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly incompatible delta removes the row")
         .expect("expected view update");
+    let update = wire_membership.observe(&update);
     assert!(
         !covered_input_rows(&update)
             .iter()
@@ -1006,6 +1012,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly compatible delta re-adds the row")
         .expect("expected view update");
+    let update = wire_membership.observe(&update);
     assert!(
         covered_input_rows(&update)
             .iter()

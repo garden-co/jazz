@@ -2261,6 +2261,8 @@ where
                     pending,
                     upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                     announced_shapes: BTreeSet::new(),
+                    sent_subscriptions: BTreeMap::new(),
+                    awaiting_support_snapshots: BTreeMap::new(),
                     sent_session_claim_revisions: BTreeMap::new(),
                     outbox: Rc::clone(&self.outbox),
                     uploaded: BTreeSet::new(),

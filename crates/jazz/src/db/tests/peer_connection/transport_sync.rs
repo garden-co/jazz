@@ -19,8 +19,11 @@ fn unordered_supporting_snapshots_preserve_public_subscription_rows() {
     let mut stream =
         prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
     let mut snapshot = RelationSnapshot::default();
-    for count in [3, 4] {
-        if count == 4 {
+    for count in [3, 5] {
+        if count == 5 {
+            server
+                .insert_with_id("todos", row(5), cells("another visible", false, author))
+                .unwrap();
             server
                 .insert_with_id("todos", row(4), cells("new visible", false, author))
                 .unwrap();
@@ -1651,6 +1654,18 @@ fn delayed_row_repair_does_not_replace_a_newer_supporting_snapshot() {
     for _ in 0..16 {
         subscriber.borrow_mut().tick().unwrap();
     }
+    // Explicit recovery snapshot: unlike a dependent delta this may supersede the old repair.
+    for message in responses.borrow_mut().iter_mut() {
+        if let SyncMessage::ViewUpdate(payload) = message
+            && !payload.supporting_rows.is_snapshot()
+        {
+            assert_eq!(payload.supporting_rows.added_rows().len(), 1);
+            assert_eq!(payload.supporting_rows.added_rows()[0].row, new);
+            payload.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(
+                payload.supporting_rows.added_rows().to_vec(),
+            );
+        }
+    }
     let mut snapshot = RelationSnapshot::default();
     for _ in 0..8 {
         client.tick().unwrap();
@@ -1793,7 +1808,14 @@ fn newer_supporting_snapshots_coalesce_unsent_repairs() {
             // repair replies; complete snapshots keep arriving normally.
             responses.borrow_mut().retain_mut(|message| {
                 match message {
-                    SyncMessage::ViewUpdate(payload) => payload.version_carriers.clear(),
+                    SyncMessage::ViewUpdate(payload) => {
+                        // This case exercises independent recovery snapshots, not dependent deltas.
+                        assert_eq!(payload.supporting_rows.added_rows().len(), 1);
+                        payload.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(
+                            payload.supporting_rows.added_rows().to_vec(),
+                        );
+                        payload.version_carriers.clear();
+                    }
                     SyncMessage::RowVersionPayloads { .. } => {
                         held.push(message.clone());
                         return false;
@@ -1829,6 +1851,172 @@ fn newer_supporting_snapshots_coalesce_unsent_repairs() {
     assert_eq!(
         snapshot.rows[0].cell(&schema.tables[0], "title"),
         Some(Value::String("15".to_owned()))
+    );
+}
+
+// Real transport receipt for an initial missing body followed by 15 dependent
+// deltas whose own bodies are present. Releasing repair must preserve the chain.
+#[test]
+fn dependent_supporting_deltas_wait_for_missing_snapshot_body() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xb2, alice, &schema);
+    let row = RowUuid::from_bytes([0xb3; 16]);
+    server
+        .insert_with_id("todos", row, cells("0", false, alice))
+        .unwrap();
+    let (upstream, downstream, _requests, responses) = duplex_with_taps();
+    let upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, alice);
+    let mut stream =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    let mut held = Vec::new();
+    let mut snapshot = RelationSnapshot::default();
+    for revision in 0..16 {
+        if revision > 0 {
+            server
+                .update(
+                    "todos",
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
+                )
+                .unwrap();
+        }
+        for _ in 0..8 {
+            subscriber.borrow_mut().tick().unwrap();
+            // Only the first snapshot needs a body fetch. Later deltas carry
+            // their own bodies but must wait behind that predecessor.
+            responses.borrow_mut().retain_mut(|message| {
+                match message {
+                    SyncMessage::ViewUpdate(payload) if payload.supporting_rows.is_snapshot() => {
+                        payload.version_carriers.clear();
+                    }
+                    SyncMessage::RowVersionPayloads { .. } => {
+                        held.push(message.clone());
+                        return false;
+                    }
+                    _ => {}
+                }
+                true
+            });
+            client.tick().unwrap();
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(&mut snapshot, event);
+            }
+        }
+    }
+    let queued = match &upstream.borrow().link {
+        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
+        _ => unreachable!("client upstream"),
+    };
+    assert!(
+        queued == 16,
+        "snapshot and all dependent deltas must remain ordered: {queued}"
+    );
+    assert!(
+        snapshot.rows.is_empty(),
+        "no successor may install before its missing predecessor"
+    );
+    assert!(!held.is_empty(), "the first repair was actually delayed");
+    responses.borrow_mut().extend(held);
+    for _ in 0..24 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("15".to_owned()))
+    );
+}
+
+// More than one bounded repair window must trigger a fresh authority baseline
+// without losing eventual public rows or accepting a disconnected delta chain.
+#[test]
+fn stalled_supporting_delta_backlog_reopens_with_a_fresh_snapshot() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xb2, alice, &schema);
+    let row = RowUuid::from_bytes([0xb3; 16]);
+    server
+        .insert_with_id("todos", row, cells("0", false, alice))
+        .unwrap();
+    let (upstream, downstream, _requests, responses) = duplex_with_taps();
+    let upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, alice);
+    let mut stream =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    let mut held = Vec::new();
+    let mut snapshot = RelationSnapshot::default();
+    let mut received_snapshots = 0;
+    for revision in 0..96 {
+        if revision > 0 {
+            server
+                .update(
+                    "todos",
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
+                )
+                .unwrap();
+        }
+        for _ in 0..8 {
+            subscriber.borrow_mut().tick().unwrap();
+            // Only the first snapshot needs a body fetch. Later deltas carry
+            // their own bodies but must wait behind that predecessor.
+            responses.borrow_mut().retain_mut(|message| {
+                match message {
+                    SyncMessage::ViewUpdate(payload) if payload.supporting_rows.is_snapshot() => {
+                        received_snapshots += 1;
+                        payload.version_carriers.clear();
+                    }
+                    SyncMessage::RowVersionPayloads { .. } => {
+                        held.push(message.clone());
+                        return false;
+                    }
+                    _ => {}
+                }
+                true
+            });
+            client.tick().unwrap();
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(&mut snapshot, event);
+            }
+        }
+    }
+    let queued = match &upstream.borrow().link {
+        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
+        _ => unreachable!("client upstream"),
+    };
+    assert!(
+        queued <= 64,
+        "stalled chains must have bounded retained transitions: {queued}"
+    );
+    assert!(
+        snapshot.rows.is_empty(),
+        "no successor may install before its missing predecessor"
+    );
+    assert!(
+        received_snapshots >= 2,
+        "overflow must cause a real fresh subscription snapshot"
+    );
+    assert!(!held.is_empty(), "the first repair was actually delayed");
+    responses.borrow_mut().extend(held);
+    for _ in 0..24 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("95".to_owned()))
     );
 }
 

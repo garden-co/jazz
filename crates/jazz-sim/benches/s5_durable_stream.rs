@@ -1252,6 +1252,7 @@ fn result_row_count(update: &SyncMessage, table: &str) -> usize {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             supporting_rows, ..
         }) => supporting_rows
+            .added_rows()
             .iter()
             .filter(|input| input.version_table.as_str() == table)
             .map(|input| input.row)

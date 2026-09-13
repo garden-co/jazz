@@ -802,6 +802,9 @@ pub(super) struct UpstreamConnectionState {
     pub(super) pending: Vec<PendingUpstreamCommand>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) announced_shapes: BTreeSet<ShapeRegistrationKey>,
+    /// Exact admitted opens retained for a fresh snapshot after authority handoff.
+    pub(super) sent_subscriptions: BTreeMap<SubscriptionKey, PendingUpstreamSubscription>,
+    pub(super) awaiting_support_snapshots: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
     pub(super) sent_session_claim_revisions: BTreeMap<AuthorSubject, u64>,
     pub(super) outbox: Outbox,
     pub(super) uploaded: BTreeSet<TxId>,
@@ -1892,11 +1895,32 @@ where
     pub(super) fn stage_inbound_without_authority_receipt(&mut self) {
         if let ConnectionLink::Upstream(UpstreamConnectionState {
             pending_row_version_repairs,
+            sent_subscriptions,
+            awaiting_support_snapshots,
+            pending,
             ..
         }) = &mut self.link
         {
             for repair in pending_row_version_repairs {
                 repair.authority_receipt_eligible = false;
+            }
+            // A surviving link's old delta chain is not a newly selected
+            // authority receipt. Reissue its admitted opens and ignore deltas
+            // until each independent snapshot arrives. Never reconstruct claims.
+            for (key, request) in sent_subscriptions {
+                if pending.iter().any(|command| {
+                    matches!(command,
+                    PendingUpstreamCommand::Unsubscribe(subscription) if subscription == key)
+                }) {
+                    continue;
+                }
+                awaiting_support_snapshots.entry(*key).or_default();
+                if !pending.iter().any(|command| {
+                    matches!(command,
+                    PendingUpstreamCommand::Subscribe(open) if open.subscription == *key)
+                }) {
+                    pending.push(PendingUpstreamCommand::Subscribe(request.clone()));
+                }
             }
         }
         while let Some(message) = self.transport.try_recv() {
@@ -1941,6 +1965,8 @@ where
                 pending,
                 upstream_subscriptions,
                 announced_shapes,
+                sent_subscriptions,
+                awaiting_support_snapshots,
                 sent_session_claim_revisions,
                 outbox,
                 uploaded,
@@ -2147,8 +2173,11 @@ where
                                         }
                                         return Err(transport_error(error));
                                     }
+                                    sent_subscriptions.insert(pending_subscription.subscription, pending_subscription.clone());
                                 }
                                 PendingUpstreamCommand::Unsubscribe(subscription) => {
+                                    sent_subscriptions.remove(subscription);
+                                    awaiting_support_snapshots.remove(subscription);
                                     if let Some(receipts) = self.active_authority_view_receipts.borrow_mut().as_mut() {
                                         receipts.subscriptions.remove(subscription);
                                     }
@@ -2839,6 +2868,18 @@ where
                                 settled_through,
                                 ..
                             }) => {
+                                if let Some(minimum_cut) = awaiting_support_snapshots.get_mut(&subscription) {
+                                    if !authority_receipt_eligible {
+                                        *minimum_cut = (*minimum_cut).max(settled_through);
+                                    }
+                                    if !authority_receipt_eligible || !matches!(&message,
+                                        SyncMessage::ViewUpdate(view) if view.supporting_rows.is_snapshot()
+                                            && !view.peer_payload_inventory.opening_pending)
+                                        || settled_through < *minimum_cut {
+                                        continue;
+                                    }
+                                    awaiting_support_snapshots.remove(&subscription);
+                                }
                                 if matches!(&message, SyncMessage::ViewUpdate(payload)
                                     if !payload.peer_payload_inventory.opening_pending && payload.supporting_rows.is_snapshot())
                                 {
@@ -2870,6 +2911,33 @@ where
                                 let predecessor_is_waiting = pending_row_version_repairs.iter().any(|repair|
                                     !repair.superseded && matches!(&repair.update, SyncMessage::ViewUpdate(view)
                                         if view.subscription == subscription));
+                                // Dependent deltas cannot be coalesced as complete
+                                // snapshots were. Bound each stalled chain and reopen
+                                // its exact admitted usage instead of retaining an
+                                // unbounded backlog behind one unavailable body.
+                                if predecessor_is_waiting && pending_row_version_repairs.iter()
+                                    .filter(|repair| !repair.superseded && matches!(&repair.update,
+                                        SyncMessage::ViewUpdate(view) if view.subscription == subscription))
+                                    .count() >= 64
+                                {
+                                    let request = sent_subscriptions.get(&subscription).ok_or(
+                                        crate::node::Error::InvalidStoredValue("support delta repair has no admitted subscription"))?;
+                                    awaiting_support_snapshots.insert(subscription, settled_through);
+                                    pending.push(PendingUpstreamCommand::Subscribe(request.clone()));
+                                    for index in (0..pending_row_version_repairs.len()).rev() {
+                                        if matches!(&pending_row_version_repairs[index].update,
+                                            SyncMessage::ViewUpdate(view) if view.subscription == subscription) {
+                                            if pending_row_version_fetches[index].sent_count == 0 {
+                                                pending_row_version_repairs.remove(index);
+                                                pending_row_version_fetches.remove(index);
+                                            } else {
+                                                pending_row_version_repairs[index].superseded = true;
+                                            }
+                                        }
+                                    }
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                    continue;
+                                }
                                 if missing.is_empty() && !predecessor_is_waiting {
                                     stage_initial_coverage_clear_for_update(
                                         &message,
@@ -2961,6 +3029,8 @@ where
                                 {
                                     continue;
                                 }
+                                sent_subscriptions.remove(&subscription);
+                                awaiting_support_snapshots.remove(&subscription);
                                 let delivered = queue_relay_subscription_rejection(
                                     &self.relay_upstream_subscription_owners,
                                     &self.pending_relay_subscription_rejections,

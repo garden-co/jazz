@@ -432,11 +432,13 @@ enum ActiveSubscriptionKeyReuse {
 }
 
 fn assert_protocol_view_update_rows(
+    membership: &mut crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle,
     message: SyncMessage,
     expected_subscription: SubscriptionKey,
     _expected_reset: bool,
     expected_rows: BTreeSet<RowUuid>,
 ) {
+    let message = membership.observe(&message);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         peer_payload_inventory,
@@ -473,6 +475,8 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let mut membership =
+        crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let initial_a = seed(&server, "todos", cells("A", false, owner));
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, client_author);
@@ -526,6 +530,7 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
         }))
         .unwrap();
     assert_protocol_view_update_rows(
+        &mut membership,
         drive_subscriber_until_payload(&subscriber, client_transport.as_mut()),
         subscription,
         true,
@@ -587,6 +592,7 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
 
     match reuse {
         ActiveSubscriptionKeyReuse::ExactReplay => assert_protocol_view_update_rows(
+            &mut membership,
             try_recv_subscriber_payload(client_transport.as_mut())
                 .expect("exact replay should refresh the active usage"),
             subscription,
@@ -594,6 +600,7 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
             BTreeSet::from([initial_a]),
         ),
         ActiveSubscriptionKeyReuse::ChangedKnownState => assert_protocol_view_update_rows(
+            &mut membership,
             try_recv_subscriber_payload(client_transport.as_mut())
                 .expect("known-state replay should refresh the active usage"),
             subscription,
@@ -648,6 +655,7 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
 
     let original_row = seed(&server, "todos", cells("A", false, owner));
     assert_protocol_view_update_rows(
+        &mut membership,
         drive_subscriber_until_payload(&subscriber, client_transport.as_mut()),
         subscription,
         false,

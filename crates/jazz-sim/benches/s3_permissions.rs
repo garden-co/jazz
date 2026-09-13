@@ -2046,8 +2046,15 @@ fn apply_client_update(client: &mut Client, message: SyncMessage, table: &str) {
         supporting_rows, ..
     }) = &message
     {
-        // Each update replaces the full subscription snapshot, even when empty.
-        client.covered_inputs = supporting_rows.iter().cloned().collect();
+        if supporting_rows.is_snapshot() {
+            client.covered_inputs.clear();
+        }
+        for row in supporting_rows.removed_rows() {
+            assert!(client.covered_inputs.remove(row));
+        }
+        client
+            .covered_inputs
+            .extend(supporting_rows.added_rows().iter().cloned());
         // This fixture knows its query table; wire rows carry no source roles.
         client.visible_rows = client
             .covered_inputs
@@ -2952,6 +2959,7 @@ fn result_rows(update: &SyncMessage, table: &str) -> Vec<ResultRowEntry> {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             supporting_rows, ..
         }) => supporting_rows
+            .added_rows()
             .iter()
             .filter(|input| input.version_table.as_str() == table)
             .map(|input| (input.version_table.clone(), input.row, input.version.tx))
