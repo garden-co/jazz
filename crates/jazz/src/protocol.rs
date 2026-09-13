@@ -4030,6 +4030,7 @@ pub struct SupportingRow {
     pub physical_table: crate::ids::GlobalPhysicalTableId,
     /// Authored native-record table name used by the existing exact version repair API.
     /// This is lookup metadata, not a query-source label; physical identity is authoritative.
+    #[serde(deserialize_with = "supporting_table_name::deserialize")]
     pub version_table: groove::Intern<String>,
     /// Physical row identity.
     pub row: RowUuid,
@@ -4041,6 +4042,91 @@ impl SupportingRow {
     /// Validate the native reference before catalogue-dependent receiver admission.
     pub fn is_wire_valid(&self) -> bool {
         !self.version_table.is_empty() && self.version.layer != ResultRowLayer::ContentOrDeletion
+    }
+}
+
+mod supporting_table_name {
+    use std::{borrow::Cow, cell::Cell, fmt};
+
+    use groove::Intern;
+    use serde::de::{Error, Unexpected, Visitor};
+
+    thread_local! {
+        // Intern handles own permanent pool entries, never input-buffer references.
+        // Exact string equality makes this independent of schema/authority lifetimes.
+        static LAST: Cell<Option<Intern<String>>> = const { Cell::new(None) };
+        #[cfg(test)]
+        pub(super) static LOOKUPS: Cell<usize> = const { Cell::new(0) };
+        #[cfg(test)]
+        pub(super) static OWNED_VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn intern(name: Cow<'_, str>) -> Intern<String> {
+        LAST.with(|last| {
+            if let Some(found) = last.get().filter(|old| old.as_str() == name.as_ref()) {
+                return found;
+            }
+            #[cfg(test)]
+            LOOKUPS.set(LOOKUPS.get() + 1);
+            let found = match name {
+                Cow::Borrowed(name) => Intern::from_ref(name),
+                Cow::Owned(name) => Intern::new(name),
+            };
+            last.set(Some(found));
+            found
+        })
+    }
+
+    struct TableName;
+
+    impl<'de> Visitor<'de> for TableName {
+        type Value = Intern<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(intern(Cow::Borrowed(value)))
+        }
+
+        fn visit_string<E: Error>(self, value: String) -> Result<Self::Value, E> {
+            #[cfg(test)]
+            OWNED_VISITS.set(OWNED_VISITS.get() + 1);
+            Ok(intern(Cow::Owned(value)))
+        }
+
+        fn visit_bytes<E: Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+            match std::str::from_utf8(value) {
+                Ok(value) => self.visit_str(value),
+                Err(_) => Err(E::invalid_value(Unexpected::Bytes(value), &self)),
+            }
+        }
+
+        fn visit_byte_buf<E: Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+            match String::from_utf8(value) {
+                Ok(value) => self.visit_string(value),
+                Err(error) => Err(E::invalid_value(
+                    Unexpected::Bytes(&error.into_bytes()),
+                    &self,
+                )),
+            }
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Intern<String>, D::Error> {
+        // Serialization stays the existing string representation. Request borrowing
+        // during decode instead of String::deserialize's allocate-before-intern path.
+        deserializer.deserialize_str(TableName)
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset() {
+        LAST.set(None);
+        LOOKUPS.set(0);
+        OWNED_VISITS.set(0);
     }
 }
 
@@ -6075,6 +6161,152 @@ mod tests {
     };
     use crate::tx::TxKind;
     use groove::schema::{ColumnSchema, ColumnType};
+
+    // Internal wire corpus: byte compatibility and interning work cannot be
+    // observed through row queries. Public sync suites still gate visible behavior.
+    #[test]
+    fn supporting_table_borrowing_preserves_existing_wire_bytes_and_validation() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct PreviousSupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId,
+            version_table: groove::Intern<String>,
+            row: RowUuid,
+            version: RowVersionRefEntry,
+        }
+        for name in ["", "todos", "résumé/倉庫", &"long_label".repeat(100)] {
+            for populated in [false, true] {
+                let old = PreviousSupportingRow {
+                    physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                        [3; 16],
+                    )),
+                    version_table: groove::Intern::from_ref(name),
+                    row: RowUuid::from_bytes([4; 16]),
+                    version: RowVersionRefEntry {
+                        tx: TxId::new(TxTime(987654), NodeUuid::from_bytes([5; 16])),
+                        schema_version: populated.then(|| SchemaVersionId::from_bytes([6; 16])),
+                        layer: ResultRowLayer::Content,
+                        batch: populated
+                            .then(|| TxId::new(TxTime(1234), NodeUuid::from_bytes([7; 16]))),
+                        branch_or_prefix: populated.then(|| vec![0, 1, 254, 255]),
+                        row_digest: populated.then(|| vec![42; 32]),
+                    },
+                };
+                let bytes = postcard::to_allocvec(&old).unwrap();
+                let row: SupportingRow = postcard::from_bytes(&bytes).unwrap();
+                assert_eq!(row.physical_table, old.physical_table);
+                assert_eq!(row.version_table, old.version_table);
+                assert_eq!(row.row, old.row);
+                assert_eq!(row.version, old.version);
+                assert_eq!(row.is_wire_valid(), !name.is_empty());
+                assert_eq!(postcard::to_allocvec(&row).unwrap(), bytes);
+                let old_again: PreviousSupportingRow =
+                    postcard::from_bytes(&postcard::to_allocvec(&row).unwrap()).unwrap();
+                assert_eq!(old_again.version_table, old.version_table);
+                let json = serde_json::to_vec(&old).unwrap();
+                assert_eq!(serde_json::from_slice::<SupportingRow>(&json).unwrap(), row);
+                assert_eq!(serde_json::to_vec(&row).unwrap(), json);
+                // Match existing postcard acceptance at every truncated boundary,
+                // including optional/default field semantics, rather than assuming it.
+                for end in 0..bytes.len() {
+                    assert_eq!(
+                        postcard::from_bytes::<SupportingRow>(&bytes[..end]).is_ok(),
+                        postcard::from_bytes::<PreviousSupportingRow>(&bytes[..end]).is_ok()
+                    );
+                }
+                let mut trailing = bytes.clone();
+                trailing.push(0);
+                let (_, new_tail) = postcard::take_from_bytes::<SupportingRow>(&trailing).unwrap();
+                let (_, old_tail) =
+                    postcard::take_from_bytes::<PreviousSupportingRow>(&trailing).unwrap();
+                assert_eq!(new_tail, old_tail);
+                assert_eq!(new_tail, &[0]);
+            }
+        }
+
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Name(
+            #[serde(deserialize_with = "supporting_table_name::deserialize")]
+            groove::Intern<String>,
+        );
+        // Existing postcard string grammar: unsigned length varint, then UTF-8.
+        const GOLDEN: &[u8] = &[5, b't', b'o', b'd', b'o', b's'];
+        assert_eq!(
+            postcard::from_bytes::<Name>(GOLDEN).unwrap().0.as_str(),
+            "todos"
+        );
+        assert_eq!(
+            postcard::to_allocvec(&Name("todos".to_owned().into())).unwrap(),
+            GOLDEN
+        );
+        for invalid in [&[1, 255][..], &[2, 0xc0, 0x80], &[2, b'x']] {
+            assert!(postcard::from_bytes::<Name>(invalid).is_err());
+            assert!(postcard::from_bytes::<groove::Intern<String>>(invalid).is_err());
+        }
+        use serde::de::value::{BytesDeserializer, Error, StringDeserializer};
+        assert!(
+            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(&[255])).is_err()
+        );
+        assert_eq!(
+            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(b"valid"))
+                .unwrap()
+                .as_str(),
+            "valid"
+        );
+        assert_eq!(
+            supporting_table_name::deserialize(StringDeserializer::<Error>::new("owned".into()))
+                .unwrap()
+                .as_str(),
+            "owned"
+        );
+    }
+
+    #[test]
+    fn supporting_table_borrowing_uses_one_bounded_cache_entry_without_input_ownership() {
+        #[derive(serde::Deserialize)]
+        struct Name(
+            #[serde(deserialize_with = "supporting_table_name::deserialize")]
+            groove::Intern<String>,
+        );
+        let first = groove::Intern::<String>::from_ref("table_name_cache_first");
+        let second = groove::Intern::<String>::from_ref("table_name_cache_second");
+        let bytes = postcard::to_allocvec(&first).unwrap();
+        supporting_table_name::reset();
+        for _ in 0..1000 {
+            assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+        }
+        assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
+        assert_eq!(supporting_table_name::OWNED_VISITS.get(), 0);
+        assert_eq!(
+            postcard::from_bytes::<Name>(&postcard::to_allocvec(&second).unwrap())
+                .unwrap()
+                .0,
+            second
+        );
+        assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+        assert_eq!(
+            supporting_table_name::LOOKUPS.get(),
+            3,
+            "one entry, not an unbounded local interner"
+        );
+        drop(bytes);
+        assert_eq!(first.as_str(), "table_name_cache_first");
+        let independent = std::thread::spawn(move || {
+            supporting_table_name::reset();
+            let decoded = postcard::from_bytes::<Name>(&postcard::to_allocvec(&first).unwrap())
+                .unwrap()
+                .0;
+            assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
+            decoded
+        })
+        .join()
+        .unwrap();
+        assert_eq!(independent, first);
+        assert_eq!(
+            supporting_table_name::LOOKUPS.get(),
+            3,
+            "other thread cannot alter this cache"
+        );
+    }
 
     #[test]
     fn peer_view_rejects_duplicate_exact_supporting_row() {
