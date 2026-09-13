@@ -107,8 +107,13 @@ fn assert_real_peer_tick(
     case: (AuthorSubject, u64, &str),
 ) {
     let (identity, seed, tick) = case;
-    assert!(capture.supporting_rows.iter().all(|row| row.is_wire_valid()),
-        "invalid supporting row for seed {seed:#x}, identity {identity:?}, tick {tick}");
+    assert!(
+        capture
+            .supporting_rows
+            .iter()
+            .all(|row| row.is_wire_valid()),
+        "invalid supporting row for seed {seed:#x}, identity {identity:?}, tick {tick}"
+    );
 }
 
 fn result_row(table: &str, row_uuid: RowUuid, tx_id: TxId) -> ResultRowEntry {
@@ -312,6 +317,7 @@ struct MaintainedSubscriptionViewSubscription {
     receiver_shape: ValidatedQuery,
     receiver_binding: Binding,
     last_update: Option<SyncMessage>,
+    last_supporting_revision: Option<[u8; 16]>,
 }
 
 impl MaintainedSubscriptionViewSubscription {
@@ -350,6 +356,7 @@ impl MaintainedSubscriptionViewSubscription {
             receiver_shape: shape.clone(),
             receiver_binding: binding.clone(),
             last_update: None,
+            last_supporting_revision: None,
         };
         let output_tables = driver.tables.clone();
         let result_member_adds = transitions
@@ -369,8 +376,6 @@ impl MaintainedSubscriptionViewSubscription {
                 subscription_key,
                 result_member_adds,
                 Vec::new(),
-                transitions.program_fact_adds.clone(),
-                transitions.program_fact_removes.clone(),
                 true,
                 identity,
             )
@@ -456,8 +461,6 @@ impl MaintainedSubscriptionViewSubscription {
                 subscription_key,
                 result_member_adds,
                 result_member_removes,
-                program_fact_adds,
-                program_fact_removes,
                 false,
                 identity,
             )
@@ -541,15 +544,13 @@ impl MaintainedSubscriptionViewSubscription {
     }
 
     fn view_update(
-        &self,
+        &mut self,
         core: &mut NodeState<RocksDbStorage>,
         _shape: &ValidatedQuery,
         subscription_key: SubscriptionKey,
         result_member_adds: Vec<ResultRowEntry>,
         result_member_removes: Vec<ResultRowEntry>,
-        program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
-        program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
-        _reset_input_set: bool,
+        reset_input_set: bool,
         identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         let previous_result_set = self
@@ -557,9 +558,24 @@ impl MaintainedSubscriptionViewSubscription {
             .iter()
             .map(|(_, _, tx_id)| *tx_id)
             .collect::<BTreeSet<_>>();
+        let supporting_update = if !reset_input_set
+            && let Some(predecessor) = self.last_supporting_revision
+            && let Some((adds, removes)) = self.maintained.unpublished_supporting_delta()
+        {
+            crate::protocol::SupportingRowsUpdate::Delta {
+                predecessor,
+                revision: *uuid::Uuid::new_v4().as_bytes(),
+                adds,
+                removes,
+            }
+        } else {
+            crate::protocol::SupportingRowsUpdate::snapshot(
+                self.maintained.supporting_rows().cloned().collect(),
+            )
+        };
         let mut update = core
             .view_update_for_maintained_result_members(crate::node::MaintainedViewBundleInputs {
-                supporting_update: None,
+                supporting_update: Some(supporting_update),
                 shape: _shape,
                 has_default_read_view: true,
                 allow_authoritative_scalar_exit_refresh: true,
@@ -577,17 +593,17 @@ impl MaintainedSubscriptionViewSubscription {
                     .into_iter()
                     .map(crate::protocol::ResultMemberEntry::from)
                     .collect(),
-                program_fact_adds,
-                program_fact_removes,
                 identity,
                 tier: DurabilityTier::Global,
                 maintained_facts: &self.maintained,
                 allow_storage_witness_fallback: false,
             })
             .resolve()?;
-        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = &mut update else {
+        self.maintained.acknowledge_peer_source_closure();
+        let SyncMessage::ViewUpdate(payload) = &mut update else {
             panic!("expected view update");
         };
+        self.last_supporting_revision = Some(payload.supporting_rows.revision());
         Ok(update)
     }
 }
@@ -997,10 +1013,7 @@ fn recursive_rls_capture_schema() -> JazzSchema {
                     .column("kind", PublicColumnType::Text)
                     .policies(PublicTablePolicies::new().with_select(recursive_policy)),
             )
-            .table(
-                PublicTableSchemaBuilder::new("teams")
-                    .column("name", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("doc_access")
                     .fk_column("doc", "docs")
@@ -1036,9 +1049,7 @@ fn team_edge_cells(member: AuthorSubject, parent: AuthorSubject) -> BTreeMap<Str
 }
 
 fn team_cells(name: &str) -> BTreeMap<String, Value> {
-    BTreeMap::from([
-        ("name".to_owned(), Value::String(name.to_owned())),
-    ])
+    BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))])
 }
 
 type CaptureLayerParents = BTreeMap<(&'static str, RowUuid), (Option<TxId>, Option<TxId>)>;

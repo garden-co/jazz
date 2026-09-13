@@ -269,23 +269,39 @@ where
         if let Ok(coordinate) = self.current_row_coordinate(&request.table, request.row_uuid) {
             return Ok(coordinate);
         }
-        let candidates = self.catalogue.physical_mappings.values()
-            .filter_map(|mapping| mapping.tables.get(request.table.as_str()).map(|table| table.table_id))
+        let candidates = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| {
+                mapping
+                    .tables
+                    .get(request.table.as_str())
+                    .map(|table| table.table_id)
+            })
             .collect::<BTreeSet<_>>();
         let versions = self.query_versions_for_tx(request.tx_id()).await?;
         let mut tables = BTreeSet::new();
         for version in versions {
             if version.row_uuid() == request.row_uuid {
                 let table = self.physical_table_id_for_version(&version)?;
-                if candidates.contains(&table) { tables.insert(table); }
+                if candidates.contains(&table) {
+                    tables.insert(table);
+                }
             }
         }
         let [table] = tables.into_iter().collect::<Vec<_>>()[..] else {
-            return Err(Error::InvalidStoredValue("repair coordinate has no unique current lineage"));
+            return Err(Error::InvalidStoredValue(
+                "repair coordinate has no unique current lineage",
+            ));
         };
         let name = self.catalogue.physical_mappings[&self.catalogue.current_schema_version_id]
-            .tables.iter().find_map(|(name, mapping)| (mapping.table_id == table).then_some(name.clone()))
-            .ok_or(Error::InvalidStoredValue("repair lineage is not in the current schema"))?;
+            .tables
+            .iter()
+            .find_map(|(name, mapping)| (mapping.table_id == table).then_some(name.clone()))
+            .ok_or(Error::InvalidStoredValue(
+                "repair lineage is not in the current schema",
+            ))?;
         self.current_row_coordinate(&name, request.row_uuid)
     }
 
@@ -570,15 +586,23 @@ where
                     // Its visible cardinality cannot certify that a withheld
                     // sibling/parent coordinate does not exist.
                     self.ingest_view_scoped_transaction_with_current_indexes(
-                        bundle.tx.clone(), bundle.versions.clone(), bundle.fate.clone(),
-                        bundle.global_time, bundle.durability,
-                    ).await?;
+                        bundle.tx.clone(),
+                        bundle.versions.clone(),
+                        bundle.fate.clone(),
+                        bundle.global_time,
+                        bundle.durability,
+                    )
+                    .await?;
                 }
                 crate::protocol::VersionBundleScope::CompleteTransaction => {
                     self.ingest_known_transaction(
-                        bundle.tx.clone(), bundle.versions.clone(), bundle.fate.clone(),
-                        bundle.global_time, bundle.durability,
-                    ).await?;
+                        bundle.tx.clone(),
+                        bundle.versions.clone(),
+                        bundle.fate.clone(),
+                        bundle.global_time,
+                        bundle.durability,
+                    )
+                    .await?;
                 }
             }
             applied_bundles.push(bundle);
@@ -621,7 +645,19 @@ where
             .filter_map(|(tx, version)| {
                 self.physical_table_id_for_schema(version.schema_version(), version.table())
                     .ok()
-                    .map(|table| (tx, version.row_uuid(), table, if version.deletion().is_some() { crate::protocol::ResultRowLayer::Deletion } else { crate::protocol::ResultRowLayer::Content }, version.branch_key().canonical_bytes()))
+                    .map(|table| {
+                        (
+                            tx,
+                            version.row_uuid(),
+                            table,
+                            if version.deletion().is_some() {
+                                crate::protocol::ResultRowLayer::Deletion
+                            } else {
+                                crate::protocol::ResultRowLayer::Content
+                            },
+                            version.branch_key().canonical_bytes(),
+                        )
+                    })
             })
             .collect::<BTreeSet<_>>();
         let Some(registered_shape) = self.registered_shape(subscription.shape_id) else {
@@ -632,9 +668,18 @@ where
             return Ok(Vec::new());
         };
         let result_schema_version = registered_shape.schema_version();
-        let table_names = self.catalogue.physical_mappings.get(&result_schema_version)
-            .map(|mapping| mapping.identities.tables.iter()
-                .map(|(name, identity)| (identity.id, name.clone())).collect::<BTreeMap<_, _>>())
+        let table_names = self
+            .catalogue
+            .physical_mappings
+            .get(&result_schema_version)
+            .map(|mapping| {
+                mapping
+                    .identities
+                    .tables
+                    .iter()
+                    .map(|(name, identity)| (identity.id, name.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            })
             .unwrap_or_default();
         let mut missing = BTreeSet::new();
         // Every referenced native body must be available, including retained rows
@@ -651,11 +696,13 @@ where
                 continue;
             }
             let resident = match table_names.get(&row.physical_table) {
-                Some(table) => self.local_supporting_row_version(row, result_schema_version, table).await?,
+                Some(table) => {
+                    self.local_supporting_row_version(row, result_schema_version, table)
+                        .await?
+                }
                 None => None,
             };
-            if resident.is_none() || !self.transaction_exists(tx_id).await?
-            {
+            if resident.is_none() || !self.transaction_exists(tx_id).await? {
                 missing.insert(version_ref);
             }
         }
@@ -671,7 +718,13 @@ where
         request: &RowVersionRef,
         result_schema_version: SchemaVersionId,
         version: &crate::protocol::RowVersionRefEntry,
-        incoming_versions: &BTreeSet<(TxId, RowUuid, PhysicalTableId, crate::protocol::ResultRowLayer, Vec<u8>)>,
+        incoming_versions: &BTreeSet<(
+            TxId,
+            RowUuid,
+            PhysicalTableId,
+            crate::protocol::ResultRowLayer,
+            Vec<u8>,
+        )>,
     ) -> Result<bool, Error> {
         // Unlike a standalone RowVersionRef repair request, an inline witness
         // is carried by a registered subscription whose schema version makes
@@ -720,18 +773,11 @@ where
         read_schema: SchemaVersionId,
         table: &str,
     ) -> Result<Option<VersionRow>, Error> {
-        // Reuse admission's exact physical-table, layer and branch lookup.
-        // This local source name is only a lookup coordinate, not a new claim
-        // about which compiled query occurrence the peer supplied.
-        self.covered_input_version(&crate::protocol::CoveredInputEntry {
-            source: crate::protocol::ProgramSourceId {
-                table: table.to_owned().into(),
-                path: vec![crate::protocol::ProgramSourceRole::Root],
-            },
-            version_table: row.version_table.clone(),
-            source_row: row.row,
-            version: row.version.clone(),
-        }, read_schema).await
+        debug_assert_eq!(
+            self.scope_physical_table(read_schema, table)?,
+            row.physical_table
+        );
+        self.covered_input_version(row, read_schema).await
     }
 
     fn mint_tx_time(&mut self, now_ms: u64) -> Result<TxTime, Error> {

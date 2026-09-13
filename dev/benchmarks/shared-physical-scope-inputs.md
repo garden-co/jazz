@@ -60,3 +60,27 @@ An internal work-bound test is justified only for input/source allocation and
 materialization counts that cannot be observed through public query equality.
 
 Theses, results and unresolved follow-ups remain in GitHub issue #2913.
+
+## Whole-chain implementation
+
+Sender terminals now update a single weighted physical-row frontier and a
+touched-row journal. Publication consumes its net delta; it no longer maintains
+a second full published fact set or a second physical reference-count map.
+Acknowledged membership can be recovered from the current frontier plus the
+journal, so failed/cancelled bundle construction does not lose its predecessor.
+
+The v2 physical Snapshot/Delta vocabulary remains because it already expresses
+these inputs, not because byte equivalence constrained the design. The receiver
+retains physical coordinates/versions directly, with one shared table input
+beneath occurrence projections and local overlays. It does not fabricate source
+coverage facts or Root-role carriers. Inputs prepared before initial catalogue
+adoption are rebound to trusted physical IDs at the snapshot boundary.
+
+Durable scope rows use the explicit, byte-pinned JSIR v1 codec. As approved by
+Anselm, old JPFK occurrence caches and resume cursors are discarded, not migrated.
+Native rows, transaction history, pending writes and catalogue data survive.
+Tests for the old internal representation now exercise physical frames; the
+historical corpus still checks every primary byte while allowing the authorized
+derived-cache invalidation. A dedicated recovery test checks both data retention
+and fresh subscription recovery. Offline permissioned settlement cannot reuse
+the discarded authority proof.

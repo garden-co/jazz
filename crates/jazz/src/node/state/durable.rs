@@ -493,7 +493,8 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(Some(author), false, false).await
+        self.below_global_transaction_ids(Some(author), false, false)
+            .await
     }
 
     /// A Global synchronization barrier also needs the authority timestamp.
@@ -502,7 +503,8 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(Some(author), false, true).await
+        self.below_global_transaction_ids(Some(author), false, true)
+            .await
     }
 
     /// A trusted backend owns every author scope created by its node. Restrict
@@ -511,8 +513,12 @@ where
         &mut self,
         node: NodeUuid,
     ) -> Result<Vec<TxId>, Error> {
-        Ok(self.below_global_transaction_ids(None, false, true).await?
-            .into_iter().filter(|tx| tx.node == node).collect())
+        Ok(self
+            .below_global_transaction_ids(None, false, true)
+            .await?
+            .into_iter()
+            .filter(|tx| tx.node == node)
+            .collect())
     }
 
     /// Edge-host recovery includes accepted writes from every originating
@@ -542,11 +548,10 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            let made_by = RowAuthor::from_record(
-                record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-            )
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-            .as_author_subject();
+            let made_by =
+                RowAuthor::from_record(record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
+                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                    .as_author_subject();
             let durability = durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
@@ -555,7 +560,8 @@ where
                     fate != 1 || durability != DurabilityTier::Edge
                 } else {
                     !(fate == 0 || fate == 1)
-                        || (!include_missing_authority_timestamp && durability >= DurabilityTier::Global)
+                        || (!include_missing_authority_timestamp
+                            && durability >= DurabilityTier::Global)
                 }
             {
                 continue;
@@ -708,8 +714,8 @@ where
         &self,
         authority_result_key: AuthorityResultKey,
         cleared: bool,
-        fact_adds: &[ViewFactEntry],
-        fact_removes: &[ViewFactEntry],
+        fact_adds: &[crate::protocol::SupportingRow],
+        fact_removes: &[crate::protocol::SupportingRow],
     ) -> Result<(), Error> {
         self.persist_authority_policy_binding_directory(&authority_result_key)
             .await?;
@@ -741,7 +747,8 @@ where
         policy: &PolicyBindingKey,
     ) -> Result<(), Error> {
         let digest = policy.directory_digest();
-        let claims = policy.directory_value()
+        let claims = policy
+            .directory_value()
             .map_err(|_| Error::InvalidStoredValue("policy binding claims must encode"))?;
         let store = self
             .database
@@ -758,7 +765,10 @@ where
                     Error::InvalidStoredValue("policy binding directory subject is invalid")
                 })?,
                 existing.get_idx(1)?,
-            ).map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
+            )
+            .map_err(|_| {
+                Error::InvalidStoredValue("policy binding directory claims are invalid")
+            })?;
             if existing != *policy {
                 return Err(Error::InvalidStoredValue(
                     "policy binding digest aliases a distinct exact policy identity",
@@ -782,8 +792,8 @@ where
         &self,
         authority_result_key: AuthorityResultKey,
         cleared: bool,
-        adds: &[ViewFactEntry],
-        removes: &[ViewFactEntry],
+        adds: &[crate::protocol::SupportingRow],
+        removes: &[crate::protocol::SupportingRow],
     ) -> Result<(), Error> {
         let store = self
             .database
@@ -883,7 +893,10 @@ where
                     Error::InvalidStoredValue("policy binding directory subject is invalid")
                 })?,
                 entry.value.get_idx(1)?,
-            ).map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
+            )
+            .map_err(|_| {
+                Error::InvalidStoredValue("policy binding directory claims are invalid")
+            })?;
             if policy.directory_digest() != digest
                 || policies
                     .insert(digest, policy.clone())
@@ -944,8 +957,26 @@ where
         let store = self
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        for entry in store.prefix_entries(&[]).await? {
-            let Some((fact_digest, prefix)) = entry.key.split_last() else {
+        let stored_facts = store
+            .prefix_entries(&[])
+            .await?
+            .into_iter()
+            .map(|entry| Ok((entry.key, entry.value.get_idx(0)?)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        drop(store);
+        // Subscription scopes are derived caches, not native row/history data.
+        // An old occurrence-cache entry invalidates this cache generation,
+        // including resume cursors. Reopen must obtain fresh authority snapshots;
+        // never migrate query roles or infer authority from retained native rows.
+        if stored_facts
+            .iter()
+            .any(|(_, value)| matches!(value, Value::Bytes(bytes) if bytes.starts_with(b"JPFK")))
+        {
+            self.clear_all_known_state_facts().await?;
+            return Ok(());
+        }
+        for (entry_key, entry_value) in stored_facts {
+            let Some((fact_digest, prefix)) = entry_key.split_last() else {
                 return Err(Error::InvalidStoredValue(
                     "settled program fact key is empty",
                 ));
@@ -971,7 +1002,7 @@ where
                     "settled program fact digest must be 32 bytes",
                 ));
             }
-            let fact_bytes = match entry.value.get_idx(0)? {
+            let fact_bytes = match entry_value {
                 Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(Error::InvalidStoredValue(
@@ -984,28 +1015,15 @@ where
                     "settled program fact payload does not match its digest",
                 ));
             }
-            let fact = codec::program_fact_from_storage_bytes(&fact_bytes)?;
-            authority_results
-                .entry(authority_result_key)
-                .or_default()
-                .settled_program_facts
-                .insert(fact);
-        }
-        for state in authority_results.values_mut() {
-            state.covered_input_sources.clear();
-            state.covered_input_versions.clear();
-            for fact in &state.settled_program_facts {
-                match fact {
-                    ProgramFactEntry::ProgramSourceCoverage(coverage) if coverage.complete => {
-                        state.covered_input_sources.insert(coverage.source.clone());
-                    }
-                    ProgramFactEntry::CoveredInput(input) => {
-                        state
-                            .covered_input_versions
-                            .insert(CoveredInputCoordinate::from(input), input.clone());
-                    }
-                    _ => {}
-                }
+            let row = codec::scope_row_from_storage_bytes(&fact_bytes)?;
+            let state = authority_results.entry(authority_result_key).or_default();
+            let coordinate = CoveredInputCoordinate::from(&row);
+            if let Some(previous) = state.covered_input_versions.insert(coordinate, row.clone())
+                && previous != row
+            {
+                return Err(Error::InvalidStoredValue(
+                    "stored scope has conflicting physical versions",
+                ));
             }
         }
         self.query.authority_results = authority_results;

@@ -782,7 +782,7 @@ where
                     !self.query.retained_root_window_sources.contains_key(key)
                         && (state.live_settled
                             || state.settled_through.is_some()
-                            || !state.settled_program_facts.is_empty())
+                            || !state.covered_input_versions.is_empty())
                 })
                 .count(),
             self.query
@@ -790,7 +790,7 @@ where
                 .iter()
                 .filter(|(key, state)| {
                     !self.query.retained_root_window_sources.contains_key(*key)
-                        && !state.settled_program_facts.is_empty()
+                        && !state.covered_input_versions.is_empty()
                 })
                 .count(),
         )
@@ -893,7 +893,7 @@ where
         &mut self,
         key: &AuthorityResultKey,
         schema: SchemaVersionId,
-    ) -> Result<BTreeMap<ProgramFactEntry, VersionRow>, Error> {
+    ) -> Result<BTreeMap<crate::protocol::SupportingRow, VersionRow>, Error> {
         let inputs = self
             .query
             .authority_results
@@ -909,7 +909,7 @@ where
                 .covered_input_version(&input, schema)
                 .await?
                 .ok_or(Error::MissingTransaction(input.version.tx))?;
-            witnesses.insert(ProgramFactEntry::CoveredInput(input), version);
+            witnesses.insert(input, version);
         }
         Ok(witnesses)
     }
@@ -927,10 +927,16 @@ where
             .into_iter()
             .flat_map(|state| state.covered_input_versions.values())
             .filter(|input| {
-                input.source.table.as_str() == table
-                    && input.source.path == [crate::protocol::ProgramSourceRole::Root]
+                self.query
+                    .registered_shapes
+                    .get(&key.binding_view.shape_id)
+                    .and_then(|shape| {
+                        self.scope_physical_table(shape.schema_version(), table)
+                            .ok()
+                    })
+                    == Some(input.physical_table)
             })
-            .map(|input| input.source_row)
+            .map(|input| input.row)
             .collect()
     }
 

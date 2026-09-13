@@ -64,15 +64,16 @@ impl PeerState {
         let permission_identity = self.permission_subject().ok_or(Error::InvalidStoredValue(
             "edge fate authority is missing a terminated permission subject",
         ))?;
-        if let Some(scope_subscriptions) = self.unsettled_authority_scope_subscriptions(
-            node,
-            permission_identity,
-            policy_claims.clone(),
-            &versions,
-            Some(tx.tx_id),
-            true,
-        )
-        .await?
+        if let Some(scope_subscriptions) = self
+            .unsettled_authority_scope_subscriptions(
+                node,
+                permission_identity,
+                policy_claims.clone(),
+                &versions,
+                Some(tx.tx_id),
+                true,
+            )
+            .await?
         {
             for subscription in &scope_subscriptions {
                 self.retain_edge_scope_subscription(*subscription);
@@ -167,9 +168,11 @@ impl PeerState {
             // A generic fresh snapshot supersedes any incremental publisher
             // baseline. The maintained path installs its prepared successor
             // after this metadata call; other paths rebuild once on next drain.
-            let state = self.publication_states.entry(view.subscription).or_default();
+            let state = self
+                .publication_states
+                .entry(view.subscription)
+                .or_default();
             state.supporting_revision = None;
-            state.physical_support_counts.clear();
         }
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
@@ -229,11 +232,8 @@ impl PeerState {
             // snapshot. Never fall back to the node's author-keyed
             // compatibility map: a scope relay deliberately keeps its binding
             // out of that mutable map, and same-author sessions may differ.
-            let scope = node.authorization_support_scope_for_session(
-                writer,
-                Some(&claims),
-                &action,
-            )?;
+            let scope =
+                node.authorization_support_scope_for_session(writer, Some(&claims), &action)?;
             if scope.subscriptions.is_empty() {
                 continue;
             }
@@ -259,7 +259,8 @@ impl PeerState {
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some());
                 if maintained
-                    && self.subscription_policy_binding(subscription) != Some(policy_binding.clone())
+                    && self.subscription_policy_binding(subscription)
+                        != Some(policy_binding.clone())
                 {
                     // A canonical support key does not encode the session
                     // snapshot. Reusing a receiver installed by an earlier
@@ -290,7 +291,8 @@ impl PeerState {
                         )
                         .await;
                     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                        settled_through, ..
+                        settled_through,
+                        ..
                     }) = update?
                     else {
                         return Err(Error::UnsupportedSyncMessage(
@@ -356,11 +358,8 @@ impl PeerState {
             .authorization_actions_for_versions_in_transaction(versions, candidate_tx_id)
             .await?
         {
-            let scope = node.authorization_support_scope_for_session(
-                writer,
-                Some(&claims),
-                &action,
-            )?;
+            let scope =
+                node.authorization_support_scope_for_session(writer, Some(&claims), &action)?;
             if scope.subscriptions.is_empty() {
                 // A policy with no support clauses is structurally complete;
                 // its terminal decision is evaluated by the same authority
@@ -381,7 +380,8 @@ impl PeerState {
                     read_view: scope.options.read_view_key(),
                 };
                 let policy_binding = (writer, claims.clone());
-                let subscription = edge_scope_subscription_key(canonical_subscription, &policy_binding);
+                let subscription =
+                    edge_scope_subscription_key(canonical_subscription, &policy_binding);
                 if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
                     // The compiler may reach the same canonical clause through
                     // more than one policy edge.  It remains one support
@@ -393,7 +393,9 @@ impl PeerState {
                         .edge_scope_subscription_refs
                         .contains_key(&subscription)
                 {
-                    if self.subscription_policy_binding(subscription) != Some(policy_binding.clone()) {
+                    if self.subscription_policy_binding(subscription)
+                        != Some(policy_binding.clone())
+                    {
                         return Err(Error::InvalidStoredValue(
                             "retained edge support has a mismatched immutable policy binding",
                         ));
@@ -406,7 +408,8 @@ impl PeerState {
                     .get(&subscription)
                     .is_some_and(|state| state.maintained_subscription_view.is_some());
                 if maintained
-                    && self.subscription_policy_binding(subscription) != Some(policy_binding.clone())
+                    && self.subscription_policy_binding(subscription)
+                        != Some(policy_binding.clone())
                 {
                     self.forget_subscription_with_node(&mut node, subscription);
                 }
@@ -436,7 +439,8 @@ impl PeerState {
                     .await;
                 let update = rehydrate?;
                 let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                    settled_through, ..
+                    settled_through,
+                    ..
                 }) = update
                 else {
                     return Err(Error::UnsupportedSyncMessage(
@@ -541,23 +545,19 @@ impl PeerState {
     }
 
     fn record_outgoing_view_update<S: OrderedKvStorage>(
-        &mut self, node: &NodeState<S>, schema: crate::ids::SchemaVersionId,
+        &mut self,
+        _node: &NodeState<S>,
+        _schema: crate::ids::SchemaVersionId,
         update: &SyncMessage,
     ) -> Result<(), Error> {
         self.record_outgoing_view_update_metadata(update);
         if let SyncMessage::ViewUpdate(view) = update {
-            let state = self.publication_states.entry(view.subscription).or_default();
+            let state = self
+                .publication_states
+                .entry(view.subscription)
+                .or_default();
+            state.supporting_revision = Some(view.supporting_rows.revision());
             if let Some(maintained) = &mut state.maintained_subscription_view {
-                let facts = maintained.maintained.active_peer_source_closure_facts();
-                let mut counts = BTreeMap::new();
-                for fact in &facts {
-                    if let Some(row) = node.supporting_row_for_fact(schema, fact)? {
-                        *counts.entry(row).or_default() += 1;
-                    }
-                }
-                state.physical_support_counts = counts;
-                state.supporting_revision = Some(view.supporting_rows.revision());
-                state.program_fact_set = facts;
                 maintained.maintained.acknowledge_peer_source_closure();
             }
         }
@@ -580,28 +580,22 @@ impl PeerState {
         reset_input_set: bool,
         result_member_adds: &[ResultMemberEntry],
         result_member_removes: &[ResultMemberEntry],
-        program_fact_adds: &[ProgramFactEntry],
-        program_fact_removes: &[ProgramFactEntry],
     ) {
         let state = self.publication_states.entry(subscription).or_default();
         // This path records an independently supplied delta rather than the
         // maintained journal's exact successor. Re-establish its baseline if
         // this subscription later returns to maintained publication.
-        if (reset_input_set || !program_fact_adds.is_empty() || !program_fact_removes.is_empty())
-            && let Some(view) = &mut state.maintained_subscription_view {
+        if reset_input_set && let Some(view) = &mut state.maintained_subscription_view {
             view.maintained.forget_peer_source_closure_baseline();
         }
         if reset_input_set {
+            state.supporting_revision = None;
             state.result_member_set.clear();
-            state.program_fact_set.clear();
             state.member_index.clear();
         }
         for member in result_member_removes {
             state.result_member_set.remove(member);
             apply_contribution_remove(state, std::iter::once(member), &mut Vec::new());
-        }
-        for fact in program_fact_removes {
-            state.program_fact_set.remove(fact);
         }
         for member in result_member_adds {
             state.result_member_set.insert(member.clone());
@@ -612,9 +606,6 @@ impl PeerState {
                 &mut Vec::new(),
             );
         }
-        state
-            .program_fact_set
-            .extend(program_fact_adds.iter().cloned());
         // Diagnostic-only invariant check: detecting duplicate content versions
         // in the result set requires materializing and scanning it, which is
         // wasted work in release where the debug_assert compiles out. Gate the

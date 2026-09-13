@@ -6077,8 +6077,6 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             opening_pending: peer_payload_inventory.opening_pending,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
         },
         _ => unreachable!("expected view update message"),
     }
@@ -6164,8 +6162,8 @@ where
                 && !update.parts.opening_pending
                 && !update.parts.defer_settlement
                 && (update.parts.reset_input_set
-                    || !update.parts.program_fact_adds.is_empty()
-                    || !update.parts.program_fact_removes.is_empty())
+                    || !update.parts.supporting_adds().is_empty()
+                    || !update.parts.supporting_removes().is_empty())
         })
         .map(|update| update.parts.subscription)
         .collect::<BTreeSet<_>>();

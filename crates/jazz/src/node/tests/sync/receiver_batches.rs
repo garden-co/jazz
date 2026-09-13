@@ -1,29 +1,28 @@
 // Reset and incremental receiver batching, partial bundles, and winner selection.
 
-/// The peer protocol names the exact source closure, never an authority-side
-/// result member. These receiver-level cases all use the unaliased root scan
-/// of the `todos` whole-table subscription.
-fn todos_root_source() -> crate::protocol::ProgramSourceId {
-    crate::protocol::ProgramSourceId {
-        table: "todos".to_owned().into(),
-        path: vec![crate::protocol::ProgramSourceRole::Root],
-    }
+// Internal ingress fixtures deliberately construct exact wire frames to test
+// atomic batching and malformed predecessors, which public scheduling cannot select.
+fn todos_physical_table() -> crate::ids::GlobalPhysicalTableId {
+    static TABLE: std::sync::OnceLock<crate::ids::GlobalPhysicalTableId> =
+        std::sync::OnceLock::new();
+    *TABLE.get_or_init(|| {
+        let schema = schema();
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = groove::storage::MemoryStorage::new(&refs).unwrap();
+        let fixture =
+            NodeState::new_with_shared_test_catalogue(node(0xf8), schema, storage).unwrap();
+        fixture
+            .scope_physical_table(fixture.catalogue.current_schema_version_id, "todos")
+            .unwrap()
+    })
 }
 
-fn todos_source_coverage() -> crate::protocol::ProgramFactEntry {
-    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
-        crate::protocol::ProgramSourceCoverageEntry {
-            source: todos_root_source(),
-            complete: true,
-        },
-    )
-}
-
-fn todos_covered_input(tx: TxId, version: &VersionRecord) -> crate::protocol::ProgramFactEntry {
-    crate::protocol::ProgramFactEntry::CoveredInput(crate::protocol::CoveredInputEntry {
-        source: todos_root_source(),
+fn todos_covered_input(tx: TxId, version: &VersionRecord) -> crate::protocol::SupportingRow {
+    crate::protocol::SupportingRow {
+        physical_table: todos_physical_table(),
         version_table: "todos".to_owned().into(),
-        source_row: version.row_uuid(),
+        row: version.row_uuid(),
         version: crate::protocol::RowVersionRefEntry {
             tx,
             schema_version: None,
@@ -33,36 +32,64 @@ fn todos_covered_input(tx: TxId, version: &VersionRecord) -> crate::protocol::Pr
                 .then(|| version.branch_key().canonical_bytes()),
             row_digest: None,
         },
-    })
+    }
 }
 
 fn todos_source_closure(
     tx: TxId,
     versions: &[VersionRecord],
-) -> Vec<crate::protocol::ProgramFactEntry> {
-    // Payload tests may repeat immutable bodies; their closure still declares
-    // each source/version once. Malformed closure tests construct their own facts.
-    std::iter::once(todos_source_coverage())
-        .chain(
-            versions
-                .iter()
-                .map(|version| todos_covered_input(tx, version)),
-        )
+) -> Vec<crate::protocol::SupportingRow> {
+    versions
+        .iter()
+        .map(|version| todos_covered_input(tx, version))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
 }
 
-fn removed_todos_input(tx: TxId) -> crate::protocol::ProgramFactEntry {
+fn removed_todos_input(tx: TxId) -> crate::protocol::SupportingRow {
     todos_covered_input(
         tx,
         &version_record(row(9), Vec::new(), title_cells("removed"), None),
     )
 }
 
+fn fixture_scope_update(
+    subscription: SubscriptionKey,
+    reset: bool,
+    rows: Vec<crate::protocol::SupportingRow>,
+    removes: Vec<crate::protocol::SupportingRow>,
+) -> crate::protocol::SupportingRowsUpdate {
+    // Each fixture builds its frames in send order. A reset begins a new
+    // predecessor chain; ordinary fragments explicitly advance that receipt.
+    thread_local! { static REVISIONS: std::cell::RefCell<BTreeMap<SubscriptionKey, [u8;16]>> = Default::default(); }
+    REVISIONS.with(|revisions| {
+        let mut revisions = revisions.borrow_mut();
+        let revision = *uuid::Uuid::new_v4().as_bytes();
+        let predecessor = revisions
+            .insert(subscription, revision)
+            .unwrap_or([0xff; 16]);
+        if reset && removes.is_empty() {
+            crate::protocol::SupportingRowsUpdate::Snapshot { revision, rows }
+        } else {
+            crate::protocol::SupportingRowsUpdate::Delta {
+                predecessor,
+                revision,
+                adds: rows,
+                removes,
+            }
+        }
+    })
+}
+
 fn todos_receiver_reset(subscription: SubscriptionKey) -> ViewUpdateParts {
     ViewUpdateParts {
-        wire_rows: None,
+        wire_rows: Some(fixture_scope_update(
+            subscription,
+            true,
+            Vec::new(),
+            Vec::new(),
+        )),
         subscription,
         settled_through: GlobalTime(0),
         defer_settlement: false,
@@ -73,8 +100,6 @@ fn todos_receiver_reset(subscription: SubscriptionKey) -> ViewUpdateParts {
         opening_pending: false,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: vec![todos_source_coverage()],
-        program_fact_removes: Vec::new(),
     }
 }
 
@@ -151,15 +176,20 @@ fn cold_and_warm_complete_snapshots_ingest_same_versions() {
 fn empty_history_reset_heads_match_history_and_populated_table_falls_back() {
     // Raw current records contain node-local transaction aliases. Compare the
     // complete application payload and public row identity across replicas.
-    let public_rows = |rows: Vec<CurrentRow>| rows.into_iter()
-        .map(|record| (record.row_uuid(), record.cell(&schema().tables[0], "title")))
-        .collect::<BTreeMap<_, _>>();
+    let public_rows = |rows: Vec<CurrentRow>| {
+        rows.into_iter()
+            .map(|record| (record.row_uuid(), record.cell(&schema().tables[0], "title")))
+            .collect::<BTreeMap<_, _>>()
+    };
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(2));
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
     for (id, time, title) in [(1, 10, "one"), (2, 11, "two"), (1, 12, "newer")] {
-        commit_mergeable_global(&mut writer, &mut core,
-            MergeableCommit::new("todos", row(id), time).cells(title_cells(title)));
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("todos", row(id), time).cells(title_cells(title)),
+        );
     }
     register_whole_table_receiver(&mut reader, "todos");
     let mut peer = PeerState::new();
@@ -168,36 +198,71 @@ fn empty_history_reset_heads_match_history_and_populated_table_falls_back() {
     assert!(reader.sync_metrics().receiver_history_table_probes > 0);
     // Row 1's newer version needs a missing parent and follows per-bundle
     // ingestion; only parentless row 2 enters the empty-table bulk proof.
-    assert_eq!(reader.sync_metrics().receiver_history_rebuild_rows_avoided, 1);
+    assert_eq!(
+        reader.sync_metrics().receiver_history_rebuild_rows_avoided,
+        1
+    );
     assert!(reader.sync_metrics().receiver_per_bundle_ingests > 0);
     assert_currency_tables_match_storage(&mut reader, "todos");
-    assert_eq!(public_rows(reader.current_rows("todos", DurabilityTier::Global).unwrap()),
-        public_rows(core.current_rows("todos", DurabilityTier::Global).unwrap()));
+    assert_eq!(
+        public_rows(
+            reader
+                .current_rows("todos", DurabilityTier::Global)
+                .unwrap()
+        ),
+        public_rows(core.current_rows("todos", DurabilityTier::Global).unwrap())
+    );
     let expected = reader.query_all_versions().unwrap();
     reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(reader.query_all_versions().unwrap(), expected);
-    assert_eq!(reader.sync_metrics().receiver_history_rebuild_rows_avoided, 1);
+    assert_eq!(
+        reader.sync_metrics().receiver_history_rebuild_rows_avoided,
+        1
+    );
 
     drop(reader);
     let mut reader = reopen_node_at(&reader_dir, node(3), schema());
     assert_eq!(reader.query_all_versions().unwrap(), expected);
     assert_currency_tables_match_storage(&mut reader, "todos");
     register_whole_table_receiver(&mut reader, "todos");
-    commit_mergeable_global(&mut writer, &mut core,
-        MergeableCommit::new("todos", row(3), 13).cells(title_cells("three")));
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", row(3), 13).cells(title_cells("three")),
+    );
     // Explicitly exercise bulk reset against a nonempty table: a reopened
     // ordinary subscription may resume its retained receiver state instead.
     // Persisted sibling history defeats the proof despite the new row's absence.
-    let update = PeerState::new().rehydrate_current_rows(&mut core, "todos").unwrap();
+    let update = PeerState::new()
+        .rehydrate_current_rows(&mut core, "todos")
+        .unwrap();
     let bundles = version_bundles_for_update(&update);
-    let refs = bundles.iter().map(VersionBundle::as_ref).collect::<Vec<_>>();
-    assert_eq!(reader.ingest_reset_view_bundle_refs_in_bulk(&refs, None).unwrap().len(), 1);
+    let refs = bundles
+        .iter()
+        .map(VersionBundle::as_ref)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reader
+            .ingest_reset_view_bundle_refs_in_bulk(&refs, None)
+            .unwrap()
+            .len(),
+        1
+    );
     reader.apply_sync_message_settled(update).unwrap();
     assert!(reader.sync_metrics().receiver_history_table_probes > 0);
-    assert_eq!(reader.sync_metrics().receiver_history_rebuild_rows_avoided, 0);
+    assert_eq!(
+        reader.sync_metrics().receiver_history_rebuild_rows_avoided,
+        0
+    );
     assert_currency_tables_match_storage(&mut reader, "todos");
-    assert_eq!(public_rows(reader.current_rows("todos", DurabilityTier::Global).unwrap()),
-        public_rows(core.current_rows("todos", DurabilityTier::Global).unwrap()));
+    assert_eq!(
+        public_rows(
+            reader
+                .current_rows("todos", DurabilityTier::Global)
+                .unwrap()
+        ),
+        public_rows(core.current_rows("todos", DurabilityTier::Global).unwrap())
+    );
 }
 
 /// The exact derived head set is internal metadata, and ordinary subscription
@@ -208,31 +273,45 @@ fn empty_history_reset_heads_match_history_and_populated_table_falls_back() {
 fn empty_history_reset_concurrent_heads_are_atomic_across_cancellation() {
     use groove::storage::{TestStorage, TestStorageOperation};
     let schema = schema();
-    let bundles = (0..3).map(|i| {
-        let tx_id = TxId::new(TxTime::from(100 + i), node(0xe1));
-        let mut bundle = reset_scope_bundle(
-            reset_scope_tx(tx_id, 1),
-            crate::protocol::VersionBundleScope::CompleteTransaction,
-            vec![version_record(row(1), Vec::new(), title_cells(&format!("head {i}")), None)],
-        );
-        bundle.global_time = Some(GlobalTime(i + 1));
-        bundle
-    }).collect::<Vec<_>>();
-    let bundle_refs = bundles.iter().map(VersionBundle::as_ref).collect::<Vec<_>>();
+    let bundles = (0..3)
+        .map(|i| {
+            let tx_id = TxId::new(TxTime::from(100 + i), node(0xe1));
+            let mut bundle = reset_scope_bundle(
+                reset_scope_tx(tx_id, 1),
+                crate::protocol::VersionBundleScope::CompleteTransaction,
+                vec![version_record(
+                    row(1),
+                    Vec::new(),
+                    title_cells(&format!("head {i}")),
+                    None,
+                )],
+            );
+            bundle.global_time = Some(GlobalTime(i + 1));
+            bundle
+        })
+        .collect::<Vec<_>>();
+    let bundle_refs = bundles
+        .iter()
+        .map(VersionBundle::as_ref)
+        .collect::<Vec<_>>();
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let mut completed = false;
     for allowed_writes in 0..12 {
         let (storage, control) = TestStorage::controlled(&refs);
         let reopen_handle = storage.clone();
-        let mut reader = NodeState::new_with_shared_test_catalogue(node(0xe2), schema.clone(), storage).unwrap();
+        let mut reader =
+            NodeState::new_with_shared_test_catalogue(node(0xe2), schema.clone(), storage).unwrap();
         control.take_observed();
         control.pause_on(TestStorageOperation::WriteMany);
         let mut ingest = Box::pin(reader.ingest_reset_view_bundle_refs_in_bulk(&bundle_refs, None));
         let mut released = 0;
         let mut stopped = false;
         for _ in 0..50_000 {
-            match std::future::Future::poll(ingest.as_mut(), &mut std::task::Context::from_waker(std::task::Waker::noop())) {
+            match std::future::Future::poll(
+                ingest.as_mut(),
+                &mut std::task::Context::from_waker(std::task::Waker::noop()),
+            ) {
                 std::task::Poll::Ready(result) => {
                     assert_eq!(result.unwrap().len(), bundles.len());
                     completed = true;
@@ -241,7 +320,11 @@ fn empty_history_reset_concurrent_heads_are_atomic_across_cancellation() {
                 }
                 std::task::Poll::Pending => {}
             }
-            let writes = control.observed().iter().filter(|operation| **operation == TestStorageOperation::WriteMany).count();
+            let writes = control
+                .observed()
+                .iter()
+                .filter(|operation| **operation == TestStorageOperation::WriteMany)
+                .count();
             if writes > allowed_writes {
                 stopped = true;
                 break;
@@ -251,29 +334,59 @@ fn empty_history_reset_concurrent_heads_are_atomic_across_cancellation() {
                 released = writes;
             }
         }
-        assert!(stopped, "reset did not reach a bounded persistence boundary");
+        assert!(
+            stopped,
+            "reset did not reach a bounded persistence boundary"
+        );
         drop(ingest);
         if completed {
             assert_eq!(reader.sync_metrics().receiver_history_table_probes, 1);
-            assert_eq!(reader.sync_metrics().receiver_history_rebuild_rows_avoided, 1);
+            assert_eq!(
+                reader.sync_metrics().receiver_history_rebuild_rows_avoided,
+                1
+            );
         }
         drop(reader);
         control.resume();
         let storage = crate::db::block_on(reopen_handle.reopen(families.clone())).unwrap();
-        let mut reopened = NodeState::new_with_shared_test_catalogue(node(0xe2), schema.clone(), storage).unwrap();
-        let present = bundles.iter().filter(|bundle| reopened.query_transaction(bundle.tx.tx_id).unwrap().is_some()).count();
-        assert!(present == 0 || present == bundles.len(), "accepted prefix after {allowed_writes} writes");
+        let mut reopened =
+            NodeState::new_with_shared_test_catalogue(node(0xe2), schema.clone(), storage).unwrap();
+        let present = bundles
+            .iter()
+            .filter(|bundle| {
+                reopened
+                    .query_transaction(bundle.tx.tx_id)
+                    .unwrap()
+                    .is_some()
+            })
+            .count();
+        assert!(
+            present == 0 || present == bundles.len(),
+            "accepted prefix after {allowed_writes} writes"
+        );
         if present != 0 {
             assert_eq!(reopened.query_all_versions().unwrap().len(), bundles.len());
-            reopened.assert_merge_heads_match_history_for_test("todos", row(1)).unwrap();
-            let heads = reopened.database.primary_key_scan_raw("jazz_merge_heads", &[]).unwrap();
+            reopened
+                .assert_merge_heads_match_history_for_test("todos", row(1))
+                .unwrap();
+            let heads = reopened
+                .database
+                .primary_key_scan_raw("jazz_merge_heads", &[])
+                .unwrap();
             assert_eq!(heads.len(), 1);
-            assert_eq!(merge_heads_from_value(heads[0].record().get_idx(3).unwrap()).unwrap(),
-                bundles.iter().map(|bundle| bundle.tx.tx_id).collect());
+            assert_eq!(
+                merge_heads_from_value(heads[0].record().get_idx(3).unwrap()).unwrap(),
+                bundles.iter().map(|bundle| bundle.tx.tx_id).collect()
+            );
         }
-        if completed { break; }
+        if completed {
+            break;
+        }
     }
-    assert!(completed, "include a completed reset, not only canceled attempts");
+    assert!(
+        completed,
+        "include a completed reset, not only canceled attempts"
+    );
 }
 
 /// Receiver-level coverage pins the optimized reset path as well as ordinary
@@ -368,8 +481,6 @@ fn receiver_batch_ingests_complete_snapshot_bundles_once() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
             },
         ])
         .unwrap();
@@ -404,7 +515,12 @@ fn complete_parent_receiver_update(
         vec![todos_covered_input(tx_id, &version)]
     };
     ViewUpdateParts {
-        wire_rows: None,
+        wire_rows: Some(fixture_scope_update(
+            subscription,
+            reset_input_set,
+            program_fact_adds,
+            Vec::new(),
+        )),
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: false,
@@ -422,8 +538,6 @@ fn complete_parent_receiver_update(
         opening_pending: false,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds,
-        program_fact_removes: Vec::new(),
     }
 }
 
@@ -469,34 +583,67 @@ fn pending_parent_time_proof_skips_newer_but_checks_equal_and_older_parents() {
     let parent = TxId::new(TxTime::from(70), node(0xc2));
     let mut batch = reader.database.open_batch();
     reader.database.reset_storage_read_metrics();
-    reader.preflight_complete_parent_constraints(&mut batch, parent, &[]).unwrap();
-    reader.reject_mismatched_pending_children_for_parent(parent).unwrap();
+    reader
+        .preflight_complete_parent_constraints(&mut batch, parent, &[])
+        .unwrap();
+    reader
+        .reject_mismatched_pending_children_for_parent(parent)
+        .unwrap();
     assert_eq!(reader.database.storage_read_metrics().total.ranges, 0);
     // Startup's Unknown state is fail-closed even if the physical table is empty.
     reader.rejections.pending_parent_time_bound = PendingParentTimeBound::Unknown;
-    reader.preflight_complete_parent_constraints(&mut batch, parent, &[]).unwrap();
+    reader
+        .preflight_complete_parent_constraints(&mut batch, parent, &[])
+        .unwrap();
     assert_eq!(reader.database.storage_read_metrics().total.ranges, 1);
     drop(batch);
     let mut reader = reader.reopen_in_place().unwrap();
     // Use the real ingestion entry point: Accepted partial children are not in
     // the Pending-only rejection graph, but must advance the time ceiling.
-    reader.ingest_view_scoped_transaction_with_current_indexes(
-        reset_scope_tx(TxId::new(TxTime::from(80), node(0xc3)), 1),
-        vec![version_record(row(1), vec![parent], title_cells("partial child"), None)],
-        Fate::Accepted, None, DurabilityTier::Edge,
-    ).unwrap();
-    for (time, parent_node, should_scan) in [(71, node(0xc2), false), (70, node(0xc4), true), (69, node(0xc2), true)] {
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            reset_scope_tx(TxId::new(TxTime::from(80), node(0xc3)), 1),
+            vec![version_record(
+                row(1),
+                vec![parent],
+                title_cells("partial child"),
+                None,
+            )],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+    for (time, parent_node, should_scan) in [
+        (71, node(0xc2), false),
+        (70, node(0xc4), true),
+        (69, node(0xc2), true),
+    ] {
         let probe = TxId::new(TxTime::from(time), parent_node);
         let mut batch = reader.database.open_batch();
         reader.database.reset_storage_read_metrics();
-        reader.preflight_complete_parent_constraints(&mut batch, probe, &[]).unwrap();
-        assert_eq!(reader.database.storage_read_metrics().total.ranges, usize::from(should_scan));
+        reader
+            .preflight_complete_parent_constraints(&mut batch, probe, &[])
+            .unwrap();
+        assert_eq!(
+            reader.database.storage_read_metrics().total.ranges,
+            usize::from(should_scan)
+        );
     }
     let mut batch = reader.database.open_batch();
     let wrong = version_record(row(2), Vec::new(), title_cells("wrong coordinate"), None);
-    assert!(matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[wrong]).resolve(),
-        Err(Error::ConflictingCommitUnit(id)) if id == parent));
-    assert_eq!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().len(), 1);
+    assert!(
+        matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[wrong]).resolve(),
+        Err(Error::ConflictingCommitUnit(id)) if id == parent)
+    );
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -508,34 +655,65 @@ fn pending_parent_time_proof_includes_staged_constraints_and_recovers_after_drop
     let child = TxId::new(TxTime::from(80), node(0xc7));
     accepted_view_scoped_child_for_parent(&mut reader, parent, child, row(1));
     let coordinate = {
-        let rows = reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap();
+        let rows = reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap();
         pending_edge_coordinate_from_record(rows[0].record()).unwrap()
     };
     let future_parent = TxId::new(TxTime(u64::MAX), parent.node);
     let mut batch = reader.database.open_batch();
-    reader.stage_pending_parent_constraint(
-        &mut batch, (reader.node_aliases[&child.node], child),
-        (reader.node_aliases[&parent.node], future_parent), &coordinate, false,
-    ).unwrap();
+    reader
+        .stage_pending_parent_constraint(
+            &mut batch,
+            (reader.node_aliases[&child.node], child),
+            (reader.node_aliases[&parent.node], future_parent),
+            &coordinate,
+            false,
+        )
+        .unwrap();
     let wrong = version_record(row(2), Vec::new(), title_cells("wrong coordinate"), None);
-    assert!(matches!(reader.preflight_complete_parent_constraints(&mut batch, future_parent, &[wrong]).resolve(),
-        Err(Error::ConflictingCommitUnit(id)) if id == future_parent));
+    assert!(
+        matches!(reader.preflight_complete_parent_constraints(&mut batch, future_parent, &[wrong]).resolve(),
+        Err(Error::ConflictingCommitUnit(id)) if id == future_parent)
+    );
     drop(batch);
-    assert_eq!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().len(), 1);
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1
+    );
     let probe = TxId::new(TxTime::from(90), parent.node);
     let mut batch = reader.database.open_batch();
     reader.database.reset_storage_read_metrics();
-    reader.preflight_complete_parent_constraints(&mut batch, probe, &[]).unwrap();
-    assert_eq!(reader.database.storage_read_metrics().total.ranges, 1, "abandoned future edge leaves a safe conservative ceiling");
+    reader
+        .preflight_complete_parent_constraints(&mut batch, probe, &[])
+        .unwrap();
+    assert_eq!(
+        reader.database.storage_read_metrics().total.ranges,
+        1,
+        "abandoned future edge leaves a safe conservative ceiling"
+    );
     drop(batch);
     let mut reader = reader.reopen_in_place().unwrap();
     let mut batch = reader.database.open_batch();
     reader.database.reset_storage_read_metrics();
-    reader.preflight_complete_parent_constraints(&mut batch, probe, &[]).unwrap();
-    assert_eq!(reader.database.storage_read_metrics().total.ranges, 0, "reopen recovers the exact durable ceiling");
+    reader
+        .preflight_complete_parent_constraints(&mut batch, probe, &[])
+        .unwrap();
+    assert_eq!(
+        reader.database.storage_read_metrics().total.ranges,
+        0,
+        "reopen recovers the exact durable ceiling"
+    );
     let wrong = version_record(row(2), Vec::new(), title_cells("wrong after reopen"), None);
-    assert!(matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[wrong]).resolve(),
-        Err(Error::ConflictingCommitUnit(id)) if id == parent));
+    assert!(
+        matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[wrong]).resolve(),
+        Err(Error::ConflictingCommitUnit(id)) if id == parent)
+    );
 }
 
 #[test]
@@ -543,19 +721,33 @@ fn pending_parent_time_proof_tracks_locally_authored_update_constraints() {
     // Author through the normal local commit API; the internal read counter
     // proves that the shared staging helper also covers this second writer.
     let (_dir, mut writer) = open_node_with_uuid(node(0xca));
-    let (parent, _) = writer.commit_mergeable_unit_settled(
-        MergeableCommit::new("todos", row(1), 10).cells(title_cells("before")),
-    ).unwrap();
-    writer.commit_mergeable_unit_settled(
-        MergeableCommit::new("todos", row(1), 11).parents(vec![parent]).cells(title_cells("after")),
-    ).unwrap();
+    let (parent, _) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("before")),
+        )
+        .unwrap();
+    writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 11)
+                .parents(vec![parent])
+                .cells(title_cells("after")),
+        )
+        .unwrap();
     let mut batch = writer.database.open_batch();
     writer.database.reset_storage_read_metrics();
-    writer.preflight_complete_parent_constraints(&mut batch, parent, &[]).unwrap();
+    writer
+        .preflight_complete_parent_constraints(&mut batch, parent, &[])
+        .unwrap();
     // Child transaction lookup may do additional transaction-index reads;
     // pending-edge storage belongs to the `other` destination bucket.
     assert_eq!(writer.database.storage_read_metrics().other.ranges, 1);
-    assert!(!writer.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().is_empty());
+    assert!(
+        !writer
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -565,15 +757,24 @@ fn pending_parent_time_proof_preserves_poisoned_database_errors() {
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let (storage, control) = TestStorage::controlled(&refs);
-    let mut reader = NodeState::new_with_shared_test_catalogue(node(0xc8), schema, storage).unwrap();
+    let mut reader =
+        NodeState::new_with_shared_test_catalogue(node(0xc8), schema, storage).unwrap();
     control.fail_next(TestStorageOperation::WriteMany);
     assert!(reader.ensure_node_alias(node(0xc9)).resolve().is_err());
     let mut batch = reader.database.open_batch();
     let parent = TxId::new(TxTime::from(100), node(0xc9));
-    assert!(matches!(reader.preflight_complete_parent_constraints(&mut batch, parent, &[]).resolve(),
-        Err(Error::Groove(groove::db::Error::DatabasePoisoned))));
-    assert!(matches!(reader.reject_mismatched_pending_children_for_parent(parent).resolve(),
-        Err(Error::Groove(groove::db::Error::DatabasePoisoned))));
+    assert!(matches!(
+        reader
+            .preflight_complete_parent_constraints(&mut batch, parent, &[])
+            .resolve(),
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))
+    ));
+    assert!(matches!(
+        reader
+            .reject_mismatched_pending_children_for_parent(parent)
+            .resolve(),
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))
+    ));
 }
 
 #[test]
@@ -587,7 +788,9 @@ fn complete_parent_batch_scans_empty_constraints_once_at_scale() {
             .collect::<Vec<_>>();
         let mut batch = reader.database.open_batch();
         reader.database.reset_storage_read_metrics();
-        reader.preflight_complete_parent_batch(&mut batch, &parents).unwrap();
+        reader
+            .preflight_complete_parent_batch(&mut batch, &parents)
+            .unwrap();
         let reads = reader.database.storage_read_metrics();
         assert_eq!(reads.total.ranges, usize::from(count != 0));
         assert_eq!(reads.total.reads, 0);
@@ -613,47 +816,104 @@ fn complete_parent_batch_preserves_atomic_constraints_and_staged_deletes() {
                 row(0xb0 + index as u8),
             );
         }
-        let version = |id| version_record(row(id), Vec::new(), title_cells("complete parent"), None);
+        let version =
+            |id| version_record(row(id), Vec::new(), title_cells("complete parent"), None);
         let mut batch = reader.database.open_batch();
         // An earlier operation in the same batch removed the third parent's
         // constraint. Its deliberately wrong coordinate must not be checked.
-        let third_key = reader.database.primary_key_scan_raw("jazz_pending_edges", &[])
-            .unwrap().into_iter().find(|raw| {
-                raw.record().get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX).unwrap()
+        let third_key = reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .into_iter()
+            .find(|raw| {
+                raw.record()
+                    .get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)
+                    .unwrap()
                     == parents[2].time.0
-            }).map(|raw| {
+            })
+            .map(|raw| {
                 let record = raw.record();
                 pending_edge_primary_key(
-                    NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX).unwrap()),
+                    NodeAlias(
+                        record
+                            .get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)
+                            .unwrap(),
+                    ),
                     TxId::new(TxTime::from(82), node(0xa5)),
-                    NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX).unwrap()),
+                    NodeAlias(
+                        record
+                            .get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)
+                            .unwrap(),
+                    ),
                     parents[2],
                     &pending_edge_coordinate_from_record(record).unwrap(),
-                ).unwrap()
-            }).unwrap();
+                )
+                .unwrap()
+            })
+            .unwrap();
         batch.delete("jazz_pending_edges", third_key);
         let complete = vec![
             (parents[0], vec![version(0xb0)]),
             // A duplicate sees no Accepted constraints after the first pass.
             (parents[0], vec![version(0xee)]),
-            (parents[1], vec![version(if mismatch { 0xee } else { 0xb1 })]),
+            (
+                parents[1],
+                vec![version(if mismatch { 0xee } else { 0xb1 })],
+            ),
             (parents[2], vec![version(0xee)]),
         ];
-        let result = reader.preflight_complete_parent_batch(&mut batch, &complete).resolve();
+        let result = reader
+            .preflight_complete_parent_batch(&mut batch, &complete)
+            .resolve();
         if mismatch {
-            assert!(matches!(result, Err(Error::ConflictingCommitUnit(parent)) if parent == parents[1]));
+            assert!(
+                matches!(result, Err(Error::ConflictingCommitUnit(parent)) if parent == parents[1])
+            );
             drop(batch);
-            assert_eq!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().len(), 3);
+            assert_eq!(
+                reader
+                    .database
+                    .primary_key_scan_raw("jazz_pending_edges", &[])
+                    .unwrap()
+                    .len(),
+                3
+            );
         } else {
             result.unwrap();
             // Staging is not publication: the old durable constraints remain.
-            assert_eq!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().len(), 3);
-            assert!(reader.database.primary_key_scan_raw_in_batch(&batch, "jazz_pending_edges", &[]).unwrap().is_empty());
+            assert_eq!(
+                reader
+                    .database
+                    .primary_key_scan_raw("jazz_pending_edges", &[])
+                    .unwrap()
+                    .len(),
+                3
+            );
+            assert!(
+                reader
+                    .database
+                    .primary_key_scan_raw_in_batch(&batch, "jazz_pending_edges", &[])
+                    .unwrap()
+                    .is_empty()
+            );
             reader.database.commit_batch(batch).unwrap();
-            assert!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().is_empty());
+            assert!(
+                reader
+                    .database
+                    .primary_key_scan_raw("jazz_pending_edges", &[])
+                    .unwrap()
+                    .is_empty()
+            );
         }
         for index in 0..3 {
-            assert_eq!(reader.transaction_record(TxId::new(TxTime::from(80 + index), node(0xa5))).unwrap().fate, Fate::Accepted);
+            assert_eq!(
+                reader
+                    .transaction_record(TxId::new(TxTime::from(80 + index), node(0xa5)))
+                    .unwrap()
+                    .fate,
+                Fate::Accepted
+            );
         }
     }
 }
@@ -838,7 +1098,12 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
     reader
         .apply_view_updates_in_batch(vec![
             ViewUpdateParts {
-                wire_rows: None,
+                wire_rows: Some(fixture_scope_update(
+                    subscription,
+                    true,
+                    Vec::new(),
+                    Vec::new(),
+                )),
                 subscription,
                 settled_through: global_time,
                 defer_settlement: false,
@@ -849,11 +1114,14 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: vec![todos_source_coverage()],
-                program_fact_removes: Vec::new(),
             },
             ViewUpdateParts {
-                wire_rows: None,
+                wire_rows: Some(fixture_scope_update(
+                    subscription,
+                    false,
+                    source_closure,
+                    Vec::new(),
+                )),
                 subscription,
                 settled_through: global_time,
                 defer_settlement: false,
@@ -871,8 +1139,6 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: source_closure,
-                program_fact_removes: Vec::new(),
             },
         ])
         .unwrap();
@@ -921,7 +1187,12 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     reader
         .apply_view_updates_in_batch(vec![
             ViewUpdateParts {
-                wire_rows: None,
+                wire_rows: Some(fixture_scope_update(
+                    subscription,
+                    true,
+                    todos_source_closure(tx_id, std::slice::from_ref(&first)),
+                    Vec::new(),
+                )),
                 subscription,
                 settled_through: GlobalTime(1),
                 defer_settlement: false,
@@ -939,11 +1210,14 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: todos_source_closure(tx_id, std::slice::from_ref(&first)),
-                program_fact_removes: Vec::new(),
             },
             ViewUpdateParts {
-                wire_rows: None,
+                wire_rows: Some(fixture_scope_update(
+                    subscription,
+                    true,
+                    todos_source_closure(tx_id, std::slice::from_ref(&second)),
+                    Vec::new(),
+                )),
                 subscription,
                 settled_through: GlobalTime(1),
                 defer_settlement: false,
@@ -961,8 +1235,6 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: todos_source_closure(tx_id, std::slice::from_ref(&second)),
-                program_fact_removes: Vec::new(),
             },
         ])
         .unwrap();
@@ -1049,7 +1321,7 @@ fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
     let update = |version: VersionRecord, _result_row| {
         let facts = todos_source_closure(tx_id, std::slice::from_ref(&version));
         ViewUpdateParts {
-            wire_rows: None,
+            wire_rows: Some(fixture_scope_update(subscription, true, facts, Vec::new())),
             subscription,
             settled_through: GlobalTime(1),
             defer_settlement: false,
@@ -1067,8 +1339,6 @@ fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: facts,
-            program_fact_removes: Vec::new(),
         }
     };
 
@@ -1138,7 +1408,12 @@ fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
             version_record(row(1), Vec::new(), title_cells("changed"), None)
         };
         let update = |tx: Transaction, version: VersionRecord| ViewUpdateParts {
-            wire_rows: None,
+            wire_rows: Some(fixture_scope_update(
+                subscription,
+                true,
+                Vec::new(),
+                Vec::new(),
+            )),
             subscription,
             settled_through: GlobalTime(1),
             defer_settlement: false,
@@ -1156,8 +1431,6 @@ fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: vec![todos_source_coverage()],
-            program_fact_removes: Vec::new(),
         };
         let result = reader.apply_view_updates_in_batch(vec![
             update(base_tx.clone(), first),
@@ -1238,9 +1511,14 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         .apply_view_update(todos_receiver_reset(subscription))
         .unwrap();
     let update = |version, fate, update_global_time, update_durability| {
-        let facts = todos_source_closure(tx_id, std::slice::from_ref(&version));
+        let mut facts = todos_source_closure(tx_id, std::slice::from_ref(&version));
+        for input in &mut facts {
+            input.physical_table = core
+                .scope_physical_table(projection_schema.version_id(), "todos")
+                .unwrap();
+        }
         ViewUpdateParts {
-            wire_rows: None,
+            wire_rows: Some(fixture_scope_update(subscription, true, facts, Vec::new())),
             subscription,
             settled_through: global_time,
             defer_settlement: false,
@@ -1260,8 +1538,6 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: facts,
-            program_fact_removes: Vec::new(),
         }
     };
 
@@ -1399,7 +1675,12 @@ fn reset_accepts_identical_annotated_duplicates() {
             })
             .collect();
         let update = ViewUpdateParts {
-            wire_rows: None,
+            wire_rows: Some(fixture_scope_update(
+                subscription,
+                true,
+                closure,
+                Vec::new(),
+            )),
             subscription,
             settled_through: GlobalTime(1),
             defer_settlement: false,
@@ -1411,8 +1692,6 @@ fn reset_accepts_identical_annotated_duplicates() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: closure,
-            program_fact_removes: Vec::new(),
         };
         match path {
             ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![update]).unwrap(),
@@ -1423,7 +1702,12 @@ fn reset_accepts_identical_annotated_duplicates() {
 
         let conflicting = version_record(row(1), Vec::new(), title_cells("one"), None);
         let replay = ViewUpdateParts {
-            wire_rows: None,
+            wire_rows: Some(fixture_scope_update(
+                subscription,
+                true,
+                todos_source_closure(tx_id, std::slice::from_ref(&conflicting)),
+                Vec::new(),
+            )),
             subscription,
             settled_through: GlobalTime(1),
             defer_settlement: true,
@@ -1441,11 +1725,9 @@ fn reset_accepts_identical_annotated_duplicates() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: todos_source_closure(tx_id, std::slice::from_ref(&conflicting)),
             // This case isolates conflicting transaction metadata.  An absent
             // covered-input removal is independently rejected by
             // `reset_conflicts_with_member_removals_are_atomic`.
-            program_fact_removes: Vec::new(),
         };
         let result = match path {
             ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![replay]).resolve(),
@@ -1748,18 +2030,24 @@ fn reset_scope_update(
     subscription: SubscriptionKey,
     bundles: Vec<VersionBundle>,
 ) -> ViewUpdateParts {
-    let program_fact_adds = std::iter::once(todos_source_coverage())
-        .chain(bundles.iter().flat_map(|bundle| {
+    let program_fact_adds = bundles
+        .iter()
+        .flat_map(|bundle| {
             bundle
                 .versions
                 .iter()
                 .map(|version| todos_covered_input(bundle.tx.tx_id, version))
-        }))
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
     ViewUpdateParts {
-        wire_rows: None,
+        wire_rows: Some(fixture_scope_update(
+            subscription,
+            true,
+            program_fact_adds,
+            Vec::new(),
+        )),
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: true,
@@ -1770,10 +2058,8 @@ fn reset_scope_update(
         opening_pending: false,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds,
         // Reset supplies the entire closure; impossible-removal rejection has
         // a separate control in reset_conflicts_with_member_removals_are_atomic.
-        program_fact_removes: Vec::new(),
     }
 }
 
@@ -1834,6 +2120,11 @@ fn assert_reset_authored_columns_conflict(
     let version_carriers = crate::protocol::build_version_carriers_from_singletons(version_bundles)
         .expect("two valid bundles form a packed carrier");
 
+    if with_member_removal {
+        reader
+            .apply_view_update(todos_receiver_reset(subscription))
+            .unwrap();
+    }
     reader.set_initial_sync_flush_cadence(2).unwrap();
     let cadence_before = (
         reader.initial_sync_flush_active,
@@ -1843,7 +2134,15 @@ fn assert_reset_authored_columns_conflict(
     let deferred_before = authority_hydration_receipts(&reader).1;
 
     let update = ViewUpdateParts {
-        wire_rows: None,
+        wire_rows: Some(fixture_scope_update(
+            subscription,
+            true,
+            source_closure,
+            with_member_removal
+                .then_some(removed_todos_input(tx_id))
+                .into_iter()
+                .collect(),
+        )),
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: true,
@@ -1854,11 +2153,6 @@ fn assert_reset_authored_columns_conflict(
         opening_pending: false,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: source_closure,
-        program_fact_removes: with_member_removal
-            .then_some(removed_todos_input(tx_id))
-            .into_iter()
-            .collect(),
     };
     let result = match path {
         ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![update]).resolve(),
@@ -1870,7 +2164,7 @@ fn assert_reset_authored_columns_conflict(
             matches!(
                 result,
                 Err(Error::InvalidAuthoritySourceClosure { ref transition, .. })
-                    if transition.contains("covered input removal is absent from predecessor closure")
+                    if transition.contains("scope removal is absent from exact predecessor")
             ),
             "{path:?} reset must reject an absent covered-input removal (reversed: {reversed}): {result:?}"
         );
@@ -2030,7 +2324,12 @@ fn partial_exclusive_view_update(
     let mut tx = tx;
     tx.n_total_writes = 1;
     ViewUpdateParts {
-        wire_rows: None,
+        wire_rows: Some(fixture_scope_update(
+            subscription,
+            false,
+            source_closure,
+            Vec::new(),
+        )),
         subscription,
         settled_through: GlobalTime(1),
         defer_settlement: false,
@@ -2048,8 +2347,6 @@ fn partial_exclusive_view_update(
         opening_pending: false,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: source_closure,
-        program_fact_removes: Vec::new(),
     }
 }
 
@@ -2125,7 +2422,12 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
 
     reader
         .apply_view_updates_in_batch(vec![ViewUpdateParts {
-            wire_rows: None,
+            wire_rows: Some(fixture_scope_update(
+                subscription,
+                false,
+                source_closure,
+                Vec::new(),
+            )),
             subscription,
             settled_through: new_seq,
             defer_settlement: false,
@@ -2154,8 +2456,6 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: source_closure,
-            program_fact_removes: Vec::new(),
         }])
         .unwrap();
 
@@ -2194,7 +2494,10 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     let mut redacted_tx = tx.clone();
     redacted_tx.n_total_writes = 1;
     let first_closure = vec![todos_covered_input(tx_id, &first)];
-    let second_closure = vec![todos_covered_input(tx_id, &first), todos_covered_input(tx_id, &second)];
+    let second_closure = vec![
+        todos_covered_input(tx_id, &first),
+        todos_covered_input(tx_id, &second),
+    ];
     reader
         .apply_view_update(todos_receiver_reset(subscription))
         .unwrap();
@@ -2214,7 +2517,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                     durability: DurabilityTier::Global,
                 })],
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, first_closure).unwrap()),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(first_closure),
             },
         ))
         .unwrap();
@@ -2247,7 +2550,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                     durability: DurabilityTier::Global,
                 })],
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, second_closure).unwrap()),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(second_closure),
             },
         ))
         .unwrap();
@@ -2305,7 +2608,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                     durability: DurabilityTier::Global,
                 })],
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, first_closure).unwrap()),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(first_closure),
             },
         ))
         .unwrap();
@@ -2345,7 +2648,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                     durability: DurabilityTier::Global,
                 })],
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, complete_closure).unwrap()),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(complete_closure),
             },
         ))
         .unwrap();
@@ -2353,7 +2656,6 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     assert_eq!(stored.tx.n_total_writes, 2);
     assert!(!stored.view_scoped_cardinality);
 }
-
 
 #[test]
 fn receiver_batch_prepares_all_author_aliases_before_exact_ingestion() {
@@ -2411,8 +2713,6 @@ fn receiver_batch_prepares_all_author_aliases_before_exact_ingestion() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
             },
         ])
         .unwrap();
@@ -2470,9 +2770,20 @@ fn receiver_batch_defers_known_transaction_publication_until_new_rows_commit() {
         bundle.global_time = None;
         bundle.durability = DurabilityTier::Local;
     }
-    let known = version_bundles.iter().find(|bundle| bundle.tx.tx_id.node == node(4)).unwrap();
+    let known = version_bundles
+        .iter()
+        .find(|bundle| bundle.tx.tx_id.node == node(4))
+        .unwrap();
     let known_tx_id = known.tx.tx_id;
-    reader.ingest_known_transaction(known.tx.clone(), known.versions.clone(), Fate::Pending, known.global_time, known.durability).unwrap();
+    reader
+        .ingest_known_transaction(
+            known.tx.clone(),
+            known.versions.clone(),
+            Fate::Pending,
+            known.global_time,
+            known.durability,
+        )
+        .unwrap();
     version_bundles.reverse();
     // Both entries are complete sets; exact native payloads ingest only once.
 
@@ -2494,13 +2805,14 @@ fn receiver_batch_defers_known_transaction_publication_until_new_rows_commit() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
             },
         ])
         .unwrap();
 
-    assert_eq!(reader.query_transaction(known_tx_id).unwrap().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        reader.query_transaction(known_tx_id).unwrap().unwrap().fate,
+        Fate::Accepted
+    );
     let version_rows = reader.query_all_versions().unwrap();
     assert_eq!(version_rows.len(), 2);
     assert!(

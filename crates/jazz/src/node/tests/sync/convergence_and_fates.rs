@@ -107,8 +107,14 @@ fn covered_input_receiver_fixture() -> (
         successor.supporting_rows.added_rows()[0].physical_table,
         initial_input.physical_table
     );
-    assert_eq!(successor.supporting_rows.added_rows()[0].row, initial_input.row);
-    assert_ne!(successor.supporting_rows.added_rows()[0].version, initial_input.version);
+    assert_eq!(
+        successor.supporting_rows.added_rows()[0].row,
+        initial_input.row
+    );
+    assert_ne!(
+        successor.supporting_rows.added_rows()[0].version,
+        initial_input.version
+    );
     (
         receiver_dir,
         receiver,
@@ -154,8 +160,6 @@ fn payload_view_update_parts(
         opening_pending: payload.peer_payload_inventory.opening_pending,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
     }
 }
 
@@ -165,7 +169,8 @@ fn covered_input_tx_for_row(message: &SyncMessage, row_uuid: RowUuid) -> TxId {
     };
     update
         .supporting_rows
-        .added_rows().iter()
+        .added_rows()
+        .iter()
         .find(|input| input.row == row_uuid)
         .unwrap()
         .version
@@ -278,7 +283,8 @@ fn authority_same_batch_snapshots_compare_each_successor_and_replay() {
     let (_dir, mut receiver, authority_result, initial, mut successor) =
         covered_input_receiver_fixture();
     let expected = successor.supporting_rows.added_rows()[0].clone();
-    successor.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(vec![expected.clone()]);
+    successor.supporting_rows =
+        crate::protocol::SupportingRowsUpdate::snapshot(vec![expected.clone()]);
     let mut empty = successor.clone();
     empty.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(Vec::new());
     empty.version_carriers.clear();
@@ -291,20 +297,22 @@ fn authority_same_batch_snapshots_compare_each_successor_and_replay() {
     .expect("replacement, empty, refill and replay compare adjacent snapshots");
 
     let state = &receiver.query.authority_results[&authority_result];
-    assert_eq!(state.covered_input_sources.len(), 1);
+    assert_eq!(
+        state.compiled_covered_input_sources.as_ref().unwrap().len(),
+        1
+    );
     assert_eq!(state.covered_input_versions.len(), 1);
     for input in state.covered_input_versions.values() {
-        assert_eq!(input.source_row, expected.row);
+        assert_eq!(input.row, expected.row);
         assert_eq!(input.version, expected.version);
         assert_ne!(input.version, initial.version);
     }
-    let facts = state.settled_program_facts.clone();
+    let facts = state.covered_input_versions.clone();
     receiver
         .apply_sync_message_settled(successor.into_view_update())
         .expect("replay also compares against retained rather than batch-local facts");
     assert_eq!(
-        receiver.query.authority_results[&authority_result].settled_program_facts,
-        facts,
+        receiver.query.authority_results[&authority_result].covered_input_versions, facts,
         "replay leaves the exact retained set unchanged"
     );
 }
@@ -366,14 +374,10 @@ fn successor_authority_closure_replaces_covered_input_and_detach_retires_it() {
         .expect("receive successor covered closure");
 
     let covered_versions = receiver.query.authority_results[&authority_result]
-        .settled_program_facts
-        .iter()
-        .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) if input.source_row == row_uuid => {
-                Some(input.version.tx)
-            }
-            _ => None,
-        })
+        .covered_input_versions
+        .values()
+        .filter(|input| input.row == row_uuid)
+        .map(|input| input.version.tx)
         .collect::<BTreeSet<_>>();
     assert!(
         covered_versions.contains(&successor_covered_tx),
@@ -577,12 +581,14 @@ fn reopened_core_continues_sync_after_restart() {
         .1;
     {
         let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
-        let mut core = NodeState::new_with_shared_test_catalogue(node(9), schema.clone(), storage).unwrap();
+        let mut core =
+            NodeState::new_with_shared_test_catalogue(node(9), schema.clone(), storage).unwrap();
         core.apply_sync_message_settled(first_unit).unwrap();
     }
 
     let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
-    let mut reopened_core = NodeState::new_with_shared_test_catalogue(node(9), schema, storage).unwrap();
+    let mut reopened_core =
+        NodeState::new_with_shared_test_catalogue(node(9), schema, storage).unwrap();
     let second_unit = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(2), 11).cells(title_cells("after")),

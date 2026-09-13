@@ -41,13 +41,15 @@ use crate::ids::{
     RowAuthor, RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias,
     SchemaVersionId,
 };
+#[cfg(test)]
+use crate::protocol::ProgramFactEntry;
 use crate::protocol::{
-    AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CoveredInputEntry,
-    CurrentWriteSchema, LensOp, MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest,
-    PhysicalTableIdentity, PolicyBindingKey, ProgramFactEntry, ProgramSourceId, ProgramSourceRole,
-    ReadViewKey, ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication,
-    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
+    AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp,
+    MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
+    PolicyBindingKey, ProgramSourceId, ProgramSourceRole, ReadViewKey, ResultMemberEntry,
+    ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord,
+    expand_version_carriers,
 };
 use crate::query::{
     Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
@@ -332,6 +334,7 @@ mod query_eval;
 mod recovery;
 mod row_availability;
 mod source_resolution;
+pub(crate) mod supporting_frontier;
 mod views;
 pub(crate) use open_tx::TransactionBranchRowState;
 #[cfg(feature = "testing")]
@@ -1034,17 +1037,17 @@ impl RetainedRootWindowSource {
 /// This index is rebuilt from existing facts; it has no storage or wire codec.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CoveredInputCoordinate {
-    source: ProgramSourceId,
+    physical_table: crate::ids::GlobalPhysicalTableId,
     row: RowUuid,
     layer: crate::protocol::ResultRowLayer,
     branch: Vec<u8>,
 }
 
-impl From<&CoveredInputEntry> for CoveredInputCoordinate {
-    fn from(input: &CoveredInputEntry) -> Self {
+impl From<&crate::protocol::SupportingRow> for CoveredInputCoordinate {
+    fn from(input: &crate::protocol::SupportingRow) -> Self {
         Self {
-            source: input.source.clone(),
-            row: input.source_row,
+            physical_table: input.physical_table,
+            row: input.row,
             layer: input.version.layer,
             branch: input.version.branch_or_prefix.clone().unwrap_or_default(),
         }
@@ -1083,16 +1086,14 @@ pub(crate) struct AuthorityResultState {
     live_settled: bool,
     /// Exact authoritative membership and an occurrence index for replacement.
     /// Non-row facts paired with the membership.
-    settled_program_facts: BTreeSet<ViewFactEntry>,
     /// Exact v2 transport predecessor. Invalidate before settled-fact mutation;
     /// never recover it as authority evidence after restart or scope teardown.
     supporting_revision: Option<[u8; 16]>,
     /// O(changed) admission indexes for the exact source closure. These are
     /// receiver-local indexes over `settled_program_facts`, rebuilt on reopen;
     /// they never replace the durable closure itself.
-    covered_input_sources: BTreeSet<ProgramSourceId>,
-    covered_input_versions: BTreeMap<CoveredInputCoordinate, CoveredInputEntry>,
-    compiled_covered_input_sources: Option<BTreeSet<ProgramSourceId>>,
+    covered_input_versions: BTreeMap<CoveredInputCoordinate, crate::protocol::SupportingRow>,
+    compiled_covered_input_sources: Option<CompiledScopeTables>,
     /// Optional fast cursor and authorization receipt. The cursor is durable
     /// cache metadata; only `live_settled` permits a new known-state claim.
     settled_through: Option<GlobalTime>,
@@ -1126,8 +1127,8 @@ pub(crate) enum AuthoritySourceClosure {
 pub(crate) struct AuthoritySourceIncremental {
     pub(crate) predecessor_generation: u64,
     pub(crate) generation: u64,
-    pub(crate) adds: BTreeSet<ProgramFactEntry>,
-    pub(crate) removes: BTreeSet<ProgramFactEntry>,
+    pub(crate) adds: BTreeSet<crate::protocol::SupportingRow>,
+    pub(crate) removes: BTreeSet<crate::protocol::SupportingRow>,
 }
 
 impl AuthoritySourceIncremental {
@@ -1139,8 +1140,8 @@ impl AuthoritySourceIncremental {
         previous: Option<Self>,
         predecessor_generation: u64,
         generation: u64,
-        adds: BTreeSet<ProgramFactEntry>,
-        removes: BTreeSet<ProgramFactEntry>,
+        adds: BTreeSet<crate::protocol::SupportingRow>,
+        removes: BTreeSet<crate::protocol::SupportingRow>,
     ) -> Result<Self, Error> {
         if !adds.is_disjoint(&removes) {
             return Err(Error::InvalidStoredValue(
@@ -2628,9 +2629,22 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) opening_pending: bool,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
-    pub(crate) program_fact_adds: Vec<ViewFactEntry>,
-    pub(crate) program_fact_removes: Vec<ViewFactEntry>,
 }
+
+impl ViewUpdateParts {
+    pub(crate) fn supporting_adds(&self) -> &[crate::protocol::SupportingRow] {
+        self.wire_rows
+            .as_ref()
+            .map_or(&[], |rows| rows.added_rows())
+    }
+    pub(crate) fn supporting_removes(&self) -> &[crate::protocol::SupportingRow] {
+        self.wire_rows
+            .as_ref()
+            .map_or(&[], |rows| rows.removed_rows())
+    }
+}
+
+type CompiledScopeTables = BTreeMap<crate::ids::GlobalPhysicalTableId, groove::Intern<String>>;
 
 #[derive(Default)]
 struct IngestMemo {
@@ -2875,17 +2889,17 @@ fn known_state_fact_key(authority_result_key: &AuthorityResultKey) -> Vec<Value>
 
 fn settled_program_fact_key(
     authority_result_key: &AuthorityResultKey,
-    fact: &ViewFactEntry,
+    fact: &crate::protocol::SupportingRow,
 ) -> Result<Vec<Value>, Error> {
     let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
-        settled_program_fact_digest(&codec::program_fact_storage_bytes(fact)?).to_vec(),
+        settled_program_fact_digest(&codec::scope_row_storage_bytes(fact)?).to_vec(),
     ));
     Ok(key)
 }
 
 /// Domain-separated identity for an admitted source closure fact. The full
-/// canonical source-role/version encoding belongs in the value cell, and its
+/// canonical physical-table/row/version encoding belongs in the value cell, and its
 /// fixed-size digest is validated before recovery publishes resident state.
 const SETTLED_PROGRAM_FACT_DIGEST_DOMAIN: &str = "jazz.settled-program-fact-key.v1";
 
@@ -2895,9 +2909,9 @@ fn settled_program_fact_digest(fact_bytes: &[u8]) -> [u8; 32] {
 
 fn settled_program_fact_storage_write(
     authority_result_key: &AuthorityResultKey,
-    fact: &ViewFactEntry,
+    fact: &crate::protocol::SupportingRow,
 ) -> Result<groove::db::DirectRecordStoreWrite, Error> {
-    let fact_bytes = codec::program_fact_storage_bytes(fact)?;
+    let fact_bytes = codec::scope_row_storage_bytes(fact)?;
     let mut key = authority_result_store_prefix(authority_result_key);
     key.push(Value::Bytes(
         settled_program_fact_digest(&fact_bytes).to_vec(),
@@ -3224,14 +3238,23 @@ fn authority_result_store_prefix_round_trips_complete_policy_identity() {
 mod authority_source_incremental_tests {
     use super::*;
 
-    fn fact(table: &str) -> ProgramFactEntry {
-        ProgramFactEntry::ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry {
-            source: ProgramSourceId {
-                table: table.to_owned().into(),
-                path: vec![ProgramSourceRole::Root],
+    fn fact(table: &str) -> crate::protocol::SupportingRow {
+        let tx = TxId::new(crate::time::TxTime::from(1), NodeUuid::from_bytes([1; 16]));
+        crate::protocol::SupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(
+                if table == "a" { 1 } else { 2 },
+            )),
+            version_table: table.to_owned().into(),
+            row: RowUuid::from_bytes([2; 16]),
+            version: crate::protocol::RowVersionRefEntry {
+                tx,
+                schema_version: None,
+                layer: crate::protocol::ResultRowLayer::Content,
+                batch: Some(tx),
+                branch_or_prefix: None,
+                row_digest: None,
             },
-            complete: true,
-        })
+        }
     }
 
     #[test]

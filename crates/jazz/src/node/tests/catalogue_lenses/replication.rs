@@ -507,11 +507,12 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
         panic!("expected view update");
     };
 
-
     let (_reader_dir, mut reader) = open_node_with_schema(node(0x6d), base);
     let error = reader
         .apply_view_updates_in_batch(vec![ViewUpdateParts {
-            wire_rows: Some(program_fact_adds),
+            wire_rows: Some(crate::protocol::SupportingRowsUpdate::snapshot(
+                program_fact_adds.added_rows().to_vec(),
+            )),
             subscription,
             settled_through,
             defer_settlement: false,
@@ -523,8 +524,6 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
         }])
         .expect_err("malformed ViewUpdate must not stage a row");
     match error {
@@ -630,8 +629,6 @@ fn direct_view_update_rejects_unavailable_authored_schema_without_mutation() {
                 opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
             })
             .resolve()
     }));
@@ -724,8 +721,6 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
         }])
         .resolve(),
         Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })
@@ -795,8 +790,6 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_unavailable_schemas(
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
         }])
         .resolve(),
         Err(Error::InvalidAuthoritySourceClosure { subscription: rejected, transition })

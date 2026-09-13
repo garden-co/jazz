@@ -83,41 +83,47 @@ not by accumulated view state. `groove/SPEC/INVARIANTS.md::INV-MV-1` and the mai
 differential oracle prove observable equivalence; they do not justify a
 full-state rebuild or full-state diff on the maintained path.
 
-#### Durable source closure facts
+#### Durable physical scope inputs
 
-`INV-QUERY-36` — Only `ProgramSourceCoverage` and `CoveredInput` have a
-persisted fact representation. The `jazz_settled_program_facts` direct store
-uses the authority prefix `[shape UUID, binding UUID, read-view UUID,
-policy-presence U8, policy-directory digest Bytes]`, followed by a 32-byte
-BLAKE3 derived key in domain `jazz.settled-program-fact-key.v1`. Its single
-`fact: Bytes` value contains the canonical fact whose bytes derive that digest.
-The policy directory and known-state source-closure generation remain separate
-validated stores. The receiver rebuilds terminal results through local IVM over
-these covered source versions; no output row or result member is recovered.
+New receiver writes use `JSIR` version `1` in the existing
+`jazz_settled_program_facts` store and authority-key/digest envelope described
+below. The digest domain is unchanged; the tagged value bytes distinguish the
+formats. A JSIR value contains, in order: physical table UUID, authored native
+table string, row UUID, and version reference. UUID, UTF-8 string, integer and
+option encodings use the explicit conventions below. Only concrete content or
+deletion layers are valid. There is no source occurrence, coverage fact, query
+result or serializer-defined layout in a new scope record. Empty scope tables
+are implicit in the registered query's dataset; a complete snapshot and its
+receipt establish completeness, not a fabricated per-occurrence manifest.
 
-The fact bytes are ASCII `JPFK`, version byte `1`, then dense tag byte `0` for
-`ProgramSourceCoverage` or `1` for `CoveredInput`. Every other tag rejects.
-There is no persisted result-member store, `JRME`, or `JRSE` format.
+On detecting the retired JPFK occurrence-cache generation, recovery discards
+all subscription scope cache records and their resume cursors. There is no
+occurrence-to-physical migration. Native rows, transaction history, pending
+writes and catalogue data are retained. New subscriptions must obtain fresh
+authority snapshots; offline permissioned subscriptions cannot settle from the
+discarded scope. Merely retaining a native row never proves current authority
+membership. The policy directory is shared metadata, not scope evidence, and
+is not deleted by this invalidation.
 
-- Tag `0`: source identity, then one boolean byte (`0` incomplete, `1` complete).
-- Tag `1`: source identity, version-table string, source-row UUID, version ref.
-- A string/byte field is little-endian `U32` byte length then exact bytes;
-  strings must be UTF-8. UUIDs are exactly 16 bytes. A source identity is its
-  table string followed by `U32` path length and ordered roles: `0` root,
-  `1` alias, `2` recursive seed, `3` recursive step, `4` correlated child,
-  `5` policy; every non-root role has one following string. Paths contain
-  1–32 roles and must satisfy the protocol's canonical source-identity rules.
-- A version ref is transaction (`U64` time, node UUID), optional schema UUID,
-  layer byte (`0` content, `1` deletion, `2` content-or-deletion), optional
-  batch transaction, optional branch/prefix bytes, optional row-digest bytes.
-  Each option is byte `0` absent or byte `1` followed by the declared value.
-  Covered-input table, row, and version identity must be wire-valid.
+JSIR recovery does not restore live authority or a transport predecessor.
+Unknown or malformed new-format encodings still fail closed.
+`physical_scope_storage_v1_has_exact_bytes_and_rejects_malformed_records`
+pins the new format.
 
-Total and individual byte fields are bounded to 1 MiB. Recovery validates the
-entire closure before resident query-state mutation: malformed, truncated,
-unknown-version/tag, trailing, noncanonical, oversized, or invalid source
-identity encodings reject. Add, remove, rewrite, and reopen use the same codec.
-The runtime protocol enum's serde layout is never a durable fact format.
+The physical-row cache uses the authority prefix [shape UUID, binding UUID,
+read-view UUID, policy-presence U8, policy-directory digest Bytes], followed by
+a 32-byte BLAKE3 derived key in domain `jazz.settled-program-fact-key.v1`.
+The tagged JSIR bytes derive the digest and are its sole stored value.
+
+Every string/byte field uses a little-endian U32 byte length followed by exact
+bytes; strings must be UTF-8. UUIDs are exactly 16 bytes. A version reference is
+transaction (U64 time, node UUID), optional schema UUID, layer byte (0 content,
+1 deletion), optional batch transaction, optional branch bytes, optional digest
+bytes. Each option is U8 0 absent or U8 1 followed by its declared value.
+Content-or-deletion is not an admissible physical-row layer. Total and individual
+byte fields are bounded to 1 MiB. Unknown versions, malformed/truncated/trailing
+bytes and invalid row identities reject before resident scope installation.
+Serializer defaults are not part of this contract.
 
 #### Typed identity descriptor roles
 

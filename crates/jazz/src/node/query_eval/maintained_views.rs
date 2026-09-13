@@ -6,7 +6,8 @@
 //! public deltas.
 
 use super::*;
-use crate::protocol::{CoveredInputEntry, ProgramSourceId};
+use crate::ids::GlobalPhysicalTableId;
+use crate::protocol::SupportingRow;
 
 pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) subscription: MultisinkSubscription,
@@ -30,6 +31,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
 #[derive(Clone, Debug)]
 pub(crate) struct CoveredInputSource {
     pub(super) id: InputSourceId,
+    pub(super) table: groove::Intern<String>,
     pub(super) descriptor: RecordDescriptor,
 }
 
@@ -38,8 +40,8 @@ pub(crate) struct CoveredInputSource {
 /// the graph derives its own terminal from these inputs.
 #[derive(Debug, Default)]
 pub(crate) struct CoveredInputReceiver {
-    /// These IDs have no wire meaning; full `ProgramSourceId` does.
-    pub(crate) sources: BTreeMap<ProgramSourceId, CoveredInputSource>,
+    /// One runtime dataset per physical table in this receiver's read schema.
+    pub(crate) sources: BTreeMap<GlobalPhysicalTableId, CoveredInputSource>,
     pub(crate) read_view: ReadViewSpec,
     local_authority: LocalAuthorityReconciliation,
     /// `None` is pending, never an implicit empty closure.
@@ -51,12 +53,12 @@ pub(crate) struct CoveredInputReceiver {
     /// Exact content facts currently materialized in each runtime input. A
     /// deletion-layer fact participates in closure provenance but deliberately
     /// has no source tuple, so it is not retained here.
-    installed_records: BTreeMap<ProgramSourceId, BTreeMap<CoveredInputEntry, Vec<u8>>>,
+    installed_records: BTreeMap<GlobalPhysicalTableId, BTreeMap<SupportingRow, Vec<u8>>>,
 }
 
 impl CoveredInputReceiver {
     pub(crate) fn new(
-        sources: BTreeMap<ProgramSourceId, CoveredInputSource>,
+        sources: BTreeMap<GlobalPhysicalTableId, CoveredInputSource>,
         read_view: ReadViewSpec,
     ) -> Self {
         Self {
@@ -683,28 +685,13 @@ where
                 "covered input incremental delta does not name receiver predecessor",
             ));
         }
-        if incremental
-            .adds
-            .iter()
-            .chain(&incremental.removes)
-            .any(|fact| matches!(fact, ProgramFactEntry::ProgramSourceCoverage(_)))
-        {
-            return Err(Error::InvalidStoredValue(
-                "incremental covered input frame must retain its source coverage manifest",
-            ));
-        }
         // Stage the local successor before changing Groove or receipt state.
         // The runtime validates its complete batch before mutation; keeping
         // this mirror staged gives the same all-or-nothing failure boundary.
-        let mut staged_records = BTreeMap::<CoveredInputEntry, Option<Vec<u8>>>::new();
-        let mut changes = BTreeMap::<ProgramSourceId, (Vec<Vec<u8>>, Vec<Vec<u8>>)>::new();
-        for fact in &incremental.removes {
-            let ProgramFactEntry::CoveredInput(input) = fact else {
-                return Err(Error::InvalidStoredValue(
-                    "incremental receiver frame contains a non-source fact",
-                ));
-            };
-            let Some(records) = receiver.installed_records.get(&input.source) else {
+        let mut staged_records = BTreeMap::<SupportingRow, Option<Vec<u8>>>::new();
+        let mut changes = BTreeMap::<GlobalPhysicalTableId, (Vec<Vec<u8>>, Vec<Vec<u8>>)>::new();
+        for input in &incremental.removes {
+            let Some(records) = receiver.installed_records.get(&input.physical_table) else {
                 return Err(Error::InvalidStoredValue(
                     "incremental covered input removes an unknown source occurrence",
                 ));
@@ -712,7 +699,7 @@ where
             if let Some(record) = records.get(input) {
                 staged_records.insert(input.clone(), None);
                 changes
-                    .entry(input.source.clone())
+                    .entry(input.physical_table)
                     .or_default()
                     .1
                     .push(record.clone());
@@ -722,16 +709,11 @@ where
                 ));
             }
         }
-        for fact in &incremental.adds {
-            let ProgramFactEntry::CoveredInput(input) = fact else {
-                return Err(Error::InvalidStoredValue(
-                    "incremental receiver frame contains a non-source fact",
-                ));
-            };
+        for input in &incremental.adds {
             let runtime_source =
                 receiver
                     .sources
-                    .get(&input.source)
+                    .get(&input.physical_table)
                     .ok_or(Error::InvalidStoredValue(
                         "incremental covered input names no compiled source occurrence",
                     ))?;
@@ -748,7 +730,7 @@ where
             };
             let records = receiver
                 .installed_records
-                .get(&input.source)
+                .get(&input.physical_table)
                 .expect("receiver records are initialized with every compiled source");
             let present = match staged_records.get(input) {
                 Some(record) => record.is_some(),
@@ -761,7 +743,7 @@ where
             }
             staged_records.insert(input.clone(), Some(record.clone()));
             changes
-                .entry(input.source.clone())
+                .entry(input.physical_table)
                 .or_default()
                 .0
                 .push(record);
@@ -805,7 +787,7 @@ where
         for (input, record) in staged_records {
             let records = receiver
                 .installed_records
-                .get_mut(&input.source)
+                .get_mut(&input.physical_table)
                 .expect("staged source was validated before runtime mutation");
             match record {
                 Some(record) => {
@@ -828,6 +810,29 @@ where
     ) -> Result<bool, Error> {
         if receiver.sources.is_empty() {
             return Ok(false);
+        }
+        // A local graph may be prepared before the first trusted catalogue
+        // replaces its bootstrap identities. Bind its existing table inputs to
+        // that catalogue at the snapshot boundary, not to a stale bootstrap UUID.
+        // This is once per table, never an occurrence expansion or row lookup.
+        let remapping = receiver
+            .sources
+            .iter()
+            .map(|(old, source)| {
+                Ok((
+                    *old,
+                    self.scope_physical_table(result_schema_version, source.table.as_str())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        for (old, new) in remapping {
+            if old != new {
+                let source = receiver
+                    .sources
+                    .remove(&old)
+                    .expect("compiled table exists");
+                receiver.sources.insert(new, source);
+            }
         }
         // A newer authority generation invalidates the old source closure
         // before any validation.  In particular, a reset cannot reuse a
@@ -855,67 +860,20 @@ where
             }
             crate::node::AuthoritySourceClosure::Claimed { generation } => generation,
         };
-        let facts = authority_result.settled_program_facts.clone();
-        let expected_sources = receiver.sources.keys().cloned().collect::<BTreeSet<_>>();
-        let mut covered_sources = BTreeSet::new();
-        for fact in &facts {
-            let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact else {
-                continue;
-            };
-            if !coverage.complete || !coverage.source.is_wire_valid() {
-                return Err(Error::InvalidStoredValue(
-                    "authority program-source coverage is incomplete or noncanonical",
-                ));
-            }
-            if !expected_sources.contains(&coverage.source) {
-                return Err(Error::InvalidStoredValue(
-                    "authority program-source coverage names no compiled source occurrence",
-                ));
-            }
-            if !covered_sources.insert(coverage.source.clone()) {
-                return Err(Error::InvalidStoredValue(
-                    "authority program-source coverage duplicates a compiled source occurrence",
-                ));
-            }
-        }
-        if covered_sources != expected_sources {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                eprintln!(
-                    "JAZZ_COVERED_INPUT_TRACE stage=incomplete_coverage expected_sources={} actual_sources={} facts={}",
-                    expected_sources.len(),
-                    covered_sources.len(),
-                    facts.len(),
-                );
-            }
-            return Err(Error::InvalidStoredValue(
-                "authority program-source coverage does not exactly close compiled source set",
-            ));
-        }
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-            let covered_input_count = facts
-                .iter()
-                .filter(|fact| matches!(fact, ProgramFactEntry::CoveredInput(_)))
-                .count();
-            eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=replace subscription_sources={} coverage_sources={} covered_inputs={} generation={}",
-                receiver.sources.len(),
-                covered_sources.len(),
-                covered_input_count,
-                closure_generation,
-            );
-        }
+        let inputs = authority_result
+            .covered_input_versions
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         let mut records = receiver
             .sources
             .keys()
             .cloned()
             .map(|source| (source, BTreeMap::new()))
-            .collect::<BTreeMap<_, BTreeMap<CoveredInputEntry, Vec<u8>>>>();
+            .collect::<BTreeMap<_, BTreeMap<SupportingRow, Vec<u8>>>>();
 
-        for fact in facts {
-            let ProgramFactEntry::CoveredInput(input) = fact else {
-                continue;
-            };
-            let Some(runtime_source) = receiver.sources.get(&input.source) else {
+        for input in inputs {
+            let Some(runtime_source) = receiver.sources.get(&input.physical_table) else {
                 return Err(Error::InvalidStoredValue(
                     "authority covered input names no compiled source occurrence",
                 ));
@@ -932,7 +890,7 @@ where
                 continue;
             };
             records
-                .get_mut(&input.source)
+                .get_mut(&input.physical_table)
                 .expect("source presence was checked above")
                 .insert(input, record);
         }
@@ -981,13 +939,13 @@ where
     /// tuple: their absence retracts a previously installed content carrier.
     async fn covered_input_runtime_record(
         &mut self,
-        input: &CoveredInputEntry,
+        input: &SupportingRow,
         runtime_source: &CoveredInputSource,
         result_schema_version: SchemaVersionId,
         read_view: &ReadViewSpec,
     ) -> Result<Option<Vec<u8>>, Error> {
         let source_table =
-            self.table_in_schema(input.source.table.as_str(), result_schema_version)?;
+            self.table_in_schema(runtime_source.table.as_str(), result_schema_version)?;
         let version = self
             .covered_input_version(input, result_schema_version)
             .await?

@@ -697,37 +697,9 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
         .apply_sync_message_settled(SyncMessage::Subscribe(bob_subscribe.clone()))
         .unwrap();
     let update = |subscription, reset_input_set: bool, opening_pending: bool, defer_settlement| {
-        let program_fact_adds = (reset_input_set && !opening_pending)
-            .then(|| {
-                vec![
-                    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
-                        crate::protocol::ProgramSourceCoverageEntry {
-                            source: crate::protocol::ProgramSourceId {
-                                table: "issues".to_owned().into(),
-                                path: vec![crate::protocol::ProgramSourceRole::Root],
-                            },
-                            complete: true,
-                        },
-                    ),
-                    crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
-                        crate::protocol::ProgramSourceCoverageEntry {
-                            source: crate::protocol::ProgramSourceId {
-                                table: "users".to_owned().into(),
-                                path: vec![
-                                    crate::protocol::ProgramSourceRole::Root,
-                                    crate::protocol::ProgramSourceRole::Alias(
-                                        "reference:assignee".to_owned(),
-                                    ),
-                                ],
-                            },
-                            complete: true,
-                        },
-                    ),
-                ]
-            })
-            .unwrap_or_default();
         crate::node::ViewUpdateParts {
-            wire_rows: None,
+            wire_rows: (reset_input_set && !opening_pending)
+                .then(|| crate::protocol::SupportingRowsUpdate::snapshot(Vec::new())),
             subscription,
             settled_through: crate::time::GlobalTime(7),
             defer_settlement,
@@ -738,8 +710,6 @@ fn interleaved_policy_scoped_lifecycles_keep_reset_and_defer_receipts_separate()
             opening_pending,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds,
-            program_fact_removes: Vec::new(),
         }
     };
 
@@ -863,33 +833,7 @@ fn pending_authoritative_reset_acknowledgement_is_generation_checked() {
         opening_pending: false,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: vec![
-            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
-                crate::protocol::ProgramSourceCoverageEntry {
-                    source: crate::protocol::ProgramSourceId {
-                        table: "issues".to_owned().into(),
-                        path: vec![crate::protocol::ProgramSourceRole::Root],
-                    },
-                    complete: true,
-                },
-            ),
-            crate::protocol::ProgramFactEntry::ProgramSourceCoverage(
-                crate::protocol::ProgramSourceCoverageEntry {
-                    source: crate::protocol::ProgramSourceId {
-                        table: "users".to_owned().into(),
-                        path: vec![
-                            crate::protocol::ProgramSourceRole::Root,
-                            crate::protocol::ProgramSourceRole::Alias(
-                                "reference:assignee".to_owned(),
-                            ),
-                        ],
-                    },
-                    complete: true,
-                },
-            ),
-        ],
-        program_fact_removes: Vec::new(),
-        wire_rows: None,
+        wire_rows: Some(crate::protocol::SupportingRowsUpdate::snapshot(Vec::new())),
     };
 
     relay

@@ -9,7 +9,9 @@
 use crate::storage_codec_profile::epoch_1_storage_codec_profile;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jazz_storage_rocksdb::Durability as RocksDurability;
-use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage as ImmediateSqliteStorage};
+use jazz_storage_sqlite::{
+    Durability as SqliteDurability, SqliteStorage as ImmediateSqliteStorage,
+};
 use sha2::{Digest, Sha256};
 
 /// The storage families that the native settlement producer must prove before
@@ -45,14 +47,19 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "da7d6e9e39c33433c8b163fd8b767658fcb0a653044579b7a986482686271c4f";
+    "f3ef22d387f4fef9e101343713f6080e37e87678680d39b8e6aed4957f4616ba";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "3c6a10107539005448ff9fde21d821bdfba4c55db820722de01e0c2c1571e812";
-const CURRENT_NATIVE_SQLITE_BASE64: &str = include_str!("../../../fixtures/current-native-jazz.sqlite.gz.base64");
-const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str = "4bd6ef06288d01b2d89cc53402b6cff3e470d25341d4e9dbcfe9fddd54b8bf7e";
-const CURRENT_NATIVE_SQLITE_SHA256: &str = "20e7f266e895183cb8251a2543b389464800110f849b8a5572a80e139a9b567d";
-const CURRENT_NATIVE_ROCKSDB_BASE64: &str = include_str!("../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
-const CURRENT_NATIVE_ROCKSDB_SHA256: &str = "130c0d93e12d81fa7528511ca1b4994c8981f2dbd6d67c89e8bfdc5c98bcad06";
+    "2db44fe73c261103149c5aad74b03ede66897aef5d55a666ee361c39a4db64dc";
+const CURRENT_NATIVE_SQLITE_BASE64: &str =
+    include_str!("../../../fixtures/current-native-jazz.sqlite.gz.base64");
+const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
+    "4bd6ef06288d01b2d89cc53402b6cff3e470d25341d4e9dbcfe9fddd54b8bf7e";
+const CURRENT_NATIVE_SQLITE_SHA256: &str =
+    "20e7f266e895183cb8251a2543b389464800110f849b8a5572a80e139a9b567d";
+const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
+    include_str!("../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
+const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
+    "130c0d93e12d81fa7528511ca1b4994c8981f2dbd6d67c89e8bfdc5c98bcad06";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -96,14 +103,30 @@ fn native_corpus_pack(receipt: &NativeCorpusReceipt) -> String {
         // cannot distinguish an empty-but-opened family from one the
         // producer accidentally omitted from the corpus.
         use std::fmt::Write as _;
-        writeln!(pack, "store\t{store}")
-            .expect("writing an in-memory corpus pack cannot fail");
+        writeln!(pack, "store\t{store}").expect("writing an in-memory corpus pack cannot fail");
         for (key, value) in rows {
-            writeln!(pack, "entry\t{store}\t{}\t{}", hex::encode(key), hex::encode(value))
-                .expect("writing an in-memory corpus pack cannot fail");
+            writeln!(
+                pack,
+                "entry\t{store}\t{}\t{}",
+                hex::encode(key),
+                hex::encode(value)
+            )
+            .expect("writing an in-memory corpus pack cannot fail");
         }
     }
     pack
+}
+
+fn native_pack_without_derived_scope_entries(pack: &str) -> String {
+    // Subscription caches are explicitly invalidated on this format upgrade;
+    // every native family, its registry entry and every primary byte still match.
+    pack.lines()
+        .filter(|line| {
+            !line.starts_with("entry\tjazz_known_state_facts\t")
+                && !line.starts_with("entry\tjazz_settled_program_facts\t")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn epoch_1_native_corpus_pack() -> String {
@@ -154,18 +177,24 @@ fn decode_native_physical_fixture(
 }
 
 fn materialize_native_sqlite_fixture(path: &std::path::Path, base64: &str) -> Result<(), String> {
-    materialize_native_sqlite_fixture_with_hashes(path, base64, EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256, EPOCH_1_NATIVE_SQLITE_SHA256)
+    materialize_native_sqlite_fixture_with_hashes(
+        path,
+        base64,
+        EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256,
+        EPOCH_1_NATIVE_SQLITE_SHA256,
+    )
 }
 
-fn materialize_native_sqlite_fixture_with_hashes(path: &std::path::Path, base64: &str, archive_sha: &str, sqlite_sha: &str) -> Result<(), String> {
+fn materialize_native_sqlite_fixture_with_hashes(
+    path: &std::path::Path,
+    base64: &str,
+    archive_sha: &str,
+    sqlite_sha: &str,
+) -> Result<(), String> {
     // Verify the immutable payload before creating a target. This is both a
     // corruption receipt and a guard against a bad checked-in fixture being
     // reported later as an adapter-open failure.
-    let bytes = decode_native_physical_fixture(
-        base64,
-        archive_sha,
-        "SQLite",
-    )?;
+    let bytes = decode_native_physical_fixture(base64, archive_sha, "SQLite")?;
     let mut sqlite = Vec::new();
     std::io::Read::read_to_end(
         &mut flate2::read::GzDecoder::new(std::io::Cursor::new(bytes)),
@@ -191,11 +220,7 @@ fn unpack_native_rocksdb_fixture(
     root: &std::path::Path,
     base64: &str,
 ) -> Result<std::path::PathBuf, String> {
-    let bytes = decode_native_physical_fixture(
-        base64,
-        EPOCH_1_NATIVE_ROCKSDB_SHA256,
-        "RocksDB",
-    )?;
+    let bytes = decode_native_physical_fixture(base64, EPOCH_1_NATIVE_ROCKSDB_SHA256, "RocksDB")?;
     unpack_native_rocksdb_archive(root, &bytes)
 }
 
@@ -212,17 +237,17 @@ fn unpack_native_rocksdb_archive(
         .map_err(|error| format!("native RocksDB corpus archive is not safe: {error}"))?;
     let database = root.join("rocksdb-epoch-1");
     if !database.is_dir() {
-        return Err("native RocksDB corpus archive does not contain rocksdb-epoch-1 root".to_owned());
+        return Err(
+            "native RocksDB corpus archive does not contain rocksdb-epoch-1 root".to_owned(),
+        );
     }
     Ok(database)
 }
 
 fn inspect_native_sqlite_candidate(path: &std::path::Path) -> Result<(), String> {
-    let connection = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|error| format!("candidate SQLite image cannot open read-only: {error}"))?;
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("candidate SQLite image cannot open read-only: {error}"))?;
     let rows: u64 = connection
         .query_row("SELECT COUNT(*) FROM kv", [], |row| row.get(0))
         .map_err(|error| format!("candidate SQLite image lacks readable kv rows: {error}"))?;
@@ -263,8 +288,9 @@ fn assert_native_corpus_candidate_is_staged(
     kind: &str,
 ) {
     assert!(candidate.exists(), "{kind} staged candidate must exist");
-    assert_staged_path_is_distinct(live, candidate, kind)
-        .unwrap_or_else(|error| panic!("{kind} candidate must be staged outside the live producer root: {error}"));
+    assert_staged_path_is_distinct(live, candidate, kind).unwrap_or_else(|error| {
+        panic!("{kind} candidate must be staged outside the live producer root: {error}")
+    });
 }
 
 /// Resolve a corpus file through its existing parent.  Candidates are required
@@ -272,7 +298,10 @@ fn assert_native_corpus_candidate_is_staged(
 /// which has not been created yet just as checkable as one which has, while
 /// still resolving `.` and symlink aliases in the parent before any bytes are
 /// written.
-fn canonical_corpus_child(path: &std::path::Path, role: &str) -> Result<std::path::PathBuf, String> {
+fn canonical_corpus_child(
+    path: &std::path::Path,
+    role: &str,
+) -> Result<std::path::PathBuf, String> {
     let name = path
         .file_name()
         .filter(|name| !name.is_empty())
@@ -284,7 +313,9 @@ fn canonical_corpus_child(path: &std::path::Path, role: &str) -> Result<std::pat
     let canonical_parent = std::fs::canonicalize(parent)
         .map_err(|error| format!("cannot resolve {role} parent {parent:?}: {error}"))?;
     if !canonical_parent.is_dir() {
-        return Err(format!("{role} parent {canonical_parent:?} is not a directory"));
+        return Err(format!(
+            "{role} parent {canonical_parent:?} is not a directory"
+        ));
     }
     Ok(canonical_parent.join(name))
 }
@@ -320,7 +351,8 @@ fn same_existing_file_identity(
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        return Ok(left_metadata.dev() == right_metadata.dev() && left_metadata.ino() == right_metadata.ino());
+        return Ok(left_metadata.dev() == right_metadata.dev()
+            && left_metadata.ino() == right_metadata.ino());
     }
     #[cfg(windows)]
     {
@@ -363,7 +395,8 @@ fn regular_files_below(path: &std::path::Path) -> Result<Vec<std::path::PathBuf>
     for entry in std::fs::read_dir(path)
         .map_err(|error| format!("cannot list corpus directory {path:?}: {error}"))?
     {
-        let entry = entry.map_err(|error| format!("cannot read corpus directory entry: {error}"))?;
+        let entry =
+            entry.map_err(|error| format!("cannot read corpus directory entry: {error}"))?;
         let child = entry.path();
         let child_metadata = std::fs::symlink_metadata(&child)
             .map_err(|error| format!("cannot inspect corpus member {child:?}: {error}"))?;
@@ -425,21 +458,21 @@ fn assert_staged_path_is_distinct(
     };
     let candidate_canonical = canonical_corpus_child(candidate, &format!("{kind} candidate"))?;
 
-    if candidate_canonical == live_canonical
-        || candidate_canonical.starts_with(&live_root)
-    {
+    if candidate_canonical == live_canonical || candidate_canonical.starts_with(&live_root) {
         return Err(format!(
             "candidate {candidate:?} resolves inside live producer root {live_root:?}"
         ));
     }
     if path_entry_exists(candidate)? {
-        let candidate_metadata = std::fs::symlink_metadata(candidate)
-            .map_err(|error| format!("cannot inspect existing {kind} candidate {candidate:?}: {error}"))?;
+        let candidate_metadata = std::fs::symlink_metadata(candidate).map_err(|error| {
+            format!("cannot inspect existing {kind} candidate {candidate:?}: {error}")
+        })?;
         if candidate_metadata.file_type().is_symlink() {
             return Err(format!("candidate {candidate:?} is a symlink"));
         }
-        let candidate_target = std::fs::canonicalize(candidate)
-            .map_err(|error| format!("cannot resolve existing {kind} candidate {candidate:?}: {error}"))?;
+        let candidate_target = std::fs::canonicalize(candidate).map_err(|error| {
+            format!("cannot resolve existing {kind} candidate {candidate:?}: {error}")
+        })?;
         if candidate_target == live_canonical || candidate_target.starts_with(&live_root) {
             return Err(format!(
                 "candidate {candidate:?} resolves through an alias inside live producer root {live_root:?}"
@@ -477,11 +510,15 @@ fn publish_verified_native_corpus_candidate(
     candidate: &std::path::Path,
     requested: &std::path::Path,
 ) -> Result<(), String> {
-    publish_verified_native_corpus_candidate_with_copy(candidate, requested, |candidate, temporary| {
-        std::fs::copy(candidate, temporary)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    })
+    publish_verified_native_corpus_candidate_with_copy(
+        candidate,
+        requested,
+        |candidate, temporary| {
+            std::fs::copy(candidate, temporary)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+    )
 }
 
 /// The copy operation is an explicit seam so this receipt can prove that an
@@ -509,7 +546,9 @@ fn publish_verified_native_corpus_candidate_with_copy(
         .write(true)
         .create_new(true)
         .open(&temporary)
-        .map_err(|error| format!("reserve private corpus publication path {temporary:?}: {error}"))?;
+        .map_err(|error| {
+            format!("reserve private corpus publication path {temporary:?}: {error}")
+        })?;
     if let Err(error) = copy(&candidate, &temporary) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
@@ -663,14 +702,18 @@ fn native_corpus_lineage(
         Vec::<String>::new(),
     )
     .expect("native corpus lineage is valid");
-    publication.physical_identities.tables.get_mut("notes")
+    publication
+        .physical_identities
+        .tables
+        .get_mut("notes")
         .expect("lineage retains notes table")
-        .columns.get_mut("genre")
+        .columns
+        .get_mut("genre")
         .expect("lineage allocates genre column")
         .id = crate::ids::GlobalPhysicalColumnId(uuid::Uuid::new_v5(
-            &namespace,
-            b"table/notes/column/genre",
-        ));
+        &namespace,
+        b"table/notes/column/genre",
+    ));
     publication.id = publication.content_id();
     publication
 }
@@ -678,8 +721,7 @@ fn native_corpus_lineage(
 fn publish_native_corpus_lineage<S>(
     node: &mut NodeState<S>,
     snapshot: &crate::protocol::CatalogueSnapshot,
-)
-where
+) where
     S: ReopenableStorage,
 {
     let publication = native_corpus_lineage(snapshot);
@@ -742,10 +784,7 @@ where
     }))
     .expect("native corpus registers a policy-scoped receipt");
     let mut authority = PeerState::relay();
-    authority.set_subscription_policy_binding(
-        subscription,
-        (AuthorSubject::SYSTEM, policy_claims),
-    );
+    authority.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, policy_claims));
     let update = authority
         .rehydrate_query_for_subscription_with_opts(
             node,
@@ -851,9 +890,7 @@ fn native_corpus_authority_snapshot(schema: &JazzSchema) -> crate::protocol::Cat
     }
 }
 
-fn native_corpus_required_application_stores<S>(
-    node: &NodeState<S>,
-) -> BTreeSet<String>
+fn native_corpus_required_application_stores<S>(node: &NodeState<S>) -> BTreeSet<String>
 where
     S: OrderedKvStorage,
 {
@@ -973,8 +1010,10 @@ where
     NativeCorpusReceipt { stores }
 }
 
-fn assert_native_corpus_has_required_families<S>(node: &mut NodeState<S>, receipt: &NativeCorpusReceipt)
-where
+fn assert_native_corpus_has_required_families<S>(
+    node: &mut NodeState<S>,
+    receipt: &NativeCorpusReceipt,
+) where
     S: OrderedKvStorage,
 {
     for store in NATIVE_CORPUS_REQUIRED_STORES {
@@ -983,6 +1022,8 @@ where
             "the producer registry must include {store}"
         );
     }
+    // Derived subscription caches may be empty after a format upgrade;
+    // their registry entries remain mandatory, but native rows/history do not.
     for store in [
         "jazz_catalogue",
         "jazz_nodes",
@@ -991,8 +1032,6 @@ where
         "jazz_merge_heads",
         "jazz_global_changes",
         "jazz_deletion_history",
-        "jazz_known_state_facts",
-        "jazz_settled_program_facts",
         groove::db::LARGE_VALUE_METADATA_CF,
     ] {
         assert!(
@@ -1002,13 +1041,15 @@ where
     }
     let application = native_corpus_required_application_stores(node);
     assert!(
-        application.iter().all(|store| receipt.stores.contains_key(store)),
+        application
+            .iter()
+            .all(|store| receipt.stores.contains_key(store)),
         "the corpus must scan every permanent physical application family derived from the authority manifest"
     );
     assert!(
-        application.iter().any(|store| {
-            store.ends_with("_history") && !receipt.stores[store].is_empty()
-        }),
+        application
+            .iter()
+            .any(|store| { store.ends_with("_history") && !receipt.stores[store].is_empty() }),
         "the authority-derived physical application closure must contain historical row records"
     );
     assert!(
@@ -1032,7 +1073,11 @@ where
     let attachment = versions
         .iter()
         .find(|version| version.row_uuid() == row(0xc1))
-        .and_then(|version| version.cell(table, "attachment").expect("decode corpus attachment"))
+        .and_then(|version| {
+            version
+                .cell(table, "attachment")
+                .expect("decode corpus attachment")
+        })
         .expect("seeded corpus row retains an attachment");
     let Value::Large(value_ref) = attachment else {
         panic!("seeded corpus attachment must be an indirect large value");
@@ -1045,15 +1090,21 @@ where
     node_key.extend_from_slice(&encoded_root);
     let metadata = &receipt.stores[groove::db::LARGE_VALUE_METADATA_CF];
     assert!(
-        metadata.iter().any(|(key, value)| key == &root_key && !value.is_empty()),
+        metadata
+            .iter()
+            .any(|(key, value)| key == &root_key && !value.is_empty()),
         "the seeded descriptor's exact root key retains nonempty durable lifecycle/refcount metadata"
     );
     assert!(
-        metadata.iter().any(|(key, value)| key == &node_key && !value.is_empty()),
+        metadata
+            .iter()
+            .any(|(key, value)| key == &node_key && !value.is_empty()),
         "the seeded descriptor's exact root node retains nonempty child/reference metadata"
     );
     assert!(
-        metadata.iter().all(|(key, _)| !key.starts_with(b"install/")),
+        metadata
+            .iter()
+            .all(|(key, _)| !key.starts_with(b"install/")),
         "a completed local seed leaves no unfinished remote-install journal"
     );
 }
@@ -1094,11 +1145,13 @@ where
         prepared.staged_chunks,
     ))
     .expect("fixture chunks stage through the normal node admission path");
-    let staged = crate::db::block_on(node.finalize_large_value_upload(upload_id, prepared.value_ref))
-        .expect("fixture root finalizes through the normal node admission path");
-    first_commit
-        .cells
-        .insert("attachment".to_owned(), Value::Large(Box::new(staged.value_ref)));
+    let staged =
+        crate::db::block_on(node.finalize_large_value_upload(upload_id, prepared.value_ref))
+            .expect("fixture root finalizes through the normal node admission path");
+    first_commit.cells.insert(
+        "attachment".to_owned(),
+        Value::Large(Box::new(staged.value_ref)),
+    );
     first_commit
         .prepared_large_columns
         .insert("attachment".to_owned());
@@ -1128,8 +1181,7 @@ where
     .expect("seed independent current row");
     let deletion = node
         .commit_mergeable_settled(
-            MergeableCommit::new("notes", row(0xc6), 103)
-                .deletion(DeletionEvent::Deleted),
+            MergeableCommit::new("notes", row(0xc6), 103).deletion(DeletionEvent::Deleted),
         )
         .expect("seed an independent deletion history entry");
     node.accept_global_for_test(deletion)
@@ -1150,16 +1202,22 @@ where
         .find(|table| table.name == "todos")
         .expect("native corpus source todos schema");
     assert_eq!(
-        versions[0].cell(source_todos, "title").expect("decode first title"),
+        versions[0]
+            .cell(source_todos, "title")
+            .expect("decode first title"),
         Some(v("settlement baseline")),
         "the first historical title survives reopening exactly"
     );
     assert_eq!(
-        versions[1].cell(source_todos, "title").expect("decode second title"),
+        versions[1]
+            .cell(source_todos, "title")
+            .expect("decode second title"),
         Some(v("mixed-write predecessor")),
         "the later historical title survives reopening exactly"
     );
-    let latest = node.version_tx_id(&versions[1]).expect("latest history tx id");
+    let latest = node
+        .version_tx_id(&versions[1])
+        .expect("latest history tx id");
     assert_eq!(node.version_tx_id(&versions[1]).unwrap(), latest);
     assert_eq!(
         node.transaction_record(latest)
@@ -1170,7 +1228,11 @@ where
     let rows = node
         .current_rows("todos", DurabilityTier::Local)
         .expect("current rows reopen");
-    assert_eq!(rows.len(), 0, "branch rows stay out of the shared read view");
+    assert_eq!(
+        rows.len(),
+        0,
+        "branch rows stay out of the shared read view"
+    );
     let note_versions = node
         .query_table_versions("notes")
         .expect("independent table history");
@@ -1185,11 +1247,17 @@ where
         .find(|version| version.row_uuid() == row(0xc3))
         .expect("independent note history survives");
     assert_eq!(
-        historical_note.cell(&source_notes, "body").expect("decode historical note body"),
+        historical_note
+            .cell(&source_notes, "body")
+            .expect("decode historical note body"),
         Some(v("independent table")),
         "the old authored note body survives reopening exactly"
     );
-    assert!(versions.iter().all(|version| version.row_uuid() == row_uuid));
+    assert!(
+        versions
+            .iter()
+            .all(|version| version.row_uuid() == row_uuid)
+    );
 
     let active_schema = native_corpus_evolved_schema();
     let active_shape = Query::from("notes")
@@ -1221,29 +1289,49 @@ where
         "active migration lens supplies its durable default"
     );
     assert!(
-        current_notes.iter().all(|current| current.row_uuid() != row(0xc6)),
+        current_notes
+            .iter()
+            .all(|current| current.row_uuid() != row(0xc6)),
         "a globally settled deletion remains invisible from normal current reads after reopen"
     );
-    let active = node.current_write_schema().expect("current write schema reopens");
-    assert_eq!(active.revision, 1, "active write-schema revision survives reopen");
+    let active = node
+        .current_write_schema()
+        .expect("current write schema reopens");
+    assert_eq!(
+        active.revision, 1,
+        "active write-schema revision survives reopen"
+    );
     assert_eq!(
         active.schema,
         active_schema.version_id(),
         "active write-schema pointer targets the published lineage descendant"
     );
-    assert_eq!(node.catalogue_schemas().len(), 2, "genesis and descendant schemas reopen");
-    assert_eq!(node.catalogue_lenses().len(), 1, "active lineage lens reopens");
     assert_eq!(
-        node.settled_authoritative_receipt_counts_for_test(),
-        (1, 1),
-        "settled result membership and program facts are recovered as NodeState query state"
+        node.catalogue_schemas().len(),
+        2,
+        "genesis and descendant schemas reopen"
+    );
+    assert_eq!(
+        node.catalogue_lenses().len(),
+        1,
+        "active lineage lens reopens"
+    );
+    assert!(
+        node.query
+            .authority_results
+            .values()
+            .all(|state| !state.live_settled),
+        "reopen never restores live subscription authority; legacy scope caches are discarded"
     );
 
     // The receipt above deliberately records the row descriptor, not the
     // chunk backend's private install receipt.  Prove the complementary
     // durable contract directly: reopening the current node materializes the
     // whole indirect value through Groove's ordered chunk plane.
-    let table = node.table("todos").expect("todos table remains known").clone();
+    let table = node
+        .table("todos")
+        .expect("todos table remains known")
+        .clone();
     let attachment = versions[0]
         .cell(&table, "attachment")
         .expect("history attachment decodes")
@@ -1275,16 +1363,14 @@ where
     // published snapshot into the independent SQLite and RocksDB roots makes
     // their logical packs comparable without pretending local integer aliases
     // or freshly minted UUIDs are an interchange format.
-    let mut producer = crate::db::block_on(NodeState::new_catalogue_uninitialized(node(0xc0), open()))
-        .expect("open uninitialized settlement-baseline producer");
+    let mut producer =
+        crate::db::block_on(NodeState::new_catalogue_uninitialized(node(0xc0), open()))
+            .expect("open uninitialized settlement-baseline producer");
     producer
         .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .expect("install the one authority snapshot before corpus writes");
-    let (row_uuid, _latest) = seed_native_corpus(
-        &mut producer,
-        "settlement baseline",
-        "independent table",
-    );
+    let (row_uuid, _latest) =
+        seed_native_corpus(&mut producer, "settlement baseline", "independent table");
     publish_native_corpus_lineage(&mut producer, snapshot);
     seed_native_corpus_settled_query_state(&mut producer);
     let before_close = native_corpus_receipt(&producer, &schema);
@@ -1341,7 +1427,7 @@ where
             .query_table_versions("notes")
             .expect("mixed write history")
             .iter()
-        .any(|version| version.row_uuid() == row(0xc4)),
+            .any(|version| version.row_uuid() == row(0xc4)),
         "new writer data survives without rewriting historical transaction bytes"
     );
     assert_ne!(
@@ -1361,8 +1447,7 @@ fn verify_historical_native_corpus<S>(
     schema: JazzSchema,
     expected_pack: fn() -> String,
     open: impl Fn() -> S,
-)
-where
+) where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let mut reader = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
@@ -1371,8 +1456,8 @@ where
     assert_native_corpus_has_required_families(&mut reader, &before_write);
     if std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT").is_none() {
         assert_eq!(
-            native_corpus_pack(&before_write),
-            expected_pack(),
+            native_pack_without_derived_scope_entries(&native_corpus_pack(&before_write)),
+            native_pack_without_derived_scope_entries(&expected_pack()),
             "current Jazz reads every retained historical family and entry"
         );
     }
@@ -1442,93 +1527,107 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     // only a final publication path, never a location that could alias the
     // live RocksDB tree while it is being exported.
     let rocks_candidate_directory = private_native_corpus_staging_root("rocksdb");
-    let rocks_candidate_archive = rocks_candidate_directory.path().join("epoch-1-native-jazz-rocksdb.tar.gz");
-    let requested_rocks_archive = std::env::var_os("JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT")
-        .map(std::path::PathBuf::from);
+    let rocks_candidate_archive = rocks_candidate_directory
+        .path()
+        .join("epoch-1-native-jazz-rocksdb.tar.gz");
+    let requested_rocks_archive =
+        std::env::var_os("JAZZ_NATIVE_CORPUS_ROCKS_ARCHIVE_OUT").map(std::path::PathBuf::from);
     let rocks_archive_output = rocks_candidate_archive.clone();
     let rocks_candidate_verify_archive = rocks_candidate_archive.clone();
     let rocks_candidate_schema = rocks_schema.clone();
     let rocks_candidate_profile = profile.clone();
-    let rocks_receipt = exercise_native_corpus(rocks_schema.clone(), &snapshot, move || {
-        let families = rocks_schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        YieldingStorage::wrap(
-            ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-                &rocks_open_path,
-                &refs,
-                RocksDurability::FullSync,
-                &rocks_profile,
-            )
-            .expect("open RocksDB corpus storage"),
-        )
-    }, move || {
-        let families = rocks_wrong_schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-            &rocks_wrong_path,
-            &refs,
-            RocksDurability::FullSync,
-            &groove::storage::StorageCodecProfile::groove_epoch_1(),
-        )
-        .map(YieldingStorage::wrap)
-    }, move || {
-        assert_ne!(
-            rocks_archive_output.parent(),
-            rocks_path.parent(),
-            "RocksDB candidate archive must be staged outside the live producer root"
-        );
-        let output_file = std::fs::File::create(&rocks_archive_output)
-            .expect("create RocksDB candidate archive");
-        let encoder = flate2::write::GzEncoder::new(output_file, flate2::Compression::best());
-        let mut archive = tar::Builder::new(encoder);
-        archive
-            .append_dir_all("rocksdb-epoch-1", &rocks_path)
-            .expect("archive requested RocksDB corpus store");
-        archive
-            .into_inner()
-            .expect("finish RocksDB tar archive")
-            .finish()
-            .expect("finish RocksDB gzip archive");
-    }, move || {
-        assert_native_corpus_candidate_is_staged(
-            &rocks_live_path_for_verification,
-            &rocks_candidate_verify_archive,
-            "RocksDB archive",
-        );
-        let verification_root = tempfile::tempdir()
-            .expect("create fresh RocksDB candidate verification root");
-        let archive = std::fs::read(&rocks_candidate_verify_archive)
-            .expect("read exported RocksDB candidate archive");
-        let candidate_root = unpack_native_rocksdb_archive(verification_root.path(), &archive)
-            .expect("unpack exported RocksDB candidate into fresh root");
-        inspect_native_rocksdb_candidate(&candidate_root)
-            .expect("exported RocksDB candidate has readable durable rows");
-        let candidate_schema = rocks_candidate_schema.clone();
-        let candidate_profile = rocks_candidate_profile.clone();
-        verify_historical_native_corpus(candidate_schema.clone(), current_producer_native_corpus_pack, move || {
-            let families = candidate_schema.column_families();
+    let rocks_receipt = exercise_native_corpus(
+        rocks_schema.clone(),
+        &snapshot,
+        move || {
+            let families = rocks_schema.column_families();
             let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
             YieldingStorage::wrap(
                 ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-                    &candidate_root,
+                    &rocks_open_path,
                     &refs,
                     RocksDurability::FullSync,
-                    &candidate_profile,
+                    &rocks_profile,
                 )
-                .expect("current RocksDB adapter opens exported candidate corpus"),
+                .expect("open RocksDB corpus storage"),
             )
-        });
-    }, move || {
-        assert_native_corpus_candidate_is_staged(
-            &rocks_live_path_for_publish,
-            &rocks_candidate_archive,
-            "RocksDB archive",
-        );
-        if let Some(requested) = &requested_rocks_archive {
-            publish_verified_native_corpus_candidate(&rocks_candidate_archive, requested)
-                .expect("atomically publish verified RocksDB candidate archive");
-        }
-    });
+        },
+        move || {
+            let families = rocks_wrong_schema.column_families();
+            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+                &rocks_wrong_path,
+                &refs,
+                RocksDurability::FullSync,
+                &groove::storage::StorageCodecProfile::groove_epoch_1(),
+            )
+            .map(YieldingStorage::wrap)
+        },
+        move || {
+            assert_ne!(
+                rocks_archive_output.parent(),
+                rocks_path.parent(),
+                "RocksDB candidate archive must be staged outside the live producer root"
+            );
+            let output_file = std::fs::File::create(&rocks_archive_output)
+                .expect("create RocksDB candidate archive");
+            let encoder = flate2::write::GzEncoder::new(output_file, flate2::Compression::best());
+            let mut archive = tar::Builder::new(encoder);
+            archive
+                .append_dir_all("rocksdb-epoch-1", &rocks_path)
+                .expect("archive requested RocksDB corpus store");
+            archive
+                .into_inner()
+                .expect("finish RocksDB tar archive")
+                .finish()
+                .expect("finish RocksDB gzip archive");
+        },
+        move || {
+            assert_native_corpus_candidate_is_staged(
+                &rocks_live_path_for_verification,
+                &rocks_candidate_verify_archive,
+                "RocksDB archive",
+            );
+            let verification_root =
+                tempfile::tempdir().expect("create fresh RocksDB candidate verification root");
+            let archive = std::fs::read(&rocks_candidate_verify_archive)
+                .expect("read exported RocksDB candidate archive");
+            let candidate_root = unpack_native_rocksdb_archive(verification_root.path(), &archive)
+                .expect("unpack exported RocksDB candidate into fresh root");
+            inspect_native_rocksdb_candidate(&candidate_root)
+                .expect("exported RocksDB candidate has readable durable rows");
+            let candidate_schema = rocks_candidate_schema.clone();
+            let candidate_profile = rocks_candidate_profile.clone();
+            verify_historical_native_corpus(
+                candidate_schema.clone(),
+                current_producer_native_corpus_pack,
+                move || {
+                    let families = candidate_schema.column_families();
+                    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+                    YieldingStorage::wrap(
+                        ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+                            &candidate_root,
+                            &refs,
+                            RocksDurability::FullSync,
+                            &candidate_profile,
+                        )
+                        .expect("current RocksDB adapter opens exported candidate corpus"),
+                    )
+                },
+            );
+        },
+        move || {
+            assert_native_corpus_candidate_is_staged(
+                &rocks_live_path_for_publish,
+                &rocks_candidate_archive,
+                "RocksDB archive",
+            );
+            if let Some(requested) = &requested_rocks_archive {
+                publish_verified_native_corpus_candidate(&rocks_candidate_archive, requested)
+                    .expect("atomically publish verified RocksDB candidate archive");
+            }
+        },
+    );
 
     let sqlite_directory = tempfile::tempdir().expect("create SQLite corpus directory");
     let sqlite_path = sqlite_directory.path().join("jazz.sqlite");
@@ -1539,88 +1638,106 @@ fn settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes() {
     let sqlite_live_path_for_publish = sqlite_path.clone();
     let sqlite_wrong_schema = sqlite_schema.clone();
     let sqlite_candidate_directory = private_native_corpus_staging_root("sqlite");
-    let sqlite_candidate_path = sqlite_candidate_directory.path().join("epoch-1-native-jazz.sqlite");
-    let requested_sqlite_fixture_path = std::env::var_os("JAZZ_NATIVE_CORPUS_SQLITE_OUT")
-        .map(std::path::PathBuf::from);
+    let sqlite_candidate_path = sqlite_candidate_directory
+        .path()
+        .join("epoch-1-native-jazz.sqlite");
+    let requested_sqlite_fixture_path =
+        std::env::var_os("JAZZ_NATIVE_CORPUS_SQLITE_OUT").map(std::path::PathBuf::from);
     let sqlite_candidate_output = sqlite_candidate_path.clone();
     let sqlite_candidate_verify_path = sqlite_candidate_path.clone();
     let sqlite_candidate_schema = sqlite_schema.clone();
     let sqlite_candidate_profile = profile.clone();
-    let sqlite_receipt = exercise_native_corpus(sqlite_schema.clone(), &snapshot, move || {
-        let families = sqlite_schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        YieldingStorage::wrap(
-            ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                &sqlite_open_path,
-                &refs,
-                SqliteDurability::FullSync,
-                &profile,
-            )
-            .expect("open SQLite corpus storage"),
-        )
-    }, move || {
-        let families = sqlite_wrong_schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-            &sqlite_wrong_path,
-            &refs,
-            SqliteDurability::FullSync,
-            &groove::storage::StorageCodecProfile::groove_epoch_1(),
-        )
-        .map(YieldingStorage::wrap)
-    }, move || {
-        assert_ne!(
-            sqlite_candidate_output.parent(),
-            sqlite_path.parent(),
-            "SQLite candidate must be staged outside the live producer root"
-        );
-        std::fs::copy(&sqlite_path, &sqlite_candidate_output)
-            .expect("copy SQLite candidate corpus store");
-    }, move || {
-        assert_native_corpus_candidate_is_staged(
-            &sqlite_live_path_for_verification,
-            &sqlite_candidate_verify_path,
-            "SQLite image",
-        );
-        let verification_directory = tempfile::tempdir()
-            .expect("create fresh SQLite candidate verification directory");
-        let verification_path = verification_directory.path().join("candidate.sqlite");
-        let bytes = std::fs::read(&sqlite_candidate_verify_path)
-            .expect("read exported SQLite candidate");
-        materialize_native_sqlite_bytes(&verification_path, &bytes)
-            .expect("materialize exported SQLite candidate at fresh path");
-        inspect_native_sqlite_candidate(&verification_path)
-            .expect("exported SQLite candidate has readable durable rows");
-        let candidate_schema = sqlite_candidate_schema.clone();
-        let candidate_profile = sqlite_candidate_profile.clone();
-        verify_historical_native_corpus(candidate_schema.clone(), current_producer_native_corpus_pack, move || {
-            let families = candidate_schema.column_families();
+    let sqlite_receipt = exercise_native_corpus(
+        sqlite_schema.clone(),
+        &snapshot,
+        move || {
+            let families = sqlite_schema.column_families();
             let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
             YieldingStorage::wrap(
                 ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                    &verification_path,
+                    &sqlite_open_path,
                     &refs,
                     SqliteDurability::FullSync,
-                    &candidate_profile,
+                    &profile,
                 )
-                .expect("current SQLite adapter opens exported candidate corpus"),
+                .expect("open SQLite corpus storage"),
             )
-        });
-    }, move || {
-        assert_native_corpus_candidate_is_staged(
-            &sqlite_live_path_for_publish,
-            &sqlite_candidate_path,
-            "SQLite image",
-        );
-        if let Some(requested) = &requested_sqlite_fixture_path {
-            publish_verified_native_corpus_candidate(&sqlite_candidate_path, requested)
-                .expect("atomically publish verified SQLite candidate corpus store");
-        }
-    });
+        },
+        move || {
+            let families = sqlite_wrong_schema.column_families();
+            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            ImmediateSqliteStorage::open_with_durability_and_codec_profile(
+                &sqlite_wrong_path,
+                &refs,
+                SqliteDurability::FullSync,
+                &groove::storage::StorageCodecProfile::groove_epoch_1(),
+            )
+            .map(YieldingStorage::wrap)
+        },
+        move || {
+            assert_ne!(
+                sqlite_candidate_output.parent(),
+                sqlite_path.parent(),
+                "SQLite candidate must be staged outside the live producer root"
+            );
+            std::fs::copy(&sqlite_path, &sqlite_candidate_output)
+                .expect("copy SQLite candidate corpus store");
+        },
+        move || {
+            assert_native_corpus_candidate_is_staged(
+                &sqlite_live_path_for_verification,
+                &sqlite_candidate_verify_path,
+                "SQLite image",
+            );
+            let verification_directory =
+                tempfile::tempdir().expect("create fresh SQLite candidate verification directory");
+            let verification_path = verification_directory.path().join("candidate.sqlite");
+            let bytes = std::fs::read(&sqlite_candidate_verify_path)
+                .expect("read exported SQLite candidate");
+            materialize_native_sqlite_bytes(&verification_path, &bytes)
+                .expect("materialize exported SQLite candidate at fresh path");
+            inspect_native_sqlite_candidate(&verification_path)
+                .expect("exported SQLite candidate has readable durable rows");
+            let candidate_schema = sqlite_candidate_schema.clone();
+            let candidate_profile = sqlite_candidate_profile.clone();
+            verify_historical_native_corpus(
+                candidate_schema.clone(),
+                current_producer_native_corpus_pack,
+                move || {
+                    let families = candidate_schema.column_families();
+                    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+                    YieldingStorage::wrap(
+                        ImmediateSqliteStorage::open_with_durability_and_codec_profile(
+                            &verification_path,
+                            &refs,
+                            SqliteDurability::FullSync,
+                            &candidate_profile,
+                        )
+                        .expect("current SQLite adapter opens exported candidate corpus"),
+                    )
+                },
+            );
+        },
+        move || {
+            assert_native_corpus_candidate_is_staged(
+                &sqlite_live_path_for_publish,
+                &sqlite_candidate_path,
+                "SQLite image",
+            );
+            if let Some(requested) = &requested_sqlite_fixture_path {
+                publish_verified_native_corpus_candidate(&sqlite_candidate_path, requested)
+                    .expect("atomically publish verified SQLite candidate corpus store");
+            }
+        },
+    );
 
     assert_eq!(
-        rocks_receipt.stores.get(groove::db::LARGE_VALUE_METADATA_CF),
-        sqlite_receipt.stores.get(groove::db::LARGE_VALUE_METADATA_CF),
+        rocks_receipt
+            .stores
+            .get(groove::db::LARGE_VALUE_METADATA_CF),
+        sqlite_receipt
+            .stores
+            .get(groove::db::LARGE_VALUE_METADATA_CF),
         "SQLite and RocksDB agree on the canonical indirect-tree and lifecycle metadata; raw chunk-plane bytes remain backend-owned physical fixture data"
     );
     assert_same_native_corpus(
@@ -1664,8 +1781,13 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
 
     let sqlite_directory = tempfile::tempdir().expect("create SQLite fixture directory");
     let sqlite_path = sqlite_directory.path().join("epoch-1-native-jazz.sqlite");
-    materialize_native_sqlite_fixture_with_hashes(&sqlite_path, CURRENT_NATIVE_SQLITE_BASE64, CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256, CURRENT_NATIVE_SQLITE_SHA256)
-        .expect("materialize checksum-guarded SQLite corpus");
+    materialize_native_sqlite_fixture_with_hashes(
+        &sqlite_path,
+        CURRENT_NATIVE_SQLITE_BASE64,
+        CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256,
+        CURRENT_NATIVE_SQLITE_SHA256,
+    )
+    .expect("materialize checksum-guarded SQLite corpus");
     {
         // This first physical inspection is read-only and intentionally below
         // the Jazz/Groove adapter. It proves the committed file is a SQLite
@@ -1684,22 +1806,34 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
     let sqlite_schema = schema.clone();
     let sqlite_profile = profile.clone();
     let sqlite_open_path = sqlite_path.clone();
-    verify_historical_native_corpus(sqlite_schema.clone(), current_producer_native_corpus_pack, move || {
-        let families = sqlite_schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        YieldingStorage::wrap(
-            ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                &sqlite_open_path,
-                &refs,
-                SqliteDurability::FullSync,
-                &sqlite_profile,
+    verify_historical_native_corpus(
+        sqlite_schema.clone(),
+        current_producer_native_corpus_pack,
+        move || {
+            let families = sqlite_schema.column_families();
+            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            YieldingStorage::wrap(
+                ImmediateSqliteStorage::open_with_durability_and_codec_profile(
+                    &sqlite_open_path,
+                    &refs,
+                    SqliteDurability::FullSync,
+                    &sqlite_profile,
+                )
+                .expect("current SQLite adapter opens committed native corpus"),
             )
-            .expect("current SQLite adapter opens committed native corpus"),
-        )
-    });
+        },
+    );
 
     let rocks_directory = tempfile::tempdir().expect("create RocksDB fixture directory");
-    let rocks_path = unpack_native_rocksdb_archive(rocks_directory.path(), &decode_native_physical_fixture(CURRENT_NATIVE_ROCKSDB_BASE64, CURRENT_NATIVE_ROCKSDB_SHA256, "current RocksDB").unwrap())
+    let rocks_path = unpack_native_rocksdb_archive(
+        rocks_directory.path(),
+        &decode_native_physical_fixture(
+            CURRENT_NATIVE_ROCKSDB_BASE64,
+            CURRENT_NATIVE_ROCKSDB_SHA256,
+            "current RocksDB",
+        )
+        .unwrap(),
+    )
     .expect("extract checksum-guarded RocksDB corpus");
     {
         let options = rocksdb::Options::default();
@@ -1708,7 +1842,9 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
         let read_only = rocksdb::DB::open_cf_for_read_only(&options, &rocks_path, &families, false)
             .expect("open committed RocksDB corpus read-only");
         assert!(
-            families.iter().any(|family| family == "__groove_storage_internal_v1"),
+            families
+                .iter()
+                .any(|family| family == "__groove_storage_internal_v1"),
             "committed RocksDB corpus retains Groove's immutable internal family"
         );
         let rows = families
@@ -1724,19 +1860,23 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
     }
     let rocks_schema = schema;
     let rocks_open_path = rocks_path.clone();
-    verify_historical_native_corpus(rocks_schema.clone(), current_producer_native_corpus_pack, move || {
-        let families = rocks_schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        YieldingStorage::wrap(
-            ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
-                &rocks_open_path,
-                &refs,
-                RocksDurability::FullSync,
-                &profile,
+    verify_historical_native_corpus(
+        rocks_schema.clone(),
+        current_producer_native_corpus_pack,
+        move || {
+            let families = rocks_schema.column_families();
+            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            YieldingStorage::wrap(
+                ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+                    &rocks_open_path,
+                    &refs,
+                    RocksDurability::FullSync,
+                    &profile,
+                )
+                .expect("current RocksDB adapter opens committed native corpus"),
             )
-            .expect("current RocksDB adapter opens committed native corpus"),
-        )
-    });
+        },
+    );
 }
 
 #[test]
@@ -1752,15 +1892,30 @@ fn retired_result_codec_profiles_reject_historical_native_roots() {
     let sqlite_path = sqlite_dir.path().join("historical.sqlite");
     materialize_native_sqlite_fixture(&sqlite_path, EPOCH_1_NATIVE_SQLITE_BASE64).unwrap();
     let sqlite_before = std::fs::read(&sqlite_path).unwrap();
-    let sqlite_error = ImmediateSqliteStorage::open_with_durability_and_codec_profile(&sqlite_path, &refs, SqliteDurability::FullSync, &profile).err().expect("retired SQLite profile must reject");
+    let sqlite_error = ImmediateSqliteStorage::open_with_durability_and_codec_profile(
+        &sqlite_path,
+        &refs,
+        SqliteDurability::FullSync,
+        &profile,
+    )
+    .err()
+    .expect("retired SQLite profile must reject");
     assert!(
         matches!(sqlite_error, groove::storage::Error::InvalidStorageLayout(ref message) if message.contains("storage manifest is inconsistent")),
         "historical SQLite root must fail closed during manifest admission: {sqlite_error}"
     );
     assert_eq!(std::fs::read(&sqlite_path).unwrap(), sqlite_before);
     let rocks_dir = tempfile::tempdir().unwrap();
-    let rocks_path = unpack_native_rocksdb_fixture(rocks_dir.path(), EPOCH_1_NATIVE_ROCKSDB_BASE64).unwrap();
-    let rocks_error = ImmediateRocksDbStorage::open_with_durability_and_codec_profile(&rocks_path, &refs, RocksDurability::FullSync, &profile).err().expect("retired RocksDB profile must reject");
+    let rocks_path =
+        unpack_native_rocksdb_fixture(rocks_dir.path(), EPOCH_1_NATIVE_ROCKSDB_BASE64).unwrap();
+    let rocks_error = ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+        &rocks_path,
+        &refs,
+        RocksDurability::FullSync,
+        &profile,
+    )
+    .err()
+    .expect("retired RocksDB profile must reject");
     assert!(
         matches!(rocks_error, groove::storage::Error::InvalidStorageLayout(ref message) if message.contains("unmarked non-empty RocksDB store cannot be opened as raw-v1")),
         "historical RocksDB root must fail closed before ordinary data admission: {rocks_error}"
@@ -1852,7 +2007,8 @@ fn native_jazz_corpus_candidate_roundtrip_rejects_broken_exports() {
 
     let mut wrong_archive = Vec::new();
     {
-        let encoder = flate2::write::GzEncoder::new(&mut wrong_archive, flate2::Compression::fast());
+        let encoder =
+            flate2::write::GzEncoder::new(&mut wrong_archive, flate2::Compression::fast());
         let mut tar = tar::Builder::new(encoder);
         let mut header = tar::Header::new_gnu();
         header.set_size(4);
@@ -1913,20 +2069,20 @@ fn native_jazz_corpus_staging_rejects_normalized_and_physical_aliases() {
     let live = live_root.join("live.sqlite");
     std::fs::write(&live, b"live corpus bytes").expect("create live SQLite image");
 
-    assert_staged_path_is_distinct(&live, &staging_root.join("not-yet-created.sqlite"), "SQLite")
-        .expect("a nonexistent direct child of an independent staging root is safe");
+    assert_staged_path_is_distinct(
+        &live,
+        &staging_root.join("not-yet-created.sqlite"),
+        "SQLite",
+    )
+    .expect("a nonexistent direct child of an independent staging root is safe");
     assert!(
         assert_staged_path_is_distinct(&live, &live_root.join("not-yet-created.sqlite"), "SQLite")
             .is_err(),
         "a not-yet-created candidate below the live root is rejected"
     );
     assert!(
-        assert_staged_path_is_distinct(
-            &live,
-            &live_root.join(".").join("live.sqlite"),
-            "SQLite",
-        )
-        .is_err(),
+        assert_staged_path_is_distinct(&live, &live_root.join(".").join("live.sqlite"), "SQLite",)
+            .is_err(),
         "a dot-path spelling of the live image is rejected"
     );
 
@@ -1963,7 +2119,6 @@ fn native_jazz_corpus_staging_rejects_normalized_and_physical_aliases() {
             .is_err(),
             "a candidate below a symlink alias of the live RocksDB root is rejected"
         );
-
     }
 
     #[cfg(any(unix, windows))]
@@ -1972,7 +2127,8 @@ fn native_jazz_corpus_staging_rejects_normalized_and_physical_aliases() {
         std::fs::hard_link(&live_sst, &hardlinked_sst_candidate)
             .expect("plant a staged file linked to a live RocksDB SST");
         assert!(
-            assert_staged_path_is_distinct(&rocks_live, &hardlinked_sst_candidate, "RocksDB").is_err(),
+            assert_staged_path_is_distinct(&rocks_live, &hardlinked_sst_candidate, "RocksDB")
+                .is_err(),
             "a candidate hard-linked to any live RocksDB member is rejected, not only an alias of the root"
         );
     }
@@ -2068,8 +2224,13 @@ fn native_jazz_corpus_publication_creates_a_fresh_output_without_overwrite() {
 fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
     let source_root = tempfile::tempdir().expect("create live producer root");
     let source = source_root.path().join("live.sqlite");
-    materialize_native_sqlite_fixture_with_hashes(&source, CURRENT_NATIVE_SQLITE_BASE64, CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256, CURRENT_NATIVE_SQLITE_SHA256)
-        .expect("materialize an independent live producer fixture");
+    materialize_native_sqlite_fixture_with_hashes(
+        &source,
+        CURRENT_NATIVE_SQLITE_BASE64,
+        CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256,
+        CURRENT_NATIVE_SQLITE_SHA256,
+    )
+    .expect("materialize an independent live producer fixture");
     let staging_root = tempfile::tempdir().expect("create private staging root");
     let candidate = staging_root.path().join("candidate.sqlite");
     std::fs::copy(&source, &candidate).expect("stage SQLite candidate outside live root");
@@ -2085,19 +2246,23 @@ fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
         .expect("staged candidate remains physically valid after live source removal");
     let schema = native_corpus_schema();
     let profile = epoch_1_storage_codec_profile().expect("closed Jazz profile");
-    verify_historical_native_corpus(schema.clone(), current_producer_native_corpus_pack, move || {
-        let families = schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        YieldingStorage::wrap(
-            ImmediateSqliteStorage::open_with_durability_and_codec_profile(
-                &verification_path,
-                &refs,
-                SqliteDurability::FullSync,
-                &profile,
+    verify_historical_native_corpus(
+        schema.clone(),
+        current_producer_native_corpus_pack,
+        move || {
+            let families = schema.column_families();
+            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            YieldingStorage::wrap(
+                ImmediateSqliteStorage::open_with_durability_and_codec_profile(
+                    &verification_path,
+                    &refs,
+                    SqliteDurability::FullSync,
+                    &profile,
+                )
+                .expect("current Jazz opens staged candidate without the producer"),
             )
-            .expect("current Jazz opens staged candidate without the producer"),
-        )
-    });
+        },
+    );
 }
 
 /// Proves the frozen digest actually observes authored application content.
@@ -2109,11 +2274,18 @@ fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
 #[test]
 fn native_jazz_corpus_digest_is_sensitive_to_application_row_bytes() {
     let baseline = in_memory_native_corpus_receipt("settlement baseline", "independent table");
-    let changed_branch = in_memory_native_corpus_receipt("changed branch title", "independent table");
+    let changed_branch =
+        in_memory_native_corpus_receipt("changed branch title", "independent table");
     let changed_note = in_memory_native_corpus_receipt("settlement baseline", "changed note body");
 
-    assert_ne!(native_corpus_checksum(&baseline), native_corpus_checksum(&changed_branch));
-    assert_ne!(native_corpus_checksum(&baseline), native_corpus_checksum(&changed_note));
+    assert_ne!(
+        native_corpus_checksum(&baseline),
+        native_corpus_checksum(&changed_branch)
+    );
+    assert_ne!(
+        native_corpus_checksum(&baseline),
+        native_corpus_checksum(&changed_note)
+    );
 }
 
 /// The system transaction records also contain authored values, so a checksum
