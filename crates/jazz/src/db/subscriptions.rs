@@ -552,6 +552,11 @@ where
                 };
                 receipts.all(|candidate| candidate == receipt)
                     && node.applied_authority_result_generation(&receipt) > *required_after
+                    // Rebuild/eviction preserves sequencing but discards the
+                    // delivered answer. A counter alone cannot cover a read.
+                    // This also accepts a complete same-scope Local owner
+                    // answer; it does not require the owner's upstream to settle.
+                    && node.has_settled_authority_result(&receipt)
                     && !node.opening_pending_for_authority_result(&receipt)
             })
             && (!attachment.requires_current_authority_receipt || has_current_authority_receipt);

@@ -3335,3 +3335,54 @@ fn review_multiclause_cleanup(mode: u8) {
         "cancelled whole proof must retire earlier successful clause owners"
     );
 }
+
+// This scheduling boundary is internal: invalidate the accepted owner answer
+// before the waiting foreground polls it, while retaining its receipt counter.
+#[test]
+fn invalidated_owner_delivery_cannot_cover_a_waiting_local_read() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc5; 16]);
+    let relay = open_db(0x74, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let foreground = open_db(0x75, author, &schema);
+    foreground.set_non_durable_client();
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let query = prepared(&foreground, &Query::from("todos"));
+    let local = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let waiting = foreground
+        .attach_query_with_opts(&query, local.clone())
+        .unwrap();
+    for _ in 0..16 {
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&waiting));
+    foreground
+        .node
+        .node
+        .borrow_mut()
+        .invalidate_subscription_scopes();
+    assert!(
+        !foreground.query_attachment_is_covered(&waiting),
+        "the counter alone must not revive an invalidated owner answer"
+    );
+    let refreshed = foreground.attach_query_with_opts(&query, local).unwrap();
+    assert!(!foreground.query_attachment_is_covered(&refreshed));
+    for _ in 0..16 {
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(
+        foreground.query_attachment_is_covered(&waiting),
+        "fresh owner delivery releases the older read without upstream authority"
+    );
+    assert!(foreground.query_attachment_is_covered(&refreshed));
+    foreground.detach_query(waiting);
+    foreground.detach_query(refreshed);
+}
