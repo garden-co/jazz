@@ -32,8 +32,9 @@ const USERS: usize = 10;
 const PROJECTS: usize = 30;
 
 fn policy_bench_identity() -> AuthorSubject {
-    AuthorSubject::authenticated("https://benchmark.invalid", "policy-writer")
-        .expect("static W1 benchmark identity is valid")
+    // Durable session writes need an account-bound principal. The synthetic
+    // fixture identity supplies that binding without bypassing row policies.
+    AuthorSubject::for_test_bytes([0x76; 16])
 }
 
 /// Seeded W1 read fixture. Setup is deliberately outside measured closures.
