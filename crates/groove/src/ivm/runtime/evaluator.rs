@@ -856,27 +856,7 @@ impl TickEvaluator<'_> {
         &self,
         node: NodeId,
     ) -> Result<bool, IvmRuntimeError> {
-        let mut pending = vec![node];
-        let mut seen = HashSet::new();
-        while let Some(node) = pending.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            let node = self
-                .graph
-                .node(node)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-            match &node.descriptor.operator {
-                OpType::CollectBy(collect_by) => {
-                    return Ok(matches!(
-                        collect_by.mode,
-                        CollectByMode::Collect | CollectByMode::Root
-                    ));
-                }
-                _ => pending.extend(node.descriptor.inputs.iter().copied()),
-            }
-        }
-        Ok(false)
+        output_is_structured_collect_by(self.graph, node)
     }
 
     pub(super) fn output_has_public_root(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
@@ -2115,9 +2095,14 @@ impl TickEvaluator<'_> {
             let before = before.get(group_prefix).cloned().unwrap_or_default();
             let after =
                 top_by_window_from_ordered_group(state.value().groups.get(group_prefix), top_by);
-            let windows = self.root_ordering_windows.entry(node).or_default();
-            extend_root_window_positions(output_desc, &before, &mut windows.before)?;
-            extend_root_window_positions(output_desc, &after, &mut windows.after)?;
+            let position_records = before.len().saturating_add(after.len());
+            if let Some(windows) = self.root_ordering_windows.get_mut(&node) {
+                extend_root_window_positions(output_desc, &before, &mut windows.before)?;
+                extend_root_window_positions(output_desc, &after, &mut windows.after)?;
+                self.metrics.root_ordering_position_records += position_records;
+            } else {
+                self.metrics.root_ordering_position_records_skipped += position_records;
+            }
             output.extend(diff_record_windows(before, after));
         }
         self.operator_states.insert(operator_key, operator);
