@@ -26,10 +26,90 @@ use super::{
 };
 
 pub(super) type JoinKey = SmallVec<[u8; 64]>;
+
+/// A join key commonly owns just one encoded record. Keep that case inside
+/// the existing shared bucket allocation, promoting only for distinct records.
+#[derive(Clone, Debug, Default)]
+enum JoinBucketMap<V> {
+    #[default]
+    Empty,
+    One(Bytes, V),
+    Many(HashMap<Bytes, V>),
+}
+
+impl<V> JoinBucketMap<V> {
+    fn get(&self, record: &Bytes) -> Option<&V> {
+        match self {
+            Self::Empty => None,
+            Self::One(key, value) => (key == record).then_some(value),
+            Self::Many(records) => records.get(record),
+        }
+    }
+
+    fn contains_key(&self, record: &Bytes) -> bool {
+        self.get(record).is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Empty => true,
+            Self::One(..) => false,
+            Self::Many(records) => records.is_empty(),
+        }
+    }
+
+    fn insert(&mut self, record: Bytes, value: V) {
+        match self {
+            Self::Empty => *self = Self::One(record, value),
+            Self::One(key, current) if *key == record => *current = value,
+            Self::One(..) => {
+                let Self::One(old_record, old_value) = std::mem::take(self) else {
+                    unreachable!("matched singleton")
+                };
+                *self = Self::Many(HashMap::from_iter([
+                    (old_record, old_value),
+                    (record, value),
+                ]));
+            }
+            Self::Many(records) => {
+                records.insert(record, value);
+            }
+        }
+    }
+
+    fn remove(&mut self, record: &Bytes) {
+        match self {
+            Self::One(key, _) if key == record => *self = Self::Empty,
+            Self::Many(records) => {
+                records.remove(record);
+            }
+            _ => {}
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&Bytes, &V)> {
+        let (one, many) = match self {
+            Self::Empty => (None, None),
+            Self::One(record, value) => (Some((record, value)), None),
+            Self::Many(records) => (None, Some(records)),
+        };
+        one.into_iter().chain(many.into_iter().flatten())
+    }
+
+    fn into_entries(self) -> impl Iterator<Item = (Bytes, V)> {
+        let (one, many) = match self {
+            Self::Empty => (None, None),
+            Self::One(record, value) => (Some((record, value)), None),
+            Self::Many(records) => (None, Some(records)),
+        };
+        one.into_iter().chain(many.into_iter().flatten())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct JoinBucket {
-    base: Rc<HashMap<Bytes, i64>>,
-    overlay: Rc<HashMap<Bytes, Option<i64>>>,
+    base: Rc<JoinBucketMap<i64>>,
+    overlay: Rc<JoinBucketMap<Option<i64>>>,
 }
 
 impl JoinBucket {
@@ -48,13 +128,24 @@ impl JoinBucket {
 
     fn add_weight(&mut self, record: &Bytes, delta: i64) -> i64 {
         // An overlay tombstone means zero, not the weight in the base.
-        // Entry retains the probe used to read the old weight for the write.
-        let weight = Rc::make_mut(&mut self.overlay)
-            .entry(record.clone())
-            .or_insert_with(|| self.base.get(record).copied());
-        let next = weight.unwrap_or_default() + delta;
-        *weight = (next != 0).then_some(next);
-        next
+        let overlay = Rc::make_mut(&mut self.overlay);
+        if let JoinBucketMap::Many(records) = overlay {
+            // Preserve one hash probe for the ordinary multi-record path.
+            let weight = records
+                .entry(record.clone())
+                .or_insert_with(|| self.base.get(record).copied());
+            let next = weight.unwrap_or_default() + delta;
+            *weight = (next != 0).then_some(next);
+            next
+        } else {
+            let weight = overlay
+                .get(record)
+                .copied()
+                .unwrap_or_else(|| self.base.get(record).copied());
+            let next = weight.unwrap_or_default() + delta;
+            overlay.insert(record.clone(), (next != 0).then_some(next));
+            next
+        }
     }
 
     fn iter(&self) -> impl Iterator<Item = (&Bytes, &i64)> {
@@ -81,7 +172,7 @@ impl JoinBucket {
         let overlay = std::mem::take(&mut self.overlay);
         let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
         let base = Rc::make_mut(&mut self.base);
-        for (record, weight) in overlay {
+        for (record, weight) in overlay.into_entries() {
             if let Some(weight) = weight {
                 base.insert(record, weight);
             } else {
@@ -93,7 +184,7 @@ impl JoinBucket {
     #[cfg(test)]
     fn from_records(records: HashMap<Bytes, i64>) -> Self {
         Self {
-            base: Rc::new(records),
+            base: Rc::new(JoinBucketMap::Many(records)),
             overlay: Rc::default(),
         }
     }
@@ -1681,6 +1772,91 @@ mod tests {
         assert!(!Rc::ptr_eq(&original.overlay, &prepared.overlay));
         assert_eq!(original.row_count(), 1);
         assert_eq!(prepared.row_count(), 2);
+    }
+
+    #[test]
+    fn singleton_join_bucket_promotes_without_changing_snapshot_or_tombstone_semantics() {
+        // Internal representation proof: public join rows cannot establish
+        // that a singleton did not allocate a collection/hash its record.
+        let record = Bytes::from_static(b"one");
+        let other = Bytes::from_static(b"two");
+        let mut bucket = JoinBucket::default();
+        assert_eq!(bucket.add_weight(&record, 2), 2);
+        assert!(matches!(
+            bucket.overlay.as_ref(),
+            JoinBucketMap::One(_, Some(2))
+        ));
+        bucket.commit_overlay();
+        assert!(matches!(bucket.base.as_ref(), JoinBucketMap::One(_, 2)));
+        assert!(matches!(bucket.overlay.as_ref(), JoinBucketMap::Empty));
+        let original = bucket.clone();
+        assert_eq!(bucket.add_weight(&record, -2), 0);
+        assert!(matches!(
+            bucket.overlay.as_ref(),
+            JoinBucketMap::One(_, None)
+        ));
+        assert!(bucket.is_empty());
+        assert_eq!(original.get(&record), Some(&2));
+        assert_eq!(bucket.add_weight(&record, -1), -1);
+        bucket.commit_overlay();
+        assert_eq!(bucket.get(&record), Some(&-1));
+        assert_eq!(bucket.add_weight(&other, 3), 3);
+        bucket.commit_overlay();
+        assert!(matches!(bucket.base.as_ref(), JoinBucketMap::Many(_)));
+        assert_eq!(bucket.get(&record), Some(&-1));
+        assert_eq!(bucket.get(&other), Some(&3));
+        assert_eq!(original.get(&record), Some(&2));
+        assert_eq!(original.get(&other), None);
+    }
+
+    #[test]
+    fn inline_join_bucket_matches_signed_map_oracle_across_promotion_and_snapshots() {
+        // Internal multiset oracle covers copy-on-write snapshots and staged
+        // overrides, which are not separately observable through a query API.
+        fn contents(bucket: &JoinBucket) -> std::collections::BTreeMap<Vec<u8>, i64> {
+            bucket
+                .iter()
+                .map(|(record, weight)| (record.to_vec(), *weight))
+                .collect()
+        }
+        for count in [1, 2, 17] {
+            let records = (0..count)
+                .map(|i| Bytes::from(format!("record-{i}")))
+                .collect::<Vec<_>>();
+            let mut bucket = JoinBucket::default();
+            let mut expected = std::collections::BTreeMap::<Vec<u8>, i64>::new();
+            let mut snapshots = Vec::new();
+            for step in 0..600 {
+                if step % 11 == 0 {
+                    snapshots.push((bucket.clone(), expected.clone()));
+                }
+                let record = &records[(step * 13 + step / 5) % count];
+                let change = ((step * 17 + 3) % 7) as i64 - 3;
+                let weight = if step % 7 == 0 {
+                    bucket.set(record.clone(), change);
+                    change
+                } else {
+                    let weight =
+                        expected.get(record.as_ref()).copied().unwrap_or_default() + change;
+                    assert_eq!(bucket.add_weight(record, change), weight);
+                    weight
+                };
+                if weight == 0 {
+                    expected.remove(record.as_ref());
+                } else {
+                    expected.insert(record.to_vec(), weight);
+                }
+                if step % 5 == 0 {
+                    bucket.commit_overlay();
+                }
+                assert_eq!(contents(&bucket), expected, "count={count} step={step}");
+            }
+            bucket.commit_overlay();
+            assert_eq!(contents(&bucket), expected);
+            for (snapshot, expected) in snapshots {
+                assert_eq!(contents(&snapshot), expected);
+            }
+        }
     }
 
     #[test]
