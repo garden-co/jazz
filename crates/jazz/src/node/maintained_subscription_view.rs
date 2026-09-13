@@ -127,22 +127,22 @@ pub(crate) struct MaintainedSubscriptionView {
     /// The graph uses read-schema names; immutable payload coordinates use
     /// the name of that same physical table in the authored schema.
     witness_table_names: BTreeMap<(String, SchemaVersionAlias), String>,
-    result_weights: BTreeMap<ResultMemberEntry, i64>,
+    result_weights: RetainedResultMap<i64>,
     /// Result memberships already exposed to the subscription consumer. A
     /// result-current terminal can advance before the companion content
     /// witness terminal, so raw membership alone is not publishable.
-    published_result_members: BTreeSet<ResultMemberEntry>,
+    published_result_members: RetainedResultMembers,
     /// After a complete storage-backed baseline, only changed result weights
     /// can affect publishability. Keep candidates across partial/failed drains;
     /// `None` requires a full reconcile (also used by witness-gated views).
-    unreconciled_result_members: Option<BTreeSet<ResultMemberEntry>>,
+    unreconciled_result_members: Option<RetainedResultMembers>,
     #[cfg(test)]
     result_member_reconcile_visits: usize,
-    result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+    result_payloads: RetainedResultMap<ResultMemberPayloadEntry>,
     /// Payloads paired with memberships already exposed to a consumer. Keep
     /// this separate from `result_payloads`: the latter records the raw
     /// result-terminal state while a membership waits for its content witness.
-    published_result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+    published_result_payloads: RetainedResultMap<ResultMemberPayloadEntry>,
     /// Incrementally maintained collector output, keyed by the opaque Groove
     /// terminal key and then encoded tree. A public root UUID is not a
     /// sufficient identity: one flat relation can contain several occurrences
@@ -195,13 +195,13 @@ impl Default for MaintainedSubscriptionView {
             edge_availability_owner: None,
             read_view: Default::default(),
             witness_table_names: BTreeMap::new(),
-            result_weights: BTreeMap::new(),
-            published_result_members: BTreeSet::new(),
+            result_weights: RetainedResultMap::default(),
+            published_result_members: RetainedResultMembers::default(),
             unreconciled_result_members: None,
             #[cfg(test)]
             result_member_reconcile_visits: 0,
-            result_payloads: BTreeMap::new(),
-            published_result_payloads: BTreeMap::new(),
+            result_payloads: RetainedResultMap::default(),
+            published_result_payloads: RetainedResultMap::default(),
             structured_app_rows: BTreeMap::new(),
             structured_terminal_records: BTreeMap::new(),
             structured_root_keys: BTreeMap::new(),
@@ -236,6 +236,135 @@ pub(crate) struct MaintainedSubscriptionViewFootprint {
     pub(crate) versions_bytes: usize,
     pub(crate) replacements_bytes: usize,
     pub(crate) total_heap_bytes: usize,
+}
+
+/// Read-only map access keeps every mutation paired with the exact existing
+/// referenced-byte model. No allocator sampling or delayed metric refresh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RetainedResultMap<V> {
+    entries: BTreeMap<ResultMemberEntry, V>,
+    entry_bytes: usize,
+    positive_count: usize,
+}
+
+impl<V> Default for RetainedResultMap<V> {
+    fn default() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            entry_bytes: 0,
+            positive_count: 0,
+        }
+    }
+}
+
+impl<V> std::ops::Deref for RetainedResultMap<V> {
+    type Target = BTreeMap<ResultMemberEntry, V>;
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+trait RetainedResultValue {
+    fn retained_bytes(&self) -> usize;
+    fn positive_count(&self) -> usize {
+        0
+    }
+}
+
+impl RetainedResultValue for i64 {
+    fn retained_bytes(&self) -> usize {
+        mem::size_of::<Self>()
+    }
+    fn positive_count(&self) -> usize {
+        usize::from(*self > 0)
+    }
+}
+
+impl RetainedResultValue for ResultMemberPayloadEntry {
+    fn retained_bytes(&self) -> usize {
+        result_member_payload_entry_bytes(self)
+    }
+}
+
+impl<V: RetainedResultValue> RetainedResultMap<V> {
+    fn insert(&mut self, member: ResultMemberEntry, value: V) -> Option<V> {
+        let key_bytes = result_member_entry_bytes(&member);
+        let value_bytes = value.retained_bytes();
+        let positive = value.positive_count();
+        let old = self.entries.insert(member, value);
+        if let Some(old) = &old {
+            self.entry_bytes -= old.retained_bytes();
+            self.positive_count -= old.positive_count();
+        } else {
+            // Equal keys have equal modeled sizes: the model uses lengths,
+            // not vector capacities or allocation addresses.
+            self.entry_bytes += key_bytes;
+        }
+        self.entry_bytes += value_bytes;
+        self.positive_count += positive;
+        old
+    }
+
+    fn remove(&mut self, member: &ResultMemberEntry) -> Option<V> {
+        let (key, value) = self.entries.remove_entry(member)?;
+        self.entry_bytes -= result_member_entry_bytes(&key) + value.retained_bytes();
+        self.positive_count -= value.positive_count();
+        Some(value)
+    }
+
+    fn footprint_bytes(&self) -> usize {
+        btree_map_bytes(self.entries.len()) + self.entry_bytes
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RetainedResultMembers {
+    entries: BTreeSet<ResultMemberEntry>,
+    entry_bytes: usize,
+}
+
+impl std::ops::Deref for RetainedResultMembers {
+    type Target = BTreeSet<ResultMemberEntry>;
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl From<BTreeSet<ResultMemberEntry>> for RetainedResultMembers {
+    fn from(entries: BTreeSet<ResultMemberEntry>) -> Self {
+        let entry_bytes = entries.iter().map(result_member_entry_bytes).sum();
+        Self {
+            entries,
+            entry_bytes,
+        }
+    }
+}
+
+impl IntoIterator for RetainedResultMembers {
+    type Item = ResultMemberEntry;
+    type IntoIter = std::collections::btree_set::IntoIter<ResultMemberEntry>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl RetainedResultMembers {
+    fn insert(&mut self, member: ResultMemberEntry) -> bool {
+        let bytes = result_member_entry_bytes(&member);
+        let inserted = self.entries.insert(member);
+        if inserted {
+            self.entry_bytes += bytes;
+        }
+        inserted
+    }
+
+    fn remove(&mut self, member: &ResultMemberEntry) -> bool {
+        let removed = self.entries.remove(member);
+        if removed {
+            self.entry_bytes -= result_member_entry_bytes(member);
+        }
+        removed
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -293,6 +422,9 @@ impl VersionPayload {
 struct ReplacementIndex {
     content_by_key: BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
     deletion_by_key: BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
+    entry_count: usize,
+    entry_bytes: usize,
+    key_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1090,41 +1222,19 @@ impl MaintainedSubscriptionView {
     }
 
     pub(crate) fn footprint(&self) -> MaintainedSubscriptionViewFootprint {
-        let result_weights_bytes = btree_map_bytes(self.result_weights.len())
+        let result_weights_bytes = self.result_weights.footprint_bytes()
             + self
                 .unreconciled_result_members
                 .as_ref()
                 .map_or(0, |members| {
-                    btree_set_bytes(members.len())
-                        + members.iter().map(result_member_entry_bytes).sum::<usize>()
+                    btree_set_bytes(members.len()) + members.entry_bytes
                 })
-            + self
-                .result_weights
-                .keys()
-                .map(|member| result_member_entry_bytes(member) + mem::size_of::<i64>())
-                .sum::<usize>()
             + btree_map_bytes(self.published_result_members.len())
-            + self
-                .published_result_members
-                .iter()
-                .map(result_member_entry_bytes)
-                .sum::<usize>();
-        let result_payloads_bytes = btree_map_bytes(self.result_payloads.len())
-            + self
-                .result_payloads
-                .iter()
-                .map(|(member, payload)| {
-                    result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
-                })
-                .sum::<usize>()
-            + btree_map_bytes(self.published_result_payloads.len())
-            + self
-                .published_result_payloads
-                .iter()
-                .map(|(member, payload)| {
-                    result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
-                })
-                .sum::<usize>();
+            + self.published_result_members.entry_bytes;
+        let result_payloads_bytes = self.result_payloads.footprint_bytes()
+            + self.published_result_payloads.footprint_bytes();
+        #[cfg(test)]
+        self.assert_incremental_footprint_matches_full_scan();
         let journal_bytes = self.unpublished_source_facts.as_ref().map_or(0, |facts| {
             btree_set_bytes(facts.len()) + facts.iter().map(peer_source_fact_bytes).sum::<usize>()
         });
@@ -1167,11 +1277,7 @@ impl MaintainedSubscriptionView {
                 .map(|record| record.retained_bytes())
                 .sum::<usize>();
         MaintainedSubscriptionViewFootprint {
-            result_rows: self
-                .result_weights
-                .values()
-                .filter(|weight| **weight > 0)
-                .count(),
+            result_rows: self.result_weights.positive_count,
             result_weights: self.result_weights.len(),
             result_payloads: self.result_payloads.len(),
             structured_app_rows: self
@@ -1195,6 +1301,38 @@ impl MaintainedSubscriptionView {
                 + replacements_bytes
                 + witness_table_names_bytes,
         }
+    }
+
+    // Accounting is not observable from row/query APIs. Keep the old full-scan
+    // model as a test-only oracle at every exercised footprint refresh.
+    #[cfg(test)]
+    fn assert_incremental_footprint_matches_full_scan(&self) {
+        fn check_map<V: RetainedResultValue>(map: &RetainedResultMap<V>) {
+            assert_eq!(
+                map.entry_bytes,
+                map.iter()
+                    .map(|(key, value)| { result_member_entry_bytes(key) + value.retained_bytes() })
+                    .sum::<usize>()
+            );
+            assert_eq!(
+                map.positive_count,
+                map.values()
+                    .map(RetainedResultValue::positive_count)
+                    .sum::<usize>()
+            );
+        }
+        check_map(&self.result_weights);
+        check_map(&self.result_payloads);
+        check_map(&self.published_result_payloads);
+        for members in std::iter::once(&self.published_result_members)
+            .chain(self.unreconciled_result_members.as_ref())
+        {
+            assert_eq!(
+                members.entry_bytes,
+                members.iter().map(result_member_entry_bytes).sum::<usize>()
+            );
+        }
+        self.replacements.assert_footprint_matches_full_scan();
     }
 
     /// Current positive result memberships, including unchanged members during
@@ -1555,12 +1693,12 @@ impl MaintainedSubscriptionView {
                 .difference(&publishable)
                 .cloned()
                 .collect::<Vec<_>>();
-            self.published_result_members = publishable;
+            self.published_result_members = publishable.into();
             (adds, removes)
         };
         self.unreconciled_result_members = self
             .storage_backed_result_materialization
-            .then(BTreeSet::new);
+            .then(RetainedResultMembers::default);
         let payload_removes = removes
             .iter()
             .filter(|member| self.published_result_payloads.contains_key(*member))
@@ -3287,7 +3425,10 @@ impl WeightedVersionIndex {
 
 impl ReplacementIndex {
     fn footprint_bytes(&self) -> usize {
-        replacement_map_bytes(&self.content_by_key) + replacement_map_bytes(&self.deletion_by_key)
+        btree_map_bytes(self.content_by_key.len() + self.deletion_by_key.len())
+            + btree_map_bytes(self.entry_count)
+            + self.key_bytes
+            + self.entry_bytes
     }
 
     fn apply_delta(
@@ -3302,21 +3443,38 @@ impl ReplacementIndex {
             VersionLayer::Deletion => &mut self.deletion_by_key,
         };
         let row_versions = by_key.entry(key.clone()).or_default();
-        let old = row_versions
-            .get(&identity)
-            .map(|version| version.weight)
-            .unwrap_or(0);
-        let new = old + weight;
-        if new > 0 {
-            row_versions.insert(
-                identity,
-                WeightedVersion {
-                    payload,
-                    weight: new,
-                },
-            );
-        } else {
-            row_versions.remove(&identity);
+        let was_empty = row_versions.is_empty();
+        use std::collections::btree_map::Entry;
+        match row_versions.entry(identity) {
+            Entry::Occupied(mut entry) => {
+                let new = entry.get().weight + weight;
+                self.entry_bytes -= weighted_version_bytes(entry.get());
+                if new > 0 {
+                    let version = WeightedVersion {
+                        payload,
+                        weight: new,
+                    };
+                    self.entry_bytes += weighted_version_bytes(&version);
+                    entry.insert(version);
+                } else {
+                    self.entry_bytes -= version_identity_bytes(entry.key());
+                    self.entry_count -= 1;
+                    entry.remove();
+                }
+            }
+            Entry::Vacant(entry) if weight > 0 => {
+                let version = WeightedVersion { payload, weight };
+                self.entry_bytes +=
+                    version_identity_bytes(entry.key()) + weighted_version_bytes(&version);
+                self.entry_count += 1;
+                entry.insert(version);
+            }
+            Entry::Vacant(_) => {}
+        }
+        if was_empty && !row_versions.is_empty() {
+            self.key_bytes += replacement_key_bytes(&key);
+        } else if !was_empty && row_versions.is_empty() {
+            self.key_bytes -= replacement_key_bytes(&key);
         }
         if row_versions.is_empty() {
             by_key.remove(&key);
@@ -3343,14 +3501,28 @@ impl ReplacementIndex {
     }
 
     fn entry_count(&self) -> usize {
-        self.content_by_key
-            .values()
-            .chain(self.deletion_by_key.values())
-            .map(BTreeMap::len)
-            .sum()
+        self.entry_count
+    }
+
+    #[cfg(test)]
+    fn assert_footprint_matches_full_scan(&self) {
+        assert_eq!(
+            self.footprint_bytes(),
+            replacement_map_bytes(&self.content_by_key)
+                + replacement_map_bytes(&self.deletion_by_key)
+        );
+        assert_eq!(
+            self.entry_count,
+            self.content_by_key
+                .values()
+                .chain(self.deletion_by_key.values())
+                .map(BTreeMap::len)
+                .sum::<usize>()
+        );
     }
 }
 
+#[cfg(test)]
 fn replacement_map_bytes(
     by_key: &BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
 ) -> usize {
@@ -5552,6 +5724,167 @@ mod tests {
         assert!(inactive.adds.is_empty());
         assert_eq!(inactive.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
+    }
+
+    // Internal accounting oracle: public queries cannot inspect retained byte
+    // totals. Exercise the same mutation wrappers used by reconciliation,
+    // including signed weights, resized payloads, journal resets, and clones.
+    #[test]
+    fn retained_result_accounting_matches_full_scans_through_mutations() {
+        let mut maintained = MaintainedSubscriptionView::default();
+        let members = (0..32)
+            .map(|i| {
+                ResultMemberEntry::from(
+                    RealRowMemberEntry::current_content(result(row(i + 1), 10))
+                        .with_row_digest(vec![i; usize::from(i) + 1]),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut seed = 29_u64;
+        for step in 0..600 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let member = members[(seed >> 32) as usize % members.len()].clone();
+            let old = maintained.result_weights.get(&member).copied().unwrap_or(0);
+            let new = old + [1, -2, 0, 3, -4][step % 5];
+            let payload = ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: vec![1; step % 41],
+                record: vec![2; step % 137],
+            };
+            if new == 0 {
+                maintained.result_weights.remove(&member);
+            } else {
+                maintained.result_weights.insert(member.clone(), new);
+            }
+            if new > 0 {
+                maintained
+                    .result_payloads
+                    .insert(member.clone(), payload.clone());
+                maintained
+                    .published_result_payloads
+                    .insert(member.clone(), payload);
+                maintained.published_result_members.insert(member.clone());
+            } else {
+                maintained.result_payloads.remove(&member);
+                maintained.published_result_payloads.remove(&member);
+                maintained.published_result_members.remove(&member);
+            }
+            maintained
+                .unreconciled_result_members
+                .get_or_insert_with(Default::default)
+                .insert(member);
+            maintained.assert_incremental_footprint_matches_full_scan();
+            if step % 17 == 0 {
+                let retained = maintained.clone();
+                let retained_footprint = retained.footprint();
+                // Both taking a completed journal and the full-reconcile
+                // replacement path must install independent fresh counters.
+                maintained.unreconciled_result_members.take();
+                maintained.published_result_members = maintained
+                    .published_result_members
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into();
+                maintained.assert_incremental_footprint_matches_full_scan();
+                assert_eq!(retained.footprint(), retained_footprint);
+            }
+        }
+        let retained = maintained.clone();
+        for member in &members {
+            maintained.result_weights.remove(member);
+            maintained.result_payloads.remove(member);
+            maintained.published_result_payloads.remove(member);
+            maintained.published_result_members.remove(member);
+        }
+        maintained.unreconciled_result_members = None;
+        assert_eq!(maintained.footprint().result_weights_bytes, 0);
+        assert_eq!(maintained.footprint().result_payloads_bytes, 0);
+        assert_eq!(maintained.footprint().result_rows, 0);
+        retained.assert_incremental_footprint_matches_full_scan();
+        assert!(!retained.result_weights.is_empty());
+    }
+
+    // Internal differential/accounting oracle: public rows cannot verify
+    // replacement weights, exact modeled bytes, or payload ownership.
+    #[test]
+    fn replacement_accounting_matches_signed_mutation_oracle() {
+        let aliases = aliases();
+        let payloads = (0..32)
+            .map(|i| {
+                let record = if i % 2 == 0 {
+                    version(row(i % 4 + 1), u64::from(10 + i / 4), "content")
+                } else {
+                    deletion(row(i % 4 + 1), u64::from(10 + i / 4))
+                };
+                VersionPayload::prepare(
+                    record.clone(),
+                    &VersionIdentity::for_row(&record),
+                    &aliases,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut index = ReplacementIndex::default();
+        let mut oracle = BTreeMap::<VersionIdentity, WeightedVersion>::new();
+        let mut seed = 41_u64;
+        for step in 0..600 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let payload = Arc::clone(&payloads[(seed >> 32) as usize % payloads.len()]);
+            let identity = VersionIdentity::for_row(&payload.row);
+            let key = ReplacementKey::for_row(&payload.row, payload.row.layer());
+            let weight = [1, -1, 0, -4, 2, 3, -2][step % 7];
+            let new = oracle.get(&identity).map_or(0, |version| version.weight) + weight;
+            if new > 0 {
+                oracle.insert(
+                    identity.clone(),
+                    WeightedVersion {
+                        payload: Arc::clone(&payload),
+                        weight: new,
+                    },
+                );
+            } else {
+                oracle.remove(&identity);
+            }
+            index.apply_delta(key, identity, payload, weight);
+            index.assert_footprint_matches_full_scan();
+            assert_eq!(index.entry_count(), oracle.len());
+            for rows in index
+                .content_by_key
+                .values()
+                .chain(index.deletion_by_key.values())
+            {
+                assert!(!rows.is_empty());
+                for (identity, actual) in rows {
+                    assert_eq!(actual.weight, oracle[identity].weight);
+                    assert!(Arc::ptr_eq(&actual.payload, &oracle[identity].payload));
+                }
+            }
+        }
+        let retained = index.clone();
+        let retained_bytes = retained.footprint_bytes();
+        for (identity, version) in &oracle {
+            index.apply_delta(
+                ReplacementKey::for_row(&version.row, version.row.layer()),
+                identity.clone(),
+                Arc::clone(&version.payload),
+                -version.weight - 1,
+            );
+            index.assert_footprint_matches_full_scan();
+        }
+        assert_eq!(index.entry_count(), 0);
+        assert_eq!(index.footprint_bytes(), 0);
+        assert_eq!(retained.footprint_bytes(), retained_bytes);
+        retained.assert_footprint_matches_full_scan();
+        let payload = Arc::clone(&payloads[0]);
+        index.apply_delta(
+            ReplacementKey::for_row(&payload.row, payload.row.layer()),
+            VersionIdentity::for_row(&payload.row),
+            payload,
+            1,
+        );
+        assert_eq!(index.entry_count(), 1);
+        index.assert_footprint_matches_full_scan();
     }
 
     #[test]
