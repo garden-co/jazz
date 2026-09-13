@@ -84,10 +84,7 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
     case "EnumPayload":
       throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
-      if (!references) {
-        throw new Error("Migration stub generation does not yet support bare UUID columns.");
-      }
-      return `s.ref(${JSON.stringify(references)})`;
+      return references ? `s.ref(${JSON.stringify(references)})` : "s.uuid()";
     case "Array":
       return `s.array(${baseBuilderExpression(columnType.element, references)})`;
     case "BigInt":
