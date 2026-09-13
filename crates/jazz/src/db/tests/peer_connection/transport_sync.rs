@@ -2,6 +2,63 @@
 
 use super::*;
 
+#[test]
+fn unordered_supporting_snapshots_preserve_public_subscription_rows() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let server = open_core(0xe2, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xe3, author, &schema);
+    for id in 1..=3 {
+        server
+            .insert_with_id("todos", row(id), cells("visible", false, author))
+            .unwrap();
+    }
+    let (upstream, downstream, _sent, received) = duplex_with_taps();
+    let _upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, author);
+    let mut stream =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    let mut snapshot = RelationSnapshot::default();
+    for count in [3, 4] {
+        if count == 4 {
+            server
+                .insert_with_id("todos", row(4), cells("new visible", false, author))
+                .unwrap();
+        }
+        let mut reversed = false;
+        for _ in 0..32 {
+            subscriber.borrow_mut().tick().unwrap();
+            // Reorder real authority messages at the transport boundary. The
+            // wire describes a set, not a requirement to trust sender order.
+            for message in received.borrow_mut().iter_mut() {
+                if let SyncMessage::ViewUpdate(view) = message
+                    && view.supporting_rows.len() > 1
+                {
+                    view.supporting_rows.reverse();
+                    reversed = true;
+                }
+            }
+            client.tick().unwrap();
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(&mut snapshot, event);
+            }
+        }
+        assert!(
+            reversed,
+            "both initial and successor snapshots were reordered"
+        );
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|r| r.row_uuid())
+                .collect::<BTreeSet<_>>(),
+            (1..=count).map(row).collect(),
+        );
+        assert_eq!(snapshot.root_count, count as usize);
+    }
+}
+
 // Hold the real subscriber owner across publication; its next tick must
 // consume the shared dirty epoch and deliver both exact rows to an idle stream.
 #[test]

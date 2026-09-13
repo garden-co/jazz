@@ -19,21 +19,33 @@ use crate::protocol::{
 };
 use std::borrow::Borrow;
 
-fn peer_source_fact_delta(
-    current: &BTreeSet<ProgramFactEntry>,
-    previous: &BTreeSet<ProgramFactEntry>,
+fn peer_source_fact_delta<'a>(
+    current: impl IntoIterator<Item = &'a ProgramFactEntry>,
+    previous: impl IntoIterator<Item = &'a ProgramFactEntry>,
 ) -> (Vec<ProgramFactEntry>, Vec<ProgramFactEntry>) {
-    // Current is constructed exclusively from peer-safe source facts. Broader
-    // settled predecessor state can also contain receiver-local facts, which
-    // must never become peer-source removals.
-    (
-        current.difference(previous).cloned().collect(),
-        previous
-            .difference(current)
-            .filter(|fact| fact.is_peer_source_closure_fact())
-            .cloned()
-            .collect(),
-    )
+    // Both inputs are sorted and unique. Current contains only peer-safe
+    // source facts; broader retained state may also contain receiver-local
+    // facts, which must never become peer-source removals.
+    let mut current = current.into_iter().peekable();
+    let mut previous = previous
+        .into_iter()
+        .filter(|fact| fact.is_peer_source_closure_fact())
+        .peekable();
+    let mut adds = Vec::new();
+    let mut removes = Vec::new();
+    while let (Some(next), Some(prior)) = (current.peek(), previous.peek()) {
+        match next.cmp(prior) {
+            std::cmp::Ordering::Less => adds.push(current.next().unwrap().clone()),
+            std::cmp::Ordering::Greater => removes.push(previous.next().unwrap().clone()),
+            std::cmp::Ordering::Equal => {
+                current.next();
+                previous.next();
+            }
+        }
+    }
+    adds.extend(current.cloned());
+    removes.extend(previous.cloned());
+    (adds, removes)
 }
 
 #[test]
@@ -861,7 +873,7 @@ where
     fn normalize_supporting_snapshot(
         &mut self,
         update: &mut ViewUpdateParts,
-        prior_snapshots: &mut BTreeMap<AuthorityResultKey, BTreeSet<ProgramFactEntry>>,
+        prior_snapshots: &mut BTreeMap<AuthorityResultKey, Vec<ProgramFactEntry>>,
     ) -> Result<(), Error> {
         let Some(rows) = update.wire_rows.take() else {
             return Ok(());
@@ -889,7 +901,7 @@ where
             Err(error) => return Err(error),
         };
         let sources = self.compiled_covered_input_sources_for_subscription(update.subscription)?;
-        let mut facts = BTreeSet::new();
+        let mut facts = Vec::new();
         let mut sources_by_table = BTreeMap::<_, Vec<_>>::new();
         for source in &sources {
             let physical = self
@@ -902,7 +914,7 @@ where
                 ))?
                 .id;
             sources_by_table.entry(physical).or_default().push(source);
-            facts.insert(ProgramFactEntry::ProgramSourceCoverage(
+            facts.push(ProgramFactEntry::ProgramSourceCoverage(
                 crate::protocol::ProgramSourceCoverageEntry {
                     source: source.clone(),
                     complete: true,
@@ -927,7 +939,7 @@ where
             // Index the compiler's occurrences once; a row need only visit
             // occurrences of its own table, rather than every query source.
             for source in sources {
-                facts.insert(ProgramFactEntry::CoveredInput(
+                facts.push(ProgramFactEntry::CoveredInput(
                     crate::protocol::CoveredInputEntry {
                         source: (*source).clone(),
                         version_table: row.version_table.clone(),
@@ -938,24 +950,34 @@ where
             }
         }
 
-        let previous = prior_snapshots.get(&key).or_else(|| {
-            self.query.authority_results.get(&key).and_then(|state| {
-                matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
-                    .then_some(&state.settled_program_facts)
-            })
-        });
-        if let Some(previous) = previous {
+        // Only ordered set comparison consumes this complete snapshot. Retain
+        // a compact batch-local sequence, not another incrementally mutable
+        // tree. Physical-row validation above still rejects wire duplicates.
+        facts.sort_unstable();
+        facts.dedup();
+        let delta = if let Some(previous) = prior_snapshots.get(&key) {
+            Some(peer_source_fact_delta(&facts, previous))
+        } else {
+            self.query
+                .authority_results
+                .get(&key)
+                .filter(|state| {
+                    matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
+                })
+                .map(|state| peer_source_fact_delta(&facts, &state.settled_program_facts))
+        };
+        if let Some((adds, removes)) = delta {
             // Complete wire snapshots become one atomic local input transition.
             // Replacing the dataset does not reopen the application's subscription.
             update.reset_input_set = false;
             // Incoming facts are exclusively peer-safe. Other settled facts
             // cannot match an addition and must not become removals. Borrow
             // the broader predecessor rather than clone/filter its full set.
-            (update.program_fact_adds, update.program_fact_removes) =
-                peer_source_fact_delta(&facts, previous);
+            update.program_fact_adds = adds;
+            update.program_fact_removes = removes;
         } else {
             update.reset_input_set = true;
-            update.program_fact_adds = facts.iter().cloned().collect();
+            update.program_fact_adds = facts.clone();
             update.program_fact_removes.clear();
         }
         prior_snapshots.insert(key, facts);

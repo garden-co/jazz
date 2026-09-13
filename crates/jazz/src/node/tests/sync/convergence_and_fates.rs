@@ -271,6 +271,44 @@ fn authority_complete_empty_snapshot_replaces_prior_inputs() {
     );
 }
 
+#[test]
+fn authority_same_batch_snapshots_compare_each_successor_and_replay() {
+    // Internal ingress is required to put several complete snapshots for the
+    // same authority into exactly one receive batch and inspect both compiler
+    // self-join roles. Public transport scheduling does not expose that control.
+    let (_dir, mut receiver, authority_result, initial, successor) =
+        covered_input_receiver_fixture();
+    let expected = successor.supporting_rows[0].clone();
+    let mut empty = successor.clone();
+    empty.supporting_rows.clear();
+    empty.version_carriers.clear();
+    crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
+        payload_view_update_parts(successor.clone()),
+        payload_view_update_parts(empty),
+        payload_view_update_parts(successor.clone()),
+        payload_view_update_parts(successor.clone()),
+    ]))
+    .expect("replacement, empty, refill and replay compare adjacent snapshots");
+
+    let state = &receiver.query.authority_results[&authority_result];
+    assert_eq!(state.covered_input_sources.len(), 2);
+    assert_eq!(state.covered_input_versions.len(), 2);
+    for input in state.covered_input_versions.values() {
+        assert_eq!(input.source_row, expected.row);
+        assert_eq!(input.version, expected.version);
+        assert_ne!(input.version, initial.version);
+    }
+    let facts = state.settled_program_facts.clone();
+    receiver
+        .apply_sync_message_settled(successor.into_view_update())
+        .expect("replay also compares against retained rather than batch-local facts");
+    assert_eq!(
+        receiver.query.authority_results[&authority_result].settled_program_facts,
+        facts,
+        "replay leaves the exact retained set unchanged"
+    );
+}
+
 /// This is an internal ingress receipt because the public API intentionally
 /// hides covered-source maps.  It protects the replacement contract that lets
 /// an authority send a successor closure without accumulating one retained
