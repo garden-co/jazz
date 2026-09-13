@@ -6,6 +6,101 @@ use crate::storage::{MemoryStorage, OwnedStorage, RecordStore, TestStorage, Test
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
+#[test]
+fn touched_unbounded_membership_matches_full_window_diff_for_signed_bags() {
+    // Internal oracle intentionally exercises negative intermediate bag weights
+    // that ordinary public table writes cannot construct. Public subscription
+    // tests separately cover ordering, sharing and consumer attachment.
+    let descriptor = RecordDescriptor::new([
+        ("id", ValueType::U64),
+        ("rank", ValueType::U64),
+        ("payload", ValueType::String),
+    ]);
+    let top_by = TopByOp {
+        group_fields: Vec::new(),
+        group_field_indices: Vec::new(),
+        order_fields: vec![TopByOrderField {
+            field: "rank".into(),
+            direction: TopByDirection::Desc,
+        }],
+        tie_fields: vec!["id".into()],
+        sort_field_indices: vec![1, 0],
+        sort_directions: vec![TopByDirection::Desc, TopByDirection::Asc],
+        offset: 0,
+        limit: TopByLimit::Unbounded,
+    };
+    let records = [
+        (1, 20, "old"),
+        (1, 20, "new"),
+        (2, 10, "later"),
+        (3, 30, "earlier"),
+    ]
+    .map(|(id, rank, payload)| {
+        Bytes::from(
+            descriptor
+                .create(&[
+                    Value::U64(id),
+                    Value::U64(rank),
+                    Value::String(payload.into()),
+                ])
+                .unwrap(),
+        )
+    });
+    let key = |record: &Bytes| {
+        (
+            top_by_sort_key(descriptor, record, &top_by).unwrap(),
+            record.clone(),
+        )
+    };
+    for initial in -3..=3 {
+        for change in -4..=4 {
+            let mut before_group = CollectByGroup::default();
+            for (record, weight) in records.iter().zip([initial, 0, 2, 1]) {
+                before_group.set(key(record), weight);
+            }
+            before_group.commit_overlay();
+            let preserved = before_group.clone();
+            let input = [
+                (0, change),
+                (1, 1),
+                (1, -1),
+                (2, -1),
+                (3, -1),
+                (3, 2),
+                (0, 1),
+            ]
+            .map(|(index, weight)| RecordDelta {
+                record: records[index].clone(),
+                weight,
+            });
+            let before = top_by_window_from_ordered_group(Some(&before_group), &top_by);
+            let mut reference = before_group.clone();
+            for delta in &input {
+                let key = key(&delta.record);
+                let weight = reference.get(&key).copied().unwrap_or_default() + delta.weight;
+                reference.set(key, weight);
+            }
+            let after = top_by_window_from_ordered_group(Some(&reference), &top_by);
+            let expected = diff_record_windows(before.clone(), after.clone());
+            let actual =
+                update_unbounded_top_by_group(descriptor, &top_by, &mut before_group, &input)
+                    .unwrap();
+            assert_eq!(actual, expected, "initial={initial}, change={change}");
+            assert_eq!(
+                top_by_window_from_ordered_group(Some(&before_group), &top_by),
+                after
+            );
+            assert_eq!(
+                top_by_window_from_ordered_group(Some(&preserved), &top_by),
+                before
+            );
+            for record in &records {
+                assert_eq!(before_group.get(&key(record)), reference.get(&key(record)));
+            }
+        }
+    }
+}
+
 #[futures_test::test]
 async fn terminal_collect_canonicalization_emits_net_remove_before_net_insert() {
     let record = |label: u8| Bytes::from(vec![label]);
