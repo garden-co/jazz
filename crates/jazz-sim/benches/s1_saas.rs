@@ -1648,12 +1648,9 @@ fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUui
         // The receiver evaluates its result from covered inputs; authorities
         // no longer send a redundant result-member list. Count the disclosed
         // input closure, including relation support, when checking its cache.
-        if supporting_rows.is_snapshot() {
-            rows.clear();
-        }
-        for input in supporting_rows.removed_rows() {
-            rows.remove(&(input.version_table.to_string(), input.row));
-        }
+        // This is the union of ever-disclosed cache rows across subscriptions,
+        // not one subscription's current membership. Scope removals do not
+        // delete cached native bodies or disclosures from other live queries.
         for input in supporting_rows.added_rows() {
             rows.insert((input.version_table.to_string(), input.row));
         }
