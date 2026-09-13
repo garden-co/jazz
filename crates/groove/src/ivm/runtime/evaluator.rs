@@ -77,9 +77,125 @@ impl DerefMut for CollectByIncrementalState {
     }
 }
 
+/// Reuse a fresh root collector's complete Insert seeds only when every group
+/// has one unambiguous representative. A multi-record hash arrangement and
+/// the ordered terminal collector need not choose the same representative.
+fn singleton_root_hydration_snapshot(
+    state: &CollectByIncrementalState,
+    input: &[RecordDelta],
+    operations: &[TerminalOperation],
+) -> Option<Vec<RecordDelta>> {
+    if input.iter().any(|delta| delta.weight <= 0) {
+        return None;
+    }
+    let mut seeds = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let TerminalEdit::Insert { key, value, .. } = &operation.edit else {
+            return None;
+        };
+        if !operation.path.is_empty() || operation.root_key != *key {
+            return None;
+        }
+        let mut records = state.groups.get(key)?.iter();
+        let (_, weight) = records.next()?;
+        if *weight <= 0 || records.next().is_some() {
+            return None;
+        }
+        seeds.push((key, value));
+    }
+    // Terminal operations use public rank order; the relational snapshot has
+    // always visited the touched groups in encoded group-key order.
+    seeds.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    Some(
+        seeds
+            .into_iter()
+            .map(|(_, value)| RecordDelta {
+                record: Bytes::copy_from_slice(value),
+                weight: 1,
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod collect_by_state_tests {
     use super::*;
+
+    // Internal eligibility proof for opaque already-rendered seeds; signed
+    // intermediate bags and malformed terminal edits are not public writes.
+    #[test]
+    fn singleton_root_seed_reuse_rejects_ambiguous_groups_and_non_snapshot_edits() {
+        let first = Bytes::from_static(b"first input");
+        let second = Bytes::from_static(b"second input");
+        let mut state = CollectByIncrementalState::default();
+        state
+            .groups
+            .get_or_default(vec![1])
+            .set((Vec::new(), first.clone()), 2);
+        state
+            .groups
+            .get_or_default(vec![2])
+            .set((Vec::new(), second.clone()), 1);
+        let input = vec![
+            RecordDelta {
+                record: first.clone(),
+                weight: 1,
+            },
+            RecordDelta {
+                record: first.clone(),
+                weight: 1,
+            },
+            RecordDelta {
+                record: second.clone(),
+                weight: 1,
+            },
+        ];
+        let operations = [2, 1].map(|key| TerminalOperation {
+            root_descriptor: RecordDescriptor::default(),
+            root_key: vec![key],
+            path: Vec::new(),
+            edit: TerminalEdit::Insert {
+                index: usize::from(2 - key),
+                key: vec![key],
+                value: vec![key, 42],
+            },
+        });
+        let snapshot = singleton_root_hydration_snapshot(&state, &input, &operations).unwrap();
+        assert_eq!(
+            snapshot,
+            vec![
+                RecordDelta {
+                    record: Bytes::from_static(&[1, 42]),
+                    weight: 1
+                },
+                RecordDelta {
+                    record: Bytes::from_static(&[2, 42]),
+                    weight: 1
+                },
+            ]
+        );
+        let mut ambiguous = state.clone();
+        ambiguous
+            .groups
+            .get_or_default(vec![1])
+            .set((Vec::new(), second), 1);
+        assert!(singleton_root_hydration_snapshot(&ambiguous, &input, &operations).is_none());
+        for weight in [-1, 0] {
+            let mut signed = input.clone();
+            signed[0].weight = weight;
+            assert!(singleton_root_hydration_snapshot(&state, &signed, &operations).is_none());
+        }
+        let mut incremental = operations.clone();
+        incremental[0].edit = TerminalEdit::Remove { key: vec![2] };
+        assert!(singleton_root_hydration_snapshot(&state, &input, &incremental).is_none());
+        let mut wrong_key = operations.clone();
+        wrong_key[0].root_key = vec![1];
+        assert!(singleton_root_hydration_snapshot(&state, &input, &wrong_key).is_none());
+        assert_eq!(
+            singleton_root_hydration_snapshot(&state, &input, &operations),
+            Some(snapshot)
+        );
+    }
 
     #[test]
     fn collect_by_snapshot_clone_shares_payload_until_first_write() {
@@ -2189,6 +2305,7 @@ impl TickEvaluator<'_> {
         if input.deltas.is_empty() || collect_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
+        let mut hydration_snapshot = None;
         let direct_tree_slot = match collect_by.slots.as_slice() {
             [] if collect_by.limit == TopByLimit::Unbounded => None,
             [slot]
@@ -2222,6 +2339,13 @@ impl TickEvaluator<'_> {
                 &input.deltas,
                 matches!(self.context.eval_mode, EvalMode::Tick | EvalMode::Hydrate),
             )?;
+            if self.context.eval_mode == EvalMode::Hydrate && collect_by.mode == CollectByMode::Root
+            {
+                // Hydrate removed the prior operator above, so these Inserts
+                // cover the complete fresh state, not an incremental subset.
+                hydration_snapshot =
+                    singleton_root_hydration_snapshot(state, &input.deltas, &operations);
+            }
             self.operator_states.insert(operator_key, operator);
             // A subscription hydration is the first transition of the same
             // collector. Retain its operations so the opening/reset consumer
@@ -2247,6 +2371,12 @@ impl TickEvaluator<'_> {
         else {
             return Err(IvmRuntimeError::GraphInputArityMismatch(node));
         };
+        if let Some(deltas) = hydration_snapshot {
+            return Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas,
+            });
+        }
         let input_desc = input.descriptor;
         let arrangement_key = self.arrangement_key(
             *input_node,

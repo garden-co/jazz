@@ -1,6 +1,117 @@
 //! Structured collectors and nested result-tree behavior.
 
 use super::*;
+use crate::ivm::TerminalOperation;
+
+#[futures_test::test]
+async fn singleton_root_hydration_preserves_snapshot_rank_and_later_edits() {
+    let storage = MemoryStorage::new(&["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let graph = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("albums"),
+        ["id"],
+        [CollectByField::named("id"), CollectByField::named("title")],
+        [TopByOrder::desc("id")],
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let mut batch = database.open_batch();
+    for id in [8, 2, 3] {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("row-{id}"))],
+        );
+    }
+    database.commit_batch(batch).await.unwrap();
+    let expected = [2, 3, 8]
+        .map(|id| (vec![Value::U64(id), Value::String(format!("row-{id}"))], 1))
+        .to_vec();
+    assert_eq!(
+        database
+            .query_graph(graph.clone())
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        expected
+    );
+
+    let mut subscriptions = Vec::new();
+    for _ in 0..2 {
+        let subscription = database.subscribe([("roots", graph.clone())]).unwrap();
+        let initial = database
+            .next_multisink_subscription(&subscription)
+            .await
+            .unwrap();
+        assert_eq!(initial.sinks["roots"].to_values().unwrap(), expected);
+        let mut inserted = Vec::new();
+        for operation in &initial.terminal_sinks["roots"].operations {
+            let TerminalEdit::Insert { index, value, .. } = &operation.edit else {
+                panic!("fresh root must insert: {operation:?}");
+            };
+            let values = crate::records::OwnedRecord::new(value.clone(), operation.root_descriptor)
+                .to_values()
+                .unwrap();
+            // A hydration may assemble the final sequence through several
+            // Insert-at-zero operations; indexes address the evolving list.
+            inserted.insert(*index, values[0].clone());
+        }
+        assert_eq!(inserted, vec![Value::U64(8), Value::U64(3), Value::U64(2)]);
+        subscriptions.push(subscription);
+    }
+    let mut batch = database.open_batch();
+    batch.update(
+        "albums",
+        vec![Value::U64(3), Value::String("edited".into())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    for subscription in &subscriptions {
+        let update = database
+            .next_multisink_subscription(subscription)
+            .await
+            .unwrap();
+        let operations = &update.terminal_sinks["roots"].operations;
+        assert_eq!(operations.len(), 1);
+        let TerminalEdit::Update { value, .. } = &operations[0].edit else {
+            panic!("expected one payload update: {operations:?}");
+        };
+        assert_eq!(
+            crate::records::OwnedRecord::new(value.clone(), operations[0].root_descriptor)
+                .to_values()
+                .unwrap(),
+            vec![Value::U64(3), Value::String("edited".into())]
+        );
+    }
+    let mut batch = database.open_batch();
+    batch.delete("albums", PrimaryKeyValue::U64(8));
+    database.commit_batch(batch).await.unwrap();
+    for subscription in &subscriptions {
+        let update = database
+            .next_multisink_subscription(subscription)
+            .await
+            .unwrap();
+        assert!(matches!(
+            update.terminal_sinks["roots"].operations.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Remove { .. },
+                ..
+            }]
+        ));
+    }
+    assert_eq!(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![
+            (vec![Value::U64(2), Value::String("row-2".into())], 1),
+            (vec![Value::U64(3), Value::String("edited".into())], 1),
+        ]
+    );
+}
 
 #[futures_test::test]
 async fn collect_by_round_trips_ordered_explicit_child_ids() {
