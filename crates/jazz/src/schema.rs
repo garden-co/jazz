@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
+use std::sync::Arc;
 
 use groove::records::{
     EnumCase, EnumSchema, RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value,
@@ -62,15 +63,16 @@ pub const MERGE_HEADS_TABLE: &str = "jazz_merge_heads";
 ///
 /// The developer-authored source is retained for durable catalogue
 /// publication while [`RuntimeSchema`] is the derived, in-memory engine form.
+/// Both are immutable in production and shared across cloned schema views.
 #[derive(Clone, Debug)]
 pub struct JazzSchema {
-    public_schema: PublicSchema,
-    runtime: RuntimeSchema,
+    public_schema: Arc<PublicSchema>,
+    runtime: Arc<RuntimeSchema>,
 }
 
 impl PartialEq for JazzSchema {
     fn eq(&self, other: &Self) -> bool {
-        self.runtime == other.runtime
+        self.runtime.as_ref() == other.runtime.as_ref()
     }
 }
 
@@ -97,8 +99,8 @@ impl JazzSchema {
 
     pub(crate) fn from_runtime(public_schema: PublicSchema, runtime: RuntimeSchema) -> Self {
         Self {
-            public_schema,
-            runtime,
+            public_schema: Arc::new(public_schema),
+            runtime: Arc::new(runtime),
         }
     }
 
@@ -108,12 +110,12 @@ impl JazzSchema {
 
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn runtime_mut_for_testing(&mut self) -> &mut RuntimeSchema {
-        &mut self.runtime
+        Arc::make_mut(&mut self.runtime)
     }
 
     #[cfg(test)]
     pub(crate) fn into_runtime(self) -> RuntimeSchema {
-        self.runtime
+        Arc::unwrap_or_clone(self.runtime)
     }
 
     /// Construct a compiled schema for internal engine tests whose tables
@@ -2005,6 +2007,72 @@ fn rejected_transactions_table() -> GrooveTableSchema {
 mod tests {
     use super::*;
     use groove::schema::ColumnType;
+
+    #[test]
+    fn cloned_application_schema_retains_source_identity_and_owned_lifetime() {
+        use crate::tools::public_schema::{
+            ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+        };
+
+        let source = SchemaBuilder::new()
+            .table(PublicTableSchema::builder("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .fk_column("project_id", "projects"),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).unwrap();
+        let original_bytes = schema.canonical_bytes();
+        let original_id = schema.version_id();
+        let cloned = schema.clone();
+        // Internal ownership receipt: equal query results cannot distinguish
+        // a shared immutable schema from a deep copy of all its metadata.
+        assert!(Arc::ptr_eq(&schema.public_schema, &cloned.public_schema));
+        assert!(Arc::ptr_eq(&schema.runtime, &cloned.runtime));
+        let version = crate::protocol::SchemaVersion::new(schema.clone());
+        let canonical = crate::protocol::canonical_catalogue_schema_v1_bytes(&version).unwrap();
+        assert_eq!(
+            canonical,
+            crate::protocol::canonical_catalogue_schema_v1_bytes(&version.clone()).unwrap()
+        );
+        drop(version);
+        drop(schema);
+        assert_eq!(cloned.public_schema(), &source);
+        assert_eq!(cloned.canonical_bytes(), original_bytes);
+        assert_eq!(cloned.version_id(), original_id);
+        assert_eq!(JazzSchema::new(cloned.public_schema()).unwrap(), cloned);
+        // The now-unique consuming accessor must retain its owned table vector.
+        let table_pointer = cloned.tables().as_ptr();
+        assert_eq!(cloned.into_runtime().tables.as_ptr(), table_pointer);
+    }
+
+    #[test]
+    fn testing_schema_mutation_does_not_modify_other_schema_views() {
+        use crate::tools::public_schema::{
+            ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+        };
+
+        let source = SchemaBuilder::new()
+            .table(PublicTableSchema::builder("todos").column("title", PublicColumnType::Text))
+            .build();
+        let schema = JazzSchema::new(&source).unwrap();
+        let mut changed = schema.clone();
+        // Internal because production APIs expose no mutable runtime schema;
+        // the testing-only seam must preserve its old deep-clone isolation.
+        changed.runtime_mut_for_testing().tables[0].name = "renamed".to_owned();
+        assert_eq!(schema.tables()[0].name, "todos");
+        assert_eq!(changed.tables()[0].name, "renamed");
+        assert_ne!(schema.version_id(), changed.version_id());
+        assert!(!Arc::ptr_eq(&schema.runtime, &changed.runtime));
+        assert_eq!(changed.public_schema(), &source);
+
+        let mut consumed = schema.clone().into_runtime();
+        consumed.tables.clear();
+        assert_eq!(schema.tables().len(), 1);
+        assert_eq!(schema.tables()[0].name, "todos");
+    }
 
     #[test]
     fn string_branch_columns_are_accepted() {
