@@ -2128,6 +2128,10 @@ fn run_connect_and_subscribe(
         ticks += 1;
     }
     let settle_ms = settle_start.elapsed().as_millis();
+    #[cfg(feature = "cold-settle-attribution")]
+    if std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_some() {
+        eprintln!("ARRANGEMENT_CAPTURE_END\t{label}");
+    }
     if !config.diagnostics {
         let rows_materialized = subscriptions.iter().map(|s| s.rows.len()).sum();
         let expected_rows = expected.values().sum();
@@ -2172,9 +2176,6 @@ fn run_connect_and_subscribe(
     let projection_nodes_at_readiness = jazz::groove::cold_settle_attribution::map_node_work();
     #[cfg(feature = "cold-settle-attribution")]
     {
-        if std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_some() {
-            eprintln!("ARRANGEMENT_CAPTURE_END\t{label}");
-        }
         attribution.phase_timing = jazz_sim::phase_attribution::snapshot();
         if let Some(mut path) = std::env::var_os("JAZZ_PHASE_TIMELINE") {
             path.push(format!(".{label}.json"));
