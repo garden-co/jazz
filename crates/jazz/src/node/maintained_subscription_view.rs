@@ -1071,6 +1071,18 @@ impl MaintainedSubscriptionView {
         Ok(transitions)
     }
 
+    pub(crate) fn version_refs_by_tx(&self, tx_id: TxId) -> Vec<&VersionRow> {
+        let mut versions = self.versions.rows_by_tx(tx_id).collect::<Vec<_>>();
+        for (fact, version) in &self.selected_deletion_witnesses {
+            if matches!(fact, ProgramFactEntry::CoveredInput(input) if input.version.tx == tx_id)
+                && !versions.contains(&version)
+            {
+                versions.push(version);
+            }
+        }
+        versions
+    }
+
     pub(crate) fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
         let mut versions = self.versions.versions_by_tx(tx_id);
         for (fact, version) in &self.selected_deletion_witnesses {
@@ -6089,6 +6101,72 @@ mod tests {
             index.by_tx[&payloads[0].tx_id][&payloads[0].sort_key].weight,
             1
         );
+    }
+
+    // Internal ownership receipt: public query equality cannot distinguish a
+    // retained body's reference from a freshly allocated copy of the same bytes.
+    #[test]
+    fn publication_version_refs_preserve_owned_order_and_selected_deletion_dedup() {
+        let aliases = aliases();
+        let tx_id = tx(1, 10);
+        let retained_deletion = deletion(row(2), 10);
+        let selected_only = deletion(row(3), 10);
+        let selected_other_tx = deletion(row(4), 11);
+        let mut maintained = MaintainedSubscriptionView::default();
+        maintained
+            .apply_decoded_deltas(
+                [
+                    (
+                        version_content(version(row(1), 10, &"body".repeat(4096))),
+                        1,
+                    ),
+                    (
+                        DecodedMaintainedEvent::VersionDeletion {
+                            source: test_source(),
+                            row: retained_deletion.clone(),
+                        },
+                        1,
+                    ),
+                ],
+                &aliases,
+            )
+            .unwrap();
+        maintained.replace_selected_deletion_witnesses(
+            [retained_deletion, selected_only, selected_other_tx]
+                .into_iter()
+                .map(|version| {
+                    (
+                        ProgramFactEntry::CoveredInput(
+                            covered_input_for_version(test_source(), &version, &aliases).unwrap(),
+                        ),
+                        version,
+                    )
+                })
+                .collect(),
+        );
+        for selected_tx in [tx_id, tx(1, 11), tx(1, 99)] {
+            let borrowed = maintained.version_refs_by_tx(selected_tx);
+            let owned = maintained.versions_by_tx(selected_tx);
+            assert_eq!(borrowed, owned.iter().collect::<Vec<_>>());
+            for version in &borrowed {
+                assert!(
+                    maintained
+                        .versions
+                        .rows_by_tx(selected_tx)
+                        .chain(maintained.selected_deletion_witnesses.values())
+                        .any(|retained| std::ptr::eq(*version, retained)),
+                    "must borrow the retained object and its raw body"
+                );
+            }
+        }
+        assert_eq!(
+            maintained.version_refs_by_tx(tx_id).len(),
+            3,
+            "selected duplicate emitted once"
+        );
+        maintained.replace_selected_deletion_witnesses(BTreeMap::new());
+        assert_eq!(maintained.version_refs_by_tx(tx_id).len(), 2);
+        assert!(maintained.version_refs_by_tx(tx(1, 11)).is_empty());
     }
 
     #[test]

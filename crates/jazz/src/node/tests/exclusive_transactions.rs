@@ -1716,6 +1716,52 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
     );
 }
 
+// Internal producer boundary: public rows do not reveal canonical wire bytes,
+// duplicate body cardinality or ownership after the borrowed input is dropped.
+#[test]
+fn borrowed_publication_bundle_preserves_exact_bodies_and_partial_cardinality() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let open = OpenTransactionId::new();
+    writer.open_exclusive(open).unwrap();
+    writer.tx_write(open, "todos", row(1), title_cells("one"), None).unwrap();
+    writer.tx_write(open, "todos", row(2), title_cells("two"), None).unwrap();
+    let (tx_id, unit) = writer.commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10).unwrap();
+    core.apply_sync_message_settled(unit).unwrap();
+    let mut stored = core.query_transaction(tx_id).unwrap().unwrap();
+    let versions = core.query_versions_for_tx(tx_id).unwrap();
+    assert_eq!(versions.len(), 2);
+    let mut expected = versions.iter().map(|version| core.version_record_from_row(version).unwrap()).collect::<Vec<_>>();
+    expected.sort_by_key(|version| version.row_uuid());
+    let full = core.version_bundle_for_maintained_view_versions_with_tx(
+        &stored, versions.iter().rev().chain(versions.iter()),
+    ).unwrap();
+    assert_eq!(full.versions, expected);
+    assert_eq!(full.scope, crate::protocol::VersionBundleScope::CompleteTransaction);
+    assert_eq!(full.tx.n_total_writes, 2);
+    assert_eq!(full.tx.permission_subject, None);
+    let partial = core.version_bundle_for_maintained_view_versions_with_tx(
+        &stored, versions.iter().take(1),
+    ).unwrap();
+    assert_eq!(partial.scope, crate::protocol::VersionBundleScope::ViewScoped);
+    assert_eq!(partial.tx.n_total_writes, 1);
+    // A receiver's partial durable cardinality is not proof of complete history.
+    stored.view_scoped_cardinality = true;
+    stored.tx.n_total_writes = 1;
+    let forwarded = core.version_bundle_for_maintained_view_versions_with_tx(
+        &stored, versions.iter().take(1),
+    ).unwrap();
+    assert_eq!(forwarded.scope, crate::protocol::VersionBundleScope::ViewScoped);
+    assert_eq!(forwarded.versions, partial.versions);
+    let encoded = postcard::to_allocvec(&full).unwrap();
+    drop(versions);
+    drop(stored);
+    drop(core);
+    let decoded: crate::protocol::VersionBundle = postcard::from_bytes(&encoded).unwrap();
+    assert_eq!(decoded, full);
+    assert_eq!(decoded.versions, expected);
+}
+
 #[test]
 fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
