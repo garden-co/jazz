@@ -655,9 +655,19 @@ where
         Some(TxId::new(time, self.resolve_node_alias(alias).await.ok()??))
     }
 
-    /// Invalidate process-local membership and body-dedup cursors before eviction.
+    /// Discard authority proof during rebuild or eviction, preserving live receipt ordering.
     pub(crate) fn invalidate_subscription_scopes(&mut self) {
-        self.query.authority_results.clear();
+        // Rebuild/eviction invalidates authority proof, not the ordering of
+        // receipts awaited by still-live foregrounds. Reusing generation one
+        // after invalidation can strand a read already waiting for > one.
+        // Keep only this process-local counter; no membership, settlement,
+        // predecessor, compiled source, or pending publication survives.
+        for state in self.query.authority_results.values_mut() {
+            *state = AuthorityResultState {
+                applied_view_update_generation: state.applied_view_update_generation,
+                ..AuthorityResultState::default()
+            };
+        }
         self.query.retained_root_window_sources.clear();
     }
 

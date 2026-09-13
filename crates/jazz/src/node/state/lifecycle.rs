@@ -1669,8 +1669,7 @@ where
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
-        self.query.authority_results.clear();
-        self.query.retained_root_window_sources.clear();
+        self.invalidate_subscription_scopes();
     }
 
     fn clear_settled_result_view(&mut self, authority_result_key: AuthorityResultKey) {

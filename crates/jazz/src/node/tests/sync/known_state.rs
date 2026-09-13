@@ -2103,7 +2103,11 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         .resolve()
         .expect_err("body deletion failure must preserve native history");
 
-    assert!(reader.query.authority_results.is_empty());
+    assert!(!reader.query.authority_results.is_empty(), "live receipt sequencing survives eviction");
+    for state in reader.query.authority_results.values() {
+        assert_authority_proof_cleared(state);
+        assert!(state.applied_view_update_generation > 0);
+    }
     assert!(reader.cached_tx_versions(tx_id).is_none());
     assert!(reader.cached_tx_version_tables(tx_id).is_none());
     drop(reader);
@@ -2507,4 +2511,101 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
     assert_eq!(version_bundles[0].versions.len(), 1);
+}
+
+// These fields are internal authority evidence: row reads alone cannot prove
+// that an invalidated predecessor or deferred publication was discarded.
+fn assert_authority_proof_cleared(state: &AuthorityResultState) {
+    assert_eq!(state.source_closure, AuthoritySourceClosure::Pending);
+    assert!(state.source_incrementals.is_empty());
+    assert!(!state.live_settled);
+    assert!(state.supporting_revision.is_none());
+    assert!(state.covered_input_versions.is_empty());
+    assert!(state.compiled_covered_input_sources.is_none());
+    assert!(state.settled_through.is_none());
+    assert!(state.authorization_progress.is_none());
+    assert!(!state.known_state_declared);
+    assert!(!state.initial_hydration);
+    assert!(!state.deferred_publication);
+    assert!(state.pending_authoritative_reset.is_none());
+    assert!(!state.pending_opening);
+}
+
+// The pending delivery threshold is internal; eviction and redelivery use
+// real bodies so a no-op cache-budget pass cannot satisfy this regression.
+#[test]
+fn fresh_delivery_generation_advances_after_live_body_eviction() {
+    for budgeted in [false, true] {
+        let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+        let (_core_dir, mut core) = open_node_with_uuid(node(9));
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+        let subscription = core.whole_table_subscription_key("todos").unwrap();
+        let row_uuid = row(0x7d);
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("todos", row_uuid, 19)
+                .cells(title_cells("refresh after eviction")),
+        );
+        register_shape_binding(&mut reader, &shape, &binding);
+        let update = relay_with_system_binding(subscription)
+            .rehydrate_query_for_subscription_with_opts(
+                &mut core,
+                subscription,
+                &shape,
+                &binding,
+                RegisterShapeOptions::default(),
+            )
+            .unwrap()
+            .expect("authority reset");
+        reader.apply_sync_message_settled(update.clone()).unwrap();
+        let key = reader
+            .authority_result_key_for_subscription(subscription)
+            .unwrap();
+        let required_after = reader.applied_authority_result_generation(&key);
+        assert!(required_after > 0);
+        if budgeted {
+            reader
+                .enforce_edge_cache_budget(&PeerEvictionPins::default(), EdgeCacheBudget::new(0))
+                .resolve()
+                .unwrap();
+        } else {
+            reader
+                .evict_cold(&PeerEvictionPins::default())
+                .resolve()
+                .unwrap();
+        }
+        assert!(
+            reader.row_history("todos", row_uuid).unwrap().is_empty(),
+            "actual body eviction occurred"
+        );
+        assert!(!reader.has_settled_authority_result(&key));
+        assert!(
+            reader.applied_authority_result_generation(&key) <= required_after,
+            "eviction alone cannot satisfy a waiting read"
+        );
+        if let Some(state) = reader.query.authority_results.get(&key) {
+            assert_authority_proof_cleared(state);
+        }
+        // The authority may now answer empty. That is a fresh delivery, not
+        // permission to revive the evicted membership or its body inventory.
+        reader
+            .apply_sync_message_settled(SyncMessage::ViewUpdate(
+                crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    settled_through: GlobalTime(2),
+                    version_carriers: Vec::new(),
+                    peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                    supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
+                },
+            ))
+            .unwrap();
+        assert!(reader.has_settled_authority_result(&key));
+        assert!(
+            reader.applied_authority_result_generation(&key) > required_after,
+            "fresh delivery must release a read waiting across eviction"
+        );
+        assert!(reader.row_history("todos", row_uuid).unwrap().is_empty());
+    }
 }

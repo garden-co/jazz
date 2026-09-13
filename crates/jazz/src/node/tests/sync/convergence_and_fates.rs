@@ -1033,3 +1033,44 @@ fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
     }));
     assert!(result.is_err());
 }
+
+// Receipt sequencing is internal: a public reader cannot suspend catalogue
+// activation between capturing its delivery generation and receiving refresh.
+#[test]
+fn fresh_delivery_generation_advances_after_catalogue_runtime_rebuild() {
+    let (_temp_dir, mut receiver) = open_node();
+    register_whole_table_receiver(&mut receiver, "todos");
+    let subscription = receiver.whole_table_subscription_key("todos").unwrap();
+    let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        settled_through: GlobalTime(1),
+        version_carriers: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
+    });
+    receiver.apply_sync_message_settled(update.clone()).unwrap();
+    let key = receiver
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let required_after = receiver.applied_authority_result_generation(&key);
+    assert!(required_after > 0);
+    assert!(receiver.has_settled_authority_result(&key));
+    futures::executor::block_on(receiver.rebuild_database_slot()).unwrap();
+    assert!(
+        !receiver.has_settled_authority_result(&key),
+        "rebuild must discard authority proof"
+    );
+    assert!(
+        receiver.applied_authority_result_generation(&key) <= required_after,
+        "rebuild alone is not a fresh delivery"
+    );
+    if let Some(state) = receiver.query.authority_results.get(&key) {
+        assert_authority_proof_cleared(state);
+    }
+    receiver.apply_sync_message_settled(update).unwrap();
+    assert!(receiver.has_settled_authority_result(&key));
+    assert!(
+        receiver.applied_authority_result_generation(&key) > required_after,
+        "a fresh delivery must release the read waiting across the rebuild"
+    );
+}

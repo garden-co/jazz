@@ -334,6 +334,13 @@ edge/core connection is stalled. Ordinary upstream propagation remains enabled
 when requested. A standalone durable runtime can read its local storage directly
 and does not acquire this foreground delivery prerequisite.
 
+Within a live usage's lifetime, its applied-delivery generation remains
+monotonic across catalogue runtime rebuilds and cache eviction. These operations
+discard all authority proof, membership, and source predecessors; retaining the
+counter alone never establishes readiness. A fresh accepted delivery must still
+advance beyond any generation captured by an outstanding read. Process restart
+and final usage retirement may discard the counter.
+
 Source membership and stored row state are distinct. Scope withdrawal neither
 deletes nor redacts previously downloaded content. An actually admitted deletion
 version, however, updates locally known row state and suppresses that row in
