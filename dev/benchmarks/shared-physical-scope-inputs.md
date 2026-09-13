@@ -1,0 +1,50 @@
+# Shared physical scope inputs — replacement experiment for #2952
+
+Authorized by Anselm as a sibling alternative to #2952, with common PR base
+`8021dffb31628a3f7f97ede47c30a421354aa13d` (#2951). Preserve #2952 and its
+receipts; no merge or adopter deployment until explicitly approved.
+
+## Thesis
+
+The wire already sends one physical row/version set per exact authority scope.
+Receiver normalization currently broadcasts each row to every compiled table
+occurrence, retaining occurrence-sized facts and separately materialized IVM
+inputs. This is receiver plumbing, not information supplied by the sender.
+Replace that expansion with shared scope/table membership and shared input
+datasets. Aliases, filters, schema projections, branch semantics and local
+overlays remain explicit downstream graph operations. Never share authority
+membership across different query/identity/read-view scopes.
+
+Initial/recovery snapshots and predecessor-checked physical deltas retain the
+v2 encoding pinned in #2952. The experiment is not an additional wire version
+or a compatibility mode. Any necessary durable-state change must be separately
+specified and byte-pinned; no incidental serializer encoding is authoritative.
+
+## Changed premise and preflight
+
+Read the rejected-experiment ledger and Rust testing guidelines. Searched
+preserved receiver/source/scope branches and open/closed receiver PR bodies.
+#2927/#2935 optimize occurrence expansion, but retain its multiplicity. The
+same-drain shared-membership fix on `fix/covered-source-shared-membership`
+protects aggregate sender justifications and must remain intact. Rejected
+#2830 only optimizes witness metadata encoding; #2848 globally shares record
+ownership. This trial removes the receiver occurrence boundary instead of
+repeating either mechanism.
+
+## Acceptance and comparisons
+
+Compare against both the common parent and #2952 with identical native todo
+insert/update, batch/reopen, and permissioned cold-load fixtures; seal source
+and binary receipts and confirm with CodSpeed/full GQL profiles. Prediction:
+retain #2952's ~15% insert / ~27% update gain, recover its ~1% cold penalty and
+look for additional cold benefit from less representation duplication. No
+specific larger cold win is established yet.
+
+Compare production/test diff size, retained scope indexes, normalization paths,
+and per-physical-row versus per-occurrence materializations, not just raw LOC.
+Tests must cover self-joins/repeated paths, permissions, lens/branch boundaries,
+pending local writes, scope retirement/reconnect, and atomic missing-body repair.
+An internal work-bound test is justified only for input/source allocation and
+materialization counts that cannot be observed through public query equality.
+
+Theses, results and unresolved follow-ups remain in GitHub issue #2913.
