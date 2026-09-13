@@ -892,7 +892,6 @@ pub struct VersionRecord {
 /// and resource bounds; this record role owns its discriminator and schema.
 mod version_record_wire_row {
     use super::*;
-    use serde::{Deserialize, Serialize};
 
     const MAGIC: &[u8; 5] = b"JVRR\x01";
 
@@ -1019,6 +1018,73 @@ mod version_record_wire_row {
     mod tests {
         use super::*;
         use groove::records::{DescriptorField, FieldIdentity};
+
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct WireRow(#[serde(with = "super")] OwnedRecord);
+
+        // Pin the outer Postcard byte-blob contract independently of its
+        // serializer implementation, including both varint length boundaries.
+        #[test]
+        fn row_bulk_bytes_preserve_sequence_wire_contract() {
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let envelope = encode(&record).unwrap();
+            for length in [envelope.len(), 127, 128, 16383, 16384] {
+                let mut bytes = envelope.clone();
+                bytes.resize(length, 0);
+                // This codec preserves row bytes, even when receipt admission
+                // would reject their contents. Do not weaken that boundary.
+                let row = WireRow(decode(&bytes).unwrap());
+                let mut expected = Vec::new();
+                let mut remaining = length;
+                while remaining >= 128 {
+                    expected.push((remaining as u8 & 0x7f) | 0x80);
+                    remaining >>= 7;
+                }
+                expected.push(remaining as u8);
+                expected.extend_from_slice(&bytes);
+                assert_eq!(postcard::to_allocvec(&row).unwrap(), expected);
+                assert_eq!(postcard::to_allocvec(&bytes).unwrap(), expected);
+                assert_eq!(postcard::from_bytes::<WireRow>(&expected).unwrap(), row);
+                assert_eq!(postcard::from_bytes::<Vec<u8>>(&expected).unwrap(), bytes);
+
+                // A following field must retain its boundary in both directions.
+                let old = postcard::to_allocvec(&(bytes.clone(), 999u64)).unwrap();
+                assert_eq!(postcard::to_allocvec(&(&row, 999u64)).unwrap(), old);
+                assert_eq!(
+                    postcard::from_bytes::<(WireRow, u64)>(&old).unwrap(),
+                    (row, 999)
+                );
+
+                let json = serde_json::to_string(&bytes).unwrap();
+                let json_row: WireRow = serde_json::from_str(&json).unwrap();
+                assert_eq!(serde_json::to_string(&json_row).unwrap(), json);
+                assert_eq!(encode(&json_row.0).unwrap(), bytes);
+            }
+        }
+
+        #[test]
+        fn row_bulk_bytes_reject_truncated_and_invalid_envelopes() {
+            for bytes in [
+                vec![],
+                b"JVRR\x02".to_vec(),
+                b"JVRR\x01\xff\xff\xff\xff".to_vec(),
+            ] {
+                let wire = postcard::to_allocvec(&bytes).unwrap();
+                assert!(postcard::from_bytes::<WireRow>(&wire).is_err());
+                assert!(
+                    serde_json::from_str::<WireRow>(&serde_json::to_string(&bytes).unwrap())
+                        .is_err()
+                );
+            }
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let wire = postcard::to_allocvec(&WireRow(record)).unwrap();
+            for end in 0..wire.len() {
+                assert!(postcard::from_bytes::<WireRow>(&wire[..end]).is_err());
+            }
+            assert!(serde_json::from_str::<WireRow>("[256]").is_err());
+        }
 
         // These internal tests exercise the exact untrusted byte boundary and
         // proof reuse, which ordinary client queries cannot observe directly.
@@ -1180,16 +1246,52 @@ mod version_record_wire_row {
         record: &OwnedRecord,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        encode(record)
-            .map_err(serde::ser::Error::custom)?
-            .serialize(serializer)
+        let bytes = encode(record).map_err(serde::ser::Error::custom)?;
+        // Postcard's byte blob and u8 sequence have the same canonical
+        // varint length + raw bytes contract. Extend the output in bulk.
+        serializer.serialize_bytes(&bytes)
     }
 
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<OwnedRecord, D::Error> {
-        let bytes = Vec::<u8>::deserialize(deserializer)?;
-        decode(&bytes).map_err(serde::de::Error::custom)
+        struct RowVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RowVisitor {
+            type Value = OwnedRecord;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JVRR v1 row byte blob")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+                // Decode from the deserializer's slice; only the resulting
+                // owned record needs a payload copy. Admission remains separate.
+                decode(bytes).map_err(E::custom)
+            }
+
+            fn visit_borrowed_bytes<E: serde::de::Error>(
+                self,
+                bytes: &'de [u8],
+            ) -> Result<Self::Value, E> {
+                self.visit_bytes(bytes)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                // Human-readable formats such as JSON still represent bytes
+                // as arrays. Never reserve from an untrusted size hint.
+                let mut bytes = Vec::new();
+                while let Some(byte) = sequence.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                self.visit_bytes(&bytes)
+            }
+        }
+
+        deserializer.deserialize_bytes(RowVisitor)
     }
 }
 
