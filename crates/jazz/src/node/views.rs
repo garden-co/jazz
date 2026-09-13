@@ -17,6 +17,7 @@ use crate::protocol::{
     RowVersionRef, VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
     build_version_carriers_from_singletons,
 };
+use std::borrow::Borrow;
 
 fn apply_covered_input_closure_admission_delta(
     state: &mut AuthorityResultState,
@@ -748,14 +749,18 @@ where
         update
     }
 
-    pub(crate) fn supporting_rows_for_facts(
+    pub(crate) fn supporting_rows_for_facts<I>(
         &self,
         read_schema: SchemaVersionId,
-        facts: impl IntoIterator<Item = ProgramFactEntry>,
-    ) -> Result<Vec<crate::protocol::SupportingRow>, Error> {
+        facts: I,
+    ) -> Result<Vec<crate::protocol::SupportingRow>, Error>
+    where
+        I: IntoIterator,
+        I::Item: Borrow<ProgramFactEntry>,
+    {
         let mut rows = BTreeSet::new();
         for fact in facts {
-            let ProgramFactEntry::CoveredInput(input) = fact else {
+            let ProgramFactEntry::CoveredInput(input) = fact.borrow() else {
                 continue;
             };
             let physical_table = self
@@ -769,9 +774,9 @@ where
                 .id;
             rows.insert(crate::protocol::SupportingRow {
                 physical_table,
-                version_table: input.version_table,
+                version_table: input.version_table.clone(),
                 row: input.source_row,
-                version: input.version,
+                version: input.version.clone(),
             });
         }
         Ok(rows.into_iter().collect())
@@ -1475,7 +1480,7 @@ where
                 },
                 supporting_rows: self.supporting_rows_for_facts(
                     shape.schema_version(),
-                    maintained_facts.active_peer_source_closure_facts(),
+                    maintained_facts.active_peer_source_closure_fact_refs(),
                 )?,
             },
         ))

@@ -307,6 +307,23 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             self.read_all();
         }
     }
+    /// Grow an already subscribed table with one new row per roundtrip.
+    /// Caller-supplied IDs and cells are constructed inside the timed operation.
+    #[inline(never)]
+    pub fn sequential_insert(&mut self, inserted: usize) {
+        assert_eq!(
+            self.changed, 0,
+            "insert workload starts with unfinished tasks"
+        );
+        let start = self.count;
+        for i in start..start + inserted {
+            self.count += 1;
+            self.write_range(i..i + 1, true);
+        }
+        if !REPORT.get() {
+            self.read_all();
+        }
+    }
     fn read_all(&mut self) {
         let (shape, binding, _) =
             support::table_subscription(&self.schema, "tasks", self.peer.identity());
@@ -357,6 +374,9 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         }
     }
     fn update_range(&mut self, range: std::ops::Range<usize>) {
+        self.write_range(range, false);
+    }
+    fn write_range(&mut self, range: std::ops::Range<usize>, insert: bool) {
         let backend = self.backend;
         let count = self.count;
         let schema = &self.schema;
@@ -368,9 +388,12 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         let commits = range
             .clone()
             .map(|i| {
-                MergeableCommit::new("tasks", row(i), 2000)
-                    .parents(vec![seed])
-                    .cells(cells(i, true))
+                let commit = MergeableCommit::new("tasks", row(i), 2000).cells(cells(i, !insert));
+                if insert {
+                    commit
+                } else {
+                    commit.parents(vec![seed])
+                }
             })
             .collect();
         let publication = phase(backend, count, "batch_author", || {
@@ -404,13 +427,22 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         });
         emit_node_metrics(worker, backend, count, "batch_publish_metrics");
         deliver(
-            backend, count, "batch", message, foreground, schema, peer, range.end,
+            backend,
+            count,
+            "batch",
+            message,
+            foreground,
+            schema,
+            peer,
+            if insert { 0 } else { range.end },
         );
     }
 }
 impl Fixture<RocksDbStorage> {
     pub fn rocksdb(count: usize) -> Self {
-        jazz_benchmark_guard::refuse_contaminated_measurement();
+        if !REPORT.get() {
+            jazz_benchmark_guard::refuse_contaminated_measurement();
+        }
         let dir = tempfile::tempdir().unwrap();
         let cfs = schema().column_families();
         Self::seeded("rocksdb_wal", count, move || {
@@ -511,14 +543,52 @@ pub fn profile_main() {
         jazz_benchmark_guard::refuse_contaminated_measurement();
     }
     let percent = support::env_usize("JAZZ_BATCH_UPDATE_PERCENT", 90);
+    let workload = std::env::var("JAZZ_TODO_WORKLOAD").unwrap_or_else(|_| "batch".into());
+    assert!(matches!(
+        workload.as_str(),
+        "batch" | "sequential-insert" | "sequential-update"
+    ));
     for count in support::csv_usizes("JAZZ_BATCH_ROWS", "1500") {
-        run_fixture(count, percent);
+        if workload == "batch" {
+            run_fixture(count, percent);
+        } else {
+            assert!((20..=4096).contains(&count));
+            // The RocksDB path is the same one used by the clean Divan cases.
+            // Diagnostic per-delivery checks/printing are deliberately not latency receipts.
+            let initial = if workload == "sequential-insert" {
+                count / 10
+            } else {
+                count
+            };
+            let mut fixture = Fixture::loaded(initial);
+            if workload == "sequential-insert" {
+                fixture.sequential_insert(count - initial);
+            } else {
+                fixture.sequential_update(count * percent / 100);
+            }
+            fixture.verify();
+            fixture.reopen();
+            fixture.verify();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Direct protocol fixture is required to exercise the timed worker/foreground
+    // phase boundaries; correctness is checked through exact visible rows and reopen.
+    #[test]
+    fn sequential_inserts_deliver_and_persist_exact_rows() {
+        let mut fixture = Fixture::loaded(2);
+        fixture.verify();
+        fixture.sequential_insert(9);
+        fixture.verify();
+        fixture.sequential_insert(9);
+        fixture.verify();
+        fixture.reopen();
+        fixture.verify();
+    }
     #[test]
     fn batch_reopen_preserves_exact_rows() {
         correctness_smoke();

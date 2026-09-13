@@ -856,6 +856,18 @@ impl MaintainedSubscriptionView {
     /// This intentionally exposes neither rendered result rows nor internal
     /// proof/relationship facts.
     pub(crate) fn active_peer_source_closure_facts(&self) -> BTreeSet<ProgramFactEntry> {
+        self.active_peer_source_closure_fact_refs()
+            .cloned()
+            .collect()
+    }
+
+    /// Borrow peer-safe facts without allocating an intermediate owned set.
+    /// A selected deletion witness may also be present in the weighted facts:
+    /// consumers must deduplicate in their own identity domain. In particular,
+    /// the wire manifest deduplicates physical rows, not query source roles.
+    pub(crate) fn active_peer_source_closure_fact_refs(
+        &self,
+    ) -> impl Iterator<Item = &ProgramFactEntry> {
         #[cfg(test)]
         SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(count.get() + 1));
         self.source_fact_weights
@@ -863,9 +875,8 @@ impl MaintainedSubscriptionView {
             .filter(|(fact, weights)| {
                 weights.iter().any(|weight| *weight > 0) && fact.is_peer_source_closure_fact()
             })
-            .map(|(fact, _)| fact.clone())
-            .chain(self.selected_deletion_witnesses.keys().cloned())
-            .collect()
+            .map(|(fact, _)| fact)
+            .chain(self.selected_deletion_witnesses.keys())
     }
 
     /// Compare only touched identities with the last successful publication.
