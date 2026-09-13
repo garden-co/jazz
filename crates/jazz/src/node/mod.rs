@@ -549,6 +549,10 @@ pub struct NodeState<S> {
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
+    /// One completed catalogue scan proved this UUID absent. The sole alias
+    /// writer invalidates it before any await; transaction absence is never
+    /// memoized. Fixed size bounds memory under arbitrary peer UUID churn.
+    absent_node_alias: Option<NodeUuid>,
     /// Exact ahead-current keys used to make peer replay idempotent. No caller
     /// needs ordering, so use the low-overhead deterministic hasher here.
     ahead_current_keys: FxHashSet<(PhysicalTableId, VersionLayer, Vec<u8>)>,
