@@ -3,6 +3,20 @@
 Small read-only Next.js dashboard for public `garden-co/jazz` CodSpeed wallclock
 history. No Jazz native build, database, or CodSpeed token is needed.
 
+Descriptions and throughput counts come from the benchmark-owned metadata
+catalogue at [../benchmarks/metadata](../benchmarks/metadata/README.md), not from
+dashboard-specific prose or numbers parsed from names. It currently covers all
+47 known current/retired wallclock series. Unknown names still show timings but
+receive no guessed description or throughput.
+
+Measured CodSpeed time remains the default. The optional estimated graph and
+secondary time/rate values use the explicitly requested **5× assumption**:
+estimated seconds = measured seconds / 5; estimated rate = measured rate × 5.
+Every estimated number carries `*`, with a visible footnote explaining that this
+is illustrative, not a measured machine prediction. The raw receipt table and
+upstream/API data remain unmodified. Rates are work count / median duration, not
+an independent mean-throughput or sustained-concurrency measurement.
+
 ```sh
 pnpm install --filter jazz-perf-timeline... --ignore-scripts
 pnpm --filter jazz-perf-timeline dev

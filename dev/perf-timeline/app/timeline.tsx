@@ -2,6 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  getBenchmarkMetadata,
+  metadataRevision,
+  displayedTime,
+  formatThroughput,
+} from "../lib/presentation";
+import {
   checkpoint,
   calendarDay,
   plotGeometry,
@@ -98,12 +104,14 @@ function Chart({
   onSelect,
   logarithmic,
   spread,
+  estimated,
 }: {
   points: Point[];
   selected: string | null;
   onSelect: (id: string) => void;
   logarithmic: boolean;
   spread: boolean;
+  estimated: boolean;
 }) {
   const width = 1100,
     height = 395,
@@ -123,7 +131,7 @@ function Chart({
         className="chart"
         viewBox={`0 0 ${width} ${height}`}
         role="img"
-        aria-label="Median wallclock time by chronological measured checkpoint. Use the receipt table below for every exact value."
+        aria-label={`${estimated ? "Estimated wallclock (CodSpeed divided by five)" : "Measured CodSpeed wallclock"} by chronological checkpoint. Use the receipt table below for exact measured values.`}
       >
         {Array.from({ length: 5 }, (_, i) => {
           const ratio = i / 4;
@@ -139,7 +147,7 @@ function Chart({
                 strokeDasharray="3 5"
               />
               <text x={left - 14} y={y(value) + 4} textAnchor="end" className="axis-text">
-                {formatTime(value)}
+                {displayedTime(value, estimated)}
               </text>
             </g>
           );
@@ -197,7 +205,7 @@ function Chart({
               onClick={() => onSelect(p.resultId)}
               tabIndex={0}
               role="button"
-              aria-label={`${checkpoint(p)}, ${formatTime(p.median)}, ${stages[p.stage].label}`}
+              aria-label={`${checkpoint(p)}, ${displayedTime(p.median, estimated)}, ${stages[p.stage].label}`}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
@@ -206,7 +214,7 @@ function Chart({
               }}
             >
               <title>
-                {checkpoint(p)} · {formatTime(p.median)} · {date(p.date)}
+                {checkpoint(p)} · {displayedTime(p.median, estimated)} · {date(p.date)}
                 {`\n`}
                 {p.title}
               </title>
@@ -229,7 +237,8 @@ function Chart({
           </g>
         ))}
         <text x={left} y="12" className="axis-caption">
-          WALLCLOCK · {logarithmic ? "LOG SCALE" : "ZERO-BASED SCALE"}
+          {estimated ? "ESTIMATED WALLCLOCK*" : "CODSPEED WALLCLOCK"} ·{" "}
+          {logarithmic ? "LOG SCALE" : "ZERO-BASED SCALE"}
         </text>
         <text x={width - right} y={height - 6} textAnchor="end" className="axis-caption">
           MEASURED CHECKPOINTS · RUN DAY (UTC) →
@@ -251,6 +260,7 @@ export function Dashboard() {
   const [branch, setBranch] = useState("all");
   const [logarithmic, setLogarithmic] = useState(false);
   const [spread, setSpread] = useState(false);
+  const [estimated, setEstimated] = useState(false);
 
   async function refresh() {
     setLoading(true);
@@ -289,6 +299,7 @@ export function Dashboard() {
     [data],
   );
   const benchmark: Benchmark | undefined = benchmarks.find((b) => b.id === benchmarkId);
+  const metadata = benchmark ? getBenchmarkMetadata(benchmark.name) : null;
   const points = useMemo(() => {
     const cutoff = days === "all" ? 0 : Date.now() - Number(days) * 86400000;
     return (benchmark?.points ?? []).filter(
@@ -440,7 +451,7 @@ export function Dashboard() {
                           ? "IN MEMORY"
                           : "NATIVE WALLCLOCK"}
                     </div>
-                    <h2>{pretty(benchmark.name)}</h2>
+                    <h2>{metadata?.title ?? pretty(benchmark.name)}</h2>
                     <code>{benchmark.name}</code>
                   </div>
                   <a
@@ -453,15 +464,94 @@ export function Dashboard() {
                     ↗
                   </a>
                 </div>
+                {metadata ? (
+                  <section className="benchmark-description" aria-label="Benchmark description">
+                    <p>{metadata.description}</p>
+                    <div className="definition-context">
+                      <span>{metadata.storage}</span>
+                      <span>{metadata.fixture}</span>
+                    </div>
+                    <details>
+                      <summary>What is timed & how throughput is counted</summary>
+                      <div className="timing-boundaries">
+                        <div>
+                          <h4>Inside the timer</h4>
+                          <ul>
+                            {metadata.includes.map((text) => (
+                              <li key={text}>{text}</li>
+                            ))}
+                          </ul>
+                        </div>
+                        <div>
+                          <h4>Outside the timer</h4>
+                          <ul>
+                            {metadata.excludes.map((text) => (
+                              <li key={text}>{text}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                      <p className="work-unit">
+                        {metadata.work.explanation} Rate ={" "}
+                        {metadata.work.count.toLocaleString("en-US")} ÷ timed seconds.
+                      </p>
+                      <p className="definition-source">
+                        Reviewed definition v{metadataRevision.version} ·{" "}
+                        <a
+                          href={`${repo}/blob/${metadataRevision.reviewedCommit}/${metadata.source}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Reviewed harness ↗
+                        </a>
+                        {current && (
+                          <>
+                            {" "}
+                            ·{" "}
+                            <a
+                              href={`${repo}/blob/${current.sha}/${metadata.source}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Harness at selected commit ↗
+                            </a>
+                          </>
+                        )}
+                        <br />
+                        Historical timer boundaries may differ; this description is not a claim that
+                        every run used the same harness revision.
+                      </p>
+                    </details>
+                  </section>
+                ) : (
+                  <p className="benchmark-description">
+                    No reviewed description or throughput denominator is registered for this
+                    benchmark yet. Timings remain available.
+                  </p>
+                )}
                 <div className="metrics">
                   <div>
                     <span>Latest shown</span>
-                    <strong>{latest ? formatTime(latest.median) : "—"}</strong>
+                    <strong>{latest ? displayedTime(latest.median, estimated) : "—"}</strong>
+                    {latest && (
+                      <small className="estimate">
+                        {estimated
+                          ? `CodSpeed: ${formatTime(latest.median)}`
+                          : `Estimated: ${displayedTime(latest.median, true)}`}
+                      </small>
+                    )}
                     <small>{latest ? checkpoint(latest) : "No measurements"}</small>
                   </div>
                   <div>
                     <span>First shown</span>
-                    <strong>{first ? formatTime(first.median) : "—"}</strong>
+                    <strong>{first ? displayedTime(first.median, estimated) : "—"}</strong>
+                    {first && (
+                      <small className="estimate">
+                        {estimated
+                          ? `CodSpeed: ${formatTime(first.median)}`
+                          : `Estimated: ${displayedTime(first.median, true)}`}
+                      </small>
+                    )}
                     <small>{first ? checkpoint(first) : "Adjust the filters"}</small>
                   </div>
                   <div>
@@ -496,6 +586,17 @@ export function Dashboard() {
                     </div>
                   </div>
                   <div className="filters">
+                    <label>
+                      Timing
+                      <select
+                        aria-label="Timing display"
+                        value={estimated ? "estimated" : "measured"}
+                        onChange={(event) => setEstimated(event.target.value === "estimated")}
+                      >
+                        <option value="measured">CodSpeed measured</option>
+                        <option value="estimated">Estimated machine*</option>
+                      </select>
+                    </label>
                     <label>
                       Window
                       <select
@@ -546,6 +647,7 @@ export function Dashboard() {
                       onSelect={setSelected}
                       logarithmic={logarithmic}
                       spread={spread}
+                      estimated={estimated}
                     />
                   ) : (
                     <div className="empty-chart">
@@ -558,6 +660,9 @@ export function Dashboard() {
                     ))}
                   </div>
                   <p className="chart-note">
+                    {estimated && (
+                      <>* Estimated time = CodSpeed ÷ 5, not a measured hardware result. </>
+                    )}
                     Each line follows one branch or PR, ordered by run time—not commit ancestry.
                     Dates are run calendar days in UTC. Only releases, main and open PRs are shown.
                     Min–max is sample range, not a confidence interval.
@@ -598,13 +703,36 @@ export function Dashboard() {
                         </div>
                       </div>
                       <div className="receipt-timing">
-                        <strong>{formatTime(current.median)}</strong>
+                        <strong>{displayedTime(current.median, estimated)}</strong>
                         <span>
-                          {formatTime(current.min)} – {formatTime(current.max)}
+                          {displayedTime(current.min, estimated)} –{" "}
+                          {displayedTime(current.max, estimated)}
                         </span>
-                        <small>median · observed min–max</small>
+                        <small>
+                          {estimated
+                            ? "estimated median · scaled min–max*"
+                            : "CodSpeed median · observed min–max"}
+                        </small>
+                        <small>
+                          {estimated
+                            ? `CodSpeed: ${formatTime(current.median)}`
+                            : `Estimated: ${displayedTime(current.median, true)}`}
+                        </small>
                       </div>
                     </div>
+                    {metadata && (
+                      <div className="throughput-receipt" aria-label="Throughput receipt">
+                        <div>
+                          <span>Measured workload rate</span>
+                          <strong>{formatThroughput(current.median, metadata)}</strong>
+                        </div>
+                        <div>
+                          <span>Estimated workload rate*</span>
+                          <strong>{formatThroughput(current.median, metadata, true)}</strong>
+                        </div>
+                        <p>{metadata.work.explanation}</p>
+                      </div>
+                    )}
                     <div className="receipt-id">
                       {current.includedInRelease && (
                         <span>
@@ -633,8 +761,10 @@ export function Dashboard() {
                           <th>Checkpoint</th>
                           <th>Status</th>
                           <th>Measured</th>
-                          <th>Median</th>
-                          <th>Min–max</th>
+                          <th>CodSpeed median</th>
+                          <th>Measured min–max</th>
+                          <th>Estimated time*</th>
+                          {metadata && <th>Measured workload rate</th>}
                           <th>Source</th>
                         </tr>
                       </thead>
@@ -657,6 +787,10 @@ export function Dashboard() {
                             <td className="numeric">
                               {formatTime(p.min)} – {formatTime(p.max)}
                             </td>
+                            <td className="numeric">{displayedTime(p.median, true)}</td>
+                            {metadata && (
+                              <td className="numeric">{formatThroughput(p.median, metadata)}</td>
+                            )}
                             <td>
                               <a
                                 href={`${codspeed}/runs/${p.runId}`}
@@ -677,12 +811,20 @@ export function Dashboard() {
             {data && (
               <section className="methodology">
                 <h3>Read the graph, keep the context.</h3>
+                <p id="estimate-footnote" className="estimate-footnote">
+                  <strong>* Rough machine estimate:</strong> estimated time = measured CodSpeed time
+                  ÷ 5; estimated throughput = measured workload rate × 5. This is a simple
+                  illustrative assumption, not a measurement or hardware-specific calibration.
+                  Actual machines, storage, build settings and workloads can differ substantially.
+                  Measured CodSpeed values remain unchanged in the receipts.
+                </p>
                 <p>
-                  These are benchmark-operation medians on CodSpeed runners, not per-row latency or
-                  local-machine timings. Different harness revisions, fixtures, and runner
-                  configurations can change comparability; follow the commit and run receipts before
-                  making a throughput claim. No automatic speedup claim is made between unrelated
-                  branches.
+                  Measured values are benchmark-operation medians on CodSpeed runners, not per-row
+                  latency or local-machine timings. Throughput is documented work units divided by
+                  the median duration, not a separately measured mean or a concurrent-capacity
+                  claim. Different harness revisions, fixtures, and runner configurations can change
+                  comparability; follow the commit and run receipts before making a throughput
+                  claim. No automatic speedup claim is made between unrelated branches.
                 </p>
                 <p>
                   “Released” includes main commits proven to be ancestors of a semantic-version tag,

@@ -111,6 +111,18 @@ try {
     );
   }
   await assertMatchingPreview();
+  assert.match(await page.locator(".benchmark-description").innerText(), /Member, not anonymous/);
+  assert.match(await page.getByLabel("Throughput receipt").innerText(), /110,072 visible rows\/s/);
+  assert.match(
+    await page.getByLabel("Throughput receipt").innerText(),
+    /550,360 visible rows\/s\*/,
+  );
+  await page.getByLabel("Timing display").selectOption("estimated");
+  assert.equal(await page.locator(".metrics strong").first().innerText(), "50 ms*");
+  assert.match(await page.locator(".chart").textContent(), /ESTIMATED WALLCLOCK\*/);
+  assert.match(await page.locator("#estimate-footnote").innerText(), /divided|÷ 5/);
+  await assertMatchingPreview();
+  await page.getByLabel("Timing display").selectOption("measured");
   assert.equal(await page.locator(".chart-point").count(), 4);
   assert.match(await page.locator(".chart").textContent(), /2026-09-11/);
   assert.match(await page.locator(".chart").textContent(), /2026-09-14/);
@@ -132,7 +144,7 @@ try {
   await page.locator(".chart-point").first().focus();
   await page.keyboard.press("Enter");
   assert.match(await page.locator(".receipt").innerText(), /Checkpoint 1/);
-  await page.locator("summary").click();
+  await page.locator(".receipts-table summary").click();
   assert.equal(await page.locator("tbody tr").count(), 4);
   assert.match(await page.locator("tbody").innerText(), /1\.000000000 s/);
   await page.getByLabel("Find a benchmark").fill("other");
@@ -140,6 +152,8 @@ try {
   assert.match(page.url(), /benchmark=second/);
   assert.equal(await page.locator(".chart-point").count(), 1);
   await page.getByLabel("Checkpoint status").selectOption("released");
+  assert.match(await page.locator(".benchmark-description").innerText(), /No reviewed description/);
+  assert.equal(await page.getByLabel("Throughput receipt").count(), 0);
   assert.equal(await page.locator(".empty-chart").count(), 1);
   fail = true;
   await page.getByRole("button", { name: "Refresh data" }).click();

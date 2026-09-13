@@ -9,6 +9,111 @@
   --mono: "IBM Plex Mono", monospace;
   --font: "DM Sans", system-ui, sans-serif;
 }
+.benchmark-description {
+  margin: -8px 0 24px;
+  color: #667066;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.benchmark-description > p {
+  margin: 0 0 12px;
+  color: #4e5d52;
+}
+.definition-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 12px;
+  font-size: 10px;
+}
+.definition-context span {
+  background: #edf0e8;
+  border: 1px solid #dfe5d8;
+  border-radius: 5px;
+  padding: 3px 8px;
+}
+.benchmark-description summary {
+  font-size: 11px;
+}
+.timing-boundaries {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-top: 15px;
+}
+.timing-boundaries h4 {
+  margin: 0;
+  color: #4e5d52;
+  font-size: 11px;
+  font-weight: 600;
+}
+.timing-boundaries ul {
+  padding-left: 16px;
+  font-size: 11px;
+}
+.definition-source {
+  font-size: 10px;
+  color: #7e887c;
+}
+.definition-source a {
+  color: var(--green);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.work-unit {
+  font-size: 11px;
+}
+.metrics .estimate {
+  color: #88662f;
+}
+.throughput-receipt {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  margin-top: 17px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.throughput-receipt span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-bottom: 6px;
+}
+.throughput-receipt strong {
+  font-size: 15px;
+  font-family: var(--mono);
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.throughput-receipt > div:nth-child(2) strong {
+  color: #88662f;
+}
+.throughput-receipt p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.estimate-footnote {
+  border-left: 2px solid #b68a4c;
+  padding: 9px 14px;
+  background: #f0ecdf;
+  border-radius: 0 5px 5px 0;
+}
+@media (max-width: 600px) {
+  .filters label {
+    min-width: 130px;
+  }
+  .timing-boundaries {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .throughput-receipt {
+    grid-template-columns: 1fr;
+  }
+  .throughput-receipt strong {
+    font-size: 13px;
+  }
+}
 * {
   box-sizing: border-box;
 }

@@ -1,5 +1,8 @@
 # Permissioned-resource first sync
 
+[metadata.ts](metadata.ts) is the structured source for the timeline's description,
+timing boundaries, fixed Member identity and visible-row throughput unit.
+
 Workload revision 1 preserves the existing shallow-history fixture and permission
 relationships. Thirty-nine subscriptions produce 27,518 visible rows at full
 scale: resources, permission inputs and child rows inheriting their parent's
