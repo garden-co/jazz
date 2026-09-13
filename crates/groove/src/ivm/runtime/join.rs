@@ -107,9 +107,41 @@ impl<V> JoinBucketMap<V> {
 }
 
 #[derive(Clone, Debug, Default)]
+struct SharedJoinBucketMap<V>(Option<Rc<JoinBucketMap<V>>>);
+
+impl<V> AsRef<JoinBucketMap<V>> for SharedJoinBucketMap<V> {
+    fn as_ref(&self) -> &JoinBucketMap<V> {
+        self.0.as_deref().unwrap_or(&JoinBucketMap::Empty)
+    }
+}
+
+impl<V> std::ops::Deref for SharedJoinBucketMap<V> {
+    type Target = JoinBucketMap<V>;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl<V: Clone> SharedJoinBucketMap<V> {
+    fn make_mut(&mut self) -> &mut JoinBucketMap<V> {
+        Rc::make_mut(self.0.get_or_insert_with(|| Rc::new(JoinBucketMap::Empty)))
+    }
+
+    fn into_map(self) -> JoinBucketMap<V> {
+        match self.0 {
+            Some(map) => Rc::try_unwrap(map).unwrap_or_else(|map| (*map).clone()),
+            None => JoinBucketMap::Empty,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 struct JoinBucket {
-    base: Rc<JoinBucketMap<i64>>,
-    overlay: Rc<JoinBucketMap<Option<i64>>>,
+    // Empty bases and cleared overlays do not need an Rc allocation. Once
+    // populated, snapshots retain the same copy-on-write sharing boundary.
+    base: SharedJoinBucketMap<i64>,
+    overlay: SharedJoinBucketMap<Option<i64>>,
 }
 
 impl JoinBucket {
@@ -123,12 +155,14 @@ impl JoinBucket {
 
     #[cfg(test)]
     fn set(&mut self, record: Bytes, weight: i64) {
-        Rc::make_mut(&mut self.overlay).insert(record, (weight != 0).then_some(weight));
+        self.overlay
+            .make_mut()
+            .insert(record, (weight != 0).then_some(weight));
     }
 
     fn add_weight(&mut self, record: &Bytes, delta: i64) -> i64 {
         // An overlay tombstone means zero, not the weight in the base.
-        let overlay = Rc::make_mut(&mut self.overlay);
+        let overlay = self.overlay.make_mut();
         if let JoinBucketMap::Many(records) = overlay {
             // Preserve one hash probe for the ordinary multi-record path.
             let weight = records
@@ -169,9 +203,8 @@ impl JoinBucket {
         if self.overlay.is_empty() {
             return;
         }
-        let overlay = std::mem::take(&mut self.overlay);
-        let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
-        let base = Rc::make_mut(&mut self.base);
+        let overlay = std::mem::take(&mut self.overlay).into_map();
+        let base = self.base.make_mut();
         for (record, weight) in overlay.into_entries() {
             if let Some(weight) = weight {
                 base.insert(record, weight);
@@ -184,8 +217,8 @@ impl JoinBucket {
     #[cfg(test)]
     fn from_records(records: HashMap<Bytes, i64>) -> Self {
         Self {
-            base: Rc::new(JoinBucketMap::Many(records)),
-            overlay: Rc::default(),
+            base: SharedJoinBucketMap(Some(Rc::new(JoinBucketMap::Many(records)))),
+            overlay: SharedJoinBucketMap::default(),
         }
     }
 }
@@ -1775,6 +1808,42 @@ mod tests {
     }
 
     #[test]
+    fn empty_join_bucket_snapshots_need_no_shared_allocations() {
+        // Internal ownership proof: public join results cannot establish that
+        // empty snapshots and committed-away overlays hold no allocation.
+        let empty = JoinBucket::default();
+        let mut bucket = empty.clone();
+        assert!(empty.base.0.is_none());
+        assert!(empty.overlay.0.is_none());
+        assert!(bucket.base.0.is_none());
+        assert!(bucket.overlay.0.is_none());
+        bucket.commit_overlay();
+        assert!(bucket.base.0.is_none());
+        assert!(bucket.overlay.0.is_none());
+
+        let record = Bytes::from_static(b"one");
+        assert_eq!(bucket.add_weight(&record, -2), -2);
+        assert!(bucket.base.0.is_none());
+        let staged_snapshot = bucket.clone();
+        bucket.commit_overlay();
+        assert!(bucket.overlay.0.is_none());
+        assert_eq!(bucket.get(&record), Some(&-2));
+        assert_eq!(staged_snapshot.get(&record), Some(&-2));
+        assert!(empty.is_empty());
+
+        assert_eq!(bucket.add_weight(&record, 2), 0);
+        let tombstone_snapshot = bucket.clone();
+        bucket.commit_overlay();
+        assert!(bucket.overlay.0.is_none());
+        assert!(bucket.is_empty());
+        assert!(tombstone_snapshot.is_empty());
+        assert_eq!(bucket.add_weight(&record, 3), 3);
+        assert_eq!(bucket.get(&record), Some(&3));
+        assert!(tombstone_snapshot.is_empty());
+        assert_eq!(staged_snapshot.get(&record), Some(&-2));
+    }
+
+    #[test]
     fn singleton_join_bucket_promotes_without_changing_snapshot_or_tombstone_semantics() {
         // Internal representation proof: public join rows cannot establish
         // that a singleton did not allocate a collection/hash its record.
@@ -1868,7 +1937,10 @@ mod tests {
         let live = JoinBucket::from_records(records);
         let mut staged = live.clone();
         staged.set(added.clone(), 1);
-        assert!(Rc::ptr_eq(&live.base, &staged.base));
+        assert!(Rc::ptr_eq(
+            live.base.0.as_ref().expect("populated base"),
+            staged.base.0.as_ref().expect("populated base"),
+        ));
         assert_eq!(live.get(&added), None);
         drop(live);
         staged.commit_overlay();
@@ -1889,7 +1961,10 @@ mod tests {
         assert_eq!(staged.add_weight(&record, 4), 3);
         assert_eq!(original.get(&record), Some(&2));
         assert_eq!(absent.get(&record), None);
-        assert!(Rc::ptr_eq(&original.base, &staged.base));
+        assert!(Rc::ptr_eq(
+            original.base.0.as_ref().expect("populated base"),
+            staged.base.0.as_ref().expect("populated base"),
+        ));
         staged.commit_overlay();
         assert_eq!(staged.get(&record), Some(&3));
         assert_eq!(original.get(&record), Some(&2));

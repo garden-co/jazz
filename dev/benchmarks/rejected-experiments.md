@@ -25,6 +25,13 @@ premise and a measurement that can test it.
 | [#2928](https://github.com/garden-co/jazz/pull/2928): fuse shared-witness source-presence transitions                                                               | Local 1–2% did not survive hosted confirmation. Unchanged-source repeat: cold 55.9831s parent / 55.9129s head minima (−0.13%), medians −0.17%; inconclusive. A smaller phase alone did not justify retention. Excluded from the overnight stack; original branch and receipts preserved. |
 | [#2944](https://github.com/garden-co/jazz/pull/2944): borrow retained witness rows through publication staging                                                      | Cold 46.0968s / 45.8023s minima (−0.64%) but 46.1386s / 46.1560s medians (+0.04%); updates 7.3632s / 7.4351s (+0.98%). Local writes also slightly slower. Removed clones did not establish an end-to-end win; excluded, branch and receipts preserved.                                   |
 
+The [#2946](https://github.com/garden-co/jazz/pull/2946) direct multisink
+source-transition accumulator trial was also excluded: cold 45.6690s /
+45.5751s minima (−0.21%) and 45.9187s / 45.8727s medians (−0.10%), versus a
+0.5–2% prediction. Updates were +0.86% minimum / flat median; warmed local
+cold and write pairs did not establish a win. Avoided intermediate copies did
+not justify the extra call interface. Branch and receipts are preserved.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.
