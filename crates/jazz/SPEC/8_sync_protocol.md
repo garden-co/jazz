@@ -32,7 +32,7 @@ Invariant digest:
 - `INV-SYNC-24`: Known-state payload dedup may omit only native bodies, never required physical snapshot membership or delta additions/removals. Fresh subscriptions and recovery require a full snapshot; retained transport revisions are not durable coverage receipts.
 - `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
 - `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
-- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
+- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams in the current process; eviction invalidates its in-memory cursor, and restart never recovers a declaration.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may affect native-body dedup only when its server-stamped progress matches the serving peer’s current token for that reader and binding view. It MUST NOT replace the complete supporting set or the fresh selected-authority confirmation.
 - `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
 - `INV-SYNC-28`: The pre-reconstruction terminal carrier is historical scaffolding and is retired by `INV-SYNC-36`; it is not an authority-output compatibility contract.
@@ -151,7 +151,7 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
-**Experiment, 2026-09-13 — the sole wire protocol is v2 (#2913 / #2952).** `ViewUpdate` carries
+**Experiment, 2026-09-13 — the sole wire protocol is v2 (#2913 / #2954).** `ViewUpdate` carries
 settled version payloads only through `version_carriers`; the transitional
 duplicate `version_bundles` field is absent. Every endpoint advertises exactly
 wire-protocol v2 and requires every peer Hello to advertise exactly
@@ -507,8 +507,8 @@ to serve them to that reader (`INV-SYNC-12..14`, `INV-SYNC-41`).
 
 The receiver evaluates the query with its own IVM. For example, snapshot
 revision R contains A and B. Delta R→S removes A and adds C; B is untouched.
-Only the changed physical versions expand to the receiver's compiler-owned scan
-occurrences and become one atomic Groove input batch. No full predecessor clone,
+Only the changed physical versions feed shared per-table receiver inputs in
+one atomic Groove batch; aliases remain local operators. No full predecessor clone,
 manifest reconstruction or retained-scope comparison is required on this path.
 
 Native body dedup remains separate from membership. Transaction inventory may
@@ -753,8 +753,9 @@ A subscriber declares its known state per usage-site query in one of two forms:
   global position `p`, and none of it has been locally evicted." In the current
   implementation `p` is the exact `settled_through` stamp previously emitted by
   the serving node for the same canonical binding view. The client records and
-  persists this cursor when applying `ViewUpdate`s and echoes it on resubscribe.
-  Any local eviction touching stored row-version bodies invalidates persisted
+  retains this cursor in memory when applying `ViewUpdate`s and echoes it on
+  in-process resubscribe. Restart requires a fresh scope snapshot.
+  Any local eviction touching stored row-version bodies invalidates in-memory
   fast facts before another declaration can be made (`INV-SYNC-27`).
 - **Slow declaration** — an explicit set of row-version identities
   `(row_uuid, tx_time, tx_node_id)`: used when no valid fast fact exists
@@ -817,9 +818,9 @@ time that can affect the served view, including authorization and revocation
 effects. It does not claim that the receiver possesses unrelated transactions,
 and neither density nor numerical adjacency is required: the authority may
 advance one binding directly across arbitrarily many irrelevant commits. It may
-be persisted and reused across reconnects
+be reused within one process across reconnects
 or edges serving the same authoritative database lineage for known-state payload
-dedup and repair. It is not an active-connection receipt: a subscription is
+dedup and repair, but is never persisted or recovered. It is not an active-connection receipt: a subscription is
 settled, and a usage-site one-shot attachment is remotely covered, only after
 the selected continuously live upstream connection has sent a fresh confirming
 `ViewUpdate`. A fresh `Edge`/`Global` one-shot requires that confirmation for
@@ -899,10 +900,9 @@ known-state coverage grows.
 _Further invariants._ `INV-SYNC-24` — fast and slow declarations omit only
 eligible version bodies; `INV-SYNC-25` — dedup + repairs converge to the
 undeduped stream; `INV-SYNC-26` — repair requests are exact and policy-checked;
-`INV-SYNC-27` — persisted fast declarations require contiguous application and
-no eviction; eviction invalidates the persisted fact. Persisting slow exact
-declarations is intentionally not part of v1; they are derived from the
-receiver's current local store when needed.
+`INV-SYNC-27` — process-local fast declarations require contiguous application
+and no eviction; eviction invalidates the in-memory fact. Neither fast cursors
+nor slow exact declarations are persisted; restart restores native data only.
 
 ### 8.13 Subsumed sync and wire notes
 

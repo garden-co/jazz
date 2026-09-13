@@ -83,47 +83,44 @@ not by accumulated view state. `groove/SPEC/INVARIANTS.md::INV-MV-1` and the mai
 differential oracle prove observable equivalence; they do not justify a
 full-state rebuild or full-state diff on the maintained path.
 
-#### Durable physical scope inputs
+#### Volatile subscription scope and retired cache stores
 
-New receiver writes use `JSIR` version `1` in the existing
-`jazz_settled_program_facts` store and authority-key/digest envelope described
-below. The digest domain is unchanged; the tagged value bytes distinguish the
-formats. A JSIR value contains, in order: physical table UUID, authored native
-table string, row UUID, and version reference. UUID, UTF-8 string, integer and
-option encodings use the explicit conventions below. Only concrete content or
-deletion layers are valid. There is no source occurrence, coverage fact, query
-result or serializer-defined layout in a new scope record. Empty scope tables
-are implicit in the registered query's dataset; a complete snapshot and its
-receipt establish completeness, not a fabricated per-occurrence manifest.
+Native rows, transaction history, pending writes and catalogue data persist.
+Subscription membership, source-closure generations, live settlement and
+body-dedup cursors are process-local. Reopen does not recover any authority
+scope or delta predecessor. Local-first evaluates eligible local data plus
+pending writes. Remote waits for a fresh complete v2 supporting snapshot;
+remote-if-possible does the same online and uses local knowledge only after
+explicit disconnect. Retaining native bytes does not prove remote membership.
 
-On detecting the retired JPFK occurrence-cache generation, recovery discards
-all subscription scope cache records and their resume cursors. There is no
-occurrence-to-physical migration. Native rows, transaction history, pending
-writes and catalogue data are retained. New subscriptions must obtain fresh
-authority snapshots; offline permissioned subscriptions cannot settle from the
-discarded scope. Merely retaining a native row never proves current authority
-membership. The policy directory is shared metadata, not scope evidence, and
-is not deleted by this invalidation.
+Local-current queries read retained Global-current and Ahead-current rows;
+they do not require a recovered node-wide read timestamp. Native transaction
+recovery preserves sparse causal dots on partial replicas. Neither the maximum
+retained transaction time nor a discarded subscription cursor is promoted to
+a complete-history frontier. Only history-complete nodes have that guarantee;
+remote query settlement remains an exact live subscription claim.
 
-JSIR recovery does not restore live authority or a transport predecessor.
-Unknown or malformed new-format encodings still fail closed.
-`physical_scope_storage_v1_has_exact_bytes_and_rejects_malformed_records`
-pins the new format.
+The reserved `jazz_known_state_facts` and `jazz_settled_program_facts` stores
+are opened solely to delete historical cache entries. Their JPFK/JSIR payloads,
+keys and cursors are not interpreted as authority evidence, including malformed
+retired payloads. No new scope writer, encoder or decoder exists. The closed
+storage profile retains `jazz.subscription-program-fact-key.v1` as a reserved
+legacy family ID so old roots open; this does not introduce a new encoding or
+reuse that ID for new values. Native storage encodings and manifests remain
+unchanged. Shared policy/availability metadata has independent consumers and
+is not discarded with the scope cache.
 
-The physical-row cache uses the authority prefix [shape UUID, binding UUID,
-read-view UUID, policy-presence U8, policy-directory digest Bytes], followed by
-a 32-byte BLAKE3 derived key in domain `jazz.settled-program-fact-key.v1`.
-The tagged JSIR bytes derive the digest and are its sole stored value.
+`legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows`
+pins both retired byte generations and native/pending retention;
+`retired_scope_payloads_never_restore_authority` covers malformed retired
+payloads. Cleanup must finish successfully before open returns; partial cleanup
+is safe to retry because no durable cursor or scope is ever recovered.
 
-Every string/byte field uses a little-endian U32 byte length followed by exact
-bytes; strings must be UTF-8. UUIDs are exactly 16 bytes. A version reference is
-transaction (U64 time, node UUID), optional schema UUID, layer byte (0 content,
-1 deletion), optional batch transaction, optional branch bytes, optional digest
-bytes. Each option is U8 0 absent or U8 1 followed by its declared value.
-Content-or-deletion is not an admissible physical-row layer. Total and individual
-byte fields are bounded to 1 MiB. Unknown versions, malformed/truncated/trailing
-bytes and invalid row identities reject before resident scope installation.
-Serializer defaults are not part of this contract.
+Active subscriptions still maintain exact physical membership and predecessor
+revisions in memory. A retained process may use its own valid unevicted cursor
+for native-body dedup on reconnect, but a new process starts without one.
+Missing payloads remain subject to exact scoped repair. Eviction invalidates
+process-local scope/cursors before deleting any native bodies.
 
 #### Typed identity descriptor roles
 
@@ -398,10 +395,9 @@ equal-shaped predecessor's terminal cache or execute a separate semantic scan.
 Only final-pin release retires the stream. A subsequent usage opens a new wire
 identity; a retired stream's late reply cannot satisfy it. The receiver validates
 one ordered predecessor sequence, not duplicate sequences per local listener.
-A persisted settlement cursor alone cannot restore a claimed source closure:
-the complete source manifest and facts must accompany recovered cache state.
-A new usage after retirement awaits a fresh authority closure instead of lazily
-reviving only the old cursor.
+A process restart restores no scope or settlement cursor. A new remote usage
+awaits a fresh authority snapshot; a local-first usage reads eligible native
+data without reconstructing any old query membership.
 
 Sharing is determined by the lowered authority request, including its query,
 binding, read view, and policy scope. Downstream local-first and remote reads

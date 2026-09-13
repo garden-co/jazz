@@ -45,11 +45,19 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 // this records current fixture wiring and is not used to reinterpret the
 // committed historical binary stores.
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
-    include_str!("../../../fixtures/current-native-jazz-producer.pack.base64");
+    include_str!("../../../fixtures/volatile-scope-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "f3ef22d387f4fef9e101343713f6080e37e87678680d39b8e6aed4957f4616ba";
+    "b304eaa4002ba5e9a59746a0bc588b02e6398804b04275dea81bb99e045bdd5b";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "2db44fe73c261103149c5aad74b03ede66897aef5d55a666ee361c39a4db64dc";
+    "a3c66fb0ae25377577390d9210ad6e0b95b0f62d83435711121cf22c7288e72f";
+// Frozen alongside the physical SQLite/RocksDB images below. The current
+// producer no longer writes scope-only policy/cursor metadata; historical
+// images still retain the independent policy directory and must be checked
+// against their own receipt, not a newly produced store's receipt.
+const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
+    include_str!("../../../fixtures/current-native-jazz-producer.pack.base64");
+const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
+    "f3ef22d387f4fef9e101343713f6080e37e87678680d39b8e6aed4957f4616ba";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -142,6 +150,14 @@ fn current_producer_native_corpus_pack() -> String {
         CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64,
         CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256,
         "current native corpus producer pack",
+    )
+}
+
+fn current_physical_native_corpus_pack() -> String {
+    decode_native_corpus_pack(
+        CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64,
+        CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256,
+        "committed physical native corpus pack",
     )
 }
 
@@ -1808,7 +1824,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
     let sqlite_open_path = sqlite_path.clone();
     verify_historical_native_corpus(
         sqlite_schema.clone(),
-        current_producer_native_corpus_pack,
+        current_physical_native_corpus_pack,
         move || {
             let families = sqlite_schema.column_families();
             let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1862,7 +1878,7 @@ fn committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes() {
     let rocks_open_path = rocks_path.clone();
     verify_historical_native_corpus(
         rocks_schema.clone(),
-        current_producer_native_corpus_pack,
+        current_physical_native_corpus_pack,
         move || {
             let families = rocks_schema.column_families();
             let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2248,7 +2264,7 @@ fn native_jazz_corpus_staged_candidate_survives_live_producer_removal() {
     let profile = epoch_1_storage_codec_profile().expect("closed Jazz profile");
     verify_historical_native_corpus(
         schema.clone(),
-        current_producer_native_corpus_pack,
+        current_physical_native_corpus_pack,
         move || {
             let families = schema.column_families();
             let refs = families.iter().map(String::as_str).collect::<Vec<_>>();

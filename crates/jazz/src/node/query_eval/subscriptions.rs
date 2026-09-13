@@ -829,12 +829,12 @@ where
             })
     }
 
-    /// Forget a recovered authority result that has no live wire owner.
+    /// Forget an in-memory authority result that has no live wire owner.
     ///
-    /// Settled result membership is durable, but relay registration ownership
-    /// is intentionally process-local. A reopened relay therefore cannot use
-    /// an ownerless `RelayAuthoritySession` view to satisfy a new downstream
-    /// usage site: it must first receive a current authoritative reset.
+    /// Retained membership must not outlive its relay registration owner.
+    /// An ownerless `RelayAuthoritySession` view cannot satisfy a new downstream
+    /// usage site: it must first receive a current authoritative reset. Neither
+    /// membership nor registration ownership survives a process restart.
     pub(crate) fn invalidate_ownerless_settled_result_view(
         &mut self,
         binding_view_key: BindingViewKey,
@@ -1100,8 +1100,8 @@ where
         {
             return Ok(None);
         }
-        // Durable payload possession survives restart; live authority does not.
-        // Advertising this cursor only deduplicates bodies. The serving peer
+        // This process's unevicted receipt may deduplicate bodies on reconnect;
+        // restart restores neither this cursor nor scope. The serving peer
         // must still send a fresh complete supporting set, and ordinary receipt
         // admission/repair must finish before the query becomes confirmed.
         if let Some(position) = self
@@ -1129,7 +1129,7 @@ where
                 },
             }));
         }
-        // Without a durable cursor, only a live exact receipt can justify an
+        // Without a process-local cursor, only a live exact receipt can justify an
         // exact declaration. Locally authored/cached rows alone cannot do so.
         if !self.has_settled_authority_result(&authority_result_key) {
             return Ok(None);

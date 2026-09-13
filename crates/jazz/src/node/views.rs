@@ -2162,8 +2162,8 @@ where
                 self.record_peer_payload_inventory_missing_fallback();
             }
         }
-        let persisted_fact_adds = program_fact_adds;
-        let persisted_fact_removes = program_fact_removes;
+        let scope_adds = program_fact_adds;
+        let scope_removes = program_fact_removes;
 
         if reset_cleared_shared_state {
             self.clear_settled_result_view(authority_result_key.clone());
@@ -2182,8 +2182,8 @@ where
         apply_covered_input_closure_admission_delta(
             state,
             reset_cleared_shared_state,
-            &persisted_fact_adds,
-            &persisted_fact_removes,
+            &scope_adds,
+            &scope_removes,
         );
         if !defer_settlement && !opening_pending {
             let state = self
@@ -2206,15 +2206,7 @@ where
                 state.pending_authoritative_reset = Some(generation);
             }
         }
-        if !defer_settlement && !opening_pending {
-            self.persist_source_closure_delta_for_authority_result(
-                authority_result_key.clone(),
-                reset_cleared_shared_state,
-                &persisted_fact_adds,
-                &persisted_fact_removes,
-            )
-            .await?;
-        }
+
         if self
             .query
             .authority_results
@@ -2266,8 +2258,8 @@ where
             // applied as descriptor-bound runtime input deltas. They must not
             // be re-labelled as a complete reset merely because an authority
             // state map happens to contain the current closure.
-            let adds: BTreeSet<_> = persisted_fact_adds.iter().cloned().collect();
-            let removes: BTreeSet<_> = persisted_fact_removes.iter().cloned().collect();
+            let adds: BTreeSet<_> = scope_adds.iter().cloned().collect();
+            let removes: BTreeSet<_> = scope_removes.iter().cloned().collect();
             if !adds.is_empty() || !removes.is_empty() {
                 let crate::node::AuthoritySourceClosure::Claimed {
                     generation: predecessor_generation,
@@ -2298,16 +2290,9 @@ where
                 state.source_closure,
             );
         }
-        // Persist the closure receipt only after this frame has established
-        // whether it is an exact reset or a successor delta. Persisting
-        // earlier would leave a reopened receiver with facts but no claimed
-        // generation, forcing it to treat a durable exact closure as pending.
+        // Only this fully admitted in-process update establishes a predecessor.
+        // Neither membership nor transport revisions survive process restart.
         if !defer_settlement && !opening_pending {
-            self.persist_known_state_fact_for_authority_result(
-                authority_result_key.clone(),
-                settled_through,
-            )
-            .await?;
             if let Some(state) = self.query.authority_results.get_mut(&authority_result_key)
                 && matches!(
                     state.source_closure,

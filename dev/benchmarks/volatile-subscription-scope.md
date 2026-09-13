@@ -29,6 +29,14 @@ pending-write replay, W1 resumed result deltas, and native worker/relay restart.
 Assertions about deliberately removed cache persistence will change; observable
 row, ordering, isolation and settlement assertions must remain.
 
+Local-current reads select retained Global-current and Ahead-current rows, not
+a node-wide timestamp cut. Reopen must not promote a partial replica's clock
+from discarded subscription receipts or collapse sparse transaction knowledge
+into a complete prefix. Transaction snapshots retain their existing explicit
+dots outside the core frontier. The nested reopen check waits for cold storage
+hydration to finish before asserting its unchanged result, rather than treating
+the initial pending empty snapshot as a completed read.
+
 Measure identical native RocksDB WalNoSync todo insert/update/batch/reopen and
 permissioned cold-load workloads against sealed #2953 binaries, then CodSpeed.
 Prediction: removing per-received-row cache key hashing, encoding and writes

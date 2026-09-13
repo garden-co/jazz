@@ -21,6 +21,8 @@ pub const JAZZ_EPOCH_1_STORAGE_CODECS: &[&str] = &[
     "jazz.catalogue.physical-mapping.v1",
     "jazz.catalogue.schema.v1",
     "jazz.catalogue.write-pointer.v1",
+    // Reserved to open old roots and discard their retired subscription caches.
+    // No active scope writer or payload decoder uses this family.
     "jazz.subscription-program-fact-key.v1",
 ];
 

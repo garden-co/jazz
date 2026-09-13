@@ -545,8 +545,8 @@ fn physical_manifest_cache_never_outlives_its_facts_across_cancelled_receive_wri
         observed_invalidation,
         "must pause after invalidation and before success"
     );
-    // An unchanged manifest still advances/persists a receipt. Its cache must
-    // be invalidated before that write, even though it has no fact delta.
+    // An unchanged body-free confirmation is entirely in memory: even an
+    // armed storage failure cannot affect it because no scope write exists.
     let (storage, control) = TestStorage::controlled(&family_refs);
     let mut reader =
         NodeState::new_with_shared_test_catalogue(node(0xe8), schema, storage).unwrap();
@@ -557,12 +557,18 @@ fn physical_manifest_cache_never_outlives_its_facts_across_cancelled_receive_wri
         .unwrap();
     let mut replay = view_update_parts(initial, false);
     replay.version_carriers.clear();
+    control.take_observed();
     control.fail_next(TestStorageOperation::WriteMany);
-    assert!(reader.apply_view_update(replay).resolve().is_err());
+    reader.apply_view_update(replay).resolve().unwrap();
+    assert!(
+        !control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany)
+    );
     assert!(
         reader.query.authority_results[&key]
             .supporting_revision
-            .is_none()
+            .is_some()
     );
 }
 
@@ -1213,7 +1219,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
 }
 
 #[test]
-fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
+fn reopened_reader_keeps_local_rows_and_requires_fresh_remote_snapshot() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
@@ -1252,7 +1258,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     let mut reader = reopen_node_at(&reader_dir, node(3), schema());
     register_shape_binding(&mut reader, &shape, &binding);
     assert_eq!(
-        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
+        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Local)
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
@@ -1275,7 +1281,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
             None,
         )
         .unwrap();
-    assert!(declaration.is_some(), "recovered cursor must be advertised");
+    assert!(declaration.is_none(), "restart has no retained cursor");
     assert!(!reader.has_settled_authority_result(&authority));
     peer.declare_known_state(subscription, declaration);
 
@@ -1298,10 +1304,10 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     else {
         panic!("expected view update");
     };
-    // Durable payload knowledge survives reopen; it does not replace the
-    // fresh attachment's complete authority input manifest.
+    // Native rows survive, but no scope-dependent body cursor does. A fresh
+    // remote attachment therefore receives the complete native input again.
     assert!(!peer_payload_inventory.opening_pending);
-    assert!(version_bundles.is_empty());
+    assert_eq!(version_bundles.len(), 1);
     assert_eq!(
         supporting_rows.added_rows().len(),
         1,
@@ -1673,7 +1679,7 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
 }
 
 #[test]
-fn fast_known_state_survives_reopen_without_live_authority_but_not_eviction() {
+fn fast_known_state_is_process_local_and_invalidated_by_eviction() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_reader_dir, reader) = open_node_with_uuid(node(3));
@@ -1724,10 +1730,10 @@ fn fast_known_state_survives_reopen_without_live_authority_but_not_eviction() {
             None,
         )
         .unwrap();
-    assert!(matches!(
-        declaration,
-        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
-    ));
+    assert_eq!(
+        declaration, None,
+        "restart must not recover a body-dedup cursor"
+    );
     let authority = AuthorityResultKey::unscoped(BindingViewKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
@@ -1908,8 +1914,8 @@ fn assert_eviction_failure_contract(
         futures::executor::block_on(known_state_facts.prefix_entries(&[]))
             .unwrap()
             .len(),
-        1,
-        "the settled update must persist its fast known-state fact before eviction"
+        0,
+        "settled updates never persist a subscription cursor"
     );
     assert!(matches!(
         reader
@@ -2039,10 +2045,9 @@ fn budgeted_eviction_write_through_error_removes_body_and_clears_fast_known_stat
 }
 
 #[test]
-fn failed_known_state_clear_leaves_eviction_bodies_and_transaction_caches_intact() {
-    // Internal persistence-boundary coverage: public recovery only observes
-    // the eventual refetch. This direct failpoint proves clearing the fast
-    // declaration is the barrier before eviction can publish any body delete.
+fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
+    // Internal failure boundary: memory invalidation cannot fail, and happens
+    // before a body write failure. Recovery retains the native body but no scope.
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
@@ -2096,31 +2101,35 @@ fn failed_known_state_clear_leaves_eviction_bodies_and_transaction_caches_intact
     reader
         .evict_cold(&PeerEvictionPins::default())
         .resolve()
-        .expect_err("known-state clearing failure must stop eviction before body removal");
+        .expect_err("body deletion failure must preserve native history");
 
+    assert!(reader.query.authority_results.is_empty());
+    assert!(reader.cached_tx_versions(tx_id).is_none());
+    assert!(reader.cached_tx_version_tables(tx_id).is_none());
+    drop(reader);
+    let mut reopened =
+        NodeState::new_with_shared_test_catalogue(node(3), schema(), storage).unwrap();
     assert_eq!(
-        reader.row_history("todos", row_uuid).unwrap(),
+        reopened.row_history("todos", row_uuid).unwrap(),
         persisted_history
     );
-    assert!(matches!(
-        reader
+    assert_eq!(
+        reopened
             .known_state_declaration_for_subscription(
                 &shape,
                 &binding,
                 subscription,
                 &[],
                 AuthorSubject::SYSTEM,
-                None,
+                None
             )
             .unwrap(),
-        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
-    ));
-    assert!(reader.cached_tx_versions(tx_id).is_some());
-    assert!(reader.cached_tx_version_tables(tx_id).is_some());
+        None
+    );
 }
 
 #[test]
-fn storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement() {
+fn storage_reopen_retains_rows_without_scope_or_fast_cursor() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
@@ -2158,10 +2167,9 @@ fn storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement() {
             None,
         )
         .unwrap();
-    assert!(matches!(
-        declaration,
-        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
-    ));
+    assert_eq!(declaration, None);
+    assert!(reopened.query.authority_results.is_empty());
+    assert_eq!(reopened.row_history("todos", row_uuid).unwrap().len(), 1);
     let authority = AuthorityResultKey::unscoped(BindingViewKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
@@ -2169,15 +2177,14 @@ fn storage_reopen_does_not_promote_a_durable_fast_cursor_to_live_settlement() {
     });
     assert!(
         !reopened.has_settled_authority_result(&authority),
-        "a durable cursor must not promote storage recovery to live settlement"
+        "native data alone must not restore live settlement"
     );
 }
 
 #[test]
-fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec() {
-    // Internal storage-boundary coverage: the only durable peer facts are the
-    // exact source manifest and its covered inputs. Exercise add, remove, reset
-    // rewrite, and reopen without reviving a result-payload compatibility path.
+fn scope_updates_are_volatile_while_native_rows_survive_reopen() {
+    // Internal boundary: public rows alone cannot prove there are no scope writes.
+    // Public history/read assertions below also pin native-data retention.
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -2236,21 +2243,25 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
         .unwrap();
     let durable_facts =
         futures::executor::block_on(settled_facts_store.prefix_entries(&[])).unwrap();
-    assert_eq!(durable_facts.len(), facts.len());
     assert!(
-        durable_facts.iter().all(
-            |entry| matches!(entry.key.last(), Some(Value::Bytes(digest)) if digest.len() == 32)
+        durable_facts.is_empty(),
+        "scope updates must not write durable membership"
+    );
+    assert!(
+        crate::db::block_on(
+            reader
+                .database
+                .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
+                .unwrap()
+                .prefix_entries(&[])
         )
+        .unwrap()
+        .is_empty()
     );
     drop(reader);
-    let reopened = open_node_at(&reader_dir, schema());
-    assert!(
-        reopened
-            .query
-            .authority_results
-            .values()
-            .any(|state| state.covered_input_versions == facts)
-    );
+    let mut reopened = open_node_at(&reader_dir, schema());
+    assert!(reopened.query.authority_results.is_empty());
+    assert_eq!(reopened.row_history("todos", row(42)).unwrap().len(), 1);
 }
 
 #[test]
@@ -2288,17 +2299,11 @@ fn covered_input_reset_and_reopen_have_no_result_member_store() {
             .direct_record_store("jazz_settled_result_members")
             .is_err()
     );
-    assert!(
-        reopened
-            .query
-            .authority_results
-            .values()
-            .any(|state| { !state.covered_input_versions.is_empty() })
-    );
+    assert!(reopened.query.authority_results.is_empty());
 }
 
 #[test]
-fn legacy_occurrence_cache_is_discarded_without_losing_native_or_pending_rows() {
+fn legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows() {
     // Internal recovery boundary: public APIs cannot manufacture a retired
     // cache generation. All observable row/history assertions remain intact.
     let (reader_dir, mut reader) = open_node_with_uuid(node(3));
@@ -2325,15 +2330,35 @@ fn legacy_occurrence_cache_is_discarded_without_losing_native_or_pending_rows() 
         .database
         .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
         .unwrap();
-    let entry = crate::db::block_on(store.prefix_entries(&[]))
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-    // A complete old root coverage record. Recovery only recognizes the
-    // generation marker; it does not retain an occurrence decoder/migrator.
-    let legacy = hex::decode("4a50464b010005000000746f646f73010000000001").unwrap();
-    crate::db::block_on(store.set(&entry.key, &[Value::Bytes(legacy)])).unwrap();
+    // Retired JPFK and JSIR byte receipts, plus intentionally unparseable cache
+    // data. Recovery must discard them without retaining any old decoder.
+    let cursor_key = vec![
+        Value::Uuid(shape.shape_id().0),
+        Value::Uuid(binding.binding_id().0),
+        Value::Uuid(subscription.read_view.id),
+        Value::U8(0),
+        Value::Bytes(vec![0; 32]),
+    ];
+    for (index, bytes) in [
+        hex::decode("4a50464b010005000000746f646f73010000000001").unwrap(),
+        hex::decode("4a5349520111111111111111111111111111111111050000007461736b73222222222222222222222222222222221f0000000000000033333333333333333333333333333333013434343434343434343434343434343400011f00000000000000333333333333333333333333333333330000").unwrap(),
+        vec![0xff],
+    ].into_iter().enumerate() {
+        let mut key = cursor_key.clone();
+        key.push(Value::Bytes(vec![index as u8; 32]));
+        crate::db::block_on(store.set(&key, &[Value::Bytes(bytes)])).unwrap();
+    }
+    crate::db::block_on(
+        reader
+            .database
+            .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
+            .unwrap()
+            .set(
+                &cursor_key,
+                &[Value::U64(15), Value::U64(u64::MAX), Value::U64(1)],
+            ),
+    )
+    .unwrap();
     drop(store);
     drop(reader);
 
@@ -2380,12 +2405,9 @@ fn legacy_occurrence_cache_is_discarded_without_losing_native_or_pending_rows() 
 }
 
 #[test]
-fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
-    // Internal recovery-boundary coverage: force a valid persisted fact followed
-    // by a malformed durable key and verify recovery clears the resident
-    // closure rather than publishing a partially decoded prefix. A failed
-    // durable recovery is fail-closed, not a request to preserve potentially
-    // stale state that was loaded before the corruption was detected.
+fn retired_scope_payloads_never_restore_authority() {
+    // Internal recovery boundary: even malformed retired cache bytes cannot
+    // become authority evidence, and cleanup need not decode their payloads.
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -2406,19 +2428,21 @@ fn corrupt_settled_program_fact_recovery_does_not_publish_a_valid_prefix() {
         .database
         .direct_record_store(crate::schema::SETTLED_PROGRAM_FACTS_STORE)
         .unwrap();
-    let corrupt_entry = futures::executor::block_on(corrupt_store.prefix_entries(&[]))
-        .unwrap()
-        .into_iter()
-        .next()
-        .expect("valid closure fact was persisted");
-    let mut corrupt_key = corrupt_entry.key;
-    *corrupt_key.last_mut().expect("fact digest key component") = Value::Bytes(vec![0xff; 32]);
-    futures::executor::block_on(
-        corrupt_store.set(&corrupt_key, &[corrupt_entry.value.get_idx(0).unwrap()]),
-    )
-    .unwrap();
-    assert!(futures::executor::block_on(reader.recover_known_state_facts()).is_err());
-    assert!(reader.query.authority_results.is_empty());
+    let mut key = vec![
+        Value::Uuid(shape.shape_id().0),
+        Value::Uuid(binding.binding_id().0),
+        Value::Uuid(subscription.read_view.id),
+        Value::U8(0),
+        Value::Bytes(vec![0; 32]),
+    ];
+    key.push(Value::Bytes(vec![0xff; 32]));
+    futures::executor::block_on(corrupt_store.set(&key, &[Value::Bytes(vec![0xff])])).unwrap();
+    drop(corrupt_store);
+    futures::executor::block_on(reader.discard_legacy_subscription_scopes()).unwrap();
+    // Cleanup discards storage only; it must not mutate an active live scope.
+    assert!(!reader.query.authority_results.is_empty());
+    let reopened = reader.reopen_in_place().unwrap();
+    assert!(reopened.query.authority_results.is_empty());
 }
 
 #[test]

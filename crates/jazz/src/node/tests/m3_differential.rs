@@ -504,7 +504,8 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
         panic!("expected recursive seed view update");
     };
     let seed_inputs = program_fact_adds
-        .added_rows().iter()
+        .added_rows()
+        .iter()
         .filter_map(|fact| match fact {
             input if input.version_table.as_str() == "group_access_edges" => Some(input),
             _ => None,
@@ -591,7 +592,8 @@ fn recursive_covered_inputs_remain_partitioned_between_live_sessions() {
     };
     let covered_seeds = payload
         .supporting_rows
-        .added_rows().iter()
+        .added_rows()
+        .iter()
         .filter_map(|fact| match fact {
             input if input.version_table.as_str() == "group_access_edges" => Some(input.row),
             _ => None,
@@ -1131,8 +1133,9 @@ fn m3_differential_revoke_mid_stream_and_reconnect_mid_stream() {
     oracle.tick_and_assert(&mut core, 0, "after-reconnect-mid-stream");
 }
 
-// Internal because this must inspect a receiver rebuilt only from its persisted
-// covered-input frontier, with no live authority capable of refreshing it.
+// Internal because this verifies both an absent authority scope and exact
+// nested/aggregate reconstruction from retained native inputs, with no live
+// authority capable of refreshing them.
 #[test]
 fn maintained_nested_and_aggregate_results_rebuild_from_persisted_receiver_without_authority() {
     let schema = m3_differential_schema();
@@ -1194,8 +1197,17 @@ fn maintained_nested_and_aggregate_results_rebuild_from_persisted_receiver_witho
     drop(authority);
     drop(receiver);
     let mut reopened = reopen_node_at(&receiver_dir, node(0xd2), schema);
+    assert!(reopened.query.authority_results.is_empty());
+    assert_eq!(reopened.committed_global_time(), GlobalTime::default());
+    assert!(
+        !reopened
+            .clock
+            .applied_global_times_after_frontier
+            .is_empty()
+    );
+    assert!(!reopened.is_history_complete_for(&nested.shape, reopened.committed_global_time()));
     // No peer or serving authority survives. Registration can only compile a
-    // new receiver graph against recovered records and the durable frontier.
+    // local-knowledge graph against native data, never a recovered scope.
     for (shape, binding) in [
         (&nested.shape, &nested.binding),
         (&aggregate, &aggregate_binding),
@@ -1203,17 +1215,24 @@ fn maintained_nested_and_aggregate_results_rebuild_from_persisted_receiver_witho
         register_maintained_receiver(&mut reopened, shape, binding, identity);
     }
     assert_eq!(
-        m3_receiver_row_bodies(&mut reopened, &nested.shape, &nested.binding, identity),
+        m3_receiver_row_bodies_at_tier(
+            &mut reopened,
+            &nested.shape,
+            &nested.binding,
+            identity,
+            DurabilityTier::Local
+        ),
         nested_before,
         "reopen preserves root and child identities plus every nested value"
     );
     assert_eq!(
-        receiver_aggregate_values(
+        receiver_aggregate_values_at_tier(
             &mut reopened,
             &aggregate,
             &aggregate_binding,
             identity,
-            "count"
+            "count",
+            DurabilityTier::Local,
         ),
         aggregates_before,
         "reopen preserves aggregate group identities and values without refresh"
@@ -2142,28 +2161,53 @@ fn m3_receiver_row_bodies<S: OrderedKvStorage>(
     binding: &Binding,
     identity: AuthorSubject,
 ) -> BTreeMap<(String, RowUuid), BTreeMap<String, Value>> {
+    m3_receiver_row_bodies_at_tier(receiver, shape, binding, identity, DurabilityTier::Global)
+}
+
+fn m3_receiver_row_bodies_at_tier<S: OrderedKvStorage>(
+    receiver: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorSubject,
+    tier: DurabilityTier,
+) -> BTreeMap<(String, RowUuid), BTreeMap<String, Value>> {
     let (shape, binding, plan) = receiver
         .prepare_query_binding_for_link_in_authorization_mode(
             shape,
             binding,
-            DurabilityTier::Global,
+            tier,
             identity,
             QueryAuthorizationMode::ClientLocal,
         )
         .resolve()
         .expect("prepare maintained receiver from covered inputs");
-    let (_subscription, snapshot) = receiver
+    let (mut subscription, mut snapshot) = receiver
         .open_maintained_view_subscription_in_authorization_mode(
             &shape,
             &binding,
             identity,
-            DurabilityTier::Global,
+            tier,
             &crate::protocol::ReadViewSpec::default(),
             Some(plan),
             QueryAuthorizationMode::ClientLocal,
         )
         .resolve()
         .expect("evaluate maintained receiver from covered inputs");
+    if !subscription.initial_snapshot_received() {
+        // A cold native source can suspend on storage; the initial empty
+        // return is pending, not the completed local query result.
+        receiver.drive_query_runtime().resolve().unwrap();
+        receiver
+            .drain_local_maintained_view_subscription(&mut subscription, None)
+            .resolve()
+            .unwrap();
+        assert!(subscription.initial_snapshot_received());
+        snapshot = receiver
+            .materialize_local_maintained_relation_snapshot_with_occurrences(&subscription)
+            .resolve()
+            .unwrap()
+            .snapshot;
+    }
     snapshot
         .rows
         .into_iter()
@@ -2183,28 +2227,59 @@ fn receiver_aggregate_values<S: OrderedKvStorage>(
     identity: AuthorSubject,
     output: &str,
 ) -> BTreeMap<u64, Value> {
+    receiver_aggregate_values_at_tier(
+        receiver,
+        shape,
+        binding,
+        identity,
+        output,
+        DurabilityTier::Global,
+    )
+}
+
+fn receiver_aggregate_values_at_tier<S: OrderedKvStorage>(
+    receiver: &mut NodeState<S>,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    identity: AuthorSubject,
+    output: &str,
+    tier: DurabilityTier,
+) -> BTreeMap<u64, Value> {
     let (shape, binding, plan) = receiver
         .prepare_query_binding_for_link_in_authorization_mode(
             shape,
             binding,
-            DurabilityTier::Global,
+            tier,
             identity,
             QueryAuthorizationMode::ClientLocal,
         )
         .resolve()
         .expect("prepare aggregate receiver from covered inputs");
-    let (_subscription, snapshot) = receiver
+    let (mut subscription, mut snapshot) = receiver
         .open_maintained_view_subscription_in_authorization_mode(
             &shape,
             &binding,
             identity,
-            DurabilityTier::Global,
+            tier,
             &crate::protocol::ReadViewSpec::default(),
             Some(plan),
             QueryAuthorizationMode::ClientLocal,
         )
         .resolve()
         .expect("evaluate aggregate from covered receiver inputs");
+    if !subscription.initial_snapshot_received() {
+        receiver.drive_query_runtime().resolve().unwrap();
+        receiver
+            .drain_local_maintained_view_subscription(&mut subscription, None)
+            .resolve()
+            .unwrap();
+        assert!(subscription.initial_snapshot_received());
+        snapshot = receiver
+            .materialize_local_maintained_relation_snapshot_with_occurrences(&subscription)
+            .resolve()
+            .unwrap()
+            .snapshot;
+    }
     snapshot
         .rows
         .into_iter()
