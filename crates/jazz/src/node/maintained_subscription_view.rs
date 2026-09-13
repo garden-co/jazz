@@ -4326,6 +4326,21 @@ mod tests {
         let mut maintained = MaintainedSubscriptionView::default();
         maintained.acknowledge_peer_source_closure();
         let empty = BTreeSet::new();
+        // Selected witnesses can change without any companion terminal event.
+        maintained
+            .replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.clone())]));
+        assert_eq!(
+            maintained.unpublished_peer_source_delta(&empty),
+            Some((vec![fact.clone()], vec![]))
+        );
+        maintained.acknowledge_peer_source_closure();
+        maintained.replace_selected_deletion_witnesses(BTreeMap::new());
+        assert_eq!(
+            maintained.unpublished_peer_source_delta(&BTreeSet::from([fact.clone()])),
+            Some((vec![], vec![fact.clone()]))
+        );
+        maintained.acknowledge_peer_source_closure();
+
         maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1);
         maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1);
         assert_eq!(
@@ -4351,6 +4366,7 @@ mod tests {
             maintained.unpublished_peer_source_delta(&previous),
             Some((vec![], vec![]))
         );
+        maintained.acknowledge_peer_source_closure();
         maintained.replace_selected_deletion_witnesses(BTreeMap::new());
         assert_eq!(
             maintained.unpublished_peer_source_delta(&previous),
