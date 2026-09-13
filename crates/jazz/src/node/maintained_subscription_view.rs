@@ -236,10 +236,43 @@ struct WeightedVersionIndex {
 
 #[derive(Clone, Debug)]
 struct WeightedVersion {
+    payload: Arc<VersionPayload>,
+    weight: i64,
+}
+
+/// Immutable witness data shared only by retained role consumers, not by all
+/// transient OwnedRecords. A paired terminal prepares this once for both indexes.
+#[derive(Clone, Debug)]
+struct VersionPayload {
     row: VersionRow,
     tx_id: TxId,
     sort_key: VersionSortKey,
-    weight: i64,
+}
+
+impl std::ops::Deref for WeightedVersion {
+    type Target = VersionPayload;
+
+    fn deref(&self) -> &Self::Target {
+        &self.payload
+    }
+}
+
+impl VersionPayload {
+    fn prepare(
+        row: VersionRow,
+        identity: &VersionIdentity,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<Arc<Self>, super::Error> {
+        let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
+            super::Error::InvalidStoredValue("history tx node alias must exist"),
+        )?;
+        let sort_key = VersionSortKey::for_row(&row, identity);
+        Ok(Arc::new(Self {
+            row,
+            tx_id,
+            sort_key,
+        }))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -330,6 +363,11 @@ pub(crate) enum DecodedMaintainedEvent {
         source: ProgramSourceId,
         row: VersionRow,
     },
+    /// Identical payload graph with two independent role consumers.
+    SharedVersion {
+        source: ProgramSourceId,
+        row: VersionRow,
+    },
     ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry),
     RelationEdge(RelationEdgeEntry),
     StructuredAppRow {
@@ -351,6 +389,8 @@ enum MaintainedTerminalKind {
     VersionDeletion(VersionWitnessSchema),
     ReplacementContent(VersionWitnessSchema),
     ReplacementDeletion(VersionWitnessSchema),
+    SharedContent(VersionWitnessSchema),
+    SharedDeletion(VersionWitnessSchema),
     ProgramSourceCoverage(super::query_engine::ProgramSourceCoverageSchema),
     RelationEdge(RelationEdgeSchema),
     /// A compiler-lowered public root collector. Its initial state and later
@@ -373,6 +413,7 @@ enum EventIdentity {
     Result(ResultMemberEntry),
     Version(ProgramSourceId, VersionIdentity),
     Replacement(ProgramSourceId, ReplacementKey, VersionIdentity),
+    SharedVersion(ProgramSourceId, VersionIdentity),
     ProgramFact(ProgramFactEntry),
     StructuredAppRow(RowUuid, Vec<u8>),
 }
@@ -388,6 +429,7 @@ enum NetEvent {
     ),
     Version(ProgramSourceId, VersionIdentity, VersionRow),
     Replacement(ProgramSourceId, ReplacementKey, VersionIdentity, VersionRow),
+    SharedVersion(ProgramSourceId, VersionIdentity, VersionRow),
     ProgramFact(ProgramFactEntry),
     StructuredAppRow(RowUuid, OwnedRecord),
 }
@@ -734,6 +776,10 @@ impl MaintainedSubscriptionView {
                     let key = ReplacementKey::for_row(&row, VersionLayer::Deletion);
                     NetEvent::Replacement(source, key, identity, row)
                 }
+                DecodedMaintainedEvent::SharedVersion { source, row } => {
+                    let identity = VersionIdentity::for_row(&row);
+                    NetEvent::SharedVersion(source, identity, row)
+                }
                 DecodedMaintainedEvent::ProgramSourceCoverage(coverage) => {
                     NetEvent::ProgramFact(ProgramFactEntry::ProgramSourceCoverage(coverage))
                 }
@@ -781,8 +827,8 @@ impl MaintainedSubscriptionView {
                 NetEvent::Version(source, identity, row) => {
                     let covered_input =
                         self.covered_input_for_version(source, &row, node_aliases)?;
-                    self.versions
-                        .apply_delta(identity, row, weight, node_aliases)?;
+                    let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
+                    self.versions.apply_delta(identity, payload, weight);
                     if let Some(is_present) = self.apply_source_fact_delta(
                         SourceFactOrigin::Version,
                         ProgramFactEntry::CoveredInput(covered_input.clone()),
@@ -798,8 +844,9 @@ impl MaintainedSubscriptionView {
                 NetEvent::Replacement(source, key, identity, row) => {
                     let covered_input =
                         self.covered_input_for_version(source, &row, node_aliases)?;
+                    let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
                     self.replacements
-                        .apply_delta(key, identity, row, weight, node_aliases)?;
+                        .apply_delta(key, identity, payload, weight);
                     if let Some(is_present) = self.apply_source_fact_delta(
                         SourceFactOrigin::Replacement,
                         ProgramFactEntry::CoveredInput(covered_input.clone()),
@@ -810,6 +857,24 @@ impl MaintainedSubscriptionView {
                             ProgramFactEntry::CoveredInput(covered_input),
                             is_present,
                         );
+                    }
+                }
+                NetEvent::SharedVersion(source, identity, row) => {
+                    let covered_input =
+                        self.covered_input_for_version(source, &row, node_aliases)?;
+                    let key = ReplacementKey::for_row(&row, identity.layer);
+                    let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
+                    self.versions
+                        .apply_delta(identity.clone(), Arc::clone(&payload), weight);
+                    self.replacements
+                        .apply_delta(key, identity, payload, weight);
+                    for origin in [SourceFactOrigin::Version, SourceFactOrigin::Replacement] {
+                        let fact = ProgramFactEntry::CoveredInput(covered_input.clone());
+                        if let Some(is_present) =
+                            self.apply_source_fact_delta(origin, fact.clone(), weight)
+                        {
+                            record_source_fact_transition(&mut transitions, fact, is_present);
+                        }
                     }
                 }
                 NetEvent::ProgramFact(fact) => {
@@ -1897,7 +1962,7 @@ impl MaintainedTerminalSchemas {
             let OutputTerminalSchema::Fact(fact) = &terminal.output else {
                 unreachable!("app-row terminals were handled above")
             };
-            let kind = match (&fact.key, fact.terminal, &fact.schema) {
+            let mut kind = match (&fact.key, fact.terminal, &fact.schema) {
                 (
                     ProgramFactKey::ResultMembership,
                     ProgramFactTerminal::Primary,
@@ -1954,6 +2019,22 @@ impl MaintainedTerminalSchemas {
                     .map(MaintainedTerminalKind::ReplacementContent),
                 _ => None,
             };
+            if program
+                .lowered
+                .shared_witness_sinks
+                .values()
+                .any(|sink| sink == &terminal.sink)
+            {
+                kind = match kind {
+                    Some(MaintainedTerminalKind::VersionContent(schema)) => {
+                        Some(MaintainedTerminalKind::SharedContent(schema))
+                    }
+                    Some(MaintainedTerminalKind::VersionDeletion(schema)) => {
+                        Some(MaintainedTerminalKind::SharedDeletion(schema))
+                    }
+                    other => other,
+                };
+            }
             if let Some(kind) = kind {
                 sinks.insert(terminal.sink.clone(), kind);
             }
@@ -2143,6 +2224,7 @@ impl MaintainedTerminalKind {
             self,
             MaintainedTerminalKind::VersionDeletion(_)
                 | MaintainedTerminalKind::ReplacementDeletion(_)
+                | MaintainedTerminalKind::SharedDeletion(_)
         )
     }
 }
@@ -2160,6 +2242,21 @@ fn decode_typed_terminal_record(
     read_view: crate::protocol::ReadViewKey,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
+        MaintainedTerminalKind::SharedContent(schema)
+        | MaintainedTerminalKind::SharedDeletion(schema) => {
+            let expected = if matches!(kind, MaintainedTerminalKind::SharedContent(_)) {
+                "version_content"
+            } else {
+                "version_deletion"
+            };
+            validate_witness_event_kind(record, expected)?;
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
+                DecodedMaintainedEvent::SharedVersion {
+                    source: schema.source.clone(),
+                    row,
+                }
+            })
+        }
         MaintainedTerminalKind::AggregateAppRows(output) => {
             let crate::node::query_engine::AppRowTerminal::Aggregate(schema) = &output.terminal
             else {
@@ -3073,26 +3170,22 @@ impl WeightedVersionIndex {
     fn apply_delta(
         &mut self,
         identity: VersionIdentity,
-        row: VersionRow,
+        payload: Arc<VersionPayload>,
         weight: i64,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-    ) -> Result<(), super::Error> {
+    ) {
         let old = self
             .by_identity
             .get(&identity)
             .map(|version| version.weight)
             .unwrap_or(0);
-        let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
-            super::Error::InvalidStoredValue("history tx node alias must exist"),
-        )?;
-        let sort_key = VersionSortKey::for_row(&row, &identity);
+        let tx_id = payload.tx_id;
         let new = old + weight;
 
         if old <= 0 && new > 0 {
             self.by_tx
                 .entry(tx_id)
                 .or_default()
-                .entry(sort_key.clone())
+                .entry(payload.sort_key.clone())
                 .or_default()
                 .insert(identity.clone());
         }
@@ -3112,16 +3205,13 @@ impl WeightedVersionIndex {
             self.by_identity.insert(
                 identity,
                 WeightedVersion {
-                    row,
-                    tx_id,
-                    sort_key,
+                    payload,
                     weight: new,
                 },
             );
         } else {
             self.by_identity.remove(&identity);
         }
-        Ok(())
     }
 
     fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
@@ -3151,10 +3241,9 @@ impl ReplacementIndex {
         &mut self,
         key: ReplacementKey,
         identity: VersionIdentity,
-        row: VersionRow,
+        payload: Arc<VersionPayload>,
         weight: i64,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-    ) -> Result<(), super::Error> {
+    ) {
         let by_key = match key.layer {
             VersionLayer::Content => &mut self.content_by_key,
             VersionLayer::Deletion => &mut self.deletion_by_key,
@@ -3166,16 +3255,10 @@ impl ReplacementIndex {
             .unwrap_or(0);
         let new = old + weight;
         if new > 0 {
-            let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
-                super::Error::InvalidStoredValue("history tx node alias must exist"),
-            )?;
-            let sort_key = VersionSortKey::for_row(&row, &identity);
             row_versions.insert(
                 identity,
                 WeightedVersion {
-                    sort_key,
-                    row,
-                    tx_id,
+                    payload,
                     weight: new,
                 },
             );
@@ -3185,7 +3268,6 @@ impl ReplacementIndex {
         if row_versions.is_empty() {
             by_key.remove(&key);
         }
-        Ok(())
     }
 
     fn replacement_for(
@@ -3342,6 +3424,7 @@ fn replacement_key_bytes(key: &ReplacementKey) -> usize {
 
 fn weighted_version_bytes(version: &WeightedVersion) -> usize {
     mem::size_of_val(version)
+        + mem::size_of::<VersionPayload>()
         + version_row_bytes(&version.row)
         + version_sort_key_bytes(&version.sort_key)
 }
@@ -3391,6 +3474,9 @@ impl NetEvent {
             }
             Self::Replacement(source, key, identity, _) => {
                 EventIdentity::Replacement(source.clone(), key.clone(), identity.clone())
+            }
+            Self::SharedVersion(source, identity, _) => {
+                EventIdentity::SharedVersion(source.clone(), identity.clone())
             }
             Self::ProgramFact(fact) => EventIdentity::ProgramFact(fact.clone()),
             Self::StructuredAppRow(root, record) => {
@@ -4701,6 +4787,85 @@ mod tests {
         DecodedMaintainedEvent::ReplacementContent {
             source: test_source(),
             row,
+        }
+    }
+
+    // Internal ownership/role oracle: public row equality cannot distinguish
+    // shared allocations or independent retained role weights.
+    #[test]
+    fn shared_witness_payload_retains_independent_role_lifetimes() {
+        for is_deletion in [false, true] {
+            let mut maintained = MaintainedSubscriptionView::default();
+            let record = if is_deletion {
+                deletion(row(1), 100)
+            } else {
+                version(row(1), 100, "shared")
+            };
+            let identity = VersionIdentity::for_row(&record);
+            let key = ReplacementKey::for_row(&record, identity.layer);
+            let shared = DecodedMaintainedEvent::SharedVersion {
+                source: test_source(),
+                row: record.clone(),
+            };
+            let first = maintained
+                .apply_decoded_deltas([(shared.clone(), 1)], &aliases())
+                .unwrap();
+            assert_eq!(first.program_fact_adds.len(), 1);
+            let replacements = if is_deletion {
+                &maintained.replacements.deletion_by_key
+            } else {
+                &maintained.replacements.content_by_key
+            };
+            let version_payload = &maintained.versions.by_identity[&identity].payload;
+            let replacement_payload = &replacements[&key][&identity].payload;
+            assert!(Arc::ptr_eq(version_payload, replacement_payload));
+            assert!(Arc::ptr_eq(
+                &maintained
+                    .versions
+                    .by_identity
+                    .keys()
+                    .next()
+                    .unwrap()
+                    .raw_record,
+                &replacements[&key].keys().next().unwrap().raw_record
+            ));
+            let version_event = if is_deletion {
+                version_deletion(record.clone())
+            } else {
+                version_content(record.clone())
+            };
+            let replacement_event = if is_deletion {
+                replacement_deletion(record.clone())
+            } else {
+                replacement_content(record.clone())
+            };
+            let withdrew = maintained
+                .apply_decoded_deltas([(replacement_event.clone(), -1)], &aliases())
+                .unwrap();
+            assert!(withdrew.program_fact_removes.is_empty());
+            assert_eq!(maintained.versions.by_identity[&identity].weight, 1);
+            assert_eq!(maintained.replacements.entry_count(), 0);
+            maintained
+                .apply_decoded_deltas(
+                    [(version_event, -1), (replacement_event.clone(), 1)],
+                    &aliases(),
+                )
+                .unwrap();
+            assert_eq!(maintained.active_peer_source_closure_facts().len(), 1);
+            assert!(maintained.versions.by_identity.is_empty());
+            assert_eq!(maintained.replacements.entry_count(), 1);
+            let removed = maintained
+                .apply_decoded_deltas([(replacement_event, -1)], &aliases())
+                .unwrap();
+            assert_eq!(removed.program_fact_removes.len(), 1);
+            assert!(maintained.active_peer_source_closure_facts().is_empty());
+            let cancelled = maintained
+                .apply_decoded_deltas([(shared.clone(), 1), (shared, -1)], &aliases())
+                .unwrap();
+            assert!(cancelled.program_fact_adds.is_empty());
+            assert!(cancelled.program_fact_removes.is_empty());
+            assert!(maintained.versions.by_identity.is_empty());
+            assert_eq!(maintained.replacements.entry_count(), 0);
         }
     }
 

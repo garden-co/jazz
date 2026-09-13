@@ -298,6 +298,7 @@ pub(crate) fn lower_resolved_query_program(
 
     Ok(QueryProgram {
         lowered: LoweredGraph {
+            shared_witness_sinks: shared_witness_sinks(&terminals),
             terminals,
             internal_app_rows_graph,
             parameters,
@@ -944,8 +945,12 @@ pub(crate) struct QueryProgram {
 /// Groove graph plus the semantic contracts needed to consume it.
 #[derive(Clone, Debug)]
 pub(crate) struct LoweredGraph {
-    /// Executable named groove terminals emitted by this program.
+    /// Logical named terminals, including independently meaningful witness roles.
     pub(crate) terminals: Vec<LoweredTerminal>,
+    /// Replacement sink -> version sink for compiler-proven identical payloads.
+    /// Only the version sink executes; its consumer applies both role weights.
+    /// This is ephemeral execution metadata, never a wire/storage identity.
+    pub(crate) shared_witness_sinks: BTreeMap<String, String>,
     /// Filtered current-row graph used only by synchronous one-shot
     /// materializers. Public terminals have their own exact output shape and
     /// must not be decoded as storage-backed current rows.
@@ -958,6 +963,14 @@ pub(crate) struct LoweredGraph {
     /// lowered program. This is derived from resolved query-engine sources, not
     /// recollected from the public query shape.
     pub(crate) maintained_terminal_tables: BTreeMap<String, TableSchema>,
+}
+
+impl LoweredGraph {
+    pub(crate) fn execution_terminals(&self) -> impl Iterator<Item = &LoweredTerminal> {
+        self.terminals
+            .iter()
+            .filter(|terminal| !self.shared_witness_sinks.contains_key(&terminal.sink))
+    }
 }
 
 /// One executable output terminal produced by query lowering.
