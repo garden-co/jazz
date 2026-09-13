@@ -32,8 +32,8 @@ const USERS: usize = 10;
 const PROJECTS: usize = 30;
 
 fn policy_bench_identity() -> AuthorSubject {
-    // Durable session writes need an account-bound principal. The synthetic
-    // fixture identity supplies that binding without bypassing row policies.
+    // Durable session writes need an account-bound principal. This fixture
+    // preserves the existing Session identity and policy configuration.
     AuthorSubject::for_test_bytes([0x76; 16])
 }
 
