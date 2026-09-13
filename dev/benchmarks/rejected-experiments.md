@@ -25,6 +25,30 @@ premise and a measurement that can test it.
 | [#2928](https://github.com/garden-co/jazz/pull/2928): fuse shared-witness source-presence transitions                                                               | Local 1–2% did not survive hosted confirmation. Unchanged-source repeat: cold 55.9831s parent / 55.9129s head minima (−0.13%), medians −0.17%; inconclusive. A smaller phase alone did not justify retention. Excluded from the overnight stack; original branch and receipts preserved. |
 | [#2944](https://github.com/garden-co/jazz/pull/2944): borrow retained witness rows through publication staging                                                      | Cold 46.0968s / 45.8023s minima (−0.64%) but 46.1386s / 46.1560s medians (+0.04%); updates 7.3632s / 7.4351s (+0.98%). Local writes also slightly slower. Removed clones did not establish an end-to-end win; excluded, branch and receipts preserved.                                   |
 
+The [#2946](https://github.com/garden-co/jazz/pull/2946) direct multisink
+source-transition accumulator trial was also excluded: cold 45.6690s /
+45.5751s minima (−0.21%) and 45.9187s / 45.8727s medians (−0.10%), versus a
+0.5–2% prediction. Updates were +0.86% minimum / flat median; warmed local
+cold and write pairs did not establish a win. Avoided intermediate copies did
+not justify the extra call interface. Branch and receipts are preserved.
+
+Three later overnight trials were likewise excluded, preserving branches and
+original-parent receipts in [#2913](https://github.com/garden-co/jazz/issues/2913):
+
+- [#2947](https://github.com/garden-co/jazz/pull/2947), lazy empty join-bucket
+  ownership: cold 45.6690s / 45.7889s minima (+0.26%), medians +1.08%.
+  Local 0.5–1.6% improvements did not survive hosted confirmation. Keep #2940's
+  inline singleton representation; this rejection concerns the extra wrapper.
+- [#2949](https://github.com/garden-co/jazz/pull/2949), staged operation-vector
+  handoff: cold minima +0.47% / medians −0.33%; sequential update minima +0.44%
+  / medians −0.30%. All 75 cases classified unchanged. Small local W1 gains
+  did not explain or resolve its earlier hosted update-floor regression.
+- [#2950](https://github.com/garden-co/jazz/pull/2950), shared immutable
+  application schemas: cold 44.7753s / 44.7325s minima (−0.10%), medians +0.07%;
+  updates +0.47% minimum / +0.42% median. The matching schema-clone frame no
+  longer appeared in the new sampled cold graph, but this was not an endpoint
+  win. Do not infer savings from disappearance of an optimized stack frame.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.
