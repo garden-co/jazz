@@ -462,6 +462,88 @@ fn accepted_view_scoped_child_for_parent(
 }
 
 #[test]
+fn complete_parent_batch_scans_empty_constraints_once_at_scale() {
+    // Internal seam: application results cannot distinguish one empty storage
+    // scan from one scan per parent before persistence.
+    let (_dir, mut reader) = open_node_with_uuid(node(0xa1));
+    for count in [0, 1, 1024] {
+        let parents = (0..count)
+            .map(|index| (TxId::new(TxTime::from(100 + index), node(0xa2)), Vec::new()))
+            .collect::<Vec<_>>();
+        let mut batch = reader.database.open_batch();
+        reader.database.reset_storage_read_metrics();
+        reader.preflight_complete_parent_batch(&mut batch, &parents).unwrap();
+        let reads = reader.database.storage_read_metrics();
+        assert_eq!(reads.total.ranges, usize::from(count != 0));
+        assert_eq!(reads.total.reads, 0);
+    }
+}
+
+#[test]
+fn complete_parent_batch_preserves_atomic_constraints_and_staged_deletes() {
+    // Internal seam: accepted partial-child constraints and uncommitted
+    // constraint deletes are protocol/storage state, not public query rows.
+    for mismatch in [false, true] {
+        let (_dir, mut reader) = open_node_with_uuid(node(0xa3));
+        let parents = [
+            TxId::new(TxTime::from(70), node(0xa4)),
+            TxId::new(TxTime::from(71), node(0xa4)),
+            TxId::new(TxTime::from(72), node(0xa4)),
+        ];
+        for (index, parent) in parents.iter().enumerate() {
+            accepted_view_scoped_child_for_parent(
+                &mut reader,
+                *parent,
+                TxId::new(TxTime::from(80 + index as u64), node(0xa5)),
+                row(0xb0 + index as u8),
+            );
+        }
+        let version = |id| version_record(row(id), Vec::new(), title_cells("complete parent"), None);
+        let mut batch = reader.database.open_batch();
+        // An earlier operation in the same batch removed the third parent's
+        // constraint. Its deliberately wrong coordinate must not be checked.
+        let third_key = reader.database.primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap().into_iter().find(|raw| {
+                raw.record().get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX).unwrap()
+                    == parents[2].time.0
+            }).map(|raw| {
+                let record = raw.record();
+                pending_edge_primary_key(
+                    NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX).unwrap()),
+                    TxId::new(TxTime::from(82), node(0xa5)),
+                    NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX).unwrap()),
+                    parents[2],
+                    &pending_edge_coordinate_from_record(record).unwrap(),
+                ).unwrap()
+            }).unwrap();
+        batch.delete("jazz_pending_edges", third_key);
+        let complete = vec![
+            (parents[0], vec![version(0xb0)]),
+            // A duplicate sees no Accepted constraints after the first pass.
+            (parents[0], vec![version(0xee)]),
+            (parents[1], vec![version(if mismatch { 0xee } else { 0xb1 })]),
+            (parents[2], vec![version(0xee)]),
+        ];
+        let result = reader.preflight_complete_parent_batch(&mut batch, &complete).resolve();
+        if mismatch {
+            assert!(matches!(result, Err(Error::ConflictingCommitUnit(parent)) if parent == parents[1]));
+            drop(batch);
+            assert_eq!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().len(), 3);
+        } else {
+            result.unwrap();
+            // Staging is not publication: the old durable constraints remain.
+            assert_eq!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().len(), 3);
+            assert!(reader.database.primary_key_scan_raw_in_batch(&batch, "jazz_pending_edges", &[]).unwrap().is_empty());
+            reader.database.commit_batch(batch).unwrap();
+            assert!(reader.database.primary_key_scan_raw("jazz_pending_edges", &[]).unwrap().is_empty());
+        }
+        for index in 0..3 {
+            assert_eq!(reader.transaction_record(TxId::new(TxTime::from(80 + index), node(0xa5))).unwrap().fate, Fate::Accepted);
+        }
+    }
+}
+
+#[test]
 fn initial_reset_preflights_accepted_partial_child_parent_constraints_atomically() {
     for (case, parent_row, succeeds) in [(0x90, row(0x91), true), (0x92, row(0x93), false)] {
         let (_dir, mut reader) = open_node_with_uuid(node(case));
