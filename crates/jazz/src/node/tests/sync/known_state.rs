@@ -85,6 +85,49 @@ fn view_update_parts(message: SyncMessage, defer_settlement: bool) -> ViewUpdate
 }
 
 #[test]
+fn physical_manifest_normalization_reuses_only_the_existing_admitted_source_cache() {
+    // Internal mechanism receipt: public rows cannot show redundant compiler
+    // discovery or explicitly evict a derived authority-receipt cache.
+    use crate::node::query_eval::take_covered_input_source_discoveries_for_test as discoveries;
+    let (reader_dir, mut reader) = open_node_with_uuid(node(0xc3));
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(0xc1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(0xc2));
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    commit_mergeable_global(&mut writer, &mut core,
+        MergeableCommit::new("todos", row(0xc4), 15).cells(title_cells("source cache")));
+    let reset = system_authority_reset(&mut core, &shape, &binding, subscription);
+    discoveries();
+    reader.apply_sync_message_settled(reset.clone()).unwrap();
+    assert!(discoveries() > 0, "first receipt must discover its compiler-owned sources");
+    let key = reader.authority_result_key_for_subscription(subscription).unwrap();
+    let facts = reader.query.authority_results[&key].settled_program_facts.clone();
+    assert!(reader.query.authority_results[&key].compiled_covered_input_sources.is_some());
+
+    reader.apply_sync_message_settled(reset.clone()).unwrap();
+    assert_eq!(discoveries(), 0, "successor normalization reuses admitted capabilities");
+    assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
+    let SyncMessage::ViewUpdate(mut malformed) = reset.clone() else { unreachable!() };
+    malformed.supporting_rows.push(malformed.supporting_rows[0].clone());
+    assert!(reader.apply_sync_message_settled(SyncMessage::ViewUpdate(malformed)).is_err());
+    assert_eq!(discoveries(), 0);
+    assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
+
+    reader.query.authority_results.get_mut(&key).unwrap().compiled_covered_input_sources = None;
+    reader.apply_sync_message_settled(reset.clone()).unwrap();
+    assert!(discoveries() > 0, "cache miss follows the normal compiler path");
+    assert_eq!(receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).len(), 1);
+    drop(reader);
+    let mut reopened = open_node_at(&reader_dir, schema());
+    register_shape_binding(&mut reopened, &shape, &binding);
+    discoveries();
+    reopened.apply_sync_message_settled(reset).unwrap();
+    assert!(discoveries() > 0, "recovery does not persist derived compiler capabilities");
+    assert_eq!(receiver_rows(&mut reopened, &shape, &binding, DurabilityTier::Global).len(), 1);
+}
+
+#[test]
 fn physical_manifest_cache_is_receipt_scoped_and_cleared_by_legacy_deferred_and_reopen() {
     // Internal cache-lifetime proof: public rows cannot expose retained
     // predecessors, legacy fact frames, or recovery's derived-cache absence.
