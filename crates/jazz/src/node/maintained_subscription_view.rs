@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use groove::ivm::{
@@ -419,27 +420,33 @@ enum MaintainedTerminalKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum EventIdentity {
-    Result(ResultMemberEntry),
+    Result(Rc<ResultMemberEntry>),
     Version(ProgramSourceId, VersionIdentity),
     Replacement(ProgramSourceId, ReplacementKey, VersionIdentity),
     SharedVersion(ProgramSourceId, VersionIdentity),
-    ProgramFact(ProgramFactEntry),
+    ProgramFact(Rc<ProgramFactEntry>),
     StructuredAppRow(RowUuid, Vec<u8>),
 }
 
 #[derive(Clone, Debug)]
+struct AggregateNetEvent {
+    member: Rc<ResultMemberEntry>,
+    payload: ResultMemberPayloadEntry,
+    synthetic: super::query_engine::SyntheticResultMembershipSchema,
+    value_fields: Vec<String>,
+}
+
+// These temporary, thread-local entries share large identities with their
+// tree keys. Ordinary version witnesses do not reserve the large inline space
+// of result/proof alternatives; consuming the key releases its shared owner.
+#[derive(Clone, Debug)]
 enum NetEvent {
-    Result(ResultMemberEntry, ResultMemberPayloadEntry),
-    AggregateResult(
-        ResultMemberEntry,
-        ResultMemberPayloadEntry,
-        super::query_engine::SyntheticResultMembershipSchema,
-        Vec<String>,
-    ),
+    Result(Box<(Rc<ResultMemberEntry>, ResultMemberPayloadEntry)>),
+    AggregateResult(Box<AggregateNetEvent>),
     Version(ProgramSourceId, VersionIdentity, VersionRow),
     Replacement(ProgramSourceId, ReplacementKey, VersionIdentity, VersionRow),
     SharedVersion(ProgramSourceId, VersionIdentity, VersionRow),
-    ProgramFact(ProgramFactEntry),
+    ProgramFact(Rc<ProgramFactEntry>),
     StructuredAppRow(RowUuid, OwnedRecord),
 }
 
@@ -763,14 +770,19 @@ impl MaintainedSubscriptionView {
             let (event, weight) = row?;
             let net_event = match event {
                 DecodedMaintainedEvent::ResultCurrent { member, payload } => {
-                    NetEvent::Result(member, payload)
+                    NetEvent::Result(Box::new((Rc::new(member), payload)))
                 }
                 DecodedMaintainedEvent::AggregateResult {
                     member,
                     payload,
                     synthetic,
                     value_fields,
-                } => NetEvent::AggregateResult(member, payload, synthetic, value_fields),
+                } => NetEvent::AggregateResult(Box::new(AggregateNetEvent {
+                    member: Rc::new(member),
+                    payload,
+                    synthetic,
+                    value_fields,
+                })),
                 DecodedMaintainedEvent::VersionContent { source, row }
                 | DecodedMaintainedEvent::VersionDeletion { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
@@ -790,11 +802,11 @@ impl MaintainedSubscriptionView {
                     let identity = VersionIdentity::for_row(&row);
                     NetEvent::SharedVersion(source, identity, row)
                 }
-                DecodedMaintainedEvent::ProgramSourceCoverage(coverage) => {
-                    NetEvent::ProgramFact(ProgramFactEntry::ProgramSourceCoverage(coverage))
-                }
+                DecodedMaintainedEvent::ProgramSourceCoverage(coverage) => NetEvent::ProgramFact(
+                    Rc::new(ProgramFactEntry::ProgramSourceCoverage(coverage)),
+                ),
                 DecodedMaintainedEvent::RelationEdge(edge) => {
-                    NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
+                    NetEvent::ProgramFact(Rc::new(ProgramFactEntry::RelationEdge(edge)))
                 }
                 DecodedMaintainedEvent::StructuredAppRow { root, record } => {
                     NetEvent::StructuredAppRow(root, record)
@@ -811,7 +823,8 @@ impl MaintainedSubscriptionView {
         #[cfg(feature = "cold-settle-attribution")]
         let _apply_span = tracing::trace_span!("cold.phase.terminal_apply").entered();
         let mut transitions = ResultTransitions::default();
-        for (_, (event, weight)) in net {
+        for (identity, (event, weight)) in net {
+            drop(identity);
             if weight == 0 {
                 continue;
             }
@@ -821,10 +834,19 @@ impl MaintainedSubscriptionView {
                 );
             }
             match event {
-                NetEvent::Result(entry, payload) => {
+                NetEvent::Result(result) => {
+                    let (member, payload) = *result;
+                    let entry = Rc::unwrap_or_clone(member);
                     self.apply_result_delta(entry, payload, weight, &mut transitions);
                 }
-                NetEvent::AggregateResult(member, payload, synthetic, value_fields) => {
+                NetEvent::AggregateResult(result) => {
+                    let AggregateNetEvent {
+                        member,
+                        payload,
+                        synthetic,
+                        value_fields,
+                    } = *result;
+                    let member = Rc::unwrap_or_clone(member);
                     self.apply_aggregate_result_delta(
                         member,
                         payload,
@@ -888,6 +910,7 @@ impl MaintainedSubscriptionView {
                     }
                 }
                 NetEvent::ProgramFact(fact) => {
+                    let fact = Rc::unwrap_or_clone(fact);
                     if let Some(is_present) = self.apply_source_fact_delta(
                         SourceFactOrigin::ProgramFact,
                         fact.clone(),
@@ -3529,8 +3552,8 @@ impl ReplacementKey {
 impl NetEvent {
     fn identity(&self) -> EventIdentity {
         match self {
-            Self::Result(entry, _) => EventIdentity::Result(entry.clone()),
-            Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
+            Self::Result(result) => EventIdentity::Result(Rc::clone(&result.0)),
+            Self::AggregateResult(result) => EventIdentity::Result(Rc::clone(&result.member)),
             Self::Version(source, identity, _) => {
                 EventIdentity::Version(source.clone(), identity.clone())
             }
@@ -4573,6 +4596,82 @@ mod tests {
             maintained.unpublished_peer_source_delta(&previous),
             Some((vec![], vec![]))
         );
+    }
+
+    // Internal layout receipt: public values cannot reveal unused enum
+    // alternatives inflating every transient tree key/value allocation.
+    #[test]
+    fn event_map_layout_has_no_inline_large_result_or_fact_variants() {
+        let key_bytes = mem::size_of::<EventIdentity>();
+        let event_bytes = mem::size_of::<NetEvent>();
+        eprintln!("temporary event layout: key={key_bytes} event={event_bytes}");
+        assert!(key_bytes <= 128 && event_bytes <= 192);
+    }
+
+    // Internal identity ownership cannot be observed through public rows.
+    // It must share allocations without changing value-based equality/order,
+    // and consuming the map key must permit moving the event value back out.
+    #[test]
+    fn temporary_event_keys_share_values_and_release_them_before_application() {
+        let member = ResultMemberEntry::from(result(row(1), 10));
+        let DecodedMaintainedEvent::ResultCurrent { payload, .. } = result_current(member.clone())
+        else {
+            unreachable!();
+        };
+        let event = NetEvent::Result(Box::new((Rc::new(member.clone()), payload)));
+        let key = event.identity();
+        let NetEvent::Result(result) = &event else {
+            unreachable!();
+        };
+        let EventIdentity::Result(shared) = &key else {
+            unreachable!();
+        };
+        assert!(Rc::ptr_eq(&result.0, shared));
+        assert_eq!(Rc::strong_count(shared), 2);
+        let independently_owned_key = EventIdentity::Result(Rc::new(member.clone()));
+        assert_eq!(key, independently_owned_key);
+        assert_eq!(key.cmp(&independently_owned_key), std::cmp::Ordering::Equal);
+        drop(key);
+        let NetEvent::Result(result) = event else {
+            unreachable!();
+        };
+        assert_eq!(Rc::strong_count(&result.0), 1);
+        assert_eq!(Rc::try_unwrap(result.0).unwrap(), member);
+
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(
+                test_source(),
+                &version(row(2), 20, "shared identity"),
+                &aliases(),
+            )
+            .unwrap(),
+        );
+        let event = NetEvent::ProgramFact(Rc::new(fact.clone()));
+        let key = event.identity();
+        let NetEvent::ProgramFact(shared) = &event else {
+            unreachable!();
+        };
+        let EventIdentity::ProgramFact(key_fact) = &key else {
+            unreachable!();
+        };
+        assert!(Rc::ptr_eq(shared, key_fact));
+        assert_eq!(key, EventIdentity::ProgramFact(Rc::new(fact.clone())));
+        let mut map = BTreeMap::from([(key, (event, 1i64))]);
+        // Equal values at distinct addresses still coalesce into the first
+        // event; pointer identity is never a comparison or ordering key.
+        let duplicate = NetEvent::ProgramFact(Rc::new(fact.clone()));
+        map.entry(duplicate.identity())
+            .and_modify(|(_, weight)| *weight += 1)
+            .or_insert((duplicate, 1));
+        assert_eq!(map.len(), 1);
+        let (key, (event, weight)) = map.into_iter().next().unwrap();
+        assert_eq!(weight, 2);
+        drop(key);
+        let NetEvent::ProgramFact(shared) = event else {
+            unreachable!();
+        };
+        assert_eq!(Rc::strong_count(&shared), 1);
+        assert_eq!(Rc::try_unwrap(shared).unwrap(), fact);
     }
 
     #[test]
