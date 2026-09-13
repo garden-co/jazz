@@ -972,12 +972,14 @@ where
         tx_id: TxId,
         decode: impl Fn(&Self, NodeAlias, BorrowedRecord<'_>) -> Result<T, Error>,
     ) -> Result<Option<T>, Error> {
-        if let Some(alias) = self.node_aliases.get(&tx_id.node).copied()
-            && let Some(tx) = self
+        if let Some(alias) = self.node_aliases.get(&tx_id.node).copied() {
+            // Recovery rejects conflicting durable aliases, and alias creation
+            // installs this mapping only after persistence. A missing exact
+            // transaction cannot be hiding under another alias for this UUID.
+            // Do not cache the miss: a later received transaction must be read.
+            return self
                 .query_transaction_fields_by_alias(tx_id, alias, &decode)
-                .await?
-        {
-            return Ok(Some(tx));
+                .await;
         }
         let mut aliases = Vec::new();
         for raw in self

@@ -7,15 +7,12 @@ counters (`cpu_cycles`, `instructions`, L1/L2 hits, and cache misses).
 
 ## Authentication
 
-Copy the short-lived bearer token from an authenticated
-`https://app.codspeed.io` request and keep it outside the repository:
-
-```sh
-export CODSPEED_AUTH_TOKEN='...'
-```
-
-Never commit or paste the token into a receipt. The examples below assume
-`jq`, `curl`, and `gzip`.
+The public `garden-co/jazz` queries below work without authentication
+(verified 2026-09-13). Try that first. Private repositories may require a
+short-lived token from an authenticated `https://app.codspeed.io` request;
+keep it outside the repository and add the authorization header only when
+needed. Never commit or paste tokens or presigned URLs into receipts.
+The examples below assume `jq`, `curl`, and `gzip`.
 
 ## Resolve the newest result IDs
 
@@ -26,7 +23,6 @@ the owner, repository, commit prefixes, and benchmark name as needed.
 ```sh
 curl -sS https://gql.codspeed.io/ \
   -H 'Content-Type: application/json' \
-  -H "Authorization: $CODSPEED_AUTH_TOKEN" \
   --data-binary '{"query":"query { repository(owner: \"garden-co\", name: \"jazz\") { runs { id commit { hash } results { id benchmark { id name } } } } }"}' \
   > /tmp/codspeed-runs.json
 
@@ -38,6 +34,10 @@ jq -c '.data.repository.runs[]
 ```
 
 The selected `result.id` values become `HEAD_RESULT_ID` and `BASE_RESULT_ID`.
+Select the exact run and actual commit hash, not the first array entry: run
+ordering is not an authority for recency, and MCP discovery can initially show
+a synthetic merge hash before the run resolves to its source commit. Results
+may remain empty while processing; absence is not a zero measurement.
 
 ## Request and download the complete graph
 
@@ -57,7 +57,6 @@ for side in base head; do
 
   curl -sS https://gql.codspeed.io/ \
     -H 'Content-Type: application/json' \
-    -H "Authorization: $CODSPEED_AUTH_TOKEN" \
     --data-binary @"/tmp/codspeed-${side}-callgraph-query.json" \
     | jq -r '.data.repository.benchmarkResultById.callGraphPresignedUrl' \
     | xargs curl -sS -o "/tmp/codspeed-${side}.json.gz"
@@ -77,7 +76,15 @@ jq -c '.edges[] | select(.source == 0)
   /tmp/codspeed-head.json | head -1
 ```
 
-For function attribution, map node indexes through `.nodes`, select matching
-edges by their `source`/`target`, and sum the relevant `timeDistribution`
-entries. Prefer the MCP's rooted flamegraph query for ordinary timing analysis;
-use the raw graph when exact instruction or memory-event accounting matters.
+For performance theses, inspect the full wall-time graph first and use MCP for
+run discovery and benchmark distributions. Check the root actually returned by
+an MCP rooted query: a partial function filter can return the whole graph.
+
+For function attribution, map node indexes through `.nodes`. Node
+`timeDistribution` is self time; incoming edges carry inclusive subtree time.
+Sum all relevant thread/distribution entries rather than assuming entry zero
+is the entire process. Count the union of overlapping subtrees once; never add
+a parent scope to its children. Flamegraph node occurrences are stack-context
+occurrences, not invocation counts. Use explicit opt-in counters if a thesis
+depends on calls or processed rows. Profile sampling totals and benchmark
+wall-time minima/medians are separate receipts, not interchangeable clocks.
