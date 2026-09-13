@@ -973,6 +973,13 @@ impl LoweredGraph {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn shared_witness_sinks_for_test(
+    terminals: &[LoweredTerminal],
+) -> BTreeMap<String, String> {
+    shared_witness_sinks(terminals)
+}
+
 /// One executable output terminal produced by query lowering.
 #[derive(Clone, Debug)]
 pub(crate) struct LoweredTerminal {

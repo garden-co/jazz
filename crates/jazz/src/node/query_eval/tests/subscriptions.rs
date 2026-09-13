@@ -54,6 +54,111 @@ fn maintained_program_shares_identical_witness_execution() {
     }
 }
 
+/// Internal negative proof checks: Alice's valid compiled program is the
+/// starting point, then each mutation must invalidate only the affected pair.
+/// Public row equality cannot show whether a mismatched sink was suppressed.
+#[test]
+fn shared_witness_execution_requires_complete_graph_and_schema_equality() {
+    use crate::node::query_engine::{
+        OutputTerminalSchema, ProgramFactSchema, shared_witness_sinks_for_test,
+    };
+    use groove::ivm::{GraphBuilder, ProjectField};
+
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    commit_global_issue(&mut node, 0, "open", alice, 1);
+    let shape = Query::from("issues").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let program = node
+        .compile_current_query_program_for_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            alice,
+            CurrentQueryProgramOutput::MaintainedView,
+            &ReadViewSpec::default(),
+        )
+        .unwrap();
+    let (replacement, version) = program.lowered.shared_witness_sinks.iter().next().unwrap();
+    for mutation in 0..5 {
+        let mut terminals = program.lowered.terminals.clone();
+        let target = terminals
+            .iter_mut()
+            .find(|terminal| &terminal.sink == replacement)
+            .unwrap();
+        match mutation {
+            0 => {
+                let GraphBuilder::Project { input, .. } = &mut target.graph else {
+                    panic!("projected witness")
+                };
+                *input = std::sync::Arc::new(GraphBuilder::table("different_source"));
+            }
+            1 | 2 => {
+                let OutputTerminalSchema::Fact(fact) = &mut target.output else {
+                    panic!("fact")
+                };
+                let ProgramFactSchema::ReplacementWitnesses(schema) = &mut fact.schema else {
+                    panic!("witness")
+                };
+                if mutation == 1 {
+                    schema.routing_param_fields.insert("different_route".into());
+                } else {
+                    for witness in schema.content.iter_mut().chain(schema.deletion.iter_mut()) {
+                        witness
+                            .source
+                            .path
+                            .push(crate::protocol::ProgramSourceRole::Alias(
+                                "different_occurrence".into(),
+                            ));
+                    }
+                }
+            }
+            3 | 4 => {
+                let GraphBuilder::Project { fields, .. } = &mut target.graph else {
+                    panic!("projected witness")
+                };
+                let name = if mutation == 3 {
+                    "event_kind"
+                } else {
+                    "table_name"
+                };
+                fields
+                    .iter_mut()
+                    .find(|field| field.output_name == name)
+                    .unwrap()
+                    .expression =
+                    ProjectField::literal(name, Value::String("different_literal".into()))
+                        .expression;
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !shared_witness_sinks_for_test(&terminals).contains_key(replacement),
+            "mutation {mutation}"
+        );
+    }
+    let mut missing_version = program.lowered.terminals.clone();
+    missing_version.retain(|terminal| &terminal.sink != version);
+    assert!(!shared_witness_sinks_for_test(&missing_version).contains_key(replacement));
+
+    let mut repeated_role = program.lowered.terminals.clone();
+    let mut duplicate = repeated_role
+        .iter()
+        .find(|terminal| &terminal.sink == replacement)
+        .unwrap()
+        .clone();
+    duplicate.sink.push_str(".another_consumer");
+    repeated_role.push(duplicate);
+    assert_eq!(
+        shared_witness_sinks_for_test(&repeated_role)
+            .values()
+            .filter(|sink| *sink == version)
+            .count(),
+        1,
+        "a second independent role consumer must not disappear into a boolean pair"
+    );
+}
+
 #[test]
 fn maintained_snapshot_view_compiles_remote_delivery_witnesses() {
     let (_dir, mut node) = open_node();
