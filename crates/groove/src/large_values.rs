@@ -1,5 +1,6 @@
 //! Canonical indirect representation for large logical scalar values.
 
+use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -3989,8 +3990,18 @@ pub(crate) fn materialize_record_attempt(
     raw: &[u8],
     inputs: &mut EvaluationInputs,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
+    materialize_record_borrowed_attempt(descriptor, raw, inputs).map(Cow::into_owned)
+}
+
+/// Preserve admitted inline bytes for callers that already own their input.
+/// Indirect values retain the same chunk requests and complete-row rebuild.
+pub(crate) fn materialize_record_borrowed_attempt<'a>(
+    descriptor: &RecordDescriptor,
+    raw: &'a [u8],
+    inputs: &mut EvaluationInputs,
+) -> Result<Cow<'a, [u8]>, IvmRuntimeError> {
     if !descriptor.fields_contain_indirect_values(raw, 0..descriptor.fields().len())? {
-        return Ok(raw.to_vec());
+        return Ok(Cow::Borrowed(raw));
     }
     let mut values = descriptor.bind(raw).to_values()?;
     let mut blocked = false;
@@ -4002,9 +4013,9 @@ pub(crate) fn materialize_record_attempt(
         return Err(IvmRuntimeError::EvaluationBlocked);
     }
     if changed {
-        Ok(descriptor.create(&values)?)
+        Ok(Cow::Owned(descriptor.create(&values)?))
     } else {
-        Ok(raw.to_vec())
+        Ok(Cow::Borrowed(raw))
     }
 }
 
@@ -8114,6 +8125,27 @@ mod tests {
         assert!(!std::ptr::eq(bytes, string));
         assert!(!std::ptr::eq(bytes, json));
         assert!(!std::ptr::eq(string, json));
+    }
+
+    #[test]
+    fn inline_materialization_can_borrow_the_exact_admitted_input() {
+        // Internal ownership receipt: public row equality cannot distinguish
+        // borrowed bytes from a redundant copy of an already-inline record.
+        let descriptor =
+            RecordDescriptor::new([("id", ValueType::U64), ("body", ValueType::String)]);
+        let raw = descriptor
+            .create(&[Value::U64(7), Value::String("inline body".repeat(100))])
+            .unwrap();
+        let mut inputs = EvaluationInputs::default();
+        let result = materialize_record_borrowed_attempt(&descriptor, &raw, &mut inputs).unwrap();
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result.as_ptr(), raw.as_ptr());
+        assert_eq!(result.as_ref(), raw.as_slice());
+        assert!(inputs.take_missing_chunks().is_empty());
+        assert_eq!(
+            materialize_record_attempt(&descriptor, &raw, &mut inputs).unwrap(),
+            raw,
+        );
     }
 
     #[test]
