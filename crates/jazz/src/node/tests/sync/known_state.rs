@@ -85,6 +85,140 @@ fn view_update_parts(message: SyncMessage, defer_settlement: bool) -> ViewUpdate
 }
 
 #[test]
+fn physical_manifest_cache_is_receipt_scoped_and_cleared_by_legacy_deferred_and_reopen() {
+    // Internal cache-lifetime proof: public rows cannot expose retained
+    // predecessors, legacy fact frames, or recovery's derived-cache absence.
+    let (reader_dir, mut reader) = open_node_with_uuid(node(0xd3));
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(0xd1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(0xd2));
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    commit_mergeable_global(&mut writer, &mut core,
+        MergeableCommit::new("todos", row(0xd4), 15).cells(title_cells("cached manifest")));
+    let reset = system_authority_reset(&mut core, &shape, &binding, subscription);
+    reader.apply_sync_message_settled(reset.clone()).unwrap();
+    let key = reader.authority_result_key_for_subscription(subscription).unwrap();
+    let original = reader.query.authority_results[&key].supporting_snapshot.clone().unwrap();
+    let facts = reader.query.authority_results[&key].settled_program_facts.clone();
+    assert_eq!(original.materialize().into_iter().collect::<BTreeSet<_>>(), facts);
+
+    let SyncMessage::ViewUpdate(mut malformed) = reset.clone() else { unreachable!() };
+    malformed.supporting_rows.push(malformed.supporting_rows[0].clone());
+    assert!(reader.apply_sync_message_settled(SyncMessage::ViewUpdate(malformed)).is_err());
+    assert!(std::sync::Arc::ptr_eq(reader.query.authority_results[&key].supporting_snapshot.as_ref().unwrap(), &original));
+    assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
+
+    let mut legacy = view_update_parts(reset.clone(), false);
+    legacy.wire_rows = None;
+    legacy.reset_input_set = false;
+    legacy.version_carriers.clear();
+    reader.apply_view_updates_in_batch(vec![view_update_parts(reset.clone(), false), legacy]).resolve().unwrap();
+    assert!(reader.query.authority_results[&key].supporting_snapshot.is_none());
+    assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
+    reader.apply_sync_message_settled(reset.clone()).unwrap();
+    assert!(reader.query.authority_results[&key].supporting_snapshot.is_some());
+
+    reader.apply_view_update(view_update_parts(reset.clone(), true)).resolve().unwrap();
+    assert!(reader.query.authority_results[&key].supporting_snapshot.is_none());
+    reader.apply_sync_message_settled(reset.clone()).unwrap();
+    assert!(reader.query.authority_results[&key].supporting_snapshot.is_some());
+    reader.clear_settled_result_view(key.clone());
+    assert!(reader.query.authority_results[&key].supporting_snapshot.is_none());
+    reader.apply_sync_message_settled(reset.clone()).unwrap();
+    assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
+    assert_eq!(receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).len(), 1);
+    drop(reader);
+    let mut reopened = open_node_at(&reader_dir, schema());
+    assert!(reopened.query.authority_results.values().all(|state| state.supporting_snapshot.is_none()));
+    register_shape_binding(&mut reopened, &shape, &binding);
+    reopened.apply_sync_message_settled(reset).unwrap();
+    let state = &reopened.query.authority_results[&key];
+    assert!(state.supporting_snapshot.is_some());
+    assert_eq!(state.settled_program_facts, facts);
+}
+
+#[test]
+fn physical_manifest_cache_never_outlives_its_facts_across_cancelled_receive_writes() {
+    // Internal cancellation proof requires pausing individual durable writes
+    // and inspecting a derived predecessor, neither exposed by public clients.
+    use groove::storage::{TestStorage, TestStorageOperation};
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(0xe3));
+    let (_core_dir, mut core) = open_node_with_uuid(node(0xe4));
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    commit_mergeable_global(&mut writer, &mut core,
+        MergeableCommit::new("todos", row(0xe5), 10).cells(title_cells("first")));
+    let initial = system_authority_reset(&mut core, &shape, &binding, subscription);
+    commit_mergeable_global(&mut writer, &mut core,
+        MergeableCommit::new("todos", row(0xe6), 11).cells(title_cells("second")));
+    let successor = system_authority_reset(&mut core, &shape, &binding, subscription);
+    let schema = schema();
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut completed = false;
+    let mut observed_invalidation = false;
+    for allowed_writes in 0..24 {
+        let (storage, control) = TestStorage::controlled(&family_refs);
+        let reopen_handle = storage.clone();
+        let mut reader = NodeState::new_with_shared_test_catalogue(node(0xe7), schema.clone(), storage).unwrap();
+        register_shape_binding(&mut reader, &shape, &binding);
+        reader.apply_sync_message_settled(initial.clone()).unwrap();
+        let key = reader.authority_result_key_for_subscription(subscription).unwrap();
+        assert!(reader.query.authority_results[&key].supporting_snapshot.is_some());
+        control.take_observed();
+        control.pause_on(TestStorageOperation::WriteMany);
+        let mut receive = Box::pin(reader.apply_view_update(view_update_parts(successor.clone(), false)));
+        let mut released = 0;
+        let mut stopped = false;
+        for _ in 0..50_000 {
+            match std::future::Future::poll(receive.as_mut(), &mut std::task::Context::from_waker(std::task::Waker::noop())) {
+                std::task::Poll::Ready(result) => {
+                    result.unwrap();
+                    completed = true;
+                    stopped = true;
+                    break;
+                }
+                std::task::Poll::Pending => {}
+            }
+            let writes = control.observed().iter().filter(|op| **op == TestStorageOperation::WriteMany).count();
+            if writes > allowed_writes { stopped = true; break; }
+            if writes > released { control.release_one(); released = writes; }
+        }
+        assert!(stopped, "receive did not reach a bounded write boundary");
+        drop(receive);
+        let state = &reader.query.authority_results[&key];
+        if let Some(snapshot) = &state.supporting_snapshot {
+            assert_eq!(snapshot.materialize().into_iter().collect::<BTreeSet<_>>(),
+                state.settled_program_facts.iter().filter(|fact| fact.is_peer_source_closure_fact()).cloned().collect());
+        } else {
+            observed_invalidation = true;
+        }
+        if completed { assert!(state.supporting_snapshot.is_some()); }
+        drop(reader);
+        control.resume();
+        let storage = crate::db::block_on(reopen_handle.reopen(families.clone())).unwrap();
+        let reopened = NodeState::new_with_shared_test_catalogue(node(0xe7), schema.clone(), storage).unwrap();
+        assert!(reopened.query.authority_results.values().all(|state| state.supporting_snapshot.is_none()));
+        if completed { break; }
+    }
+    assert!(completed, "all receive writes must be covered");
+    assert!(observed_invalidation, "must pause after invalidation and before success");
+    // An unchanged manifest still advances/persists a receipt. Its cache must
+    // be invalidated before that write, even though it has no fact delta.
+    let (storage, control) = TestStorage::controlled(&family_refs);
+    let mut reader = NodeState::new_with_shared_test_catalogue(node(0xe8), schema, storage).unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    reader.apply_sync_message_settled(initial.clone()).unwrap();
+    let key = reader.authority_result_key_for_subscription(subscription).unwrap();
+    let mut replay = view_update_parts(initial, false);
+    replay.version_carriers.clear();
+    control.fail_next(TestStorageOperation::WriteMany);
+    assert!(reader.apply_view_update(replay).resolve().is_err());
+    assert!(reader.query.authority_results[&key].supporting_snapshot.is_none());
+}
+
+#[test]
 fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
     // Internal protocol coverage: public APIs only expose this as a background
     // tick-driver stall. The protocol invariant is that unsubscribe is
