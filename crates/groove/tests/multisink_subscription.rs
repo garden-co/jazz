@@ -568,6 +568,146 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
 }
 
 #[futures_test::test]
+async fn root_payload_updates_preserve_order_and_mixed_positional_edits() {
+    use groove::ivm::runtime::TerminalOperation;
+    use groove::records::BorrowedRecord;
+
+    fn apply(rows: &mut Vec<(Vec<u8>, Vec<Value>)>, operations: &[TerminalOperation]) {
+        for operation in operations {
+            let decode = |bytes: &[u8]| {
+                let record = BorrowedRecord::new(bytes, &operation.root_descriptor);
+                (0..3)
+                    .map(|index| record.get_idx(index).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            match &operation.edit {
+                TerminalEdit::Insert { key, index, value } => {
+                    rows.insert(*index, (key.clone(), decode(value)))
+                }
+                TerminalEdit::Remove { key } => {
+                    rows.remove(rows.iter().position(|(k, _)| k == key).unwrap());
+                }
+                TerminalEdit::Move { key, index } => {
+                    let row = rows.remove(rows.iter().position(|(k, _)| k == key).unwrap());
+                    rows.insert(*index, row);
+                }
+                TerminalEdit::Update { key, value } => {
+                    rows.iter_mut().find(|(k, _)| k == key).unwrap().1 = decode(value)
+                }
+            }
+        }
+    }
+
+    let mut db = database().await;
+    let subscription = db
+        .subscribe([(
+            "rows",
+            GraphBuilder::collect_root_ordered(
+                GraphBuilder::table("albums"),
+                ["id"],
+                [
+                    CollectByField::named("id"),
+                    CollectByField::named("title"),
+                    CollectByField::named("year"),
+                ],
+                [TopByOrder::asc("year")],
+                ["id"],
+                0,
+                TopByLimit::Unbounded,
+            ),
+        )])
+        .unwrap();
+    subscription.try_recv().unwrap();
+    let mut rows = Vec::new();
+    for id in 1..=64 {
+        insert_album(&mut db, id, "Original", 2000 + id).await;
+        apply(
+            &mut rows,
+            &subscription.try_recv().unwrap().terminal_sinks["rows"].operations,
+        );
+    }
+    let initial_ids = rows
+        .iter()
+        .map(|(_, values)| values[0].clone())
+        .collect::<Vec<_>>();
+    for title in ["Changed", "Changed again"] {
+        let mut batch = db.open_batch();
+        batch.update(
+            "albums",
+            vec![
+                Value::U64(32),
+                Value::String(title.into()),
+                Value::U64(2032),
+            ],
+        );
+        let persisted = db.apply_batch(batch).await.unwrap().persist().await;
+        db.finish_persistence(persisted).unwrap();
+        let tick = subscription.try_recv().unwrap();
+        let operations = &tick.terminal_sinks["rows"].operations;
+        assert!(matches!(
+            operations.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Update { .. },
+                ..
+            }]
+        ));
+        apply(&mut rows, operations);
+        assert_eq!(rows[31].1[1], Value::String(title.into()));
+        assert_eq!(
+            rows.iter()
+                .map(|(_, values)| values[0].clone())
+                .collect::<Vec<_>>(),
+            initial_ids
+        );
+    }
+    // Two moves cross each other while a new row joins between them. Terminal
+    // positions are sequential edits, not independently applied final ranks.
+    let mut batch = db.open_batch();
+    batch.update(
+        "albums",
+        vec![
+            Value::U64(64),
+            Value::String("First".into()),
+            Value::U64(1999),
+        ],
+    );
+    batch.update(
+        "albums",
+        vec![
+            Value::U64(1),
+            Value::String("Last".into()),
+            Value::U64(2100),
+        ],
+    );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(65),
+            Value::String("Middle".into()),
+            Value::U64(2032),
+        ],
+    );
+    let persisted = db.apply_batch(batch).await.unwrap().persist().await;
+    db.finish_persistence(persisted).unwrap();
+    apply(
+        &mut rows,
+        &subscription.try_recv().unwrap().terminal_sinks["rows"].operations,
+    );
+    let mut expected = (2..=63).collect::<Vec<u64>>();
+    expected.insert(0, 64);
+    expected.insert(expected.iter().position(|id| *id == 32).unwrap() + 1, 65);
+    expected.push(1);
+    assert_eq!(
+        rows.iter()
+            .map(|(_, values)| values[0].clone())
+            .collect::<Vec<_>>(),
+        expected.into_iter().map(Value::U64).collect::<Vec<_>>()
+    );
+    assert_eq!(rows.first().unwrap().1[1], Value::String("First".into()));
+    assert_eq!(rows.last().unwrap().1[1], Value::String("Last".into()));
+}
+
+#[futures_test::test]
 async fn structured_unbounded_membership_visits_only_changed_rows_at_scale() {
     for count in [10, 1000] {
         let mut db = database().await;
