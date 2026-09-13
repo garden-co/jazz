@@ -1668,6 +1668,11 @@ impl TickEvaluator<'_> {
             &right_on,
             join.comparison,
         )?;
+        #[cfg(feature = "cold-settle-attribution")]
+        {
+            self.trace_arrangement_snapshot(&left_key, left_delta);
+            self.trace_arrangement_snapshot(&right_key, right_delta);
+        }
         let mut left_arrangement = self
             .arrangement_states
             .remove(&left_key)
@@ -1767,6 +1772,11 @@ impl TickEvaluator<'_> {
         // evaluator mutates arrangements, then restore it even if evaluation
         // rejects a malformed delta. Cloning would copy every published row
         // for each small incremental update.
+        #[cfg(feature = "cold-settle-attribution")]
+        {
+            self.trace_arrangement_snapshot(&left_key, left_delta);
+            self.trace_arrangement_snapshot(&right_key, right_delta);
+        }
         let mut join_state = match self.operator_states.remove(&operator_key) {
             None => AntiJoinState::default(),
             Some(OperatorState::AntiJoin(state)) => state,
@@ -1854,6 +1864,11 @@ impl TickEvaluator<'_> {
             &right_on,
             join.comparison,
         )?;
+        #[cfg(feature = "cold-settle-attribution")]
+        {
+            self.trace_arrangement_snapshot(&left_key, left_delta);
+            self.trace_arrangement_snapshot(&right_key, right_delta);
+        }
         let mut left_arrangement = self
             .arrangement_states
             .remove(&left_key)
@@ -2654,6 +2669,34 @@ impl TickEvaluator<'_> {
             .aggregate_group_fields
             .get_or_insert_with(|| Arc::from(plan_expr_names(&aggregate.group_key)))
             .clone()
+    }
+
+    /// Opt-in diagnostic fingerprints only: these hashes are not semantic
+    /// identities and must never be used to authorize snapshot reuse.
+    #[cfg(feature = "cold-settle-attribution")]
+    fn trace_arrangement_snapshot(&self, key: &ArrangementKey, deltas: &[RecordDelta]) {
+        if self.context.arrangement_update_mode != ArrangementUpdateMode::Replace
+            || std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_none()
+        {
+            return;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+        let mut bytes = 0usize;
+        deltas.len().hash(&mut fingerprint);
+        for delta in deltas {
+            delta.record.hash(&mut fingerprint);
+            delta.weight.hash(&mut fingerprint);
+            bytes += delta.record.len();
+        }
+        eprintln!(
+            "ARRANGEMENT_SNAPSHOT\t{:p}\t{key:?}\t{:?}\t{}\t{bytes}\t{:016x}\t{:p}",
+            self.arrangement_states,
+            self.arrangement_sub_tick(key),
+            deltas.len(),
+            fingerprint.finish(),
+            deltas.as_ptr(),
+        );
     }
 
     fn arrangement_sub_tick(&self, key: &ArrangementKey) -> SubTick {
