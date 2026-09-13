@@ -3,6 +3,33 @@
 use super::*;
 use crate::records::{DescriptorField, collect_by_ordered_scalar};
 
+/// Keep demand planning and terminal publication on the same classification.
+pub(super) fn output_is_structured_collect_by(
+    graph: &IvmGraph,
+    node: NodeId,
+) -> Result<bool, IvmRuntimeError> {
+    let mut pending = vec![node];
+    let mut seen = HashSet::new();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let node = graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        match &node.descriptor.operator {
+            OpType::CollectBy(collect_by) => {
+                return Ok(matches!(
+                    collect_by.mode,
+                    CollectByMode::Collect | CollectByMode::Root
+                ));
+            }
+            _ => pending.extend(node.descriptor.inputs.iter().copied()),
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn extend_root_window_positions(
     descriptor: RecordDescriptor,
     window: &[WindowedRecord],

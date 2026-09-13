@@ -6,7 +6,8 @@
 use std::sync::mpsc::TryRecvError;
 
 use groove::db::{Database, GraphBuilder, RoutedMultisinkTerminal};
-use groove::ivm::{CollectByField, ProjectField, TopByLimit};
+use groove::ivm::runtime::TerminalEdit;
+use groove::ivm::{CollectByField, ProjectField, TopByLimit, TopByOrder};
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -449,6 +450,116 @@ async fn shared_structured_output_delivers_terminal_deltas_to_every_subscription
         .expect("second subscription receives structured terminal deltas");
     assert!(!first_terminal.is_empty());
     assert_eq!(second_terminal, first_terminal);
+}
+
+#[futures_test::test]
+async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
+    let mut db = database().await;
+    let ordered = GraphBuilder::top_by(
+        GraphBuilder::table("albums"),
+        Vec::<String>::new(),
+        [TopByOrder::asc("year")],
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let structured = db
+        .subscribe([(
+            "rows",
+            GraphBuilder::collect_root_ordered(
+                ordered.clone(),
+                ["id"],
+                [
+                    CollectByField::named("id"),
+                    CollectByField::named("title"),
+                    CollectByField::named("year"),
+                ],
+                [TopByOrder::asc("year")],
+                ["id"],
+                0,
+                TopByLimit::Unbounded,
+            ),
+        )])
+        .unwrap();
+    structured.try_recv().unwrap();
+    insert_album(&mut db, 1, "Blue Train", 1957).await;
+    assert!(!structured.try_recv().unwrap().terminal_sinks["rows"].is_empty());
+    let metrics = db.last_tick_metrics().unwrap();
+    assert_eq!(metrics.root_ordering_position_records, 0);
+    assert_eq!(metrics.root_ordering_position_records_skipped, 1);
+
+    let plain = db.subscribe([("rows", ordered.clone())]).unwrap();
+    assert_eq!(
+        plain.try_recv().unwrap().get("rows").unwrap().deltas.len(),
+        1
+    );
+    for (id, year, expected_index, expected_visits) in [(3, 1965, 1, 3), (2, 1959, 1, 5)] {
+        insert_album(&mut db, id, "Album", year).await;
+        let tick = plain.try_recv().unwrap();
+        assert!(tick.terminal_sinks["rows"].operations.iter().any(|operation| {
+            matches!(operation.edit, TerminalEdit::Insert { index, .. } if index == expected_index)
+        }));
+        assert!(!structured.try_recv().unwrap().terminal_sinks["rows"].is_empty());
+        let metrics = db.last_tick_metrics().unwrap();
+        // One shared TopBy: both consumers must not duplicate position work.
+        assert_eq!(metrics.root_ordering_position_records, expected_visits);
+        assert_eq!(metrics.root_ordering_position_records_skipped, 0);
+    }
+
+    let mut batch = db.open_batch();
+    batch.update(
+        "albums",
+        vec![
+            Value::U64(3),
+            Value::String("Moved".into()),
+            Value::U64(1950),
+        ],
+    );
+    let persisted = db.apply_batch(batch).await.unwrap().persist().await;
+    db.finish_persistence(persisted).unwrap();
+    let tick = plain.try_recv().unwrap();
+    assert!(
+        tick.terminal_sinks["rows"]
+            .operations
+            .iter()
+            .any(|operation| { matches!(operation.edit, TerminalEdit::Move { index: 0, .. }) })
+    );
+    structured.try_recv().unwrap();
+
+    assert!(db.unsubscribe(plain.id()));
+    insert_album(&mut db, 4, "Later", 1970).await;
+    structured.try_recv().unwrap();
+    let metrics = db.last_tick_metrics().unwrap();
+    assert_eq!(metrics.root_ordering_position_records, 0);
+    assert_eq!(metrics.root_ordering_position_records_skipped, 7);
+
+    let rebound = db.subscribe([("rows", ordered)]).unwrap();
+    let initial = rebound.try_recv().unwrap();
+    let ids = initial
+        .get("rows")
+        .unwrap()
+        .to_values()
+        .unwrap()
+        .into_iter()
+        .map(|(values, _)| values[0].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [Value::U64(3), Value::U64(1), Value::U64(2), Value::U64(4)]
+    );
+    insert_album(&mut db, 5, "Between", 1952).await;
+    assert!(
+        rebound.try_recv().unwrap().terminal_sinks["rows"]
+            .operations
+            .iter()
+            .any(|operation| { matches!(operation.edit, TerminalEdit::Insert { index: 1, .. }) })
+    );
+    assert_eq!(
+        db.last_tick_metrics()
+            .unwrap()
+            .root_ordering_position_records,
+        9
+    );
 }
 
 #[futures_test::test]

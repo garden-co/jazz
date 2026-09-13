@@ -2445,6 +2445,29 @@ impl IvmRuntime {
             .flatten()
             .copied()
             .collect::<HashSet<_>>();
+        // Structured collectors own their positional edits. Only plain outputs
+        // consume the generic before/after maps. Union demand across consumers
+        // because a TopBy node can be shared by both kinds of output. Preserve
+        // root_ordering_node metadata: hydration and scheduling still need it.
+        let mut root_ordering_windows = HashMap::default();
+        for subscription in affected_subscriptions
+            .iter()
+            .filter_map(|subscription| self.multisink_subscriptions.get(subscription))
+        {
+            for output in subscription
+                .outputs
+                .values()
+                .filter(|output| affected_nodes.contains(&output.node))
+            {
+                if let Some(ordering_node) = output.root_ordering_node
+                    && !output_is_structured_collect_by(&self.graph, output.node)?
+                {
+                    root_ordering_windows
+                        .entry(ordering_node)
+                        .or_insert_with(RootOrderingWindows::default);
+                }
+            }
+        }
         let mut retained_roots = affected_nodes
             .iter()
             .filter(|node| {
@@ -2498,7 +2521,7 @@ impl IvmRuntime {
             affected_subscriptions,
             pending_subscription_outputs: HashMap::default(),
             terminal_deltas: HashMap::default(),
-            root_ordering_windows: HashMap::default(),
+            root_ordering_windows,
             notification_publication,
             defer_notifications_until_durable,
             pending_resident_publication,
