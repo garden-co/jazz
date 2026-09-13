@@ -103,7 +103,7 @@ Independent review, full canonical CI and browser acceptance are not claimed.
 
 ## Reproduction
 
-Build `cargo build -p jazz-sim --bench customer_cold_start --profile perf` and
+Build `cargo build -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --profile perf` and
 run the executable from the repository root with `JAZZ_CUSTOMER_IDENTITY=member`,
 `JAZZ_CUSTOMER_PHASES=cold`, `JAZZ_CUSTOMER_SCALE=1.0`, and
 `JAZZ_CUSTOMER_MAX_TICKS=200000`. Build separately with `--features bench-alloc-sites`

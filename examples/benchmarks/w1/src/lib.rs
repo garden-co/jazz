@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates, MergeableTxOps,
-    PeerIoPump, PreparedQuery, Propagation, ReadOpts, RestoreOptions, ResumeCursor,
+    CommitUnitTrust, Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates,
+    MergeableTxOps, PeerIoPump, PreparedQuery, Propagation, ReadOpts, RestoreOptions, ResumeCursor,
     SubscriptionEvent, SubscriptionStream, UpdateOptions, WireTransportAdapter, WriteIdentity,
     block_on,
 };
@@ -32,8 +32,9 @@ const USERS: usize = 10;
 const PROJECTS: usize = 30;
 
 fn policy_bench_identity() -> AuthorSubject {
-    AuthorSubject::authenticated("https://benchmark.invalid", "policy-writer")
-        .expect("static W1 benchmark identity is valid")
+    // Durable session writes need an account-bound principal. This fixture
+    // preserves the existing Session identity and policy configuration.
+    AuthorSubject::for_test_bytes([0x76; 16])
 }
 
 /// Seeded W1 read fixture. Setup is deliberately outside measured closures.
@@ -62,7 +63,9 @@ pub struct ResumeFixture {
     client: Db<MemoryStorage>,
     subscription: SubscriptionStream,
     cursor: Option<ResumeCursor>,
-    full_snapshot_bytes: usize,
+    fresh_post_update_bytes: usize,
+    updated_task: RowUuid,
+    task_schema: jazz::schema::TableSchema,
 }
 
 struct ByteDuplexTransport {
@@ -155,8 +158,14 @@ impl ResumeFixture {
 
         let (writer_transport, server_writer_transport, queues) = byte_duplex(1);
         let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
-        let writer_subscriber =
-            server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
+        // These fixture writes are database-authored SYSTEM work, admitted by
+        // the synthetic host as a backend rather than an ordinary user session.
+        let writer_subscriber = server.accept_subscriber_with_claims_and_trust(
+            server_writer_transport,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
         let writer_pump = block_on(writer_upstream.lock()).io_pump();
         let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
         let mut quiet_ticks = 0;
@@ -208,9 +217,10 @@ impl ResumeFixture {
             }
         }
         assert_eq!(initial_rows, tasks);
-        let full_snapshot_bytes = block_on(subscriber.lock())
+        let initial_snapshot_bytes = block_on(subscriber.lock())
             .last_resume_bytes()
             .expect("W1 full snapshot bytes");
+        assert!(initial_snapshot_bytes > 0);
         block_on(server.tick()).expect("refresh W1 served cursor state");
         block_on(client.tick()).expect("apply W1 served cursor state");
         while subscription.try_next_event().is_some() {}
@@ -233,8 +243,12 @@ impl ResumeFixture {
         block_on(write.wait(DurabilityTier::Local)).expect("settle disconnected W1 task update");
         let (writer_transport, server_writer_transport, queues) = byte_duplex(3);
         let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
-        let writer_subscriber =
-            server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
+        let writer_subscriber = server.accept_subscriber_with_claims_and_trust(
+            server_writer_transport,
+            AuthorSubject::SYSTEM,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
         let writer_pump = block_on(writer_upstream.lock()).io_pump();
         let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
         let mut quiet_ticks = 0;
@@ -254,12 +268,26 @@ impl ResumeFixture {
         assert!(writer.db.detach_connection(&writer_upstream));
         assert!(server.detach_connection(&writer_subscriber));
 
+        // Compare the same post-update frontier. A new usage site rebuilds its
+        // complete CoveredInput closure; delta-sized reconnect is not promised
+        // for this reference-bearing query (performance follow-up: #2372).
+        // Use isolated control nodes so setup does not reconcile or warm the
+        // measured server's retained evaluator before resume_once.
+        let fresh_post_update_bytes = fresh_task_snapshot_bytes(tasks, comments, activity_events);
+
         Self {
             server,
             client,
             subscription,
             cursor: Some(cursor),
-            full_snapshot_bytes,
+            fresh_post_update_bytes,
+            updated_task: writer.task_transition_row,
+            task_schema: schema(false)
+                .tables()
+                .iter()
+                .find(|table| table.name == "tasks")
+                .unwrap()
+                .clone(),
         }
     }
 
@@ -282,16 +310,146 @@ impl ResumeFixture {
         let resume_bytes = block_on(resumed.lock())
             .last_resume_bytes()
             .expect("W1 resume catch-up bytes");
-        let mut changed = event_row_count(
-            block_on(self.subscription.next_event()).expect("W1 resume stream remains open"),
-        );
+        let event =
+            block_on(self.subscription.next_event()).expect("W1 resume stream remains open");
+        let mut changed = self.assert_resume_event(event);
         while let Some(event) = self.subscription.try_next_event() {
-            changed += event_row_count(event);
+            changed += self.assert_resume_event(event);
         }
         assert_eq!(changed, 1);
-        assert!(resume_bytes < self.full_snapshot_bytes);
+        assert!(resume_bytes > 0);
+        assert!(
+            resume_bytes <= self.fresh_post_update_bytes,
+            "resume must not exceed the equivalent fresh post-update response: resume={resume_bytes}, fresh={}",
+            self.fresh_post_update_bytes
+        );
         resume_bytes
     }
+
+    fn assert_resume_event(&self, event: SubscriptionEvent) -> usize {
+        if let SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            settled,
+            ..
+        } = &event
+        {
+            assert!(*settled);
+            assert!(added.is_empty());
+            assert!(removed.is_empty());
+            for update in updated {
+                assert_eq!(update.row.row_uuid(), self.updated_task);
+                assert_eq!(
+                    update.row.cell(&self.task_schema, "status"),
+                    Some(Value::String("resume-canary".to_owned()))
+                );
+            }
+        }
+        event_row_count(event)
+    }
+}
+
+fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usize) -> usize {
+    let fixture = Fixture::<MemoryStorage>::memory(tasks, comments, activity_events);
+    let writer = &fixture.db;
+    let write = block_on(writer.update(
+        "tasks",
+        fixture.task_transition_row,
+        BTreeMap::from([(
+            "status".to_owned(),
+            Value::String("resume-canary".to_owned()),
+        )]),
+        UpdateOptions::default(),
+    ))
+    .expect("write W1 fresh control update");
+    block_on(write.wait(DurabilityTier::Local)).expect("settle W1 fresh control update");
+    let control_schema = schema(false);
+    let task_schema = control_schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "tasks")
+        .unwrap();
+    let server = open_memory_node(schema(false), 0x74, true);
+    let client = open_memory_node(schema(false), 0x75, false);
+    let (transport, server_transport, queues) = byte_duplex(5);
+    let upstream = block_on(writer.connect_upstream(transport));
+    let subscriber = server.accept_subscriber_with_claims_and_trust(
+        server_transport,
+        AuthorSubject::SYSTEM,
+        BTreeMap::new(),
+        CommitUnitTrust::TrustedBackend,
+    );
+    let writer_pump = block_on(upstream.lock()).io_pump();
+    let server_pump = block_on(subscriber.lock()).io_pump();
+    let mut quiet_ticks = 0;
+    for _ in 0..10_000 {
+        block_on(writer.tick()).expect("ship W1 control frontier");
+        block_on(server.tick()).expect("ingest W1 control frontier");
+        pump_aux(&writer_pump, &server_pump);
+        quiet_ticks = if queues.is_empty() {
+            quiet_ticks + 1
+        } else {
+            0
+        };
+        if quiet_ticks == 2 {
+            break;
+        }
+    }
+    assert_eq!(quiet_ticks, 2, "W1 control uploads must settle");
+    assert!(writer.detach_connection(&upstream));
+    assert!(server.detach_connection(&subscriber));
+
+    let (transport, server_transport, _) = byte_duplex(6);
+    let upstream = block_on(client.connect_upstream(transport));
+    let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let client_pump = block_on(upstream.lock()).io_pump();
+    let server_pump = block_on(subscriber.lock()).io_pump();
+    let prepared = client
+        .prepare_query(&Query::from("tasks"))
+        .expect("prepare W1 fresh control");
+    let mut subscription = block_on(client.subscribe(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe W1 fresh control");
+    let mut rows = 0;
+    let mut updated_rows = 0;
+    for _ in 0..512 {
+        block_on(client.tick()).expect("announce W1 fresh control");
+        block_on(server.tick()).expect("serve W1 fresh control");
+        block_on(client.tick()).expect("apply W1 fresh control");
+        block_on(client.tick()).expect("materialize W1 fresh control");
+        pump_aux(&client_pump, &server_pump);
+        while let Some(event) = subscription.try_next_event() {
+            if let SubscriptionEvent::Delta { added, .. } = &event {
+                updated_rows += added
+                    .iter()
+                    .filter(|row| {
+                        row.row.cell(task_schema, "status")
+                            == Some(Value::String("resume-canary".to_owned()))
+                    })
+                    .count();
+            }
+            rows += event_row_count(event);
+        }
+        if rows == tasks {
+            break;
+        }
+    }
+    assert_eq!(rows, tasks);
+    assert_eq!(
+        updated_rows, 1,
+        "fresh control must observe the post-update frontier"
+    );
+    block_on(subscriber.lock())
+        .last_resume_bytes()
+        .expect("W1 fresh post-update bytes")
 }
 
 impl Fixture<RocksDbStorage> {

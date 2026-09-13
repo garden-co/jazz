@@ -533,8 +533,9 @@ impl PeerState {
         self.record_outgoing_view_update_metadata(update);
         if let SyncMessage::ViewUpdate(view) = update {
             let state = self.publication_states.entry(view.subscription).or_default();
-            if let Some(maintained) = &state.maintained_subscription_view {
+            if let Some(maintained) = &mut state.maintained_subscription_view {
                 state.program_fact_set = maintained.maintained.active_peer_source_closure_facts();
+                maintained.maintained.acknowledge_peer_source_closure();
             }
         }
     }
@@ -559,6 +560,13 @@ impl PeerState {
         program_fact_removes: &[ProgramFactEntry],
     ) {
         let state = self.publication_states.entry(subscription).or_default();
+        // This path records an independently supplied delta rather than the
+        // maintained journal's exact successor. Re-establish its baseline if
+        // this subscription later returns to maintained publication.
+        if (reset_input_set || !program_fact_adds.is_empty() || !program_fact_removes.is_empty())
+            && let Some(view) = &mut state.maintained_subscription_view {
+            view.maintained.forget_peer_source_closure_baseline();
+        }
         if reset_input_set {
             state.result_member_set.clear();
             state.program_fact_set.clear();

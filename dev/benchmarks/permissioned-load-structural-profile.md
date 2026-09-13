@@ -25,10 +25,10 @@ The three changes save about 31%; the approximately 5 s target remains unmet.
 Run a clean optimized timing with:
 
 ```sh
-cargo build -p jazz-sim --bench customer_cold_start --profile perf
+cargo build -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --profile perf
 JAZZ_CUSTOMER_IDENTITY=member JAZZ_CUSTOMER_PHASES=cold \
 JAZZ_CUSTOMER_SCALE=1.0 JAZZ_CUSTOMER_MAX_TICKS=200000 \
-cargo bench -p jazz-sim --bench customer_cold_start --profile perf
+cargo run -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --profile perf
 ```
 
 Use the Cargo-reported executable directly for profiling so samples exclude

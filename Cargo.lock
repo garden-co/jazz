@@ -2176,6 +2176,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-permissioned-resources-benchmark"
+version = "0.1.0"
+dependencies = [
+ "backtrace",
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "jazz-sim",
+ "jazz-storage-rocksdb",
+ "libc",
+ "postcard",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "uuid",
+ "zstd",
+]
+
+[[package]]
 name = "jazz-example-poster-shop-benchmark"
 version = "0.1.0"
 dependencies = [
@@ -2190,6 +2209,20 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "serde_json",
+]
+
+[[package]]
+name = "jazz-example-todo-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "jazz-storage-rocksdb",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
