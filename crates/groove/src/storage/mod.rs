@@ -1429,6 +1429,13 @@ impl OrderedKvStorage for BoxedStorage {
         self.inner.write_many_outcome(operations)
     }
 
+    fn write_many_borrowed_outcome<'a>(
+        &'a self,
+        operations: Vec<WriteOperation<'a>>,
+    ) -> StorageFuture<'a, WriteManyOutcome> {
+        self.inner.write_many_borrowed_outcome(operations)
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.inner.column_family_names()
     }
