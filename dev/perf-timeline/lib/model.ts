@@ -154,12 +154,39 @@ export function calendarDay(timestamp: string): string {
 
 // One normalized geometry for both plots: identical history, domain, padding
 // and log transform. A preview must not silently zoom into recent noise.
-export function plotGeometry(points: Point[], logarithmic: boolean, spread: boolean) {
-  const values = points.flatMap((p) => (spread ? [p.min, p.max] : [p.median]));
-  const low = logarithmic ? Math.min(...values) * 0.8 : 0;
-  const high = Math.max(...values) * 1.1;
+export function plotGeometry(points: Point[], logarithmic: boolean, spread: boolean, divisor = 1) {
+  const values = points
+    .flatMap((p) => (spread ? [p.min, p.max] : [p.median]))
+    .map((v) => v / divisor);
+  const paddedLow = logarithmic ? Math.min(...values) * 0.8 : 0;
+  const paddedHigh = Math.max(...values) * 1.1;
+  let ticks: number[];
+  if (logarithmic) {
+    // Round to 1/2/5 per decade; wide ranges use powers of ten to avoid crowding.
+    const start = Math.floor(Math.log10(paddedLow));
+    const end = Math.ceil(Math.log10(paddedHigh));
+    const stride = Math.max(1, Math.ceil((end - start) / 6));
+    const factors = end - start <= 3 ? [1, 2, 5] : [1];
+    const candidates: number[] = [];
+    for (let exponent = start - stride; exponent <= end + stride; exponent += stride) {
+      for (const factor of factors) candidates.push(factor * 10 ** exponent);
+    }
+    const lower = candidates.findLastIndex((v) => v <= paddedLow);
+    const upper = candidates.findIndex((v) => v >= paddedHigh);
+    ticks = candidates.slice(lower, upper + 1);
+  } else {
+    const roughStep = paddedHigh / 4;
+    const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+    const step = [1, 2, 5, 10].find((v) => v * magnitude >= roughStep)! * magnitude;
+    ticks = Array.from({ length: Math.ceil(paddedHigh / step) + 1 }, (_, i) => i * step);
+  }
+  // Return raw-second coordinates so receipts and data remain untouched.
+  ticks = ticks.map((v) => v * divisor);
+  const low = ticks[0];
+  const high = ticks[ticks.length - 1];
   const transform = (v: number) => (logarithmic ? Math.log10(v) : v);
   return {
+    ticks,
     x: (i: number) => (points.length === 1 ? 0.5 : i / (points.length - 1)),
     y: (v: number) => (transform(high) - transform(v)) / (transform(high) - transform(low) || 1),
     tick: (ratio: number) =>

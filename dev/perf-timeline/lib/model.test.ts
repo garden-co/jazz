@@ -135,6 +135,40 @@ test("retains independent reruns, deduplicates result IDs and sorts chronologica
   );
 });
 
+test("timing ticks are rounded in displayed units, mirrored without altering raw data", () => {
+  const r = run("ticks");
+  r.results[0].walltime = { min: 0.2, median: 0.9, max: 1 };
+  const points = buildTimeline([r], []).benchmarks[0].points;
+  const estimated = plotGeometry(points, false, false, 5);
+  assert.deepEqual(
+    estimated.ticks.map((v) => Number((v / 5).toPrecision(12))),
+    [0, 0.05, 0.1, 0.15, 0.2],
+  );
+  assert.equal(points[0].median, 0.9);
+  assert.ok(estimated.y(0.9) > 0 && estimated.y(0.9) < 1);
+  const log = plotGeometry(points, true, true, 5);
+  assert.deepEqual(
+    log.ticks.map((v) => Number((v / 5).toPrecision(12))),
+    [0.02, 0.05, 0.1, 0.2, 0.5],
+  );
+  assert.ok(log.y(points[0].min) < 1);
+  assert.ok(log.y(points[0].max) > 0);
+});
+
+test("log ticks stay bounded for wide ranges and usable for identical submillisecond samples", () => {
+  const small = run("small");
+  small.results[0].walltime = { min: 1e-6, median: 1e-6, max: 1e-6 };
+  const large = run("large");
+  large.results[0].walltime = { min: 100, median: 100, max: 100 };
+  const points = buildTimeline([small, large], []).benchmarks[0].points;
+  const wide = plotGeometry(points, true, true);
+  assert.ok(wide.ticks.length <= 10);
+  assert.ok(wide.ticks.every((v) => Math.abs(Math.log10(v) - Math.round(Math.log10(v))) < 1e-10));
+  const single = plotGeometry([points.find((p) => p.sha === "small")!], true, true, 5);
+  assert.ok(single.ticks.length >= 2);
+  assert.ok(Number.isFinite(single.y(1e-6)));
+});
+
 test("null simulation metrics and incomplete jobs are not zero wallclock points", () => {
   const simulation = run("simulation");
   simulation.results[0].walltime = null;

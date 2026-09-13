@@ -66,6 +66,13 @@
 .metrics .estimate {
   color: #88662f;
 }
+.metrics .metric-throughput,
+.receipt-timing .metric-throughput {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+  margin-top: 6px;
+}
 .throughput-receipt {
   border-top: 1px solid var(--line);
   padding-top: 14px;

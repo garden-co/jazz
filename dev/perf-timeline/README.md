@@ -9,13 +9,18 @@ dashboard-specific prose or numbers parsed from names. It currently covers all
 47 known current/retired wallclock series. Unknown names still show timings but
 receive no guessed description or throughput.
 
-Measured CodSpeed time remains the default. The optional estimated graph and
-secondary time/rate values use the explicitly requested **5× assumption**:
+Estimated time is the default. The measured mode is labeled “Deterministic runner”
+(CodSpeed wallclock samples still vary). Estimates use the requested **5× assumption**:
 estimated seconds = measured seconds / 5; estimated rate = measured rate × 5.
 Every estimated number carries `*`, with a visible footnote explaining that this
 is illustrative, not a measured machine prediction. The raw receipt table and
 upstream/API data remain unmodified. Rates are work count / median duration, not
 an independent mean-throughput or sustained-concurrency measurement.
+
+Summary cards run first → latest, with workload rates directly below timings.
+Both sides of the chart show the same Y ticks: rounded 1/2/5 linear steps, or
+1/2/5 decade values in log mode (powers of ten for wide ranges). Rounding happens
+in displayed units. The full graph and sparklines share the resulting domain.
 
 ```sh
 pnpm install --filter jazz-perf-timeline... --ignore-scripts

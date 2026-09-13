@@ -6,6 +6,7 @@ import {
   metadataRevision,
   displayedTime,
   formatThroughput,
+  ESTIMATE_DIVISOR,
 } from "../lib/presentation";
 import {
   checkpoint,
@@ -59,13 +60,15 @@ function Sparkline({
   points,
   logarithmic,
   spread,
+  estimated,
 }: {
   points: Point[];
   logarithmic: boolean;
   spread: boolean;
+  estimated: boolean;
 }) {
   if (!points.length) return null;
-  const geometry = plotGeometry(points, logarithmic, spread);
+  const geometry = plotGeometry(points, logarithmic, spread, estimated ? ESTIMATE_DIVISOR : 1);
   const prior = new Map<string, number>();
   return (
     <svg className="sparkline" viewBox="0 0 70 24" aria-hidden="true">
@@ -116,10 +119,10 @@ function Chart({
   const width = 1100,
     height = 395,
     left = 78,
-    right = 30,
+    right = 78,
     top = 25,
     bottom = 105;
-  const geometry = plotGeometry(points, logarithmic, spread);
+  const geometry = plotGeometry(points, logarithmic, spread, estimated ? ESTIMATE_DIVISOR : 1);
   const y = (v: number) => top + geometry.y(v) * (height - top - bottom);
   const x = (i: number) => left + geometry.x(i) * (width - left - right);
   const groups = new Map<string, number[]>();
@@ -131,11 +134,9 @@ function Chart({
         className="chart"
         viewBox={`0 0 ${width} ${height}`}
         role="img"
-        aria-label={`${estimated ? "Estimated wallclock (CodSpeed divided by five)" : "Measured CodSpeed wallclock"} by chronological checkpoint. Use the receipt table below for exact measured values.`}
+        aria-label={`${estimated ? "Estimated wallclock (deterministic runner divided by five)" : "Measured deterministic runner wallclock"} by chronological checkpoint. Use the receipt table below for exact measured values.`}
       >
-        {Array.from({ length: 5 }, (_, i) => {
-          const ratio = i / 4;
-          const value = geometry.tick(ratio);
+        {geometry.ticks.map((value, i) => {
           return (
             <g key={i}>
               <line
@@ -146,7 +147,20 @@ function Chart({
                 stroke="#e6e5de"
                 strokeDasharray="3 5"
               />
-              <text x={left - 14} y={y(value) + 4} textAnchor="end" className="axis-text">
+              <text
+                x={left - 14}
+                y={y(value) + 4}
+                textAnchor="end"
+                className="axis-text y-axis-left"
+              >
+                {displayedTime(value, estimated)}
+              </text>
+              <text
+                x={width - right + 14}
+                y={y(value) + 4}
+                textAnchor="start"
+                className="axis-text y-axis-right"
+              >
                 {displayedTime(value, estimated)}
               </text>
             </g>
@@ -237,7 +251,7 @@ function Chart({
           </g>
         ))}
         <text x={left} y="12" className="axis-caption">
-          {estimated ? "ESTIMATED WALLCLOCK*" : "CODSPEED WALLCLOCK"} ·{" "}
+          {estimated ? "ESTIMATED WALLCLOCK*" : "DETERMINISTIC RUNNER WALLCLOCK"} ·{" "}
           {logarithmic ? "LOG SCALE" : "ZERO-BASED SCALE"}
         </text>
         <text x={width - right} y={height - 6} textAnchor="end" className="axis-caption">
@@ -260,7 +274,7 @@ export function Dashboard() {
   const [branch, setBranch] = useState("all");
   const [logarithmic, setLogarithmic] = useState(false);
   const [spread, setSpread] = useState(false);
-  const [estimated, setEstimated] = useState(false);
+  const [estimated, setEstimated] = useState(true);
 
   async function refresh() {
     setLoading(true);
@@ -401,6 +415,7 @@ export function Dashboard() {
                         }
                         logarithmic={logarithmic}
                         spread={spread}
+                        estimated={estimated}
                       />
                     </span>
                   </button>
@@ -531,28 +546,38 @@ export function Dashboard() {
                 )}
                 <div className="metrics">
                   <div>
-                    <span>Latest shown</span>
-                    <strong>{latest ? displayedTime(latest.median, estimated) : "—"}</strong>
-                    {latest && (
-                      <small className="estimate">
-                        {estimated
-                          ? `CodSpeed: ${formatTime(latest.median)}`
-                          : `Estimated: ${displayedTime(latest.median, true)}`}
-                      </small>
-                    )}
-                    <small>{latest ? checkpoint(latest) : "No measurements"}</small>
-                  </div>
-                  <div>
                     <span>First shown</span>
                     <strong>{first ? displayedTime(first.median, estimated) : "—"}</strong>
+                    {first && metadata && (
+                      <small className="metric-throughput">
+                        {formatThroughput(first.median, metadata, estimated)}
+                      </small>
+                    )}
                     {first && (
                       <small className="estimate">
                         {estimated
-                          ? `CodSpeed: ${formatTime(first.median)}`
+                          ? `Deterministic runner: ${formatTime(first.median)}`
                           : `Estimated: ${displayedTime(first.median, true)}`}
                       </small>
                     )}
                     <small>{first ? checkpoint(first) : "Adjust the filters"}</small>
+                  </div>
+                  <div>
+                    <span>Latest shown</span>
+                    <strong>{latest ? displayedTime(latest.median, estimated) : "—"}</strong>
+                    {latest && metadata && (
+                      <small className="metric-throughput">
+                        {formatThroughput(latest.median, metadata, estimated)}
+                      </small>
+                    )}
+                    {latest && (
+                      <small className="estimate">
+                        {estimated
+                          ? `Deterministic runner: ${formatTime(latest.median)}`
+                          : `Estimated: ${displayedTime(latest.median, true)}`}
+                      </small>
+                    )}
+                    <small>{latest ? checkpoint(latest) : "No measurements"}</small>
                   </div>
                   <div>
                     <span>Measured checkpoints</span>
@@ -593,8 +618,8 @@ export function Dashboard() {
                         value={estimated ? "estimated" : "measured"}
                         onChange={(event) => setEstimated(event.target.value === "estimated")}
                       >
-                        <option value="measured">CodSpeed measured</option>
                         <option value="estimated">Estimated machine*</option>
+                        <option value="measured">Deterministic runner</option>
                       </select>
                     </label>
                     <label>
@@ -661,7 +686,10 @@ export function Dashboard() {
                   </div>
                   <p className="chart-note">
                     {estimated && (
-                      <>* Estimated time = CodSpeed ÷ 5, not a measured hardware result. </>
+                      <>
+                        * Estimated time = deterministic runner ÷ 5, not a measured hardware
+                        result.{" "}
+                      </>
                     )}
                     Each line follows one branch or PR, ordered by run time—not commit ancestry.
                     Dates are run calendar days in UTC. Only releases, main and open PRs are shown.
@@ -704,6 +732,11 @@ export function Dashboard() {
                       </div>
                       <div className="receipt-timing">
                         <strong>{displayedTime(current.median, estimated)}</strong>
+                        {metadata && (
+                          <span className="metric-throughput">
+                            {formatThroughput(current.median, metadata, estimated)}
+                          </span>
+                        )}
                         <span>
                           {displayedTime(current.min, estimated)} –{" "}
                           {displayedTime(current.max, estimated)}
@@ -711,11 +744,11 @@ export function Dashboard() {
                         <small>
                           {estimated
                             ? "estimated median · scaled min–max*"
-                            : "CodSpeed median · observed min–max"}
+                            : "Deterministic runner median · observed min–max"}
                         </small>
                         <small>
                           {estimated
-                            ? `CodSpeed: ${formatTime(current.median)}`
+                            ? `Deterministic runner: ${formatTime(current.median)}`
                             : `Estimated: ${displayedTime(current.median, true)}`}
                         </small>
                       </div>
@@ -723,7 +756,7 @@ export function Dashboard() {
                     {metadata && (
                       <div className="throughput-receipt" aria-label="Throughput receipt">
                         <div>
-                          <span>Measured workload rate</span>
+                          <span>Deterministic runner workload rate</span>
                           <strong>{formatThroughput(current.median, metadata)}</strong>
                         </div>
                         <div>
@@ -761,7 +794,7 @@ export function Dashboard() {
                           <th>Checkpoint</th>
                           <th>Status</th>
                           <th>Measured</th>
-                          <th>CodSpeed median</th>
+                          <th>Deterministic runner median</th>
                           <th>Measured min–max</th>
                           <th>Estimated time*</th>
                           {metadata && <th>Measured workload rate</th>}
@@ -812,17 +845,18 @@ export function Dashboard() {
               <section className="methodology">
                 <h3>Read the graph, keep the context.</h3>
                 <p id="estimate-footnote" className="estimate-footnote">
-                  <strong>* Rough machine estimate:</strong> estimated time = measured CodSpeed time
-                  ÷ 5; estimated throughput = measured workload rate × 5. This is a simple
+                  <strong>* Rough machine estimate:</strong> estimated time = deterministic runner
+                  time ÷ 5; estimated throughput = measured workload rate × 5. This is a simple
                   illustrative assumption, not a measurement or hardware-specific calibration.
                   Actual machines, storage, build settings and workloads can differ substantially.
-                  Measured CodSpeed values remain unchanged in the receipts.
+                  Measured runner values remain unchanged in the receipts.
                 </p>
                 <p>
-                  Measured values are benchmark-operation medians on CodSpeed runners, not per-row
-                  latency or local-machine timings. Throughput is documented work units divided by
-                  the median duration, not a separately measured mean or a concurrent-capacity
-                  claim. Different harness revisions, fixtures, and runner configurations can change
+                  “Deterministic runner” labels our CodSpeed runner measurements; wallclock samples
+                  still vary. Measured values are benchmark-operation medians, not per-row latency
+                  or local-machine timings. Throughput is documented work units divided by the
+                  median duration, not a separately measured mean or a concurrent-capacity claim.
+                  Different harness revisions, fixtures, and runner configurations can change
                   comparability; follow the commit and run receipts before making a throughput
                   claim. No automatic speedup claim is made between unrelated branches.
                 </p>

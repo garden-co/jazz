@@ -97,7 +97,7 @@ try {
   async function assertMatchingPreview() {
     const positions = await page.evaluate(() => ({
       large: [...document.querySelectorAll(".chart-point")].map((p) => [
-        (Number(p.getAttribute("cx")) - 78) / 992,
+        (Number(p.getAttribute("cx")) - 78) / 944,
         (Number(p.getAttribute("cy")) - 25) / 265,
       ]),
       small: [...document.querySelectorAll(".bench-item.active .sparkline circle")].map((p) => [
@@ -117,12 +117,35 @@ try {
     await page.getByLabel("Throughput receipt").innerText(),
     /550,360 visible rows\/s\*/,
   );
-  await page.getByLabel("Timing display").selectOption("estimated");
-  assert.equal(await page.locator(".metrics strong").first().innerText(), "50 ms*");
+  assert.equal(await page.getByLabel("Timing display").inputValue(), "estimated");
+  assert.equal(await page.locator(".metrics strong").first().innerText(), "200 ms*");
+  assert.equal(await page.locator(".metrics strong").nth(1).innerText(), "50 ms*");
+  assert.deepEqual(await page.locator(".metrics > div > span").allTextContents(), [
+    "First shown",
+    "Latest shown",
+    "Measured checkpoints",
+  ]);
+  assert.match(
+    await page.locator(".metrics .metric-throughput").nth(1).innerText(),
+    /550,360 visible rows\/s\*/,
+  );
+  async function assertMirroredTicks() {
+    const left = await page.locator(".y-axis-left").allTextContents();
+    assert.deepEqual(await page.locator(".y-axis-right").allTextContents(), left);
+    return left;
+  }
+  assert.deepEqual(await assertMirroredTicks(), ["0 s*", "100 ms*", "200 ms*", "300 ms*"]);
   assert.match(await page.locator(".chart").textContent(), /ESTIMATED WALLCLOCK\*/);
   assert.match(await page.locator("#estimate-footnote").innerText(), /divided|÷ 5/);
   await assertMatchingPreview();
   await page.getByLabel("Timing display").selectOption("measured");
+  assert.equal(await page.locator(".metrics strong").nth(1).innerText(), "250 ms");
+  assert.match(
+    await page.locator(".metrics .metric-throughput").nth(1).innerText(),
+    /110,072 visible rows\/s/,
+  );
+  assert.match(await page.locator(".chart").textContent(), /DETERMINISTIC RUNNER/);
+  await assertMatchingPreview();
   assert.equal(await page.locator(".chart-point").count(), 4);
   assert.match(await page.locator(".chart").textContent(), /2026-09-11/);
   assert.match(await page.locator(".chart").textContent(), /2026-09-14/);
@@ -139,6 +162,7 @@ try {
   await page.getByLabel("Checkpoint status").selectOption("all");
   await page.getByLabel("Log scale").check();
   await page.getByLabel("Min–max").check();
+  assert.deepEqual(await assertMirroredTicks(), ["100 ms", "200 ms", "500 ms", "1 s", "2 s"]);
   await assertMatchingPreview();
   assert.equal(await page.locator("svg [cy='NaN']").count(), 0);
   await page.locator(".chart-point").first().focus();
