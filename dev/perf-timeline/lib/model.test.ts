@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildTimeline, formatTime, calendarDay, type RawRun } from "./model.ts";
+import {
+  buildTimeline,
+  formatTime,
+  calendarDay,
+  checkpoint,
+  plotGeometry,
+  type RawRun,
+} from "./model.ts";
 
 const run = (id: string, branch = "main", prStatus?: string): RawRun => ({
   id,
@@ -68,6 +75,52 @@ test("does not fabricate released timings from neighboring commits", () => {
   );
   assert.equal(data.benchmarks[0].points.length, 2);
   assert.ok(data.benchmarks[0].points.every((p) => p.stage === "main"));
+});
+
+test("proven main ancestors are released history without becoming release measurements", () => {
+  const data = buildTimeline(
+    [run("ancestor"), run("after"), run("1", "trial", "OPEN"), run("2", "closed", "MERGED")],
+    [{ name: "v2.0.0", sha: "tag", url: "https://example.com" }],
+    undefined,
+    new Map([
+      ["ancestor", "v2.0.0"],
+      ["1", "v2.0.0"],
+      ["2", "v2.0.0"],
+    ]),
+  );
+  const points = new Map(data.benchmarks[0].points.map((p) => [p.sha, p]));
+  const ancestor = points.get("ancestor")!;
+  assert.equal(ancestor.stage, "released");
+  assert.equal(ancestor.includedInRelease, "v2.0.0");
+  assert.equal(ancestor.release, null);
+  assert.equal(checkpoint(ancestor), "ancesto");
+  assert.equal(points.get("after")?.stage, "main");
+  assert.equal(points.get("1")?.stage, "open");
+  assert.equal(points.has("2"), false);
+});
+
+test("shared plot geometry preserves full-history peaks and zero/log domains", () => {
+  const points = buildTimeline(
+    Array.from({ length: 52 }, (_, i) => {
+      const r = run(String(i));
+      r.results[0].walltime = {
+        min: i === 0 ? 100 : 18,
+        median: i === 0 ? 110 : 19,
+        max: i === 0 ? 120 : 20,
+      };
+      r.date = new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString();
+      return r;
+    }),
+    [],
+  ).benchmarks[0].points;
+  const geometry = plotGeometry(points, false, false);
+  assert.equal(geometry.x(0), 0);
+  assert.equal(geometry.x(51), 1);
+  assert.equal(geometry.tick(0), 0);
+  assert.ok(geometry.tick(1) > 110);
+  assert.ok(geometry.y(19) > 0.8);
+  assert.ok(plotGeometry(points, false, true).tick(1) > 120);
+  assert.ok(plotGeometry(points, true, false).tick(0) > 0);
 });
 
 test("retains independent reruns, deduplicates result IDs and sorts chronologically", () => {

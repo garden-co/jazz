@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   checkpoint,
   calendarDay,
+  plotGeometry,
   formatTime,
   stages,
   type Benchmark,
@@ -48,21 +49,45 @@ function StageLabel({ stage }: { stage: Stage }) {
   );
 }
 
-function Sparkline({ points }: { points: Point[] }) {
-  const samples = points.slice(-30);
-  const low = Math.min(...samples.map((p) => p.median));
-  const high = Math.max(...samples.map((p) => p.median));
+function Sparkline({
+  points,
+  logarithmic,
+  spread,
+}: {
+  points: Point[];
+  logarithmic: boolean;
+  spread: boolean;
+}) {
+  if (!points.length) return null;
+  const geometry = plotGeometry(points, logarithmic, spread);
+  const prior = new Map<string, number>();
   return (
     <svg className="sparkline" viewBox="0 0 70 24" aria-hidden="true">
-      {samples.map((p, i) => (
-        <circle
-          key={p.resultId}
-          cx={3 + (i / Math.max(samples.length - 1, 1)) * 64}
-          cy={21 - ((p.median - low) / (high - low || 1)) * 18}
-          r="1.5"
-          fill={stages[p.stage].color}
-        />
-      ))}
+      {points.map((p, i) => {
+        const previous = prior.get(p.series);
+        prior.set(p.series, i);
+        return (
+          <g key={p.resultId}>
+            {previous !== undefined && (
+              <line
+                x1={3 + geometry.x(previous) * 64}
+                x2={3 + geometry.x(i) * 64}
+                y1={3 + geometry.y(points[previous].median) * 18}
+                y2={3 + geometry.y(p.median) * 18}
+                stroke={stages[p.stage].color}
+                strokeWidth="0.8"
+                strokeDasharray={p.stage === "open" ? "2 2" : undefined}
+              />
+            )}
+            <circle
+              cx={3 + geometry.x(i) * 64}
+              cy={3 + geometry.y(p.median) * 18}
+              r="1"
+              fill={stages[p.stage].color}
+            />
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -86,16 +111,9 @@ function Chart({
     right = 30,
     top = 25,
     bottom = 105;
-  const values = points.flatMap((p) => (spread ? [p.min, p.max] : [p.median]));
-  const low = logarithmic ? Math.min(...values) * 0.8 : 0;
-  const high = Math.max(...values) * 1.1;
-  const transform = (v: number) => (logarithmic ? Math.log10(v) : v);
-  const y = (v: number) =>
-    top +
-    ((transform(high) - transform(v)) / (transform(high) - transform(low) || 1)) *
-      (height - top - bottom);
-  const x = (i: number) =>
-    left + (points.length === 1 ? 0.5 : i / (points.length - 1)) * (width - left - right);
+  const geometry = plotGeometry(points, logarithmic, spread);
+  const y = (v: number) => top + geometry.y(v) * (height - top - bottom);
+  const x = (i: number) => left + geometry.x(i) * (width - left - right);
   const groups = new Map<string, number[]>();
   points.forEach((p, i) => groups.set(p.series, [...(groups.get(p.series) ?? []), i]));
   const tickStep = Math.max(1, Math.ceil(points.length / 8));
@@ -109,9 +127,7 @@ function Chart({
       >
         {Array.from({ length: 5 }, (_, i) => {
           const ratio = i / 4;
-          const value = logarithmic
-            ? 10 ** (transform(low) + ratio * (transform(high) - transform(low)))
-            : high * ratio;
+          const value = geometry.tick(ratio);
           return (
             <g key={i}>
               <line
@@ -361,7 +377,20 @@ export function Dashboard() {
                     <span className="bench-name">{pretty(b.name)}</span>
                     <span className="bench-meta">
                       <span>{b.points.length} measurements</span>
-                      <Sparkline points={b.points} />
+                      <Sparkline
+                        points={
+                          b.id === benchmarkId
+                            ? points
+                            : b.points.filter(
+                                (p) =>
+                                  (days === "all" ||
+                                    Date.parse(p.date) >= Date.now() - Number(days) * 86400000) &&
+                                  (stage === "all" || p.stage === stage),
+                              )
+                        }
+                        logarithmic={logarithmic}
+                        spread={spread}
+                      />
                     </span>
                   </button>
                 ))
@@ -577,6 +606,15 @@ export function Dashboard() {
                       </div>
                     </div>
                     <div className="receipt-id">
+                      {current.includedInRelease && (
+                        <span>
+                          Included in {current.includedInRelease}
+                          {current.release
+                            ? " (exact release commit)"
+                            : " (ancestor; this timing is for the measured commit)"}{" "}
+                          ·{" "}
+                        </span>
+                      )}
                       Result {current.resultId} · run {current.runStatus.toLowerCase()}
                       {current.runStatus !== "COMPLETED" &&
                         " · other jobs may be incomplete or failed"}
@@ -647,8 +685,10 @@ export function Dashboard() {
                   branches.
                 </p>
                 <p>
-                  “Released” requires an exact commit match to a semantic-version Git tag. No timing
-                  is inferred for an unmeasured release.{" "}
+                  “Released” includes main commits proven to be ancestors of a semantic-version tag,
+                  plus exact tag matches. Only exact matches carry a version label on the x-axis;
+                  older points retain their measured commit. No timing is inferred for an unmeasured
+                  release.{" "}
                   {data.releases.length
                     ? data.releases.map((r) => (
                         <span key={r.name}>

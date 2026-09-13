@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start --hostname 0.0.0.0",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test lib/model.test.ts",
+    "test": "node --experimental-strip-types --test lib/*.test.ts",
     "test:e2e": "node tests/browser.mjs"
   },
   "dependencies": {

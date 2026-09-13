@@ -94,6 +94,23 @@ try {
   );
   await page.goto(origin);
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
+  async function assertMatchingPreview() {
+    const positions = await page.evaluate(() => ({
+      large: [...document.querySelectorAll(".chart-point")].map((p) => [
+        (Number(p.getAttribute("cx")) - 78) / 992,
+        (Number(p.getAttribute("cy")) - 25) / 265,
+      ]),
+      small: [...document.querySelectorAll(".bench-item.active .sparkline circle")].map((p) => [
+        (Number(p.getAttribute("cx")) - 3) / 64,
+        (Number(p.getAttribute("cy")) - 3) / 18,
+      ]),
+    }));
+    assert.equal(positions.small.length, positions.large.length);
+    positions.large.forEach((p, i) =>
+      p.forEach((v, j) => assert.ok(Math.abs(v - positions.small[i][j]) < 0.000001)),
+    );
+  }
+  await assertMatchingPreview();
   assert.equal(await page.locator(".chart-point").count(), 4);
   assert.match(await page.locator(".chart").textContent(), /2026-09-11/);
   assert.match(await page.locator(".chart").textContent(), /2026-09-14/);
@@ -103,12 +120,14 @@ try {
   assert.equal(await page.getByRole("option", { name: "Other branch" }).count(), 0);
   await page.getByLabel("Checkpoint status").selectOption("open");
   assert.equal(await page.locator(".chart-point").count(), 2);
+  await assertMatchingPreview();
   assert.equal(await page.locator(".chart line[stroke-dasharray='7 5']").count(), 1);
   await page.getByLabel("Checkpoint status").selectOption("released");
   assert.equal(await page.locator(".chart-point").count(), 1);
   await page.getByLabel("Checkpoint status").selectOption("all");
   await page.getByLabel("Log scale").check();
   await page.getByLabel("Min–max").check();
+  await assertMatchingPreview();
   assert.equal(await page.locator("svg [cy='NaN']").count(), 0);
   await page.locator(".chart-point").first().focus();
   await page.keyboard.press("Enter");
@@ -134,6 +153,17 @@ try {
   await page.goto(`${origin}/?benchmark=second`);
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
   assert.equal(await page.locator(".benchmark-heading code").innerText(), "other_benchmark");
+  fixture.benchmarks[0].points = Array.from({ length: 52 }, (_, i) => ({
+    ...point("main", i + 1, "main"),
+    date: new Date(Date.UTC(2026, 8, 13, 0, i)).toISOString(),
+    min: i === 0 ? 100 : 18,
+    median: i === 0 ? 110 : 19,
+    max: i === 0 ? 120 : 20,
+  }));
+  await page.goto(`${origin}/?benchmark=first`);
+  await page.getByText("Wallclock timeline", { exact: true }).waitFor();
+  assert.equal(await page.locator(".chart-point").count(), 52);
+  await assertMatchingPreview();
   assert.deepEqual(errors, []);
   console.log(
     "Browser receipt: classification, dashed PR trace, filters, exact table, keyboard selection, error/retry, deep links and mobile overflow passed.",

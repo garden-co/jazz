@@ -27,6 +27,7 @@ export type Point = Distribution & {
   prStatus: string | null;
   stage: Stage;
   release: string | null;
+  includedInRelease: string | null;
   runStatus: string;
   series: string;
 };
@@ -51,6 +52,7 @@ export function buildTimeline(
   runs: RawRun[],
   releases: Release[],
   now = new Date().toISOString(),
+  releaseAncestors: ReadonlyMap<string, string> = new Map(),
 ): Timeline {
   const tagged = new Map(releases.map((r) => [r.sha, r.name]));
   const benchmarks = new Map<string, Benchmark>();
@@ -64,7 +66,9 @@ export function buildTimeline(
     const branch = run.commit.branch;
     const pr = branch?.pullRequest;
     const release = tagged.get(run.commit.hash) ?? null;
-    const stage: Stage | null = release
+    const includedInRelease =
+      release ?? (branch?.name === "main" ? (releaseAncestors.get(run.commit.hash) ?? null) : null);
+    const stage: Stage | null = includedInRelease
       ? "released"
       : branch?.name === "main"
         ? "main"
@@ -103,6 +107,7 @@ export function buildTimeline(
         prStatus: pr?.status ?? null,
         stage,
         release,
+        includedInRelease,
         runStatus: run.status,
         // Historical PR trials are not measurements of the merged main tree.
         // Never draw a continuous path across unrelated PRs.
@@ -145,4 +150,21 @@ export function checkpoint(point: Point): string {
 
 export function calendarDay(timestamp: string): string {
   return new Date(timestamp).toISOString().slice(0, 10);
+}
+
+// One normalized geometry for both plots: identical history, domain, padding
+// and log transform. A preview must not silently zoom into recent noise.
+export function plotGeometry(points: Point[], logarithmic: boolean, spread: boolean) {
+  const values = points.flatMap((p) => (spread ? [p.min, p.max] : [p.median]));
+  const low = logarithmic ? Math.min(...values) * 0.8 : 0;
+  const high = Math.max(...values) * 1.1;
+  const transform = (v: number) => (logarithmic ? Math.log10(v) : v);
+  return {
+    x: (i: number) => (points.length === 1 ? 0.5 : i / (points.length - 1)),
+    y: (v: number) => (transform(high) - transform(v)) / (transform(high) - transform(low) || 1),
+    tick: (ratio: number) =>
+      logarithmic
+        ? 10 ** (transform(low) + ratio * (transform(high) - transform(low)))
+        : high * ratio,
+  };
 }
