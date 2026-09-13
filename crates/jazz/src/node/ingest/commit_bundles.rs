@@ -1390,8 +1390,25 @@ where
         for (stored, global_time) in current_updates.values() {
             self.write_global_current_update(&mut batch, stored, *global_time)?;
         }
-        self.write_merge_heads_for_bulk_content_versions(&mut batch, &content_versions)
-            .await?;
+        // An empty physical content-history table makes the incoming Accepted
+        // versions its complete post-commit history. Probe applied resident
+        // storage, not the uncommitted batch and not a derived head/current
+        // index. No helper below writes history before this batch is applied.
+        let mut probed_history_tables = BTreeSet::new();
+        let mut empty_history_tables = BTreeSet::new();
+        for (table_id, _, _, _) in &content_rows {
+            if probed_history_tables.insert(*table_id) {
+                self.sync_metrics.receiver_history_table_probes += 1;
+                if !self.database.table_has_stored_rows(&physical_history_table_name(*table_id)).await? {
+                    empty_history_tables.insert(*table_id);
+                }
+            }
+        }
+        self.write_merge_heads_for_bulk_content_versions_with_empty_history(
+            &mut batch,
+            &content_versions,
+            &empty_history_tables,
+        ).await?;
 
         #[cfg(test)]
         let current_update_versions = current_updates
@@ -1401,6 +1418,12 @@ where
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
+        let rebuild_rows = content_rows.iter()
+            .filter(|(table_id, _, _, _)| !empty_history_tables.contains(table_id))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        self.sync_metrics.receiver_history_rebuild_rows_avoided +=
+            (content_rows.len() - rebuild_rows.len()) as u64;
         // Counterfactual benchmark only: price the post-write history reread.
         // This is not a supported ingestion mode or a proof of redundancy.
         #[cfg(feature = "testing")]
@@ -1408,7 +1431,7 @@ where
         #[cfg(not(feature = "testing"))]
         let skip_head_rebuild = false;
         if !skip_head_rebuild {
-            self.rebuild_merge_heads_after_history_commit(&content_rows)
+            self.rebuild_merge_heads_after_history_commit(&rebuild_rows)
                 .await?;
         }
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {

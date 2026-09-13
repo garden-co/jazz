@@ -2243,6 +2243,11 @@ pub struct SyncMetrics {
     pub receiver_per_bundle_ingests: u64,
     /// Receiver-level shared ingest batches committed.
     pub receiver_bulk_ingest_commits: u64,
+    /// Bounded local physical-history existence probes during reset preparation.
+    pub receiver_history_table_probes: u64,
+    /// Row-history repair scans avoided after canonical reset persistence by
+    /// proving their physical content-history table was empty before the batch.
+    pub receiver_history_rebuild_rows_avoided: u64,
     /// Authoritative reset callback materialization fell back because the
     /// reset referenced a version not yet available in this receiver.
     pub authoritative_reset_missing_payload_fallbacks: u64,
