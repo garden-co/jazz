@@ -2882,6 +2882,8 @@ where
                                         SyncMessage::ViewUpdate(view) if view.supporting_rows.is_snapshot()
                                             && !view.peer_payload_inventory.opening_pending)
                                         || settled_through < *minimum_cut {
+                                        #[cfg(any(test, feature = "testing"))]
+                                        crate::delivery_diagnostics::record(|| format!("receiver_waiting_snapshot_skip runtime={} subscription={subscription:?} cut={} minimum={}", self.node.borrow().groove_runtime_token(), settled_through.0, minimum_cut.0));
                                         continue;
                                     }
                                     awaiting_support_snapshots.remove(&subscription);
@@ -2912,7 +2914,10 @@ where
                                 let _ = subscription;
                                 let missing = {
                                     let mut node = self.node.lock().await;
-                                    node.missing_known_state_row_version_refs(&message).await?
+                                    let result = node.missing_known_state_row_version_refs(&message).await;
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("receiver_body_preflight runtime={} subscription={subscription:?} result={:?}", node.groove_runtime_token(), result.as_ref().map(Vec::len).map_err(std::mem::discriminant)));
+                                    result?
                                 };
                                 let predecessor_is_waiting = pending_row_version_repairs.iter().any(|repair|
                                     !repair.superseded && matches!(&repair.update, SyncMessage::ViewUpdate(view)
@@ -2998,6 +3003,8 @@ where
                                                     )))
                                                 })
                                         });
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("receiver_repair runtime={} subscription={subscription:?} missing={} predecessor_waiting={predecessor_is_waiting} owner={}", self.node.borrow().groove_runtime_token(), missing.len(), policy_binding.is_some()));
                                     let Some(policy_binding) = policy_binding else {
                                         // A queued complete snapshot may arrive after its
                                         // last reader has closed. Do not fetch bytes for a
@@ -6186,6 +6193,21 @@ where
     let frame_is_selected = |update: &PendingAuthorityViewUpdate| {
         authority_link_selected && update.authority_receipt_eligible
     };
+    #[cfg(any(test, feature = "testing"))]
+    for update in pending.iter() {
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "receiver_batch_select runtime={} subscription={:?} selected={} epoch={connection_epoch} selected_epoch={:?}",
+                node.borrow().groove_runtime_token(),
+                update.parts.subscription,
+                frame_is_selected(update),
+                active_authority_view_receipts
+                    .borrow()
+                    .as_ref()
+                    .map(|receipt| receipt.connection_epoch)
+            )
+        });
+    }
     let confirmed_subscriptions = pending
         .iter()
         .filter(|update| frame_is_selected(update) && !update.parts.opening_pending)
@@ -6294,7 +6316,16 @@ where
     }
     if !updates.is_empty() {
         let mut node_ref = node.lock().await;
-        match node_ref.apply_view_updates_in_batch(updates).await {
+        let result = node_ref.apply_view_updates_in_batch(updates).await;
+        #[cfg(any(test, feature = "testing"))]
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "receiver_batch_apply runtime={} result={:?}",
+                node_ref.groove_runtime_token(),
+                result.as_ref().map_err(std::mem::discriminant)
+            )
+        });
+        match result {
             Ok(()) => {
                 let authoritative_cut = confirmed_subscriptions
                     .iter()
