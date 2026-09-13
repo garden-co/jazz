@@ -67,6 +67,11 @@ const ROCKSDB_VALUE_FORMAT_KEY: &[u8] = b"value-format";
 const ROCKSDB_VALUE_FORMAT_V1: &[u8] = b"raw-v1";
 const ROCKSDB_EPOCH_MANIFEST_KEY: &[u8] = b"epoch-manifest";
 
+#[cfg(test)]
+thread_local! {
+    static PREPARED_FAMILY_LOOKUPS: Cell<usize> = const { Cell::new(0) };
+}
+
 /// RocksDB durability tier used for writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Durability {
@@ -377,6 +382,64 @@ impl RocksDbStorage {
         self.db
             .cf_handle(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))
+    }
+
+    fn prepare_write_batch<'a>(
+        &self,
+        operations: impl IntoIterator<Item = WriteOperation<'a>>,
+    ) -> Result<WriteBatch, Error> {
+        let mut batch = WriteBatch::default();
+        let mut last_family: Option<(&str, &rocksdb::ColumnFamily)> = None;
+        for operation in operations {
+            let cf = match &operation {
+                WriteOperation::Set { cf, .. } | WriteOperation::Delete { cf, .. } => *cf,
+            };
+            let handle = if cf == "default" {
+                None
+            } else {
+                match last_family {
+                    Some((name, handle)) if name == cf => Some(handle),
+                    _ => {
+                        #[cfg(test)]
+                        PREPARED_FAMILY_LOOKUPS.set(PREPARED_FAMILY_LOOKUPS.get() + 1);
+                        let handle = self.cf_handle(cf)?;
+                        last_family = Some((cf, handle));
+                        Some(handle)
+                    }
+                }
+            };
+            match (operation, handle) {
+                (WriteOperation::Set { key, value, .. }, Some(handle)) => {
+                    batch.put_cf(handle, key, value);
+                }
+                (WriteOperation::Set { key, value, .. }, None) => batch.put(key, value),
+                (WriteOperation::Delete { key, .. }, Some(handle)) => batch.delete_cf(handle, key),
+                (WriteOperation::Delete { key, .. }, None) => batch.delete(key),
+            }
+        }
+        Ok(batch)
+    }
+
+    fn write_prepared_batch(&self, batch: WriteBatch) -> Result<(), Error> {
+        let _guard = self
+            .mutation_gate
+            .lock()
+            .expect("RocksDB mutation gate poisoned");
+        self.db.write_opt(&batch, &self.write_options).storage()?;
+        self.finish_write_batch()
+    }
+
+    fn prepared_batch_outcome(&self, prepared: Result<WriteBatch, Error>) -> WriteManyOutcome {
+        // Preparation only mutates a local native buffer. A late invalid family
+        // still proves that nothing reached storage. Once submitted, a write or
+        // WAL-boundary failure cannot make that promise.
+        match prepared {
+            Err(error) => WriteManyOutcome::Uncommitted(error),
+            Ok(batch) => match self.write_prepared_batch(batch) {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+            },
+        }
     }
 
     fn flush_wal(&self, sync: bool) -> Result<(), Error> {
@@ -990,34 +1053,12 @@ impl OrderedKvStorage for RocksDbStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            let _guard = self
-                .mutation_gate
-                .lock()
-                .expect("RocksDB mutation gate poisoned");
-            let mut batch = WriteBatch::default();
-
-            for operation in operations {
-                match operation {
-                    OwnedWriteOperation::Set { cf, key, value } => {
-                        if cf == "default" {
-                            batch.put(key, value);
-                        } else {
-                            batch.put_cf(self.cf_handle(&cf)?, key, value);
-                        }
-                    }
-                    OwnedWriteOperation::Delete { cf, key } => {
-                        if cf == "default" {
-                            batch.delete(key);
-                        } else {
-                            batch.delete_cf(self.cf_handle(&cf)?, key);
-                        }
-                    }
-                }
-            }
-
-            self.db.write_opt(&batch, &self.write_options).storage()?;
-            self.finish_write_batch()?;
-            Ok(())
+            let batch = self.prepare_write_batch(
+                operations
+                    .iter()
+                    .map(OwnedWriteOperation::as_write_operation),
+            )?;
+            self.write_prepared_batch(batch)
         })
     }
 
@@ -1026,21 +1067,13 @@ impl OrderedKvStorage for RocksDbStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, WriteManyOutcome> {
         Box::pin(async move {
-            for operation in &operations {
-                let cf = match operation {
-                    OwnedWriteOperation::Set { cf, .. }
-                    | OwnedWriteOperation::Delete { cf, .. } => cf,
-                };
-                if cf != "default"
-                    && let Err(error) = self.cf_handle(cf)
-                {
-                    return WriteManyOutcome::Uncommitted(error);
-                }
-            }
-            match self.write_many(operations).await {
-                Ok(()) => WriteManyOutcome::Committed,
-                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
-            }
+            self.prepared_batch_outcome(
+                self.prepare_write_batch(
+                    operations
+                        .iter()
+                        .map(OwnedWriteOperation::as_write_operation),
+                ),
+            )
         })
     }
 
@@ -1052,50 +1085,7 @@ impl OrderedKvStorage for RocksDbStorage {
         &'a self,
         operations: Vec<WriteOperation<'a>>,
     ) -> StorageFuture<'a, WriteManyOutcome> {
-        Box::pin(async move {
-            // Match owned-batch prevalidation and acknowledgement semantics.
-            for operation in &operations {
-                let cf = match operation {
-                    WriteOperation::Set { cf, .. } | WriteOperation::Delete { cf, .. } => *cf,
-                };
-                if cf != "default"
-                    && let Err(error) = self.cf_handle(cf)
-                {
-                    return WriteManyOutcome::Uncommitted(error);
-                }
-            }
-            let _guard = self
-                .mutation_gate
-                .lock()
-                .expect("RocksDB mutation gate poisoned");
-            let result = (|| -> Result<(), Error> {
-                let mut batch = WriteBatch::default();
-                for operation in operations {
-                    match operation {
-                        WriteOperation::Set { cf, key, value } => {
-                            if cf == "default" {
-                                batch.put(key, value);
-                            } else {
-                                batch.put_cf(self.cf_handle(cf)?, key, value);
-                            }
-                        }
-                        WriteOperation::Delete { cf, key } => {
-                            if cf == "default" {
-                                batch.delete(key);
-                            } else {
-                                batch.delete_cf(self.cf_handle(cf)?, key);
-                            }
-                        }
-                    }
-                }
-                self.db.write_opt(&batch, &self.write_options).storage()?;
-                self.finish_write_batch()
-            })();
-            match result {
-                Ok(()) => WriteManyOutcome::Committed,
-                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
-            }
-        })
+        Box::pin(async move { self.prepared_batch_outcome(self.prepare_write_batch(operations)) })
     }
 }
 
@@ -1530,6 +1520,116 @@ mod tests {
             ready(alice.get("records".into(), b"a".to_vec())).unwrap(),
             Some(b"latest".to_vec())
         );
+    }
+
+    /// Public mutations/readback cover order and atomic rejection. The private
+    /// counter only observes the work bound, which row contents cannot expose.
+    #[test]
+    fn prepared_batches_reuse_handles_without_crossing_the_commit_boundary() {
+        use crate::{PREPARED_FAMILY_LOOKUPS, ROCKSDB_INTERNAL_CF};
+        use groove::storage::{OwnedWriteOperation, WriteManyOutcome};
+
+        for borrowed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = RocksDbStorage::open(dir.path(), &["records", "other"]).unwrap();
+            let mut operations = Vec::new();
+            for cf in ["records", "default", "records", "other", "other"] {
+                for value in 0..10 {
+                    operations.push(OwnedWriteOperation::Set {
+                        cf: cf.into(),
+                        key: b"a".to_vec(),
+                        value: vec![value],
+                    });
+                }
+            }
+            operations.push(OwnedWriteOperation::Delete {
+                cf: "other".into(),
+                key: b"a".to_vec(),
+            });
+            PREPARED_FAMILY_LOOKUPS.set(0);
+            let outcome = if borrowed {
+                ready(
+                    storage.write_many_borrowed_outcome(
+                        operations
+                            .iter()
+                            .map(OwnedWriteOperation::as_write_operation)
+                            .collect(),
+                    ),
+                )
+            } else {
+                ready(storage.write_many_outcome(operations))
+            };
+            assert!(matches!(outcome, WriteManyOutcome::Committed));
+            assert_eq!(PREPARED_FAMILY_LOOKUPS.get(), 2);
+            for invalid in ["missing", ROCKSDB_INTERNAL_CF] {
+                let operations = vec![
+                    OwnedWriteOperation::Delete {
+                        cf: "records".into(),
+                        key: b"a".to_vec(),
+                    },
+                    OwnedWriteOperation::Delete {
+                        cf: "default".into(),
+                        key: b"a".to_vec(),
+                    },
+                    OwnedWriteOperation::Set {
+                        cf: "other".into(),
+                        key: b"a".to_vec(),
+                        value: vec![42],
+                    },
+                    OwnedWriteOperation::Delete {
+                        cf: "records".into(),
+                        key: b"a".to_vec(),
+                    },
+                    OwnedWriteOperation::Delete {
+                        cf: invalid.into(),
+                        key: b"a".to_vec(),
+                    },
+                ];
+                PREPARED_FAMILY_LOOKUPS.set(0);
+                let outcome = if borrowed {
+                    ready(
+                        storage.write_many_borrowed_outcome(
+                            operations
+                                .iter()
+                                .map(OwnedWriteOperation::as_write_operation)
+                                .collect(),
+                        ),
+                    )
+                } else {
+                    ready(storage.write_many_outcome(operations))
+                };
+                assert!(
+                    matches!(outcome, WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(name)) if name == invalid)
+                );
+                assert_eq!(PREPARED_FAMILY_LOOKUPS.get(), 4);
+                assert_eq!(
+                    ready(storage.get("records".into(), b"a".to_vec())).unwrap(),
+                    Some(vec![9])
+                );
+                assert_eq!(
+                    ready(storage.get("default".into(), b"a".to_vec())).unwrap(),
+                    Some(vec![9])
+                );
+                assert_eq!(
+                    ready(storage.get("other".into(), b"a".to_vec())).unwrap(),
+                    None
+                );
+            }
+            drop(storage);
+            let storage = RocksDbStorage::open(dir.path(), &["records", "other"]).unwrap();
+            assert_eq!(
+                ready(storage.get("records".into(), b"a".to_vec())).unwrap(),
+                Some(vec![9])
+            );
+            assert_eq!(
+                ready(storage.get("default".into(), b"a".to_vec())).unwrap(),
+                Some(vec![9])
+            );
+            assert_eq!(
+                ready(storage.get("other".into(), b"a".to_vec())).unwrap(),
+                None
+            );
+        }
     }
 
     #[test]
