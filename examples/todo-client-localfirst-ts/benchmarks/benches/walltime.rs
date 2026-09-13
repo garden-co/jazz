@@ -30,3 +30,9 @@ fn sequential_update_1350_rocksdb(bencher: divan::Bencher) {
         .with_inputs(|| CheckedFixture(Fixture::loaded(1500)))
         .bench_local_refs(|f| f.0.sequential_update(1350));
 }
+#[divan::bench(sample_count = 3, sample_size = 1)]
+fn sequential_insert_1350_rocksdb(bencher: divan::Bencher) {
+    bencher
+        .with_inputs(|| CheckedFixture(Fixture::loaded(150)))
+        .bench_local_refs(|f| f.0.sequential_insert(1350));
+}
