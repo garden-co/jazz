@@ -1,5 +1,11 @@
 # jazz-napi
 
+## 2.0.0-alpha.55
+
+### Patch Changes
+
+- cc12a09: Return embedded server listener bind failures as NAPI errors.
+
 ## 2.0.0-alpha.54
 
 ### Patch Changes
