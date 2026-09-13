@@ -74,8 +74,13 @@ fn record_source_fact_transition(
     transitions: &mut ResultTransitions,
     fact: ProgramFactEntry,
     is_present: bool,
+    source_changes: &mut Option<&mut BTreeMap<ProgramFactEntry, (bool, bool)>>,
 ) {
     if fact.is_peer_source_closure_fact() {
+        if let Some(changes) = source_changes.as_deref_mut() {
+            record_peer_source_fact_change(changes, fact, is_present);
+            return;
+        }
         transitions
             .source_fact_presence_changes
             .push((fact.clone(), is_present));
@@ -465,8 +470,8 @@ pub(crate) struct ResultTransitions {
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
     /// Ordered source-closure presence transitions observed while evaluating
-    /// one terminal. `apply_multisink_deltas` uses this private stream to
-    /// retain the real terminal order while coalescing one complete drain.
+    /// one standalone terminal. Multisink application routes these directly
+    /// into its drain-local accumulator instead of retaining throwaway lists.
     pub(crate) source_fact_presence_changes: Vec<(ProgramFactEntry, bool)>,
     /// Groove terminal patches are local binding output. They never enter a
     /// peer `ViewUpdate`, whose contract is the covered input closure only.
@@ -644,6 +649,7 @@ impl MaintainedSubscriptionView {
         MaintainedTerminalSchemas::for_program(program)
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_typed_deltas(
         &mut self,
         sink: &str,
@@ -651,6 +657,25 @@ impl MaintainedSubscriptionView {
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        self.apply_typed_deltas_with_source_changes(
+            sink,
+            deltas,
+            schemas,
+            tables,
+            node_aliases,
+            None,
+        )
+    }
+
+    fn apply_typed_deltas_with_source_changes(
+        &mut self,
+        sink: &str,
+        deltas: &RecordDeltas,
+        schemas: &MaintainedTerminalSchemas,
+        tables: &TableSchemas,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        source_changes: Option<&mut BTreeMap<ProgramFactEntry, (bool, bool)>>,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
@@ -675,7 +700,8 @@ impl MaintainedSubscriptionView {
             )
             .map(|event| (event, weight))
         });
-        let mut transitions = self.apply_decoded_delta_results(decoded, node_aliases)?;
+        let mut transitions =
+            self.apply_decoded_delta_results(decoded, node_aliases, source_changes)?;
         if observed_result_delta_batch {
             transitions.observed_result_delta_batches += 1;
         }
@@ -806,13 +832,17 @@ impl MaintainedSubscriptionView {
             ) {
                 continue;
             }
-            let delta_transitions =
-                self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
+            let delta_transitions = self.apply_typed_deltas_with_source_changes(
+                &sink,
+                &deltas,
+                schemas,
+                tables,
+                node_aliases,
+                Some(&mut peer_source_fact_changes),
+            )?;
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
-            for (fact, is_present) in delta_transitions.source_fact_presence_changes {
-                record_peer_source_fact_change(&mut peer_source_fact_changes, fact, is_present);
-            }
+            debug_assert!(delta_transitions.source_fact_presence_changes.is_empty());
             for fact in delta_transitions.program_fact_adds {
                 if !fact.is_peer_source_closure_fact() {
                     transitions.program_fact_adds.push(fact);
@@ -889,13 +919,14 @@ impl MaintainedSubscriptionView {
         rows: impl IntoIterator<Item = (DecodedMaintainedEvent, i64)>,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
-        self.apply_decoded_delta_results(rows.into_iter().map(Ok), node_aliases)
+        self.apply_decoded_delta_results(rows.into_iter().map(Ok), node_aliases, None)
     }
 
     fn apply_decoded_delta_results(
         &mut self,
         rows: impl IntoIterator<Item = Result<(DecodedMaintainedEvent, i64), super::Error>>,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        mut source_changes: Option<&mut BTreeMap<ProgramFactEntry, (bool, bool)>>,
     ) -> Result<ResultTransitions, super::Error> {
         // Decode into the net-change accumulator directly. No retained state
         // changes until the complete input has decoded successfully.
@@ -1006,6 +1037,7 @@ impl MaintainedSubscriptionView {
                             &mut transitions,
                             ProgramFactEntry::CoveredInput(covered_input),
                             is_present,
+                            &mut source_changes,
                         );
                     }
                 }
@@ -1024,6 +1056,7 @@ impl MaintainedSubscriptionView {
                             &mut transitions,
                             ProgramFactEntry::CoveredInput(covered_input),
                             is_present,
+                            &mut source_changes,
                         );
                     }
                 }
@@ -1040,7 +1073,12 @@ impl MaintainedSubscriptionView {
                         if let Some(is_present) =
                             self.apply_source_fact_delta(origin, fact.clone(), weight)
                         {
-                            record_source_fact_transition(&mut transitions, fact, is_present);
+                            record_source_fact_transition(
+                                &mut transitions,
+                                fact,
+                                is_present,
+                                &mut source_changes,
+                            );
                         }
                     }
                 }
@@ -1051,7 +1089,12 @@ impl MaintainedSubscriptionView {
                         fact.clone(),
                         weight,
                     ) {
-                        record_source_fact_transition(&mut transitions, fact, is_present)
+                        record_source_fact_transition(
+                            &mut transitions,
+                            fact,
+                            is_present,
+                            &mut source_changes,
+                        )
                     }
                 }
                 NetEvent::StructuredAppRow(root, record) => {
@@ -4926,6 +4969,137 @@ mod tests {
         assert!(maintained.active_peer_source_closure_facts().is_empty());
     }
 
+    // Internal ownership receipt: public rows cannot show that intermediate
+    // fact lists were never allocated. The standalone output is the unchanged
+    // reference boundary; existing multisink/public tests check final delivery.
+    #[test]
+    fn direct_source_accumulation_matches_standalone_without_temporary_lists() {
+        let witness = version(row(0x59), 13, &"x".repeat(8192));
+        let events = [
+            (
+                DecodedMaintainedEvent::SharedVersion {
+                    source: test_source(),
+                    row: witness.clone(),
+                },
+                2,
+            ),
+            (
+                DecodedMaintainedEvent::VersionContent {
+                    source: test_source(),
+                    row: witness.clone(),
+                },
+                -2,
+            ),
+            (
+                DecodedMaintainedEvent::ReplacementContent {
+                    source: test_source(),
+                    row: witness.clone(),
+                },
+                -2,
+            ),
+            (
+                DecodedMaintainedEvent::VersionContent {
+                    source: test_source(),
+                    row: witness.clone(),
+                },
+                1,
+            ),
+            (
+                DecodedMaintainedEvent::VersionContent {
+                    source: test_source(),
+                    row: witness.clone(),
+                },
+                -1,
+            ),
+            (
+                DecodedMaintainedEvent::ReplacementContent {
+                    source: test_source(),
+                    row: witness.clone(),
+                },
+                1,
+            ),
+        ];
+        let mut direct = MaintainedSubscriptionView::default();
+        let mut standalone = MaintainedSubscriptionView::default();
+        let mut actual_changes = BTreeMap::new();
+        let mut expected_changes = BTreeMap::new();
+        for (event, weight) in events {
+            let mut expected = standalone
+                .apply_decoded_deltas([(event.clone(), weight)], &aliases())
+                .unwrap();
+            for (fact, present) in expected.source_fact_presence_changes.drain(..) {
+                record_peer_source_fact_change(&mut expected_changes, fact, present);
+            }
+            expected
+                .program_fact_adds
+                .retain(|fact| !fact.is_peer_source_closure_fact());
+            expected
+                .program_fact_removes
+                .retain(|fact| !fact.is_peer_source_closure_fact());
+            let actual = direct
+                .apply_decoded_delta_results(
+                    [Ok((event, weight))],
+                    &aliases(),
+                    Some(&mut actual_changes),
+                )
+                .unwrap();
+            assert!(actual.source_fact_presence_changes.is_empty());
+            assert!(actual.program_fact_adds.is_empty() && actual.program_fact_removes.is_empty());
+            assert_eq!(actual, expected);
+            assert_eq!(actual_changes, expected_changes);
+            assert_eq!(direct.source_fact_weights, standalone.source_fact_weights);
+            assert_eq!(
+                direct.active_peer_source_closure_facts(),
+                standalone.active_peer_source_closure_facts()
+            );
+        }
+        let mut actual = ResultTransitions::default();
+        let mut expected = ResultTransitions::default();
+        append_net_peer_source_fact_changes(&mut actual, actual_changes);
+        append_net_peer_source_fact_changes(&mut expected, expected_changes);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.program_fact_adds.len(), 1);
+        assert!(actual.program_fact_removes.is_empty());
+    }
+
+    // A fallible decoder is internal; public terminal rows cannot inject an
+    // error between two already-typed events to inspect this staging boundary.
+    #[test]
+    fn direct_source_accumulation_does_not_publish_before_decode_completes() {
+        let mut maintained = MaintainedSubscriptionView::default();
+        let witness = version(row(0x60), 14, "late decode error");
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(test_source(), &witness, &aliases()).unwrap(),
+        );
+        let mut changes = BTreeMap::from([(fact, (false, true))]);
+        let before = changes.clone();
+        let result = maintained.apply_decoded_delta_results(
+            [
+                Ok((
+                    DecodedMaintainedEvent::SharedVersion {
+                        source: test_source(),
+                        row: witness,
+                    },
+                    1,
+                )),
+                Err(super::super::Error::InvalidStoredValue(
+                    "injected late decode error",
+                )),
+            ],
+            &aliases(),
+            Some(&mut changes),
+        );
+        assert!(matches!(
+            result,
+            Err(super::super::Error::InvalidStoredValue(
+                "injected late decode error"
+            ))
+        ));
+        assert_eq!(changes, before);
+        assert!(maintained.source_fact_weights.is_empty());
+        assert!(maintained.active_peer_source_closure_facts().is_empty());
+    }
+
     #[test]
     fn multisink_shared_source_fact_retracts_only_after_its_last_terminal() {
         let descriptor = RecordDescriptor::new([("complete", ValueType::Bool)]);
@@ -5526,6 +5700,7 @@ mod tests {
                 )),
             ],
             &aliases(),
+            None,
         );
         assert!(matches!(
             result,
