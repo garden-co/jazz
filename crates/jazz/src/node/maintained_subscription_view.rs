@@ -131,6 +131,12 @@ pub(crate) struct MaintainedSubscriptionView {
     /// result-current terminal can advance before the companion content
     /// witness terminal, so raw membership alone is not publishable.
     published_result_members: BTreeSet<ResultMemberEntry>,
+    /// After a complete storage-backed baseline, only changed result weights
+    /// can affect publishability. Keep candidates across partial/failed drains;
+    /// `None` requires a full reconcile (also used by witness-gated views).
+    unreconciled_result_members: Option<BTreeSet<ResultMemberEntry>>,
+    #[cfg(test)]
+    result_member_reconcile_visits: usize,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     /// Payloads paired with memberships already exposed to a consumer. Keep
     /// this separate from `result_payloads`: the latter records the raw
@@ -190,6 +196,9 @@ impl Default for MaintainedSubscriptionView {
             witness_table_names: BTreeMap::new(),
             result_weights: BTreeMap::new(),
             published_result_members: BTreeSet::new(),
+            unreconciled_result_members: None,
+            #[cfg(test)]
+            result_member_reconcile_visits: 0,
             result_payloads: BTreeMap::new(),
             published_result_payloads: BTreeMap::new(),
             structured_app_rows: BTreeMap::new(),
@@ -478,6 +487,7 @@ impl MaintainedSubscriptionView {
 
     pub(crate) fn enable_storage_backed_result_materialization(&mut self) {
         self.storage_backed_result_materialization = true;
+        self.unreconciled_result_members = None;
     }
 
     pub(crate) fn enable_inline_content_branch_key(&mut self, branch_key: &BranchKey) {
@@ -1067,6 +1077,13 @@ impl MaintainedSubscriptionView {
     pub(crate) fn footprint(&self) -> MaintainedSubscriptionViewFootprint {
         let result_weights_bytes = btree_map_bytes(self.result_weights.len())
             + self
+                .unreconciled_result_members
+                .as_ref()
+                .map_or(0, |members| {
+                    btree_set_bytes(members.len())
+                        + members.iter().map(result_member_entry_bytes).sum::<usize>()
+                })
+            + self
                 .result_weights
                 .keys()
                 .map(|member| result_member_entry_bytes(member) + mem::size_of::<i64>())
@@ -1479,26 +1496,63 @@ impl MaintainedSubscriptionView {
         Vec<(ResultMemberEntry, ResultMemberPayloadEntry)>,
         Vec<ResultMemberEntry>,
     ) {
-        let publishable = self
-            .result_weights
-            .iter()
-            .filter(|(member, weight)| {
-                **weight > 0
-                    && (self.storage_backed_result_materialization
-                        || self.result_member_has_inline_content_source(member)
-                        || self.result_member_has_bundle_witness(member, node_aliases))
-            })
-            .map(|(member, _)| member.clone())
-            .collect::<BTreeSet<_>>();
-        let adds = publishable
-            .difference(&self.published_result_members)
-            .cloned()
-            .collect::<Vec<_>>();
-        let removes = self
-            .published_result_members
-            .difference(&publishable)
-            .cloned()
-            .collect::<Vec<_>>();
+        let (adds, removes) = if let Some(candidates) = self.unreconciled_result_members.take() {
+            debug_assert!(self.storage_backed_result_materialization);
+            #[cfg(test)]
+            {
+                self.result_member_reconcile_visits += candidates.len();
+            }
+            let mut adds = Vec::new();
+            let mut removes = Vec::new();
+            for member in candidates {
+                let present = self
+                    .result_weights
+                    .get(&member)
+                    .is_some_and(|weight| *weight > 0);
+                match (self.published_result_members.contains(&member), present) {
+                    (false, true) => {
+                        self.published_result_members.insert(member.clone());
+                        adds.push(member);
+                    }
+                    (true, false) => {
+                        self.published_result_members.remove(&member);
+                        removes.push(member);
+                    }
+                    _ => {}
+                }
+            }
+            (adds, removes)
+        } else {
+            #[cfg(test)]
+            {
+                self.result_member_reconcile_visits += self.result_weights.len();
+            }
+            let publishable = self
+                .result_weights
+                .iter()
+                .filter(|(member, weight)| {
+                    **weight > 0
+                        && (self.storage_backed_result_materialization
+                            || self.result_member_has_inline_content_source(member)
+                            || self.result_member_has_bundle_witness(member, node_aliases))
+                })
+                .map(|(member, _)| member.clone())
+                .collect::<BTreeSet<_>>();
+            let adds = publishable
+                .difference(&self.published_result_members)
+                .cloned()
+                .collect::<Vec<_>>();
+            let removes = self
+                .published_result_members
+                .difference(&publishable)
+                .cloned()
+                .collect::<Vec<_>>();
+            self.published_result_members = publishable;
+            (adds, removes)
+        };
+        self.unreconciled_result_members = self
+            .storage_backed_result_materialization
+            .then(BTreeSet::new);
         let payload_removes = removes
             .iter()
             .filter(|member| self.published_result_payloads.contains_key(*member))
@@ -1513,7 +1567,6 @@ impl MaintainedSubscriptionView {
                     .map(|payload| (member.clone(), payload))
             })
             .collect::<Vec<_>>();
-        self.published_result_members = publishable;
         for member in &payload_removes {
             self.published_result_payloads.remove(member);
         }
@@ -1560,6 +1613,7 @@ impl MaintainedSubscriptionView {
         weight: i64,
         transitions: &mut ResultTransitions,
     ) {
+        self.mark_result_member_changed(&entry);
         let old = self.result_weights.get(&entry).copied().unwrap_or(0);
         let new = old + weight;
         if old <= 0 && new > 0 {
@@ -1595,6 +1649,7 @@ impl MaintainedSubscriptionView {
         weight: i64,
         transitions: &mut ResultTransitions,
     ) -> Result<(), super::Error> {
+        self.mark_result_member_changed(&member);
         let (old_member, old_payload) = self.aggregate_payload_for_stable_member(&member);
         if weight < 0 {
             // Groove's aggregate operator emits complete before/after group
@@ -1616,6 +1671,7 @@ impl MaintainedSubscriptionView {
         if let Some(old_member) = old_member
             && old_member != member
         {
+            self.mark_result_member_changed(&old_member);
             transitions.removes.push(old_member.clone());
             self.result_weights.remove(&old_member);
             if let Some(existing) = self.result_payloads.remove(&old_member).or(old_payload) {
@@ -1637,6 +1693,12 @@ impl MaintainedSubscriptionView {
         self.result_payloads.insert(member.clone(), payload);
         self.result_weights.insert(member, 1);
         Ok(())
+    }
+
+    fn mark_result_member_changed(&mut self, member: &ResultMemberEntry) {
+        if let Some(changed) = &mut self.unreconciled_result_members {
+            changed.insert(member.clone());
+        }
     }
 
     fn aggregate_payload_for_stable_member(
@@ -5049,6 +5111,123 @@ mod tests {
         assert_eq!(third.removes, vec![member]);
         assert!(third.result_payload_adds.is_empty());
         assert!(third.result_payload_removes.is_empty());
+    }
+
+    // Internal: the journal must survive discarded intermediate transitions,
+    // and public rows cannot expose how many retained members were revisited.
+    // Compare exact publication deltas/state with the existing full algorithm.
+    #[test]
+    fn storage_backed_membership_reconciles_only_retained_touched_candidates() {
+        for count in [8, 1024] {
+            let members = (0..=count)
+                .map(|index| {
+                    let member = RealRowMemberEntry::current_content(result(
+                        RowUuid(uuid::Uuid::from_u128(index as u128 + 1)),
+                        10,
+                    ));
+                    ResultMemberEntry::from(if index % 2 == 0 {
+                        member.with_row_digest(vec![0xd1, 0x6e])
+                    } else {
+                        member
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut incremental = MaintainedSubscriptionView::default();
+            incremental.enable_storage_backed_result_materialization();
+            incremental
+                .apply_decoded_deltas(
+                    members[..count]
+                        .iter()
+                        .cloned()
+                        .map(|member| (result_current(member), 1)),
+                    &aliases(),
+                )
+                .unwrap();
+            let initial = incremental.reconcile_publishable_result_members(&aliases());
+            assert_eq!(initial.0.len(), count);
+            assert_eq!(incremental.result_member_reconcile_visits, count);
+            let mut reference = incremental.clone();
+
+            for changes in [
+                vec![(0, -1), (1, 1), (count, 1)],
+                vec![(0, 1), (1, -1), (count, -1)],
+                vec![(2, -2)],
+                vec![(2, 1)],
+                vec![(2, 1)],
+                vec![(3, -1), (3, 1)],
+                vec![],
+            ] {
+                for view in [&mut incremental, &mut reference] {
+                    for &(index, weight) in &changes {
+                        // A caller can drop a transition before completing a
+                        // later drain. The view, not that return value, owns
+                        // every candidate until reconciliation succeeds.
+                        drop(
+                            view.apply_decoded_deltas(
+                                [(result_current(members[index].clone()), weight)],
+                                &aliases(),
+                            )
+                            .unwrap(),
+                        );
+                    }
+                }
+                let touched = changes
+                    .iter()
+                    .map(|(index, _)| *index)
+                    .collect::<BTreeSet<_>>();
+                incremental.result_member_reconcile_visits = 0;
+                reference.unreconciled_result_members = None;
+                let expected = reference.reconcile_publishable_result_members(&aliases());
+                let actual = incremental.reconcile_publishable_result_members(&aliases());
+                assert_eq!(actual, expected);
+                assert_eq!(incremental.result_member_reconcile_visits, touched.len());
+                assert_eq!(incremental.result_weights, reference.result_weights);
+                assert_eq!(
+                    incremental.published_result_members,
+                    reference.published_result_members
+                );
+                assert_eq!(
+                    incremental.published_result_payloads,
+                    reference.published_result_payloads
+                );
+                assert!(
+                    incremental
+                        .unreconciled_result_members
+                        .as_ref()
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+
+        // Switching an already-populated witness-gated view must establish a
+        // full baseline, promoting a previously withheld membership even when
+        // the switching call carries no new member delta.
+        let member = ResultMemberEntry::from(result(row(1), 10));
+        let mut switched = MaintainedSubscriptionView::default();
+        switched
+            .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases())
+            .unwrap();
+        assert!(
+            switched
+                .reconcile_publishable_result_members(&aliases())
+                .0
+                .is_empty()
+        );
+        assert!(switched.unreconciled_result_members.is_none());
+        switched.enable_storage_backed_result_materialization();
+        assert_eq!(
+            switched.reconcile_publishable_result_members(&aliases()).0,
+            vec![member]
+        );
+        switched.result_member_reconcile_visits = 0;
+        assert!(
+            switched
+                .reconcile_publishable_result_members(&aliases())
+                .0
+                .is_empty()
+        );
+        assert_eq!(switched.result_member_reconcile_visits, 0);
     }
 
     #[test]
