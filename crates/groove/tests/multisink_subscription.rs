@@ -5,7 +5,7 @@
 
 use std::sync::mpsc::TryRecvError;
 
-use groove::db::{Database, GraphBuilder, RoutedMultisinkTerminal};
+use groove::db::{Database, GraphBuilder, PrimaryKeyValue, RoutedMultisinkTerminal};
 use groove::ivm::runtime::TerminalEdit;
 use groove::ivm::{CollectByField, ProjectField, TopByLimit, TopByOrder};
 use groove::records::{RecordDescriptor, Value};
@@ -486,7 +486,8 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
     assert!(!structured.try_recv().unwrap().terminal_sinks["rows"].is_empty());
     let metrics = db.last_tick_metrics().unwrap();
     assert_eq!(metrics.root_ordering_position_records, 0);
-    assert_eq!(metrics.root_ordering_position_records_skipped, 1);
+    assert_eq!(metrics.root_ordering_position_records_skipped, 0);
+    assert_eq!(metrics.top_by_delta_membership_records, 1);
 
     let plain = db.subscribe([("rows", ordered.clone())]).unwrap();
     assert_eq!(
@@ -504,6 +505,7 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
         // One shared TopBy: both consumers must not duplicate position work.
         assert_eq!(metrics.root_ordering_position_records, expected_visits);
         assert_eq!(metrics.root_ordering_position_records_skipped, 0);
+        assert_eq!(metrics.top_by_delta_membership_records, 0);
     }
 
     let mut batch = db.open_batch();
@@ -531,7 +533,10 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
     structured.try_recv().unwrap();
     let metrics = db.last_tick_metrics().unwrap();
     assert_eq!(metrics.root_ordering_position_records, 0);
-    assert_eq!(metrics.root_ordering_position_records_skipped, 7);
+    // With only the structured consumer left, even window enumeration is
+    // unnecessary: the fourth insert visits one input delta, not seven rows.
+    assert_eq!(metrics.root_ordering_position_records_skipped, 0);
+    assert_eq!(metrics.top_by_delta_membership_records, 1);
 
     let rebound = db.subscribe([("rows", ordered)]).unwrap();
     let initial = rebound.try_recv().unwrap();
@@ -560,6 +565,110 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
             .root_ordering_position_records,
         9
     );
+}
+
+#[futures_test::test]
+async fn structured_unbounded_membership_visits_only_changed_rows_at_scale() {
+    for count in [10, 1000] {
+        let mut db = database().await;
+        let mut batch = db.open_batch();
+        for id in 1..=count {
+            batch.insert(
+                "albums",
+                vec![
+                    Value::U64(id),
+                    Value::String("Album".into()),
+                    Value::U64(id),
+                ],
+            );
+        }
+        let persisted = db.apply_batch(batch).await.unwrap().persist().await;
+        db.finish_persistence(persisted).unwrap();
+        let ordered = GraphBuilder::top_by(
+            GraphBuilder::table("albums"),
+            Vec::<String>::new(),
+            [TopByOrder::asc("year")],
+            ["id"],
+            0,
+            TopByLimit::Unbounded,
+        );
+        let graph = GraphBuilder::collect_root_ordered(
+            ordered,
+            ["id"],
+            [
+                CollectByField::named("id"),
+                CollectByField::named("title"),
+                CollectByField::named("year"),
+            ],
+            [TopByOrder::asc("year")],
+            ["id"],
+            0,
+            TopByLimit::Unbounded,
+        );
+        let subscription = db.subscribe([("rows", graph.clone())]).unwrap();
+        let initial = subscription.try_recv().unwrap();
+        let mut keys = Vec::new();
+        let apply = |keys: &mut Vec<Vec<u8>>, edits: &groove::ivm::runtime::TerminalDeltas| {
+            for operation in &edits.operations {
+                assert!(operation.path.is_empty());
+                match &operation.edit {
+                    TerminalEdit::Insert { index, key, .. } => keys.insert(*index, key.clone()),
+                    TerminalEdit::Remove { key } => {
+                        let i = keys.iter().position(|k| k == key).unwrap();
+                        keys.remove(i);
+                    }
+                    TerminalEdit::Move { index, key } => {
+                        let i = keys.iter().position(|k| k == key).unwrap();
+                        keys.remove(i);
+                        keys.insert(*index, key.clone());
+                    }
+                    TerminalEdit::Update { key, .. } => assert!(keys.contains(key)),
+                }
+            }
+        };
+        apply(&mut keys, &initial.terminal_sinks["rows"]);
+        assert_eq!(keys.len(), count as usize);
+        let mut batch = db.open_batch();
+        batch.update(
+            "albums",
+            vec![
+                Value::U64(count),
+                Value::String("Moved".into()),
+                Value::U64(0),
+            ],
+        );
+        batch.delete("albums", PrimaryKeyValue::U64(2));
+        let persisted = db.apply_batch(batch).await.unwrap().persist().await;
+        db.finish_persistence(persisted).unwrap();
+        let metrics = db.last_tick_metrics().unwrap();
+        assert_eq!(
+            metrics.top_by_delta_membership_records, 3,
+            "retained rows={count}"
+        );
+        assert_eq!(metrics.root_ordering_position_records, 0);
+        assert_eq!(metrics.root_ordering_position_records_skipped, 0);
+        apply(
+            &mut keys,
+            &subscription.try_recv().unwrap().terminal_sinks["rows"],
+        );
+        let fresh = db.subscribe([("rows", graph)]).unwrap().try_recv().unwrap();
+        let mut expected = Vec::new();
+        apply(&mut expected, &fresh.terminal_sinks["rows"]);
+        assert_eq!(
+            keys, expected,
+            "incremental order matches fresh hydration at {count} rows"
+        );
+        let rows = fresh.get("rows").unwrap().to_values().unwrap();
+        assert_eq!(rows.len(), count as usize - 1);
+        assert_eq!(
+            rows[0].0,
+            [
+                Value::U64(count),
+                Value::String("Moved".into()),
+                Value::U64(0)
+            ]
+        );
+    }
 }
 
 #[futures_test::test]

@@ -1299,6 +1299,52 @@ pub(super) fn diff_record_windows(
     deltas
 }
 
+/// Unbounded, zero-offset membership is the positive part of each weight.
+/// Compare first/final weights for touched records, not complete windows.
+/// This helper does not compute generic root positions or finite boundaries.
+pub(super) fn update_unbounded_top_by_group(
+    descriptor: RecordDescriptor,
+    top_by: &TopByOp,
+    group: &mut CollectByGroup,
+    input: &[RecordDelta],
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    let mut touched = BTreeMap::<CollectByOrderKey, (i64, i64)>::new();
+    for delta in input {
+        let key = (
+            top_by_sort_key(descriptor, delta.raw(), top_by)?,
+            delta.record.clone(),
+        );
+        let weights = touched.entry(key.clone()).or_insert_with(|| {
+            let before = group.get(&key).copied().unwrap_or_default();
+            (before, before)
+        });
+        weights.1 += delta.weight;
+    }
+    let mut removed = Vec::new();
+    let mut added = Vec::new();
+    for (key, (before, after)) in touched {
+        // Negative internal bag weights are retained but not selected. Simply
+        // forwarding the input delta would publish phantom rows at -2 -> -1.
+        let weight = after.max(0) - before.max(0);
+        if weight != 0 {
+            let delta = RecordDelta {
+                record: key.1.clone(),
+                weight,
+            };
+            if weight < 0 {
+                removed.push(delta);
+            } else {
+                added.push(delta);
+            }
+        }
+        group.set(key, after);
+    }
+    // Match diff_record_windows: removals in old order, then additions in new
+    // order. Full encoded records break ties, just as in the retained index.
+    removed.extend(added);
+    Ok(removed)
+}
+
 pub(super) fn encoded_record_key_part(
     descriptor: RecordDescriptor,
     record: &[u8],

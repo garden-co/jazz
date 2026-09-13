@@ -2057,6 +2057,39 @@ impl TickEvaluator<'_> {
 
         let mut output = Vec::new();
         let replace = self.context.arrangement_update_mode == ArrangementUpdateMode::Replace;
+        if !replace
+            && top_by.offset == 0
+            && top_by.limit == TopByLimit::Unbounded
+            && !self.root_ordering_windows.contains_key(&node)
+        {
+            // Without a selection boundary, only touched records can change
+            // membership. Structured collectors own their positional edits;
+            // plain consumers requesting generic positions retain the window
+            // path below. Keep the same ordered state for subsequent snapshots
+            // and for a plain consumer attached on a later tick.
+            for (group_prefix, group_deltas) in &touched_groups {
+                let group = state
+                    .value_mut()
+                    .groups
+                    .get_or_default(group_prefix.clone());
+                output.extend(update_unbounded_top_by_group(
+                    output_desc,
+                    top_by,
+                    group,
+                    group_deltas,
+                )?);
+                self.metrics.top_by_delta_membership_records += group_deltas.len();
+            }
+            state
+                .value_mut()
+                .remove_empty_touched_groups(touched_groups.keys().cloned());
+            state.mark_forward_as_of(sub_tick)?;
+            self.operator_states.insert(operator_key, operator);
+            return Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas: output,
+            });
+        }
         let before = touched_groups
             .keys()
             .map(|group| {
