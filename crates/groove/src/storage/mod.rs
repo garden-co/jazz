@@ -1775,7 +1775,11 @@ impl StagedWriteState {
         }
     }
 
-    pub(crate) fn into_operations(self) -> Vec<OwnedWriteOperation> {
+    pub(crate) fn into_operations(mut self) -> Vec<OwnedWriteOperation> {
+        if self.operations.len() == 1 {
+            let block = self.operations.pop().expect("one operation block");
+            return Rc::try_unwrap(block).unwrap_or_else(|block| (*block).clone());
+        }
         self.operations
             .into_iter()
             .flat_map(|block| Rc::try_unwrap(block).unwrap_or_else(|block| (*block).clone()))
@@ -1859,9 +1863,15 @@ impl StagedWriteState {
 
 impl From<Vec<OwnedWriteOperation>> for StagedWriteState {
     fn from(operations: Vec<OwnedWriteOperation>) -> Self {
-        let mut state = Self::default();
-        state.extend(operations);
-        state
+        if operations.is_empty() {
+            return Self::default();
+        }
+        let count = operations.len();
+        Self {
+            operations: vec![Rc::new(operations)],
+            operation_ends: vec![count],
+            ..Self::default()
+        }
     }
 }
 
@@ -4123,6 +4133,60 @@ mod tests {
                 .unwrap();
             assert!(collect_scan(empty).await.unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn staged_owned_vector_roundtrip_preserves_the_unique_allocation() {
+        // Internal ownership receipt: equal public storage rows cannot prove
+        // that the already-owned operation vector was transferred intact.
+        let mut operations = Vec::with_capacity(256);
+        for id in 0..100 {
+            operations.push(OwnedWriteOperation::set("records", vec![id], vec![id; 32]));
+        }
+        let pointer = operations.as_ptr();
+        let capacity = operations.capacity();
+        let mut staged = StagedWriteState::from(operations);
+        assert_eq!(staged.operations[0].as_ptr(), pointer);
+        assert_eq!(staged.len(), 100);
+        assert_eq!(staged.latest_index("records", &[70]), Some(70));
+        staged.stage(OwnedWriteOperation::set("records", vec![70], b"new"));
+        assert_eq!(staged.latest_index("records", &[70]), Some(100));
+        let operations = staged.into_operations();
+        assert_eq!(operations.as_ptr(), pointer);
+        assert_eq!(operations.capacity(), capacity);
+        assert_eq!(operations.len(), 101);
+        assert_eq!(
+            operations[100],
+            OwnedWriteOperation::set("records", vec![70], b"new")
+        );
+    }
+
+    #[test]
+    fn staged_vector_handoff_keeps_empty_and_shared_blocks_independent() {
+        // Internal because this observes private block ownership while a
+        // publication snapshot remains alive, not only resulting row bytes.
+        let empty = StagedWriteState::from(Vec::with_capacity(32));
+        assert!(empty.is_empty());
+        assert!(empty.operations.is_empty());
+        assert!(empty.into_operations().is_empty());
+
+        let staged = StagedWriteState::from(vec![OwnedWriteOperation::set(
+            "records",
+            b"key",
+            b"original",
+        )]);
+        let snapshot = staged.snapshot();
+        let mut operations = staged.into_operations();
+        assert_ne!(operations.as_ptr(), snapshot[0].as_ptr());
+        assert_eq!(operations, *snapshot[0]);
+        let OwnedWriteOperation::Set { value, .. } = &mut operations[0] else {
+            unreachable!("constructed a set");
+        };
+        value.push(b'!');
+        assert_eq!(
+            snapshot[0][0],
+            OwnedWriteOperation::set("records", b"key", b"original")
+        );
     }
 
     /// Internal ownership proof: public storage results cannot distinguish

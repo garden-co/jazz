@@ -39,6 +39,15 @@ ordering is not an authority for recency, and MCP discovery can initially show
 a synthetic merge hash before the run resolves to its source commit. Results
 may remain empty while processing; absence is not a zero measurement.
 
+Run IDs are not immutable measurement receipts. Re-running an individual CI
+job can replace its benchmark results inside the same CodSpeed run while
+leaving other benchmarks untouched. Record the CI attempt/job, exact commit,
+benchmark result IDs, and saved distributions before repeating a job. Resolve
+the IDs again afterward and preserve both sets. On 2026-09-13 an unchanged
+todo-only rerun changed its result IDs inside run `6aa6998fbbf79fe271c9347c`,
+while the cold-load result retained its original ID. A later run-link lookup
+must not silently stand in for the original distribution.
+
 ## Request and download the complete graph
 
 Do not depend on the web app's persisted `FindBenchmarkCallGraph` hash: it can
