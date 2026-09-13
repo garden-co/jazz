@@ -12,6 +12,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::{Arc, Weak};
 
 use crate::{
     ivm::{FieldRef, ValueComparison},
@@ -19,8 +20,8 @@ use crate::{
 };
 
 use super::{
-    ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, SubTick, consolidate_deltas,
-    encode_key_part,
+    ArrangementUpdateMode, AsOf, IvmRuntimeError, RecordDelta, RecordDeltas, SubTick,
+    consolidate_deltas, encode_key_part,
     record_projection::{resolve_field_name, resolve_field_ref},
 };
 
@@ -140,6 +141,33 @@ pub(super) struct ArrangementState {
     /// complete join index.
     index: Rc<JoinIndex>,
     overlay: Rc<HashMap<JoinKey, Option<JoinBucket>>>,
+    /// Identity of the last complete immutable input, not a retained payload.
+    /// Any content mutation invalidates this proof. A Weak keeps the Arc
+    /// allocation identity from being reused without retaining its row vector.
+    snapshot: Weak<RecordDeltas>,
+}
+
+/// A delta slice may optionally prove the identity of a complete snapshot.
+/// Only Replace evaluation uses the identity; incremental updates never do.
+pub(super) struct JoinInput<'a> {
+    records: &'a [RecordDelta],
+    snapshot: Option<&'a Arc<RecordDeltas>>,
+}
+
+impl<'a> JoinInput<'a> {
+    pub(super) fn deltas(records: &'a [RecordDelta]) -> Self {
+        Self {
+            records,
+            snapshot: None,
+        }
+    }
+
+    pub(super) fn snapshot(records: &'a Arc<RecordDeltas>) -> Self {
+        Self {
+            records: &records.deltas,
+            snapshot: Some(records),
+        }
+    }
 }
 
 enum JoinLookup<'a> {
@@ -199,12 +227,14 @@ impl JoinState {
         right_on: &[String],
         comparison: ValueComparison,
         // Changed left records with signed weights
-        left_delta: &[RecordDelta],
-        right_delta: &[RecordDelta],
+        left_input: JoinInput<'_>,
+        right_input: JoinInput<'_>,
         left_sub_tick: SubTick,
         right_sub_tick: SubTick,
         update_mode: ArrangementUpdateMode,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+        let left_delta = left_input.records;
+        let right_delta = right_input.records;
         // Fields have to be the same:
         // left:  (country_id, artist_id)
         // right: (country_id, id)
@@ -231,8 +261,16 @@ impl JoinState {
         //
         // The Key will be use to get throught the right_arrangement.index.get(&left_delta.key) fast the matching raws:
         let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta, comparison)?;
-        let keyed_right_delta =
-            keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?;
+        let keyed_right_delta = if reuses_snapshot(
+            right_arrangement,
+            right_input.snapshot,
+            right_sub_tick,
+            update_mode,
+        ) {
+            Vec::new()
+        } else {
+            keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?
+        };
         let estimated_output_bytes = left_delta
             .iter()
             .chain(right_delta)
@@ -259,12 +297,14 @@ impl JoinState {
             &keyed_left_delta,
             left_sub_tick,
             update_mode,
+            left_input.snapshot,
         )?;
         advance_arrangement(
             right_arrangement,
             &keyed_right_delta,
             right_sub_tick,
             update_mode,
+            right_input.snapshot,
         )?;
 
         // Replace inputs are faithful full snapshots. Once both arrangements
@@ -352,12 +392,14 @@ impl SemiJoinState {
         left_on: &[String],
         right_on: &[String],
         comparison: ValueComparison,
-        left_delta: &[RecordDelta],
-        right_delta: &[RecordDelta],
+        left_input: JoinInput<'_>,
+        right_input: JoinInput<'_>,
         left_sub_tick: SubTick,
         right_sub_tick: SubTick,
         update_mode: ArrangementUpdateMode,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+        let left_delta = left_input.records;
+        let right_delta = right_input.records;
         if left_on.len() != right_on.len() {
             return Err(IvmRuntimeError::JoinKeyArityMismatch {
                 left: left_on.len(),
@@ -367,8 +409,16 @@ impl SemiJoinState {
 
         let keyed_left_delta =
             keyed_join_deltas(&left_descriptor, left_on, left_delta, comparison)?;
-        let keyed_right_delta =
-            keyed_join_deltas(&right_descriptor, right_on, right_delta, comparison)?;
+        let keyed_right_delta = if reuses_snapshot(
+            right_arrangement,
+            right_input.snapshot,
+            right_sub_tick,
+            update_mode,
+        ) {
+            Vec::new()
+        } else {
+            keyed_join_deltas(&right_descriptor, right_on, right_delta, comparison)?
+        };
         let mut affected_keys = HashSet::<JoinKey>::default();
         if update_mode == ArrangementUpdateMode::Accumulate {
             affected_keys.extend(keyed_left_delta.iter().map(|delta| delta.key.clone()));
@@ -379,12 +429,14 @@ impl SemiJoinState {
             &keyed_left_delta,
             left_sub_tick,
             update_mode,
+            left_input.snapshot,
         )?;
         advance_arrangement(
             right_arrangement,
             &keyed_right_delta,
             right_sub_tick,
             update_mode,
+            right_input.snapshot,
         )?;
 
         let mut deltas = Vec::new();
@@ -440,12 +492,14 @@ impl AntiJoinState {
         left_on: &[String],
         right_on: &[String],
         comparison: ValueComparison,
-        left_delta: &[RecordDelta],
-        right_delta: &[RecordDelta],
+        left_input: JoinInput<'_>,
+        right_input: JoinInput<'_>,
         left_sub_tick: SubTick,
         right_sub_tick: SubTick,
         update_mode: ArrangementUpdateMode,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+        let left_delta = left_input.records;
+        let right_delta = right_input.records;
         if left_on.len() != right_on.len() {
             return Err(IvmRuntimeError::JoinKeyArityMismatch {
                 left: left_on.len(),
@@ -454,8 +508,16 @@ impl AntiJoinState {
         }
 
         let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta, comparison)?;
-        let keyed_right_delta =
-            keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?;
+        let keyed_right_delta = if reuses_snapshot(
+            right_arrangement,
+            right_input.snapshot,
+            right_sub_tick,
+            update_mode,
+        ) {
+            Vec::new()
+        } else {
+            keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?
+        };
         let mut affected_keys = HashSet::<JoinKey>::default();
         if update_mode == ArrangementUpdateMode::Accumulate {
             affected_keys.extend(keyed_left_delta.iter().map(|delta| delta.key.clone()));
@@ -466,12 +528,14 @@ impl AntiJoinState {
             &keyed_left_delta,
             left_sub_tick,
             update_mode,
+            left_input.snapshot,
         )?;
         advance_arrangement(
             right_arrangement,
             &keyed_right_delta,
             right_sub_tick,
             update_mode,
+            right_input.snapshot,
         )?;
 
         let mut deltas = Vec::new();
@@ -537,6 +601,7 @@ impl ArrangementState {
     }
 
     fn replace_bucket(&mut self, key: JoinKey, bucket: Option<JoinBucket>) {
+        self.snapshot = Weak::new();
         Rc::make_mut(&mut self.overlay).insert(key, bucket);
     }
 
@@ -555,6 +620,7 @@ impl ArrangementState {
         Self {
             index: Rc::new(index),
             overlay: Rc::default(),
+            snapshot: Weak::new(),
         }
     }
 
@@ -563,6 +629,7 @@ impl ArrangementState {
         keys: impl IntoIterator<Item = &'a Vec<u8>>,
         replacement: Self,
     ) {
+        self.snapshot = Weak::new();
         let overlay = Rc::make_mut(&mut self.overlay);
         for key in keys {
             let key = JoinKey::from_slice(key);
@@ -600,6 +667,7 @@ impl ArrangementState {
         deltas: &[KeyedRecordDelta<'_>],
         update_mode: ArrangementUpdateMode,
     ) {
+        self.snapshot = Weak::new();
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
                 let mut buckets = HashMap::<JoinKey, JoinBucket>::default();
@@ -656,17 +724,41 @@ impl ArrangementState {
     }
 }
 
+fn reuses_snapshot(
+    arrangement: &AsOf<ArrangementState, SubTick>,
+    snapshot: Option<&Arc<RecordDeltas>>,
+    sub_tick: SubTick,
+    update_mode: ArrangementUpdateMode,
+) -> bool {
+    update_mode == ArrangementUpdateMode::Replace
+        && arrangement.as_of() == Some(sub_tick)
+        && snapshot.is_some_and(|snapshot| {
+            std::ptr::eq(arrangement.value().snapshot.as_ptr(), Arc::as_ptr(snapshot))
+        })
+}
+
 fn advance_arrangement(
     arrangement: &mut AsOf<ArrangementState, SubTick>,
     deltas: &[KeyedRecordDelta<'_>],
     sub_tick: SubTick,
     update_mode: ArrangementUpdateMode,
+    snapshot: Option<&Arc<RecordDeltas>>,
 ) -> Result<(), IvmRuntimeError> {
+    if reuses_snapshot(arrangement, snapshot, sub_tick, update_mode) {
+        #[cfg(feature = "cold-settle-attribution")]
+        if std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_some() {
+            eprintln!(
+                "ARRANGEMENT_REUSE\t{}",
+                snapshot.expect("matched snapshot").deltas.len()
+            );
+        }
+        return Ok(());
+    }
     if update_mode == ArrangementUpdateMode::Accumulate && arrangement.as_of() == Some(sub_tick) {
         return Ok(());
     }
-    // Replace callers provide a faithful full snapshot, so they intentionally
-    // rebuild even when the stamp already matches this logical time.
+    // Without exact snapshot identity, Replace callers intentionally rebuild
+    // even when the stamp already matches this logical time.
     let replace_within_same_tick = update_mode == ArrangementUpdateMode::Replace
         && arrangement
             .as_of()
@@ -682,6 +774,9 @@ fn advance_arrangement(
         });
     }
     arrangement.value_mut().apply_update(deltas, update_mode);
+    if update_mode == ArrangementUpdateMode::Replace {
+        arrangement.value_mut().snapshot = snapshot.map(Arc::downgrade).unwrap_or_default();
+    }
     if replace_within_same_tick {
         arrangement.replace_as_of_at_least(sub_tick);
     } else {
@@ -1168,8 +1263,8 @@ mod tests {
                     &left_on,
                     &right_on,
                     ValueComparison::Exact,
-                    &left,
-                    &right,
+                    JoinInput::deltas(&left),
+                    JoinInput::deltas(&right),
                     sub_tick,
                     sub_tick,
                     update_mode,
@@ -1235,8 +1330,8 @@ mod tests {
                     &keys,
                     &keys,
                     ValueComparison::Exact,
-                    &left_snapshot,
-                    &[],
+                    JoinInput::deltas(&left_snapshot),
+                    JoinInput::deltas(&[]),
                     hydrated,
                     hydrated,
                     ArrangementUpdateMode::Replace,
@@ -1268,8 +1363,8 @@ mod tests {
                     &keys,
                     &keys,
                     ValueComparison::Exact,
-                    &[],
-                    &right_add,
+                    JoinInput::deltas(&[]),
+                    JoinInput::deltas(&right_add),
                     added,
                     added,
                     ArrangementUpdateMode::Accumulate,
@@ -1304,8 +1399,8 @@ mod tests {
                     &keys,
                     &keys,
                     ValueComparison::Exact,
-                    &[],
-                    &right_remove,
+                    JoinInput::deltas(&[]),
+                    JoinInput::deltas(&right_remove),
                     removed,
                     removed,
                     ArrangementUpdateMode::Accumulate,
@@ -1366,8 +1461,8 @@ mod tests {
                     &keys,
                     &keys,
                     ValueComparison::Exact,
-                    &[],
-                    &right_add,
+                    JoinInput::deltas(&[]),
+                    JoinInput::deltas(&right_add),
                     anti_join_tick,
                     anti_join_tick,
                     ArrangementUpdateMode::Accumulate,
@@ -1376,6 +1471,183 @@ mod tests {
                 .is_empty(),
             "a blocker suppresses an unpubished row instead of retracting it"
         );
+    }
+
+    #[test]
+    fn snapshot_identity_reuses_only_unchanged_complete_arrangements() {
+        // Internal: public query results cannot prove that an index allocation
+        // was reused, or that the identity proof does not retain input vectors.
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let fields = ["id".to_owned()];
+        let make_snapshot = |entries: &[(u64, i64)]| {
+            Arc::new(RecordDeltas {
+                descriptor,
+                deltas: entries
+                    .iter()
+                    .map(|(id, weight)| RecordDelta {
+                        record: descriptor.create(&[Value::U64(*id)]).unwrap().into(),
+                        weight: *weight,
+                    })
+                    .collect(),
+            })
+        };
+        let tick = SubTick {
+            tick: 1,
+            sub_tick: 0,
+        };
+        let install = |state: &mut AsOf<ArrangementState, SubTick>,
+                       snapshot: &Arc<RecordDeltas>| {
+            let keyed = keyed_join_deltas(
+                &descriptor,
+                &fields,
+                &snapshot.deltas,
+                ValueComparison::Exact,
+            )
+            .unwrap();
+            advance_arrangement(
+                state,
+                &keyed,
+                tick,
+                ArrangementUpdateMode::Replace,
+                Some(snapshot),
+            )
+            .unwrap();
+        };
+        let snapshot = make_snapshot(&[(1, 2), (1, -1), (2, -3)]);
+        let mut state = AsOf::default();
+        install(&mut state, &snapshot);
+        assert_eq!(
+            state.value().row_count(),
+            2,
+            "negative weights remain represented"
+        );
+        let original_index = Rc::clone(&state.value().index);
+        install(&mut state, &Arc::clone(&snapshot));
+        assert!(Rc::ptr_eq(&original_index, &state.value().index));
+
+        let mut staged = state.clone();
+        let changed = make_snapshot(&[(3, 1)]);
+        install(&mut staged, &changed);
+        assert!(!Rc::ptr_eq(&original_index, &staged.value().index));
+        assert_eq!(staged.value().row_count(), 1);
+        assert_eq!(
+            state.value().row_count(),
+            2,
+            "earlier snapshot stays unchanged"
+        );
+
+        let equal_but_distinct = make_snapshot(&[(1, 2), (1, -1), (2, -3)]);
+        install(&mut state, &equal_but_distinct);
+        assert!(
+            !Rc::ptr_eq(&original_index, &state.value().index),
+            "equal contents alone are not an identity proof"
+        );
+        let before_delta = Rc::clone(&state.value().index);
+        let addition = make_snapshot(&[(4, 1)]);
+        state
+            .value_mut()
+            .apply_record_deltas(
+                descriptor,
+                &fields,
+                &addition.deltas,
+                ArrangementUpdateMode::Accumulate,
+            )
+            .unwrap();
+        assert_eq!(state.value().row_count(), 3);
+        assert!(!reuses_snapshot(
+            &state,
+            Some(&equal_but_distinct),
+            tick,
+            ArrangementUpdateMode::Replace
+        ));
+        install(&mut state, &equal_but_distinct);
+        assert_eq!(state.value().row_count(), 2);
+        assert!(!Rc::ptr_eq(&before_delta, &state.value().index));
+        assert!(!reuses_snapshot(
+            &state,
+            Some(&equal_but_distinct),
+            SubTick {
+                tick: 2,
+                sub_tick: 0
+            },
+            ArrangementUpdateMode::Replace
+        ));
+
+        drop(equal_but_distinct);
+        assert!(
+            state.value().snapshot.upgrade().is_none(),
+            "arrangement identity must not retain the input row vector"
+        );
+    }
+
+    #[test]
+    fn snapshot_identity_is_invalidated_by_partial_replacement() {
+        // Internal: directly exercise every non-join mutation boundary that
+        // could otherwise preserve a stale identity proof on a partial index.
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let fields = ["id".to_owned()];
+        let record = Bytes::from(descriptor.create(&[Value::U64(1)]).unwrap());
+        let snapshot = Arc::new(RecordDeltas {
+            descriptor,
+            deltas: vec![RecordDelta { record, weight: 1 }],
+        });
+        let keyed = keyed_join_deltas(
+            &descriptor,
+            &fields,
+            &snapshot.deltas,
+            ValueComparison::Exact,
+        )
+        .unwrap();
+        let key = keyed[0].key.clone();
+        let tick = SubTick {
+            tick: 1,
+            sub_tick: 0,
+        };
+        let mut state = AsOf::default();
+        advance_arrangement(
+            &mut state,
+            &keyed,
+            tick,
+            ArrangementUpdateMode::Replace,
+            Some(&snapshot),
+        )
+        .unwrap();
+        let original = state.clone();
+        assert!(reuses_snapshot(
+            &state,
+            Some(&snapshot),
+            tick,
+            ArrangementUpdateMode::Replace
+        ));
+        state.value_mut().replace_bucket(key.clone(), None);
+        assert!(!reuses_snapshot(
+            &state,
+            Some(&snapshot),
+            tick,
+            ArrangementUpdateMode::Replace
+        ));
+        let keys = [key.to_vec()];
+        let partial = original.value().clone_keys(keys.iter());
+        assert!(partial.snapshot.upgrade().is_none());
+        state = original.clone();
+        state
+            .value_mut()
+            .replace_keys(keys.iter(), ArrangementState::default());
+        assert!(!reuses_snapshot(
+            &state,
+            Some(&snapshot),
+            tick,
+            ArrangementUpdateMode::Replace
+        ));
+        assert_eq!(state.value().row_count(), 0);
+        state = original;
+        state.value_mut().clear();
+        assert!(!reuses_snapshot(
+            &state,
+            Some(&snapshot),
+            tick,
+            ArrangementUpdateMode::Replace
+        ));
     }
 
     #[test]
@@ -1390,6 +1662,7 @@ mod tests {
         let original = ArrangementState {
             index: Rc::new(index),
             overlay: Rc::default(),
+            snapshot: Weak::new(),
         };
 
         let mut prepared = original.clone();

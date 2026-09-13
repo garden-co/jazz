@@ -1361,8 +1361,8 @@ impl TickEvaluator<'_> {
                         output_desc,
                         *left_input,
                         *right_input,
-                        &left.deltas,
-                        &right.deltas,
+                        &left,
+                        &right,
                     )
                 }
                 OpType::SemiJoin(join) => {
@@ -1381,8 +1381,8 @@ impl TickEvaluator<'_> {
                         output_desc,
                         *left_input,
                         *right_input,
-                        &left.deltas,
-                        &right.deltas,
+                        &left,
+                        &right,
                     )
                 }
                 OpType::AntiJoin(join) => {
@@ -1401,8 +1401,8 @@ impl TickEvaluator<'_> {
                         output_desc,
                         *left_input,
                         *right_input,
-                        &left.deltas,
-                        &right.deltas,
+                        &left,
+                        &right,
                     )
                 }
                 OpType::Recursive(recursive) => {
@@ -1641,9 +1641,11 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         left_input: NodeId,
         right_input: NodeId,
-        left_delta: &[RecordDelta],
-        right_delta: &[RecordDelta],
+        left: &Arc<RecordDeltas>,
+        right: &Arc<RecordDeltas>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let left_delta = &left.deltas;
+        let right_delta = &right.deltas;
         let operator_key = self.operator_key(node)?;
         let operator = self
             .operator_states
@@ -1720,8 +1722,8 @@ impl TickEvaluator<'_> {
             left_on.as_ref(),
             right_on.as_ref(),
             join.comparison,
-            left_delta,
-            right_delta,
+            JoinInput::snapshot(left),
+            JoinInput::snapshot(right),
             self.arrangement_sub_tick(&left_key),
             self.arrangement_sub_tick(&right_key),
             self.context.arrangement_update_mode,
@@ -1755,8 +1757,8 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         left_input: NodeId,
         right_input: NodeId,
-        left_delta: &[RecordDelta],
-        right_delta: &[RecordDelta],
+        left: &Arc<RecordDeltas>,
+        right: &Arc<RecordDeltas>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let operator_key = self.operator_key(node)?;
         let (left_on, right_on) = self.join_field_names(node, join);
@@ -1774,8 +1776,8 @@ impl TickEvaluator<'_> {
         // for each small incremental update.
         #[cfg(feature = "cold-settle-attribution")]
         {
-            self.trace_arrangement_snapshot(&left_key, left_delta);
-            self.trace_arrangement_snapshot(&right_key, right_delta);
+            self.trace_arrangement_snapshot(&left_key, &left.deltas);
+            self.trace_arrangement_snapshot(&right_key, &right.deltas);
         }
         let mut join_state = match self.operator_states.remove(&operator_key) {
             None => AntiJoinState::default(),
@@ -1806,8 +1808,8 @@ impl TickEvaluator<'_> {
                 left_on.as_ref(),
                 right_on.as_ref(),
                 join.comparison,
-                left_delta,
-                right_delta,
+                JoinInput::snapshot(left),
+                JoinInput::snapshot(right),
                 self.arrangement_sub_tick(&left_key),
                 self.arrangement_sub_tick(&right_key),
                 self.context.arrangement_update_mode,
@@ -1843,8 +1845,8 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         left_input: NodeId,
         right_input: NodeId,
-        left_delta: &[RecordDelta],
-        right_delta: &[RecordDelta],
+        left: &Arc<RecordDeltas>,
+        right: &Arc<RecordDeltas>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let operator_key = self.operator_key(node)?;
         let operator = self
@@ -1866,8 +1868,8 @@ impl TickEvaluator<'_> {
         )?;
         #[cfg(feature = "cold-settle-attribution")]
         {
-            self.trace_arrangement_snapshot(&left_key, left_delta);
-            self.trace_arrangement_snapshot(&right_key, right_delta);
+            self.trace_arrangement_snapshot(&left_key, &left.deltas);
+            self.trace_arrangement_snapshot(&right_key, &right.deltas);
         }
         let mut left_arrangement = self
             .arrangement_states
@@ -1889,8 +1891,8 @@ impl TickEvaluator<'_> {
             left_on.as_ref(),
             right_on.as_ref(),
             join.comparison,
-            left_delta,
-            right_delta,
+            JoinInput::snapshot(left),
+            JoinInput::snapshot(right),
             self.arrangement_sub_tick(&left_key),
             self.arrangement_sub_tick(&right_key),
             self.context.arrangement_update_mode,
