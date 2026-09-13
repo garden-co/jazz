@@ -1739,8 +1739,8 @@ impl TickEvaluator<'_> {
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
-            left_delta.len(),
-            right_delta.len(),
+            left.deltas.len(),
+            right.deltas.len(),
             deltas.len(),
         );
         Ok(RecordDeltas {
@@ -1823,8 +1823,8 @@ impl TickEvaluator<'_> {
             #[cfg(feature = "cold-settle-attribution")]
             crate::cold_settle_attribution::record_join(
                 self.context.eval_mode == EvalMode::Hydrate,
-                left_delta.len(),
-                right_delta.len(),
+                left.deltas.len(),
+                right.deltas.len(),
                 deltas.len(),
             );
             Ok(RecordDeltas {
@@ -1908,8 +1908,8 @@ impl TickEvaluator<'_> {
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
-            left_delta.len(),
-            right_delta.len(),
+            left.deltas.len(),
+            right.deltas.len(),
             deltas.len(),
         );
         Ok(RecordDeltas {
