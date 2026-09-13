@@ -29,7 +29,9 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = bigint_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)

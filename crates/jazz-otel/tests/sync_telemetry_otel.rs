@@ -47,7 +47,9 @@ async fn sync_layers_emit_otel_spans() {
             let subscriber_guard = tracing::subscriber::set_default(subscriber);
 
             let schema = test_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let alice = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema.clone())

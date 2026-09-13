@@ -551,7 +551,9 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_start");
             }
             let schema = metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                 eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_server_started");
             }
@@ -713,7 +715,9 @@ async fn aggregate_subscription_group_field_named_count_uses_structural_wire_slo
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = count_named_metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa21",
@@ -767,7 +771,9 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = mixed_metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa23",
@@ -843,7 +849,9 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = nullable_metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa3"),
             )
@@ -919,7 +927,9 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = nullable_metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa7",
@@ -1047,7 +1057,9 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa6",
@@ -1130,12 +1142,136 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
         .await;
 }
 
+/// A maintained grouped AVG keeps a finite maximum when two distinct rows each
+/// contain `f64::MAX`, and retracts the aggregate as both rows are deleted.
+///
+/// writer ──insert max──► server ──AVG update──► subscriber
+/// writer ──delete rows──► server ──retract group──► subscriber
+#[tokio::test(flavor = "current_thread")]
+async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = double_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
+                schema.clone(),
+                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa20",
+            ))
+            .await
+            .expect("connect writer");
+            let client = jazz_testkit::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa21"),
+            )
+            .await
+            .expect("connect client");
+            let avg_query = jazz::query::Query::from("metrics")
+                .avg("score")
+                .group_by("bucket");
+            let mut avg_stream = ObservedSubscription::new(
+                client
+                    .subscribe(avg_query.clone())
+                    .await
+                    .expect("subscribe grouped double avg"),
+                &avg_query,
+                aggregate_descriptor([
+                    ("bucket", ValueType::String),
+                    ("avg_score", ValueType::F64),
+                ]),
+            );
+
+            let first_delivery = avg_stream.delivered_deltas + 1;
+            let max = f64::MAX;
+            let (first, _, tx) = writer
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "same", "score" => Value::Double(max)),
+                )
+                .expect("insert first maximum metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            avg_stream
+                .wait_for_values_since(
+                    first_delivery,
+                    vec![vec![Value::Text("same".to_owned()), Value::Double(max)]],
+                    "AVG of the first maximum is finite",
+                )
+                .await;
+            let second_delivery = avg_stream.delivered_deltas + 1;
+
+            let (second, _, tx) = writer
+                .insert(
+                    "metrics",
+                    row_input!("bucket" => "same", "score" => Value::Double(max)),
+                )
+                .expect("insert second maximum metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            avg_stream
+                .assert_values_remain(
+                    vec![vec![Value::Text("same".to_owned()), Value::Double(max)]],
+                    Duration::from_millis(250),
+                    "AVG of two maximum values remains exactly MAX",
+                )
+                .await;
+            let visible_avg = match avg_stream.values().as_slice() {
+                [row] => match row.as_slice() {
+                    [Value::Text(_), Value::Double(value)] => *value,
+                    other => panic!("unexpected AVG row: {other:?}"),
+                },
+                rows => panic!("unexpected AVG rows: {rows:?}"),
+            };
+            assert!(visible_avg.is_finite(), "AVG must remain finite");
+            assert_eq!(visible_avg, max, "AVG must equal f64::MAX exactly");
+
+            let first_delete_delivery = avg_stream.delivered_deltas + 1;
+            let tx = writer.delete(first).expect("delete first maximum metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            avg_stream
+                .assert_values_remain(
+                    vec![vec![Value::Text("same".to_owned()), Value::Double(max)]],
+                    Duration::from_millis(250),
+                    "AVG remains MAX after deleting one maximum",
+                )
+                .await;
+
+            let last_delete_delivery = avg_stream.delivered_deltas + 1;
+            let tx = writer.delete(second).expect("delete second maximum metric");
+            support::wait_for_edge_txs(
+                &writer,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            avg_stream
+                .wait_for_values_since(
+                    last_delete_delivery,
+                    Vec::new(),
+                    "AVG group is retracted after last deletion",
+                )
+                .await;
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = bigint_metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa9",
@@ -1187,7 +1323,9 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = double_metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa10",
@@ -1269,7 +1407,9 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa15",
@@ -1345,7 +1485,9 @@ async fn integer_sum_uses_public_signed_values_for_multi_row_groups() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa2"),
             )
@@ -1381,7 +1523,9 @@ async fn integer_avg_uses_public_signed_values_for_multi_row_groups() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa3"),
             )
@@ -1415,7 +1559,9 @@ async fn integer_min_max_and_order_by_remain_signed() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -1493,7 +1639,9 @@ async fn bigint_aggregates_keep_signed_value_semantics() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = bigint_metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa5"),
             )
@@ -1550,7 +1698,9 @@ async fn aggregate_sum_bigint_survives_public_client_boundary() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = bigint_metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa4"),
             )
@@ -1609,7 +1759,9 @@ async fn integer_counter_columns_merge_signed_public_values() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = counter_schema(ColumnType::Integer);
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let alice = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa7",
@@ -1693,7 +1845,9 @@ async fn bigint_counter_columns_merge_signed_public_values() {
         .run_until(async {
             let base = 3_000_000_000_i64;
             let schema = counter_schema(ColumnType::BigInt);
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let alice = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb7",
@@ -1788,7 +1942,9 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = policy_metrics_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let admin_id = test_user_id("aggregate-admin");
             let spy_id = test_user_id("aggregate-spy");
             let mut admin_context =

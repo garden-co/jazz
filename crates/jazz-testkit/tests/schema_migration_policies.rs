@@ -245,7 +245,7 @@ async fn owner_policy_keeps_serving_v1_documents_to_v2_reader() {
 }
 
 async fn owner_policy_keeps_serving_v1_documents_to_v2_reader_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     publish_generation(&server, &[owner_schema_v1()], &[]).await;
     let (alice_ids, mallory_id) = seed_owner_documents_under_v1(&server, 3).await;
     publish_generation(
@@ -304,7 +304,7 @@ async fn owner_policy_still_denies_v1_documents_to_other_sessions_after_migratio
 }
 
 async fn owner_policy_still_denies_v1_documents_to_other_sessions_after_migration_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     publish_generation(&server, &[owner_schema_v1()], &[]).await;
     let (alice_ids, mallory_id) = seed_owner_documents_under_v1(&server, 2).await;
     publish_generation(
@@ -357,7 +357,7 @@ async fn v2_update_of_v1_document_preserves_untouched_columns() {
 }
 
 async fn v2_update_of_v1_document_preserves_untouched_columns_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_full_catalogue(
         &server,
         &[owner_schema_v1(), owner_schema_v2()],
@@ -425,7 +425,7 @@ async fn v2_update_denied_by_owner_policy_stays_rejected() {
 }
 
 async fn v2_update_denied_by_owner_policy_stays_rejected_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_full_catalogue(
         &server,
         &[owner_schema_v1(), owner_schema_v2()],
@@ -648,7 +648,7 @@ enum V2CataloguePush {
 /// Starts the dependency-fixture server, seeds all rows under v1, then moves
 /// the active generation to v2.
 async fn migrated_membership_server(push: V2CataloguePush) -> (JazzServer, MembershipSeed) {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     match push {
         V2CataloguePush::BeforeSeeding => {
             push_full_catalogue(

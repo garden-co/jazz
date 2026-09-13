@@ -4671,7 +4671,8 @@ impl JazzServer {
             opts.admin_secret.clone(),
             opts.backend_secret.clone(),
         )
-        .await;
+        .await
+        .map_err(napi::Error::from_reason)?;
 
         Ok(Self::from_inner(JazzServerInner::Core(server)))
     }
@@ -5182,7 +5183,8 @@ mod tests {
             "napi-stop-test-admin".to_owned(),
             "napi-stop-test-backend".to_owned(),
         )
-        .await;
+        .await
+        .expect("start NAPI test server");
         JazzServer::from_inner(JazzServerInner::Core(server))
     }
 

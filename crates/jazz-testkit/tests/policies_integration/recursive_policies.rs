@@ -383,7 +383,8 @@ async fn recursive_query_step_magic_columns_use_reader_session_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "teams", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "teams", READY_TIMEOUT).await;
 
@@ -464,7 +465,8 @@ async fn recursive_inherits_grants_visible_ancestor_chain_and_denies_unrelated_s
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
     let alice =
         connect_ready_user(&server, &schema, super::ALICE_ID, table_name, READY_TIMEOUT).await;
@@ -546,7 +548,8 @@ async fn recursive_inherits_respects_max_depth_boundaries_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
     let alice =
         connect_ready_user(&server, &schema, super::ALICE_ID, table_name, READY_TIMEOUT).await;
@@ -615,7 +618,8 @@ async fn recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch_
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
     let alice =
         connect_ready_user(&server, &schema, super::ALICE_ID, table_name, READY_TIMEOUT).await;
@@ -698,7 +702,8 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change_inner()
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
     let alice =
         connect_ready_user(&server, &schema, super::ALICE_ID, table_name, READY_TIMEOUT).await;
@@ -808,7 +813,8 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
     let dave =
@@ -886,7 +892,8 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
 

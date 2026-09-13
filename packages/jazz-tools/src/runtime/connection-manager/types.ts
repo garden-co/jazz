@@ -2,8 +2,7 @@ import { copyAccountConfigAdmission } from "../../accounts/config-capability.js"
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import type { DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
-import type { Session } from "../context.js";
+import type { AuthUpdate, DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
 import type { DbConfig } from "../db.js";
 import type { ForegroundNodeLease, RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
@@ -174,24 +173,19 @@ export abstract class ConnectionManager {
   openInspectorControlPort(_signal?: AbortSignal): Promise<MessagePort> {
     return Promise.reject(new Error("This runtime has no shared browser worker"));
   }
-
   abstract disconnect(): Promise<void>;
 
   abstract reconnect(): Promise<void>;
-
-  updateAuth(auth: {
-    jwtToken?: string;
-    cookieSession?: Session;
-    trustedReservedSession?: Session;
-  }): void {
-    if ("jwtToken" in auth) {
+  updateAuth(auth: AuthUpdate): void {
+    if (auth.mode === "bearer") {
       if (auth.jwtToken && auth.trustedReservedSession) {
         this.client?.updateTrustedAuthToken(auth.jwtToken, auth.trustedReservedSession);
       } else {
         this.client?.updateAuthToken(auth.jwtToken);
       }
+      return;
     }
-    if ("cookieSession" in auth) this.client?.updateCookieSession(auth.cookieSession);
+    this.client?.updateCookieSession(auth.cookieSession);
   }
 
   abstract deleteClientStorage(): Promise<void>;

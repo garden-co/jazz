@@ -96,7 +96,9 @@ async fn fresh_client_resolves_object_with_deep_update_history_impl() {
     const DEEP_HISTORY_UPDATES: usize = 100;
 
     let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let writer =
         jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), "alice-history"))
             .await
@@ -181,7 +183,9 @@ async fn jazz_tools_cli_two_clients_sync_values() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client_a = jazz_testkit::connect(
                 server.make_client_context_for_user(schema.clone(), "sync-values-user"),
             )
@@ -311,7 +315,9 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results(
 
 async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_impl() {
     let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client_a = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), "update-through-server-user"),
     )
@@ -390,7 +396,9 @@ async fn delete_through_one_client_removes_row_from_peer_query_results() {
 
 async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
     let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client_a = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), "delete-through-server-user"),
     )
@@ -454,7 +462,9 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             publish_allow_all_permissions(
                 &server.base_url(),
                 server.app_id(),
@@ -515,7 +525,9 @@ async fn wait_for_transaction_reaches_edge_and_global_tiers() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = test_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let alice = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "alice-direct-wait-for-tx"),
             )
@@ -561,7 +573,9 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata() {
 
 async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata_impl() {
     let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -640,7 +654,9 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row() {
 
 async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row_impl() {
     let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -722,7 +738,9 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
 
 async fn jazz_tools_cli_two_different_users_sync_values_impl() {
     let schema = test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client_alice = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), "alice-sync-user"),
     )

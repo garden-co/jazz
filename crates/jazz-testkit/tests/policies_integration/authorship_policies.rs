@@ -119,7 +119,8 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
     let account = jazz::account_registry::AccountId(uuid::Uuid::from_u128(0xa11ce));
     let mut session = Session::new("urn:jazz:test", super::ALICE_ID);
@@ -234,7 +235,8 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
     let (bob, bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let alice_note = create_note_as(&alice, "alice note").await;
@@ -367,7 +369,8 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution_inne
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
     let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
@@ -453,7 +456,8 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
     let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
@@ -548,7 +552,8 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() 
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let (alice, _alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
     let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
@@ -622,7 +627,8 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
     let (bob, bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let query = Query::from("notes").select([
@@ -755,7 +761,8 @@ async fn provenance_columns_expose_user_principals_and_insert_timestamps_inner()
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
     let (bob, bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
 

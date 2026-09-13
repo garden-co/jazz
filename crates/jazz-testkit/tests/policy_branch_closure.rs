@@ -292,7 +292,9 @@ fn labels_from_rows(mut rows: Vec<(jazz::tools::ObjectId, Vec<Value>)>) -> Vec<S
 
 async fn assert_policy_branch_closure(order: BranchOrder, expected_labels: Vec<&str>) {
     let schema = policy_branch_closure_schema(order);
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())

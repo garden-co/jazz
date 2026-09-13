@@ -156,7 +156,9 @@ async fn cold_client_receives_rows_granted_through_a_dependency_table() {
 
 async fn cold_client_receives_rows_granted_through_a_dependency_table_inner() {
     let schema = folder_grant_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_admin(&server, &schema).await;
 
     let (folder_id, _, folder_tx) = admin
@@ -239,7 +241,9 @@ async fn cold_client_receives_transitively_required_dependency_rows() {
 
 async fn cold_client_receives_transitively_required_dependency_rows_inner() {
     let schema = membership_chain_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_admin(&server, &schema).await;
 
     let (folder_id, _, folder_tx) = admin
@@ -322,7 +326,9 @@ async fn dependency_delivery_does_not_widen_visibility() {
 
 async fn dependency_delivery_does_not_widen_visibility_inner() {
     let schema = membership_chain_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_admin(&server, &schema).await;
 
     let (alice_folder_id, _, alice_folder_tx) = admin
@@ -452,7 +458,9 @@ async fn dependency_row_update_propagates_to_dependent_visibility() {
 
 async fn dependency_row_update_propagates_to_dependent_visibility_inner() {
     let schema = membership_chain_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_admin(&server, &schema).await;
 
     let (folder_id, _, folder_tx) = admin

@@ -51,6 +51,7 @@ function deriveInitialState(input: ClientSessionInput): AuthState {
 
 export function createAuthStateStore(input: ClientSessionInput, options?: AuthStateStoreOptions) {
   const initialAuthMode = deriveAuthMode(input);
+  let currentInput: ClientSessionInput = { ...input };
   let state = options?.initialState ?? deriveInitialState(input);
   const listeners = new Set<AuthStateListener>();
 
@@ -104,10 +105,9 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
     validateJwtToken(jwtToken?: string, trustedReservedSession?: Session): boolean {
       if (options?.lockAuthenticatedState) return false;
       const resolved = resolveClientSessionStateSync({
-        appId: input.appId,
-        accountId: input.accountId,
+        ...currentInput,
         jwtToken,
-        cookieSession: input.cookieSession,
+        cookieSession: undefined,
         trustedReservedSession,
       });
       assertSamePrincipal(resolved.session);
@@ -118,10 +118,10 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
     validateCookieSession(cookieSession?: Session): boolean {
       if (options?.lockAuthenticatedState) return false;
       const resolved = resolveClientSessionStateSync({
-        appId: input.appId,
-        accountId: input.accountId,
-        jwtToken: input.jwtToken,
+        ...currentInput,
+        jwtToken: undefined,
         cookieSession,
+        trustedReservedSession: undefined,
       });
       assertSamePrincipal(resolved.session);
       return true;
@@ -132,15 +132,16 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
         return state;
       }
 
-      const resolved = resolveClientSessionStateSync({
-        appId: input.appId,
-        accountId: input.accountId,
+      const nextInput: ClientSessionInput = {
+        ...currentInput,
         jwtToken,
-        cookieSession: input.cookieSession,
+        cookieSession: undefined,
         trustedReservedSession,
-      });
+      };
+      const resolved = resolveClientSessionStateSync(nextInput);
 
       assertSamePrincipal(resolved.session);
+      currentInput = nextInput;
 
       const nextState: AuthState = {
         authMode: initialAuthMode,
@@ -157,14 +158,16 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
         return state;
       }
 
-      const resolved = resolveClientSessionStateSync({
-        appId: input.appId,
-        accountId: input.accountId,
-        jwtToken: input.jwtToken,
+      const nextInput: ClientSessionInput = {
+        ...currentInput,
+        jwtToken: undefined,
         cookieSession,
-      });
+        trustedReservedSession: undefined,
+      };
+      const resolved = resolveClientSessionStateSync(nextInput);
 
       assertSamePrincipal(resolved.session);
+      currentInput = nextInput;
 
       const nextState: AuthState = {
         authMode: initialAuthMode,

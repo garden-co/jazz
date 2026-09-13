@@ -77,7 +77,7 @@ fn canonical_user(user_id: &str) -> String {
 async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = owned_docs_schema();
 
             push_catalogue_in_memory(

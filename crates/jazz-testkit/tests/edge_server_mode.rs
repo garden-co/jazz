@@ -86,7 +86,9 @@ async fn subscription_orders_by_unprojected_field() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = ranked_todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -170,7 +172,9 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -230,7 +234,9 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -328,7 +334,9 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -472,7 +480,9 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -1008,7 +1018,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
 async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = policy_graph_policy_schema();
             let app_id = server.app_id();
             let response = reqwest::Client::new()
@@ -1101,7 +1111,8 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
                     .with_data_dir(data_dir.path())
                     .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start()
-                    .await;
+                    .await
+                    .expect("start test server");
                 let admin = TestingClient::builder()
                     .with_server(&server)
                     .with_schema(schema.clone())
@@ -1120,7 +1131,8 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
                 .with_data_dir(data_dir.path())
                 .with_storage_factory(jazz_testkit::persistent_storage_factory())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let member = TestingClient::builder()
                 .with_server(&reopened)
                 .with_schema(schema.clone())
@@ -1155,7 +1167,8 @@ async fn edge_reconnects_after_established_core_drop() {
                     .start(),
             )
             .await
-            .expect("initial Core start timed out");
+            .expect("initial Core start timed out")
+            .expect("start Core server");
             let edge = tokio::time::timeout(
                 Duration::from_secs(10),
                 JazzServer::builder()
@@ -1166,7 +1179,8 @@ async fn edge_reconnects_after_established_core_drop() {
                     .start(),
             )
             .await
-            .expect("Edge start timed out");
+            .expect("Edge start timed out")
+            .expect("start Edge server");
             let edge_state = edge.server_state();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while edge_state.edge_upstream_health()
@@ -1201,7 +1215,8 @@ async fn edge_reconnects_after_established_core_drop() {
                     .start(),
             )
             .await
-            .expect("replacement Core start timed out");
+            .expect("replacement Core start timed out")
+            .expect("restart Core server");
             tokio::time::timeout(Duration::from_secs(5), async {
                 while edge_state.edge_upstream_health()
                     != jazz_server::EdgeUpstreamHealth::Connected
@@ -1239,7 +1254,8 @@ async fn edge_to_core_relay_retains_write_while_upstream_is_unavailable() {
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(format!("http://127.0.0.1:{core_port}"))
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_state = edge.server_state();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !matches!(
@@ -1272,7 +1288,8 @@ async fn edge_to_core_relay_retains_write_while_upstream_is_unavailable() {
                 .with_port(core_port)
                 .with_schema(schema)
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             tokio::time::timeout(Duration::from_secs(5), async {
                 while edge_state.edge_upstream_health()
                     != jazz_server::EdgeUpstreamHealth::Connected
@@ -1311,21 +1328,24 @@ async fn core_write_reaches_clients_on_both_edges() {
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_us = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_eu = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
 
             let alice =
                 connect_user_after_catalogue_bootstrap(&edge_us, schema.clone(), "alice-edge-us")
@@ -1422,21 +1442,24 @@ async fn edge_write_reaches_client_on_peer_edge() {
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_us = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_eu = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
 
             let alice = connect_user(&edge_us, schema.clone(), "alice-edge-us-writer").await;
             let bob = connect_user(&edge_eu, schema, "bob-edge-eu-reader").await;

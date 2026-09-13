@@ -64,7 +64,9 @@ async fn ephemeral_claims_merged_into_session() {
 }
 
 async fn ephemeral_claims_merged_into_session_impl() {
-    let server = JazzServer::start_with_schema(claims_gated_schema()).await;
+    let server = JazzServer::start_with_schema(claims_gated_schema())
+        .await
+        .expect("start test server");
     let schema = claims_gated_schema();
 
     // Admin creates a room with join_code = "secret-123"

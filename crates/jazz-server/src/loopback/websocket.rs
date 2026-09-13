@@ -648,28 +648,30 @@ async fn service_connection(
                         let Ok(frames) = decode_frame_batch(&batch) else {
                             break;
                         };
-                        let mut shell = shell.lock().await;
-                        if shell.receive_frames(session, frames).is_err() || shell.tick().is_err() {
-                            break;
-                        }
-                        match shell.take_frames(session) {
-                            Ok(frames) if !frames.is_empty() => {
-                                let Ok(batches) = encode_frame_batches(&frames) else {
-                                    break;
-                                };
-                                let mut send_failed = false;
-                                for batch in batches {
-                                    if socket.send(Message::Binary(batch.into())).await.is_err() {
-                                        send_failed = true;
-                                        break;
-                                    }
-                                }
-                                if send_failed {
+                        let frames = {
+                            let mut shell = shell.lock().await;
+                            if shell.receive_frames(session, frames).is_err() || shell.tick().is_err() {
+                                break;
+                            }
+                            match shell.take_frames(session) {
+                                Ok(frames) => frames,
+                                Err(_) => break,
+                            }
+                        };
+                        if !frames.is_empty() {
+                            let Ok(batches) = encode_frame_batches(&frames) else {
+                                break;
+                            };
+                            let mut send_failed = false;
+                            for batch in batches {
+                                if socket.send(Message::Binary(batch.into())).await.is_err() {
+                                    send_failed = true;
                                     break;
                                 }
                             }
-                            Ok(_) => {}
-                            Err(_) => break,
+                            if send_failed {
+                                break;
+                            }
                         }
                     }
                     Ok(Message::Close(_)) => break,

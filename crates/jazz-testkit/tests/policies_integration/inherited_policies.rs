@@ -412,7 +412,8 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -571,7 +572,8 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice_writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -746,7 +748,8 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -956,7 +959,8 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1200,7 +1204,8 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1354,7 +1359,8 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1532,7 +1538,8 @@ async fn inherited_multiple_folder_paths_compose_with_or_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,
@@ -1740,7 +1747,8 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,
@@ -1862,7 +1870,8 @@ async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "files", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
     let dave = connect_ready_user(&server, &schema, super::DAVE_ID, "files", READY_TIMEOUT).await;
@@ -1931,7 +1940,8 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "files", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
 
@@ -2050,7 +2060,8 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "files", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
 
@@ -2184,7 +2195,8 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "file_parts", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,
@@ -2297,7 +2309,8 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
 
@@ -2420,7 +2433,8 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
 
@@ -2543,7 +2557,8 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
 
@@ -2663,7 +2678,9 @@ async fn inherits_select_denies_when_parent_operation_policy_is_missing_inner() 
                 .policies(documents_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -2752,7 +2769,9 @@ async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permi
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -2830,7 +2849,9 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin =
         connect_ready_client(&server, &schema, "inherits-admin", "files", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
@@ -2908,7 +2929,9 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_i
                 .policies(folders_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin =
         connect_ready_client(&server, &schema, "inherits-admin", "folders", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "folders", READY_TIMEOUT).await;

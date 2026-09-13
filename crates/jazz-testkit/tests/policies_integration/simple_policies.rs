@@ -165,7 +165,8 @@ async fn insert_policies_boolean_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -276,7 +277,8 @@ async fn select_policies_boolean_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -395,7 +397,8 @@ async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let writer =
         jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::ALICE_ID))
             .await
@@ -497,7 +500,8 @@ async fn select_policies_filter_out_archived_rows_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice =
         connect_ready_user(&server, &schema, super::ALICE_ID, table_name, READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, table_name, READY_TIMEOUT).await;
@@ -574,7 +578,8 @@ async fn update_policies_boolean_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -703,7 +708,8 @@ async fn delete_policies_boolean_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -835,7 +841,8 @@ async fn archived_state_policies_gate_insert_update_and_delete_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice =
         connect_ready_user(&server, &schema, super::ALICE_ID, table_name, READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, table_name, READY_TIMEOUT).await;
@@ -1002,7 +1009,8 @@ async fn select_policies_scalar_comparators_filter_rows_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -1257,7 +1265,8 @@ async fn null_predicates_on_nullable_columns_gate_reads_and_writes_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -1510,7 +1519,8 @@ async fn row_level_contains_and_in_list_policies_filter_rows_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -1665,7 +1675,8 @@ async fn read_and_write_policies_remain_independent_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -1832,7 +1843,8 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice =
         connect_ready_user(&server, &schema, super::ALICE_ID, table_name, READY_TIMEOUT).await;
     let observer = connect_ready_user(
@@ -2050,7 +2062,8 @@ async fn admin_secret_ws_client_bypasses_row_select_policies_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
 
     let alice =
         connect_ready_user(&server, &schema, super::ALICE_ID, table_name, READY_TIMEOUT).await;

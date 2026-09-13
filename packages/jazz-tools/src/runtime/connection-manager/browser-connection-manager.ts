@@ -1,8 +1,7 @@
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import type { DurabilityTier, JazzClient } from "../client.js";
+import type { DurabilityTier, JazzClient, AuthUpdate } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
-import type { Session } from "../context.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { BrowserForegroundNodeLease, BrowserWorkerConnection } from "../runtime-source.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
@@ -37,7 +36,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private initialExplicitOfflineStateKnown = false;
   private connectionError: Error | null = null;
   private disconnected = false;
-  private readonly reconnectWaiters = new Set<() => void>();
+  private readonly reconnectWaiters = new Set<(error?: Error) => void>();
   private transportTransition: Promise<void> = Promise.resolve();
   private storageReset: Promise<void> | null = null;
   private storageResetError: Error | null = null;
@@ -165,6 +164,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.connection !== connection) return;
     this.connectionError = error;
     this.recoverableConnectionFailure = true;
+    this.rejectReconnectWaiters(error);
   }
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
@@ -242,17 +242,24 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (signal?.aborted) return;
     if (!this.disconnected) {
       await this.transportTransition;
+      if (this.connectionError) throw this.connectionError;
       if (!this.disconnected) return;
     }
-    await new Promise<void>((resolve) => {
-      const finish = () => {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
         this.reconnectWaiters.delete(finish);
         signal?.removeEventListener("abort", onAbort);
-        resolve();
+        if (error) reject(error);
+        else resolve();
       };
       const onAbort = () => finish();
       signal?.addEventListener("abort", onAbort, { once: true });
       this.reconnectWaiters.add(finish);
+      if (signal?.aborted) finish();
+      else if (this.connectionError) finish(this.connectionError);
     });
   }
 
@@ -290,20 +297,19 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (!this.disconnected) this.resolveReconnectWaiters();
   }
 
-  override updateAuth(auth: {
-    jwtToken?: string;
-    cookieSession?: Session;
-    trustedReservedSession?: Session;
-  }): void {
+  override updateAuth(auth: AuthUpdate): void {
     // The persistent root belongs to the principal that opened it. Check
     // before mutating Db config or forwarding anything to the worker, so a
     // rejected Alice -> Bob switch cannot expose Alice's local rows to Bob.
-    const nextConfig = { ...this.host.config, ...auth } as DbForConnection["config"];
+    const nextConfig = {
+      ...this.host.config,
+      ...(auth.mode === "bearer"
+        ? { jwtToken: auth.jwtToken, cookieSession: undefined }
+        : { jwtToken: undefined, cookieSession: auth.cookieSession }),
+    } as DbForConnection["config"];
     setTrustedReservedSession(
       nextConfig,
-      "trustedReservedSession" in auth
-        ? auth.trustedReservedSession
-        : getTrustedReservedSession(this.host.config),
+      auth.mode === "bearer" ? auth.trustedReservedSession : undefined,
     );
     assertBrowserStorageOwnerUnchanged(this.host.config, nextConfig);
     super.updateAuth(auth);
@@ -530,7 +536,13 @@ export class BrowserConnectionManager extends ConnectionManager {
   private resolveReconnectWaiters(): void {
     const waiters = [...this.reconnectWaiters];
     this.reconnectWaiters.clear();
-    for (const resolve of waiters) resolve();
+    for (const settle of waiters) settle();
+  }
+
+  private rejectReconnectWaiters(error: Error): void {
+    const waiters = [...this.reconnectWaiters];
+    this.reconnectWaiters.clear();
+    for (const settle of waiters) settle(error);
   }
 
   /**

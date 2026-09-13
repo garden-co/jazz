@@ -164,7 +164,9 @@ local_tokio_test! {
 /// subscription result.
 async fn subscribe_all_only_returns_rows_that_match_query() {
     let schema = subscription_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -613,7 +615,9 @@ async fn subscribe_all_supports_condition_filters() {
     }
 
     let schema = subscription_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())

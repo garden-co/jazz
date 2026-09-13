@@ -65,7 +65,9 @@ async fn rebac_recursive_inherits_allows_ancestor_access() {
 
 async fn rebac_recursive_inherits_allows_ancestor_access_inner() {
     let schema = recursive_folders_schema(None);
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -110,7 +112,9 @@ async fn rebac_recursive_inherits_respects_depth_override() {
 
 async fn rebac_recursive_inherits_respects_depth_override_inner() {
     let schema = recursive_folders_schema(Some(1));
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -146,7 +150,9 @@ async fn rebac_recursive_inherits_respects_depth_override_inner() {
 
 async fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     let schema = recursive_folders_schema(max_depth);
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,

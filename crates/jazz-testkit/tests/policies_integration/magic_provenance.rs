@@ -25,7 +25,9 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors() {
 
 async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner() {
     let schema = provenance_notes_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client =
         connect_ready_client(&server, &schema, "provenance-admin", "notes", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
@@ -174,7 +176,9 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override() {
 
 async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
     let schema = provenance_notes_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client =
         connect_ready_client(&server, &schema, "provenance-admin", "notes", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
@@ -263,7 +267,9 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows() {
 
 async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
     let schema = authorship_permissions_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client =
         connect_ready_client(&server, &schema, "provenance-admin", "notes", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;

@@ -85,7 +85,7 @@ async fn cold_old_schema_id_query_reads_new_array_column_row() {
                     default: Value::Array(Vec::new()),
                 }]),
             );
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             push_catalogue_in_memory(
                 server.server_state(),
                 server.app_id(),
@@ -652,13 +652,18 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core() {
 
 async fn edge_catalogue_http_reads_and_writes_forward_to_real_core_impl() {
     let app_id = JazzServer::default_app_id();
-    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let core = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start test server");
     let edge = JazzServer::builder()
         .with_app_id(app_id)
         .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let schema = schema_v1();
     let schema_hash = SchemaHash::compute(&schema).to_string();
     let client = reqwest::Client::new();
@@ -788,19 +793,25 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
 async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
     let app_id = JazzServer::default_app_id();
     let schema = schema_v1();
-    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let core = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start test server");
     let edge_us = JazzServer::builder()
         .with_app_id(app_id)
         .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let edge_eu = JazzServer::builder()
         .with_app_id(app_id)
         .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
-        .await;
+        .await
+        .expect("start test server");
 
     seed_schema_catalogue(&edge_us, &schema).await;
     publish_allow_all_permissions(&edge_us.base_url(), app_id, edge_us.admin_secret(), &schema)
@@ -869,7 +880,11 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
     let v1_schema = schema_v1();
     let v2_schema = schema_v2();
     let edge_data_dir = TempDir::new().expect("create persistent edge data directory");
-    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let core = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start test server");
 
     seed_schema_catalogue(&core, &v1_schema).await;
     publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &v1_schema).await;
@@ -881,7 +896,8 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
         .with_data_dir(edge_data_dir.path())
         .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice_v1 = TestingClient::builder()
         .with_server(&edge_before_restart)
         .with_schema(v1_schema.clone())
@@ -903,7 +919,8 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
         .with_data_dir(edge_data_dir.path())
         .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice_v2 = TestingClient::builder()
         .with_server(&edge_after_restart)
         .with_schema(v2_schema.clone())
@@ -963,7 +980,11 @@ async fn persistent_dynamic_edge_reopens_catalogue_for_trusted_client_while_regi
     let app_id = JazzServer::default_app_id();
     let schema = schema_v1();
     let edge_data_dir = TempDir::new().expect("create persistent edge data directory");
-    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let core = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start test server");
     let unavailable_core_url = core.base_url();
     seed_schema_catalogue(&core, &schema).await;
     publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &schema).await;
@@ -975,7 +996,8 @@ async fn persistent_dynamic_edge_reopens_catalogue_for_trusted_client_while_regi
         .with_data_dir(edge_data_dir.path())
         .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let warmup = TestingClient::builder()
         .with_server(&edge_before_shutdown)
         .with_schema(schema.clone())
@@ -1004,7 +1026,8 @@ async fn persistent_dynamic_edge_reopens_catalogue_for_trusted_client_while_regi
         .with_data_dir(edge_data_dir.path())
         .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     returning_context.server_url = edge_after_restart.base_url();
     let public_error = match jazz_testkit::connect(returning_context).await {
         Err(error) => error,
@@ -1061,7 +1084,11 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge()
 async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_impl() {
     let app_id = JazzServer::default_app_id();
     let schema = schema_v1();
-    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let core = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start test server");
     seed_schema_catalogue(&core, &schema).await;
     let allow_head =
         publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &schema).await;
@@ -1070,13 +1097,15 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let edge_eu = JazzServer::builder()
         .with_app_id(app_id)
         .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
-        .await;
+        .await
+        .expect("start test server");
 
     let alice = TestingClient::builder()
         .with_server(&edge_us)
@@ -1209,13 +1238,18 @@ async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_ed
 
 async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_edge_impl() {
     let app_id = JazzServer::default_app_id();
-    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let core = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start test server");
     let edge = JazzServer::builder()
         .with_app_id(app_id)
         .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let v1_schema = schema_v1();
     let v2_schema = schema_v2();
     let v1_hash = SchemaHash::compute(&v1_schema).to_string();
@@ -1326,7 +1360,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
 }
 
 async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
 
@@ -1407,7 +1441,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() 
 }
 
 async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
     let query = jazz::query::Query::from("users");
@@ -1574,7 +1608,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
 }
 
 async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
     let query = jazz::query::Query::from("users");
@@ -1657,7 +1691,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
 
 async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_retightening_impl()
 {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let schema = schema_v1();
     seed_schema_catalogue(&server, &schema).await;
     let query = jazz::query::Query::from("users");
@@ -1769,7 +1803,7 @@ async fn column_addition_new_client_can_read_old_rows() {
 }
 
 async fn column_addition_new_client_can_read_old_rows_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let target_schema = schema_v2();
 
     // === Push v2 schema + lens to server through the real sync pipeline ===
@@ -1866,7 +1900,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added() {
 }
 
 async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = schema_v1();
     let v2_schema = schema_v2();
 
@@ -1986,7 +2020,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows() {
 }
 
 async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v3_schema = schema_v3();
 
     push_catalogue_in_memory(
@@ -2137,7 +2171,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows() {
 }
 
 async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = rename_chain_schema_v1();
     let v2_schema = rename_chain_schema_v2();
     let v3_schema = rename_chain_schema_v3();
@@ -2220,7 +2254,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows() {
 }
 
 async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = rename_chain_schema_v1();
     let v2_schema = rename_chain_schema_v2();
     let v3_schema = rename_chain_schema_v3();
@@ -2300,7 +2334,7 @@ async fn table_rename_new_client_can_read_old_rows() {
 }
 
 async fn table_rename_new_client_can_read_old_rows_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
@@ -2375,7 +2409,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates() {
 }
 
 async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
@@ -2488,7 +2522,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
 }
 
 async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
@@ -2603,7 +2637,7 @@ async fn table_rename_update_and_delete_copy_on_write() {
 }
 
 async fn table_rename_update_and_delete_copy_on_write_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_copy_on_write_schema_v2();
 
@@ -2733,7 +2767,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch() {
 }
 
 async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
 
@@ -2843,7 +2877,7 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
 }
 
 async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
 
@@ -2945,7 +2979,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
 
 async fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform_impl()
 {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let legacy_schema = legacy_join_provenance_schema();
     let current_schema = current_join_provenance_permission_schema();
 
@@ -3137,7 +3171,7 @@ async fn multi_hop_table_renames_and_column_rename() {
 }
 
 async fn multi_hop_table_renames_and_column_rename_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = multi_hop_table_rename_schema_v1();
     let v2_schema = multi_hop_table_rename_schema_v2();
     let v3_schema = multi_hop_table_rename_schema_v3();
@@ -3278,7 +3312,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows() {
 }
 
 async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let v1_schema = removed_readded_schema_v1();
     let v2_schema = removed_readded_schema_v2();
     let v3_schema = removed_readded_schema_v3();
@@ -3396,7 +3430,7 @@ async fn column_addition_old_client_can_read_new_rows() {
 }
 
 async fn column_addition_old_client_can_read_new_rows_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let target_schema = schema_v2();
 
     // Seed the server with both schemas and the v1<->v2 lens before clients connect.
@@ -3488,7 +3522,7 @@ async fn keeps_authorization_through_v1_head() {
 }
 
 async fn keeps_authorization_through_v1_head_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     let query = jazz::query::Query::from("users");
     let v1_schema = schema_v1();
     push_catalogue_in_memory(

@@ -73,7 +73,9 @@ fn unique_user_id(prefix: &str) -> String {
 }
 
 async fn start_two_clients(schema: Schema) -> (JazzServer, JazzClient, JazzClient) {
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice_id = unique_user_id("alice-transactions");
     let bob_id = unique_user_id("bob-transactions");
     let alice = connect_user(&server, schema.clone(), &alice_id).await;
@@ -407,7 +409,9 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
 local_tokio_test! {
 async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction() {
     let schema = todo_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let user_id = unique_user_id("transaction-update-inserted-row");
     let client = connect_user(&server, schema, &user_id).await;
     let tx = client
@@ -458,7 +462,9 @@ async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction(
 local_tokio_test! {
 async fn multiple_updates_to_same_row_in_transaction_compose() {
     let schema = todo_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let user_id = unique_user_id("multiple-updates-compose");
     let client = connect_user(&server, schema, &user_id).await;
     let todo_id = insert_visible_todo(&client, "draft", false).await;
@@ -512,7 +518,9 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
 local_tokio_test! {
 async fn multiple_writes_in_one_transaction_settle_atomically() {
     let schema = todo_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let user_id = unique_user_id("multiple-writes-one-transaction");
     let client = connect_user(&server, schema, &user_id).await;
     let tx = client
@@ -723,7 +731,9 @@ async fn wait_for_transaction_errors_for_unattainable_durability_tier() {
 local_tokio_test! {
 async fn global_wait_after_over_one_mib_websocket_import_settles() {
     let schema = todo_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_user(&server, schema, &unique_user_id("bulk-global-wait")).await;
 
     let (target_id, _, _) = client

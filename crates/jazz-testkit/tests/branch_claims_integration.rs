@@ -132,7 +132,9 @@ async fn query_applies_claims_select_policy() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = branch_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -226,7 +228,9 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = numeric_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -323,7 +327,9 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = role_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -450,7 +456,9 @@ async fn subscription_matches_claims_select_query() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = branch_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -596,7 +604,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = admin_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone()).await.expect("start test server");
 
             let writer = TestingClient::builder()
                 .with_server(&server)
@@ -696,7 +704,9 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = branch_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -853,7 +863,9 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = numeric_claims_write_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let bigint_claim_user = TestingClient::builder()
                 .with_server(&server)

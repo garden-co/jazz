@@ -426,7 +426,8 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
     let dave =
@@ -570,7 +571,8 @@ async fn exists_rel_join_grants_and_denies_correctly_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
     let dave =
@@ -623,7 +625,8 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "join_users", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,
@@ -709,7 +712,8 @@ async fn exists_rel_hop_grants_and_denies_correctly_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
     let dave =
@@ -810,7 +814,8 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let alice_eng = connect_ready_claims(
         &server,
@@ -925,7 +930,8 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "chats", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "chats", READY_TIMEOUT).await;
     let observer =
@@ -1047,7 +1053,8 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,

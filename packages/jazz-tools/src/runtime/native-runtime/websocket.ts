@@ -252,6 +252,7 @@ export class WebSocketCarrier {
     });
     void waitForOpen(this.socket).then(
       () => {
+        if (this.closing) return;
         this.socket.send(
           encodeWebSocketPrelude(
             options.authJson ?? "{}",
@@ -339,6 +340,16 @@ export class WebSocketCarrier {
   close(): void {
     if (this.closing) return;
     this.closing = true;
+    this.reportTerminal(
+      {
+        code: "websocket_closed",
+        retry: "never",
+        message: "websocket closed before server hello",
+      },
+      new Error("websocket closed before server hello"),
+      false,
+      false,
+    );
     try {
       this.socket.close();
     } catch {
@@ -351,12 +362,13 @@ export class WebSocketCarrier {
     error: WireError,
     negotiationError = new Error(error.message),
     notifyError = true,
+    notifyTerminal = true,
   ): void {
-    if (this.closing || this.terminated) return;
+    if (this.terminated) return;
     this.terminated = true;
     this.rejectNegotiation(negotiationError);
     if (notifyError) this.onError?.(error);
-    this.onTerminal?.(error);
+    if (notifyTerminal) this.onTerminal?.(error);
   }
 
   private async handleMessage(data: unknown): Promise<void> {

@@ -132,7 +132,9 @@ async fn one_shot_query_is_served_once_without_installing_live_delivery() {
 
 async fn one_shot_query_is_served_once_without_installing_live_delivery_impl() {
     let schema = documents_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = connect_trusted(&server, &schema, ALICE_ID).await;
     let bob = connect_trusted(&server, &schema, BOB_ID).await;
     let carol = connect_trusted(&server, &schema, CAROL_ID).await;
@@ -250,7 +252,9 @@ async fn dropped_subscription_stops_delivery_and_resubscribes_cleanly() {
 
 async fn dropped_subscription_stops_delivery_and_resubscribes_cleanly_impl() {
     let schema = documents_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = connect_trusted(&server, &schema, ALICE_ID).await;
     let bob = connect_trusted(&server, &schema, BOB_ID).await;
     let carol = connect_trusted(&server, &schema, CAROL_ID).await;
@@ -378,7 +382,9 @@ async fn rapid_drop_and_resubscribe_keeps_a_live_subscription() {
 
 async fn rapid_drop_and_resubscribe_keeps_a_live_subscription_impl() {
     let schema = documents_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = connect_trusted(&server, &schema, ALICE_ID).await;
     let bob = connect_trusted(&server, &schema, BOB_ID).await;
 
@@ -449,7 +455,9 @@ async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscri
 
 async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscribers_impl() {
     let schema = membership_documents_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
 
     let alice =
         support::connect_ready_client(&server, &schema, ALICE_ID, "documents", READY_TIMEOUT).await;
@@ -636,7 +644,9 @@ async fn deleting_a_subscribed_row_emits_a_removal_delta() {
 
 async fn deleting_a_subscribed_row_emits_a_removal_delta_impl() {
     let schema = documents_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = connect_trusted(&server, &schema, ALICE_ID).await;
     let bob = connect_trusted(&server, &schema, BOB_ID).await;
 

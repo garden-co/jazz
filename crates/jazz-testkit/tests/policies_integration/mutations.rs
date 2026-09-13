@@ -57,7 +57,9 @@ async fn rebac_update_denied_by_using_policy_inner() {
     let schema = SchemaBuilder::new()
         .table(docs_table.policies(docs_policies))
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,
@@ -188,7 +190,9 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,

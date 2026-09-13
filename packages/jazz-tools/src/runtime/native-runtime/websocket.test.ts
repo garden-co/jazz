@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { BrowserWebSocket } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
@@ -704,6 +704,61 @@ describe("websocket frame carrier", () => {
     expect(delivered).toEqual([]);
     expect(socket!.closed).toBe(true);
   });
+  it("rejects readiness when intentionally closed before server hello and ignores late socket events", async () => {
+    vi.useFakeTimers();
+    try {
+      let socket: MessageWebSocket | undefined;
+      const errors: unknown[] = [];
+      const terminals: unknown[] = [];
+      const carrier = new WebSocketCarrier({
+        endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+        peerIdentity: new Uint8Array(16),
+        onFrame: () => {},
+        onError: (error) => errors.push(error),
+        onTerminal: (error) => terminals.push(error),
+        WebSocket: class extends MessageWebSocket {
+          constructor(url: string) {
+            super(url, (created) => {
+              socket = created;
+            });
+          }
+        },
+      });
+
+      const ready = carrier.ready();
+      expect(carrier.ready()).toBe(ready);
+      carrier.close();
+      carrier.close();
+
+      const readiness = Promise.race([
+        ready.then(
+          () => ({ kind: "resolved" as const }),
+          (error) => ({ kind: "rejected" as const, error }),
+        ),
+        new Promise<{ kind: "timeout" }>((resolve) => {
+          setTimeout(() => resolve({ kind: "timeout" }), 100);
+        }),
+      ]);
+      await vi.advanceTimersByTimeAsync(100);
+      const result = await readiness;
+      expect(result.kind).toBe("rejected");
+      if (result.kind === "rejected") {
+        expect(result.error).toBeInstanceOf(Error);
+      }
+
+      socket!.emitError(new Error("late transport error"));
+      socket!.emitClose({ code: 1000, reason: "intentional" });
+      socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+      await Promise.resolve();
+
+      expect(socket!.closeCalls).toBe(1);
+      expect(socket!.closed).toBe(true);
+      expect(errors).toEqual([]);
+      expect(terminals).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("surfaces an authentication failure before server hello without negotiating", async () => {
     let socket: MessageWebSocket | undefined;
@@ -1017,6 +1072,8 @@ class MessageWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
   private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
+  private readonly errorListeners: Array<(event: unknown) => void> = [];
+  private readonly closeListeners: Array<(event: { code: number; reason: string }) => void> = [];
 
   constructor(
     readonly url: string,
@@ -1028,8 +1085,10 @@ class MessageWebSocket {
   send(_data: Uint8Array | string): void {}
 
   closed = false;
+  closeCalls = 0;
 
   close(): void {
+    this.closeCalls += 1;
     this.closed = true;
   }
 
@@ -1043,11 +1102,23 @@ class MessageWebSocket {
   addEventListener(type: string, listener: unknown): void {
     if (type === "message") {
       this.messageListeners.push(listener as (event: { data: unknown }) => void);
+    } else if (type === "error") {
+      this.errorListeners.push(listener as (event: unknown) => void);
+    } else if (type === "close") {
+      this.closeListeners.push(listener as (event: { code: number; reason: string }) => void);
     }
   }
 
   emitMessage(data: Uint8Array): void {
     for (const listener of this.messageListeners) listener({ data });
+  }
+
+  emitError(event: unknown): void {
+    for (const listener of this.errorListeners) listener(event);
+  }
+
+  emitClose(event: { code: number; reason: string }): void {
+    for (const listener of this.closeListeners) listener(event);
   }
 }
 

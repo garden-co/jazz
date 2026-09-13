@@ -351,7 +351,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
 async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let v1 = client_v1_schema();
             let v2 = client_v2_schema();
 

@@ -3537,6 +3537,122 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn permissions_publication_reconciles_durable_lineage_after_runtime_bridge_failure() {
+        use jazz::tools::public_schema::SchemaHash;
+        use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
+
+        let v1 = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("old_title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build();
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(v1)
+            .build()
+            .await
+            .expect("build lineage retry server")
+            .state;
+
+        // Internal fault setup is necessary because the public admin routes
+        // persist and bridge together: they cannot deterministically stop
+        // between those operations. Simulate that failed bridge here, but
+        // observe recovery only through HTTP and real websocket Db clients.
+        state
+            .catalogue
+            .publish_schema(&state.catalogue_store, v2)
+            .expect("persist target schema");
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "todos".to_owned(),
+                old_name: "old_title".to_owned(),
+                new_name: "title".to_owned(),
+            },
+            false,
+        );
+        state
+            .catalogue
+            .publish_lens(
+                &state.catalogue_store,
+                &Lens::new(v1_hash, v2_hash, transform),
+            )
+            .expect("persist target lineage");
+
+        let addr = start_ws_test_server(state.clone()).await;
+        let policies = public_table_policies().with_select(PolicyExpr::eq_session(
+            "title",
+            vec![
+                "user".to_owned(),
+                "identity".to_owned(),
+                "subject".to_owned(),
+            ],
+        ));
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{addr}/apps/{}/admin/permissions",
+                state.app_id
+            ))
+            .header("X-Jazz-Admin-Secret", "admin-secret")
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::json!({
+                    "schemaHash": v2_hash.to_string(),
+                    "permissions": { "todos": policies },
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .expect("publish permissions through admin route");
+        let status = response.status();
+        let body = response.text().await.expect("permissions response body");
+        assert_eq!(status, reqwest::StatusCode::CREATED, "{body}");
+
+        let reader_identity = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let (_, visible_title) = issuer_and_subject(reader_identity);
+        let writer = TestClient::new(ws_public_schema_convert(), 0xa1, 0xa100).await;
+        let mut writer_ws =
+            open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0xa1; 16])).await;
+        let (_, writer_attachment) = settle_ws_todos_query(&writer, &mut writer_ws).await;
+        for title in [visible_title.as_str(), "hidden"] {
+            let write = writer.write_todo(title);
+            assert_eq!(
+                settle_ws_write(&writer, &mut writer_ws, &write).await.fate,
+                Fate::Accepted,
+                "the authority must accept the fixture row before the reader queries"
+            );
+        }
+        writer.detach_query(writer_attachment);
+
+        let reader = TestClient::new(ws_public_schema_convert(), 0xb2, 0xb200).await;
+        let mut reader_ws = open_negotiated_ws_session(addr, &state, reader_identity).await;
+        let (query, attachment) = settle_ws_todos_query(&reader, &mut reader_ws).await;
+        assert_eq!(
+            reader.edge_todo_titles(&query).await,
+            vec![visible_title],
+            "the recovered permissions must expose the allowed row and hide the other row"
+        );
+        reader.detach_query(attachment);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn ws_reader_query_covered_empty_when_existing_row_hidden_by_read_policy() {
         let schema = ws_private_docs_schema_convert();
         let state = ServerBuilder::new(AppId::random())

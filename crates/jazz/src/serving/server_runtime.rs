@@ -734,6 +734,15 @@ impl ServerRuntimeHandle {
             .await
     }
 
+    #[doc(hidden)]
+    pub async fn runtime_catalogue_contains_schema(
+        &self,
+        schema: SchemaVersionId,
+    ) -> Result<bool, String> {
+        self.run(move |shell| Ok(shell.runtime_catalogue_contains_schema(schema)))
+            .await
+    }
+
     /// Start a core runtime over the selected storage configuration.
     pub fn start_with_storage(
         schema: JazzSchema,

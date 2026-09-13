@@ -1,27 +1,35 @@
 use jazz_server::JazzServer;
-use jazz_testkit::connect_ready_client;
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_query};
 
 use super::*;
 
-/// Verifies that enforcing mode propagates into nested EXISTS_REL scans, so a
-/// missing explicit SELECT policy on a nested probed table denies the insert.
+/// Verifies that a nested EXISTS_REL policy survives public-schema conversion
+/// and authorises a correlated insert when its scanned tables expose SELECT.
 #[tokio::test]
-#[ignore = "#1759: schema conversion does not support nested ExistsRel inside an EXISTS policy"]
-async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel() {
+async fn local_insert_with_nested_exists_rel_policy_allows_correlated_insert() {
     tokio::task::LocalSet::new()
-        .run_until(
-            local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel_inner(),
-        )
+        .run_until(local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inner(true))
         .await;
 }
 
-async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exists_rel_inner() {
+/// Alice's correlated write can use private policy evidence, without exposing it.
+#[tokio::test]
+async fn nested_exists_rel_insert_reads_private_raw_evidence() {
+    tokio::task::LocalSet::new()
+        .run_until(local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inner(false))
+        .await;
+}
+
+async fn local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inner(
+    expose_evidence: bool,
+) {
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::all_of([
+                pe::eq("id", pe::session(vec!["__jazz_outer_row", "admin_id"])),
                 pe::eq("user_id", pe::session(vec!["claims", "sub"])),
                 pe::exists(pe::table("team_memberships").where_(pe::rel::all_of([
-                    pe::rel::eq_outer("team_id", "team_id"),
+                    pe::rel::eq_outer("id", "membership_id"),
                     pe::rel::eq_session("user_id", vec!["claims", "sub"]),
                 ]))),
             ]))));
@@ -30,20 +38,36 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
         .table(
             TableSchema::builder("admins")
                 .column("user_id", ColumnType::Text)
-                .column("team_id", ColumnType::Text),
+                .policies(permissions(|p| {
+                    if expose_evidence {
+                        p.allow_read().always();
+                    } else {
+                        p.allow_insert().always();
+                    }
+                })),
         )
         .table(
             TableSchema::builder("team_memberships")
-                .column("team_id", ColumnType::Text)
-                .column("user_id", ColumnType::Text),
+                .column("user_id", ColumnType::Text)
+                .policies(permissions(|p| {
+                    if expose_evidence {
+                        p.allow_read().always();
+                    } else {
+                        p.allow_insert().always();
+                    }
+                })),
         )
         .table(
             TableSchema::builder("projects")
                 .column("name", ColumnType::Text)
+                .fk_column("admin_id", "admins")
+                .fk_column("membership_id", "team_memberships")
                 .policies(projects_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,
@@ -53,27 +77,264 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
     )
     .await;
 
-    client
-        .insert(
-            "admins",
-            crate::row_input!("user_id" => super::ALICE_ID, "team_id" => "team-a"),
-        )
-        .expect("seed admin row");
-    client
+    let admin_id = client
+        .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
+        .expect("seed admin row")
+        .0;
+    let membership_id = client
         .insert(
             "team_memberships",
-            crate::row_input!("team_id" => "team-a", "user_id" => super::ALICE_ID),
+            crate::row_input!("user_id" => super::ALICE_ID),
         )
-        .expect("seed membership row");
+        .expect("seed membership row")
+        .0;
 
-    let err = client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
-        .insert("projects", crate::row_input!("name" => "alice project"))
-        .expect_err(
-            "enforcing mode should deny nested EXISTS_REL checks when the probed table lacks an explicit SELECT policy",
-        );
-    assert_client_policy_denied(err, "projects", Operation::Insert);
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
+    let transaction = alice
+        .insert(
+            "projects",
+            crate::row_input!(
+                "name" => "alice project",
+                "admin_id" => admin_id,
+                "membership_id" => membership_id,
+            ),
+        )
+        .expect("insert should be accepted optimistically")
+        .2
+        .expect("insert should be pending server policy evaluation");
+    alice
+        .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+        .await
+        .expect("nested EXISTS_REL policy should authorise the correlated insert");
 
+    if !expose_evidence {
+        for table in ["admins", "team_memberships"] {
+            wait_for_query(
+                &alice,
+                Query::from(table),
+                Some(jazz::tools::DurabilityTier::EdgeServer),
+                Duration::from_secs(5),
+                "policy evidence stays private",
+                |rows| rows.is_empty().then_some(()),
+            )
+            .await;
+        }
+    }
+    alice.shutdown().await.expect("shutdown Alice client");
+    client.shutdown().await.expect("shutdown client");
+    server.shutdown().await;
+}
+
+/// Verifies UPDATE USING enforcement for a correlated EXISTS_REL policy.
+#[tokio::test]
+async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
+    tokio::task::LocalSet::new()
+        .run_until(local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner())
+        .await;
+}
+
+async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner() {
+    let protected_policies = permissions(|p| {
+        p.allow_read().always();
+        p.allow_update()
+            .where_old(pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                pe::rel::eq_outer("id", "admin_id"),
+                pe::rel::eq_session("user_id", vec!["claims", "sub"]),
+            ]))))
+            .where_new(pe::always());
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(permissions(|p| p.allow_read().always())),
+        )
+        .table(
+            TableSchema::builder("protected")
+                .column("data", ColumnType::Text)
+                .fk_column("admin_id", "admins")
+                .policies(protected_policies),
+        )
+        .build();
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
+    let client = connect_ready_client(
+        &server,
+        &schema,
+        "exists-rel-admin",
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let admin_id = client
+        .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
+        .expect("seed admin row")
+        .0;
+    let protected = client
+        .insert(
+            "protected",
+            crate::row_input!("data" => "initial", "admin_id" => admin_id),
+        )
+        .expect("seed protected row")
+        .0;
+
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let bob_transaction = bob
+        .update(
+            protected,
+            vec![("data".into(), Value::Text("bob update".into()))],
+        )
+        .expect("non-admin update should be accepted optimistically")
+        .expect("non-admin update should be pending server policy evaluation");
+    assert!(
+        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .is_err(),
+        "non-admin update should be denied"
+    );
+
+    let alice_transaction = alice
+        .update(
+            protected,
+            vec![("data".into(), Value::Text("alice update".into()))],
+        )
+        .expect("admin update should be accepted optimistically");
+    if let Some(transaction) = alice_transaction {
+        alice
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .expect("admin update should be allowed");
+    }
+
+    bob.shutdown().await.expect("shutdown Bob client");
+    alice.shutdown().await.expect("shutdown Alice client");
+    client.shutdown().await.expect("shutdown client");
+    server.shutdown().await;
+}
+
+/// Verifies SELECT enforcement for a correlated EXISTS_REL policy traversing
+/// from the protected outer row through a declared foreign key in reverse.
+#[tokio::test]
+async fn local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non_admin() {
+    tokio::task::LocalSet::new()
+        .run_until(
+            local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non_admin_inner(),
+        )
+        .await;
+}
+
+async fn local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non_admin_inner() {
+    let admins_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::exists(pe::table("protected").where_(pe::rel::all_of(
+                [
+                    pe::rel::eq_outer("admin_id", "id"),
+                    pe::rel::eq_session("owner_id", vec!["claims", "sub"]),
+                ],
+            ))));
+    });
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(admins_policies),
+        )
+        .table(
+            TableSchema::builder("protected")
+                .column("owner_id", ColumnType::Text)
+                .fk_column("admin_id", "admins")
+                .policies(permissions(|p| p.allow_read().always())),
+        )
+        .build();
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
+    let client = connect_ready_client(
+        &server,
+        &schema,
+        "exists-rel-admin",
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let admin_id = client
+        .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
+        .expect("seed admin row")
+        .0;
+    client
+        .insert(
+            "protected",
+            crate::row_input!("owner_id" => super::ALICE_ID, "admin_id" => admin_id),
+        )
+        .expect("seed protected row");
+
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "admins",
+        Duration::from_secs(30),
+    )
+    .await;
+    wait_for_query(
+        &alice,
+        Query::from("admins")
+            .filter(eq(col("id"), lit(*admin_id.uuid())))
+            .select(["user_id"]),
+        Some(jazz::tools::DurabilityTier::EdgeServer),
+        Duration::from_secs(5),
+        "Alice admin row becomes visible",
+        |rows| (rows == [(admin_id, vec![Value::Text(super::ALICE_ID.into())])]).then_some(()),
+    )
+    .await;
+
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "admins",
+        Duration::from_secs(30),
+    )
+    .await;
+    let bob_rows = bob
+        .query_with_read_tier(
+            Query::from("admins")
+                .filter(eq(col("id"), lit(*admin_id.uuid())))
+                .select(["user_id"]),
+            jazz::tools::ReadTier::Remote,
+        )
+        .await
+        .expect("query admins as Bob");
+    assert!(bob_rows.is_empty(), "Bob should not see Alice's admin row");
+
+    bob.shutdown().await.expect("shutdown Bob client");
+    alice.shutdown().await.expect("shutdown Alice client");
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }
@@ -81,7 +342,6 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
 /// Verifies local INSERT enforcement for an EXISTS_REL admin policy: sessions
 /// without a matching admin row are denied and admins are allowed.
 #[tokio::test]
-#[ignore = "#1759: schema conversion requires ExistsRel policies to include an outer-row equality"]
 async fn local_insert_with_exists_rel_policy_denies_non_admin() {
     tokio::task::LocalSet::new()
         .run_until(local_insert_with_exists_rel_policy_denies_non_admin_inner())
@@ -90,9 +350,11 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin() {
 
 async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
     let projects_policies = permissions(|p| {
-        p.allow_insert().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
-        ));
+        p.allow_insert()
+            .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                pe::rel::eq_outer("id", "admin_id"),
+                pe::rel::eq_session("user_id", vec!["claims", "sub"]),
+            ]))));
     });
     let schema = SchemaBuilder::new()
         .table(
@@ -103,10 +365,13 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
         .table(
             TableSchema::builder("projects")
                 .column("name", ColumnType::Text)
+                .fk_column("admin_id", "admins")
                 .policies(projects_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,
@@ -116,21 +381,59 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
     )
     .await;
 
-    client
+    let admin_id = client
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
-        .expect("seed admin row");
+        .expect("seed admin row")
+        .0;
 
-    let bob_err = client
-        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
-        .insert("projects", crate::row_input!("name" => "bob project"))
-        .expect_err("non-admin insert should be denied");
-    assert_client_policy_denied(bob_err, "projects", Operation::Insert);
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
 
-    client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
-        .insert("projects", crate::row_input!("name" => "alice project"))
-        .expect("admin insert should be allowed");
+    let bob_transaction = bob
+        .insert(
+            "projects",
+            crate::row_input!("name" => "bob project", "admin_id" => admin_id),
+        )
+        .expect("non-admin insert should be accepted optimistically")
+        .2
+        .expect("non-admin insert should be pending server policy evaluation");
+    assert!(
+        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .is_err(),
+        "non-admin insert should be denied by the server"
+    );
 
+    let alice_transaction = alice
+        .insert(
+            "projects",
+            crate::row_input!("name" => "alice project", "admin_id" => admin_id),
+        )
+        .expect("admin insert should be accepted")
+        .2;
+    if let Some(transaction) = alice_transaction {
+        alice
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .expect("admin insert should be allowed by the server");
+    }
+
+    bob.shutdown().await.expect("shutdown Bob client");
+    alice.shutdown().await.expect("shutdown Alice client");
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }
@@ -161,7 +464,9 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
                 .policies(projects_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,
@@ -190,7 +495,6 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
 /// Verifies that relation predicates compare NULL literals correctly inside
 /// EXISTS_REL, allowing active rows and denying revoked rows.
 #[tokio::test]
-#[ignore = "#1759: schema conversion requires ExistsRel policies to include an outer-row equality"]
 async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
     tokio::task::LocalSet::new()
         .run_until(local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_inner())
@@ -201,6 +505,7 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                pe::rel::eq_outer("id", "admin_id"),
                 pe::rel::eq_session("user_id", vec!["claims", "sub"]),
                 pe::rel::eq_literal("revoked_at", Value::Null),
             ]))));
@@ -215,10 +520,13 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
         .table(
             TableSchema::builder("projects")
                 .column("name", ColumnType::Text)
+                .fk_column("admin_id", "admins")
                 .policies(projects_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,
@@ -228,30 +536,70 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
     )
     .await;
 
-    client
+    let alice_admin_id = client
         .insert(
             "admins",
             crate::row_input!("user_id" => super::ALICE_ID, "revoked_at" => Value::Null),
         )
-        .expect("seed active admin row");
-    client
+        .expect("seed active admin row")
+        .0;
+    let carol_admin_id = client
         .insert(
             "admins",
             crate::row_input!("user_id" => super::CAROL_ID, "revoked_at" => "2026-03-30T12:00:00Z"),
         )
-        .expect("seed revoked admin row");
+        .expect("seed revoked admin row")
+        .0;
 
-    client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
-        .insert("projects", crate::row_input!("name" => "alice project"))
-        .expect("active admin row should satisfy revoked_at = NULL predicate");
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
+    let carol = connect_ready_user(
+        &server,
+        &schema,
+        super::CAROL_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
 
-    let carol_err = client
-        .for_session(Session::new("urn:jazz:test", super::CAROL_ID))
-        .insert("projects", crate::row_input!("name" => "carol project"))
-        .expect_err("revoked admin row should fail revoked_at = NULL predicate");
-    assert_client_policy_denied(carol_err, "projects", Operation::Insert);
+    let alice_transaction = alice
+        .insert(
+            "projects",
+            crate::row_input!("name" => "alice project", "admin_id" => alice_admin_id),
+        )
+        .expect("active admin row should satisfy revoked_at = NULL predicate")
+        .2;
+    if let Some(transaction) = alice_transaction {
+        alice
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .expect("active admin row should satisfy revoked_at = NULL predicate");
+    }
 
+    let carol_transaction = carol
+        .insert(
+            "projects",
+            crate::row_input!("name" => "carol project", "admin_id" => carol_admin_id),
+        )
+        .expect("revoked admin insert should be accepted optimistically")
+        .2
+        .expect("revoked admin insert should be pending server policy evaluation");
+    assert!(
+        carol
+            .wait_for_transaction(carol_transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .is_err(),
+        "revoked admin row should fail revoked_at = NULL predicate"
+    );
+
+    alice.shutdown().await.expect("shutdown Alice client");
+    carol.shutdown().await.expect("shutdown Carol client");
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }
@@ -259,7 +607,6 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
 /// Verifies local DELETE enforcement for an EXISTS_REL admin policy, including
 /// that an already-deleted row cannot be deleted a second time.
 #[tokio::test]
-#[ignore = "#1759: schema conversion requires ExistsRel policies to include an outer-row equality"]
 async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
     tokio::task::LocalSet::new()
         .run_until(local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner())
@@ -268,9 +615,12 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin()
 
 async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner() {
     let protected_policies = permissions(|p| {
-        p.allow_delete().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
-        ));
+        p.allow_read().always();
+        p.allow_delete()
+            .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                pe::rel::eq_outer("id", "admin_id"),
+                pe::rel::eq_session("user_id", vec!["claims", "sub"]),
+            ]))));
     });
     let schema = SchemaBuilder::new()
         .table(
@@ -281,10 +631,13 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
         .table(
             TableSchema::builder("protected")
                 .column("data", ColumnType::Text)
+                .fk_column("admin_id", "admins")
                 .policies(protected_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client = connect_ready_client(
         &server,
         &schema,
@@ -294,30 +647,62 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
     )
     .await;
 
-    client
+    let admin_id = client
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
-        .expect("seed admin row");
+        .expect("seed admin row")
+        .0;
     let protected = client
-        .insert("protected", crate::row_input!("data" => "initial"))
+        .insert(
+            "protected",
+            crate::row_input!("data" => "initial", "admin_id" => admin_id),
+        )
         .expect("seed protected row")
         .0;
 
-    let bob_err = client
-        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
-        .delete(protected)
-        .expect_err("non-admin delete should be denied");
-    assert_client_policy_denied(bob_err, "protected", Operation::Delete);
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "protected",
+        Duration::from_secs(30),
+    )
+    .await;
 
-    client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
+    let bob_transaction = bob
         .delete(protected)
-        .expect("admin delete should be allowed");
-    let second_delete = client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
+        .expect("non-admin delete should be accepted optimistically")
+        .expect("non-admin delete should be pending server policy evaluation");
+    assert!(
+        bob.wait_for_transaction(bob_transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .is_err(),
+        "non-admin delete should be denied"
+    );
+
+    let alice_transaction = alice
+        .delete(protected)
+        .expect("admin delete should be accepted optimistically");
+    if let Some(transaction) = alice_transaction {
+        alice
+            .wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer)
+            .await
+            .expect("admin delete should be allowed");
+    }
+    let second_delete = alice
         .delete(protected)
         .expect_err("deleted row should not be deleted again");
     assert!(format!("{second_delete:?}").contains("row already deleted"));
 
+    bob.shutdown().await.expect("shutdown Bob client");
+    alice.shutdown().await.expect("shutdown Alice client");
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
 }
@@ -368,7 +753,9 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
                         })),
                 )
                 .build();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let admin = connect_ready_client(
                 &server,
                 &schema,
@@ -483,4 +870,61 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             server.shutdown().await;
         })
         .await;
+}
+
+/// Boolean clause order must not remove the owner check after an EXISTS-bearing OR.
+#[tokio::test]
+async fn exists_rel_disjunction_preserves_following_owner_predicate() {
+    tokio::task::LocalSet::new().run_until(async {
+        for owner_first in [false, true] {
+            let policies = permissions(|p| {
+                let owner = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
+                let alternative = pe::any_of([
+                    pe::eq("name", pe::literal("shortcut")),
+                    pe::exists(pe::table("admins").where_(pe::rel::all_of([
+                        pe::rel::eq_outer("id", "admin_id"),
+                        pe::rel::eq_session("user_id", vec!["claims", "sub"]),
+                    ]))),
+                ]);
+                p.allow_insert().where_(pe::all_of(if owner_first {
+                    [owner, alternative]
+                } else {
+                    [alternative, owner]
+                }));
+            });
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("admins")
+                    .column("user_id", ColumnType::Text)
+                    .policies(permissions(|p| p.allow_read().always())))
+                .table(TableSchema::builder("projects")
+                    .column("name", ColumnType::Text)
+                    .column("owner_id", ColumnType::Text)
+                    .fk_column("admin_id", "admins")
+                    .policies(policies))
+                .build();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let backend = connect_ready_client(&server, &schema, "boolean-policy-seed", "projects", Duration::from_secs(30)).await;
+            let admin_id = backend.insert("admins", crate::row_input!("user_id" => super::ALICE_ID)).expect("seed admin").0;
+            let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "projects", Duration::from_secs(30)).await;
+            for name in ["shortcut", "admin path"] {
+                for (owner, allowed) in [(super::ALICE_ID, true), (super::CAROL_ID, false)] {
+                    let result = alice.insert("projects", crate::row_input!("name" => name, "owner_id" => owner, "admin_id" => admin_id));
+                    match result {
+                        Ok((_, _, transaction)) => {
+                            let transaction = transaction.expect("write requires authority settlement");
+                            let settled = alice.wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer).await;
+                            assert_eq!(settled.is_ok(), allowed, "owner_first={owner_first}, name={name}, owner={owner}: {settled:?}");
+                        }
+                        Err(error) if !allowed => assert_client_policy_denied(error, "projects", Operation::Insert),
+                        Err(error) => panic!("allowed write rejected: {error:?}"),
+                    }
+                }
+            }
+            alice.shutdown().await.expect("shutdown Alice");
+            backend.shutdown().await.expect("shutdown backend");
+            server.shutdown().await;
+        }
+    }).await;
 }

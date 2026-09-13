@@ -126,6 +126,44 @@ function makeContext(): AppContext {
     jwtToken: "initial.jwt.token",
   };
 }
+function makeSyntheticJwt(version: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" }), "utf8").toString(
+    "base64url",
+  );
+  const payload = Buffer.from(
+    JSON.stringify({ iss: "https://issuer.example", sub: "alice", version }),
+    "utf8",
+  ).toString("base64url");
+  return `${header}.${payload}.signature`;
+}
+
+interface AuthTransportRuntime {
+  updateAuth: { mock: { calls: unknown[][] } };
+}
+
+function transportSnapshot(runtime: AuthTransportRuntime) {
+  const authJson = runtime.updateAuth.mock.calls.at(-1)?.[0];
+  if (typeof authJson !== "string") {
+    return { hasJwt: false, hasBackendSession: false, jwtVersion: undefined };
+  }
+  const payload = JSON.parse(authJson) as {
+    jwt_token?: unknown;
+    backend_session?: unknown;
+  };
+  const jwtToken = payload.jwt_token;
+  let jwtVersion: unknown;
+  if (typeof jwtToken === "string") {
+    const encodedPayload = jwtToken.split(".")[1];
+    if (encodedPayload) {
+      jwtVersion = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")).version;
+    }
+  }
+  return {
+    hasJwt: typeof jwtToken === "string",
+    hasBackendSession: "backend_session" in payload,
+    jwtVersion,
+  };
+}
 
 describe("JazzClient onAuthFailure wiring", () => {
   it("registers runtimeOptions.onAuthFailure with runtime.onAuthFailure on construction", () => {
@@ -509,6 +547,56 @@ describe("JazzClient.updateCookieSession", () => {
       backend_secret: "backend-secret",
       backend_session: refreshed,
     });
+  });
+  it("clears backend session credentials when switching from cookie to bearer auth", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, {
+      ...makeContext(),
+      backendSecret: "backend-secret",
+      cookieSession: {
+        user_id: "alice",
+        claims: { role: "reader" },
+        issuer: "https://issuer.example",
+        authMode: "external",
+      },
+    });
+    client.updateAuthToken(makeSyntheticJwt("bearer"));
+    const payload = JSON.parse(runtime.updateAuth.mock.calls.at(-1)![0] as string);
+    expect(payload).not.toHaveProperty("backend_session");
+    expect(payload.backend_secret).toBe("backend-secret");
+  });
+
+  it("keeps client transport credentials mode-exclusive across auth transitions", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as unknown as Runtime, makeContext());
+    const cookieB = {
+      user_id: "alice",
+      claims: {
+        version: "B",
+        auth_mode: "external",
+        subject: "alice",
+        issuer: "https://issuer.example",
+      },
+      issuer: "https://issuer.example",
+      authMode: "external" as const,
+    };
+    const cookieD = { ...cookieB, claims: { ...cookieB.claims, version: "D" } };
+
+    client.updateAuthToken(makeSyntheticJwt("A"));
+    const snapshots = [transportSnapshot(runtime)];
+    client.updateCookieSession(cookieB);
+    snapshots.push(transportSnapshot(runtime));
+    client.updateAuthToken(makeSyntheticJwt("C"));
+    snapshots.push(transportSnapshot(runtime));
+    client.updateCookieSession(cookieD);
+    snapshots.push(transportSnapshot(runtime));
+
+    expect(snapshots).toEqual([
+      { hasJwt: true, hasBackendSession: false, jwtVersion: "A" },
+      { hasJwt: false, hasBackendSession: false, jwtVersion: undefined },
+      { hasJwt: true, hasBackendSession: false, jwtVersion: "C" },
+      { hasJwt: false, hasBackendSession: false, jwtVersion: undefined },
+    ]);
   });
 });
 

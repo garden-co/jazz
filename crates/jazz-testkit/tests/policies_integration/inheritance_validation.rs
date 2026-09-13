@@ -14,7 +14,9 @@ async fn rebac_recursive_inherits_cycle_does_not_overgrant() {
 
 async fn rebac_recursive_inherits_cycle_does_not_overgrant_inner() {
     let schema = recursive_folders_schema(Some(10));
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(
         &server,
         &schema,

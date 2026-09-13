@@ -102,6 +102,7 @@ pub struct ServerCatalogue;
 pub(crate) trait CatalogueStore {
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError>;
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError>;
+    fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError>;
     fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError>;
     fn are_schema_hashes_connected(
         &self,
@@ -273,6 +274,7 @@ struct CatalogueIndex {
     schemas: HashMap<SchemaHash, Schema>,
     schema_published_at: HashMap<SchemaHash, u64>,
     lens_edges: HashSet<(SchemaHash, SchemaHash)>,
+    lenses: HashMap<(SchemaHash, SchemaHash), Lens>,
     permissions_head: Option<PermissionsHeadSummary>,
     permissions_bundles: HashMap<ObjectId, CurrentPermissionsSummary>,
 }
@@ -478,6 +480,7 @@ impl CatalogueIndex {
                 }
                 if !lens.is_draft() {
                     self.lens_edges.insert((source, target));
+                    self.lenses.insert((source, target), lens);
                 }
             }
             Some(kind) if kind == ObjectType::CataloguePermissionsBundle.as_str() => {
@@ -612,6 +615,11 @@ impl CatalogueStore for StoredCatalogue {
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.schemas.get(schema_hash).cloned())
+    }
+
+    fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
+        Ok(index.lenses.values().cloned().collect())
     }
 
     fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError> {
@@ -770,6 +778,13 @@ impl ServerCatalogue {
         schema_hash: &SchemaHash,
     ) -> Result<Option<Schema>, CatalogueError> {
         store.known_schema(schema_hash)
+    }
+
+    pub(crate) fn known_lenses(
+        &self,
+        store: &impl CatalogueStore,
+    ) -> Result<Vec<Lens>, CatalogueError> {
+        store.known_lenses()
     }
 
     pub(crate) fn schema_published_at(

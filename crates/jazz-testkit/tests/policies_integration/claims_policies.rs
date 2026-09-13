@@ -142,7 +142,8 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_claims(
         &server,
         &schema,
@@ -286,7 +287,8 @@ async fn admin_role_claims_reject_member_mutations_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_claims(
         &server,
         &schema,
@@ -467,7 +469,8 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_user(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
 
     let allowed_doc = create_title_document(&admin, table_name, "allowed").await;
@@ -639,7 +642,8 @@ async fn role_claim_presence_gates_row_visibility_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let seeder =
         connect_ready_client(&server, &schema, "seed-admin", table_name, READY_TIMEOUT).await;
     let admin = connect_ready_claims(
@@ -777,7 +781,8 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin =
         connect_ready_client(&server, &schema, "seed-admin", table_name, READY_TIMEOUT).await;
 
@@ -1014,7 +1019,8 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let seeder =
         connect_ready_client(&server, &schema, "seed-admin", null_table, READY_TIMEOUT).await;
     let explicit_null = connect_ready_claims(
@@ -1187,7 +1193,8 @@ async fn row_and_claim_predicates_compose_under_and_and_or_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let seeder =
         connect_ready_client(&server, &schema, "seed-admin", all_of_table, READY_TIMEOUT).await;
     let north_eng = connect_ready_claims(
