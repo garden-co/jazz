@@ -13,7 +13,7 @@ fn covered_input_rows(update: &SyncMessage) -> Vec<(RowUuid, TxId)> {
     };
     let facts = program_fact_adds;
     facts
-        .iter()
+        .added_rows().iter()
         .filter_map(|fact| match fact {
             input
                 if input.version_table.as_str() == "items"
@@ -82,7 +82,7 @@ fn maintained_enum_parameter_preserves_type_for_empty_and_populated_coverage() {
         let SyncMessage::ViewUpdate(payload) = &initial else {
             panic!("expected maintained view update");
         };
-        assert_eq!(payload.supporting_rows.len(), usize::from(wanted == 0));
+        assert_eq!(payload.supporting_rows.added_rows().len(), usize::from(wanted == 0));
         assert!(!payload.peer_payload_inventory.opening_pending);
 
         let next = accept_global(

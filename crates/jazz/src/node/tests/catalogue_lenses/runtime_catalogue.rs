@@ -379,7 +379,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
     };
     assert_eq!(
         program_fact_adds
-            .iter()
+            .added_rows().iter()
             .filter(|fact| matches!(
                 fact,
                 input

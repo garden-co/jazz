@@ -1560,7 +1560,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     assert_eq!(bundle.versions[0].row_uuid(), row(1));
     assert!(
         program_fact_adds
-            .iter()
+            .added_rows().iter()
             .any(|fact| { matches!(fact, input if input.row == row(1)) })
     );
     assert!(peer.shipped_complete_tx_payloads().is_empty());
@@ -1676,6 +1676,7 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
 
     let mut malformed_facts = program_fact_adds;
     let malformed_input = malformed_facts
+        .added_rows_mut()
         .first_mut()
         .expect("rehydration must disclose its root source input");
     malformed_input.row = row(2);
@@ -1857,7 +1858,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     assert_eq!(version_bundles[0].versions[0].row_uuid(), row(1));
     assert_eq!(
         program_fact_adds
-            .iter()
+            .added_rows().iter()
             .map(|input| (input.version_table.clone(), input.row, input.version.tx))
             .collect::<Vec<_>>(),
         vec![(

@@ -14,725 +14,11 @@ use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::node::query_engine::left_field;
 use crate::protocol::{
     CoveredInputEntry, KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry,
-    ProgramSourceCoverageEntry, ProgramSourceId, ResultMemberEntry, RowVersionRef,
-    RowVersionRefEntry, SupportingRow, VersionBundle, VersionBundleRef, VersionCarrier,
-    VersionRecord, build_version_carriers_from_singletons,
+    ProgramSourceCoverageEntry, ProgramSourceId, ResultMemberEntry, RowVersionRef, SupportingRow,
+    VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
+    build_version_carriers_from_singletons,
 };
 use std::borrow::Borrow;
-
-/// The two peer-safe variants in their existing ProgramFactEntry order. A
-/// borrowed input can come from a physical manifest or an already-owned fact;
-/// neither needs to construct an unchanged general-purpose proof enum.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum PeerSourceFactRef<'a> {
-    Coverage {
-        source: &'a ProgramSourceId,
-        complete: bool,
-    },
-    Input {
-        source: &'a ProgramSourceId,
-        version_table: &'a groove::Intern<String>,
-        row: RowUuid,
-        version: &'a RowVersionRefEntry,
-    },
-}
-
-#[cfg(test)]
-thread_local! {
-    static MATERIALIZED_PEER_SOURCE_FACTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-impl<'a> PeerSourceFactRef<'a> {
-    fn from_fact(fact: &'a ProgramFactEntry) -> Option<Self> {
-        match fact {
-            ProgramFactEntry::ProgramSourceCoverage(coverage) => Some(Self::Coverage {
-                source: &coverage.source,
-                complete: coverage.complete,
-            }),
-            ProgramFactEntry::CoveredInput(input) => Some(Self::Input {
-                source: &input.source,
-                version_table: &input.version_table,
-                row: input.source_row,
-                version: &input.version,
-            }),
-            _ => None,
-        }
-    }
-
-    fn into_owned(self) -> ProgramFactEntry {
-        #[cfg(test)]
-        MATERIALIZED_PEER_SOURCE_FACTS.with(|count| count.set(count.get() + 1));
-        match self {
-            Self::Coverage { source, complete } => {
-                ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
-                    source: source.clone(),
-                    complete,
-                })
-            }
-            Self::Input {
-                source,
-                version_table,
-                row,
-                version,
-            } => ProgramFactEntry::CoveredInput(CoveredInputEntry {
-                source: source.clone(),
-                version_table: *version_table,
-                source_row: row,
-                version: version.clone(),
-            }),
-        }
-    }
-}
-
-/// Validated physical rows plus their compiler-owned source occurrences.
-/// A retained instance is only a derived comparison cache for one receipt.
-#[derive(Debug)]
-pub(super) struct OrderedSupportingSnapshot {
-    rows: Vec<SupportingRow>,
-    sources: Vec<(
-        ProgramSourceId,
-        crate::ids::GlobalPhysicalTableId,
-        std::ops::Range<usize>,
-    )>,
-    fact_count: usize,
-}
-
-impl OrderedSupportingSnapshot {
-    fn new(
-        subscription: crate::protocol::SubscriptionKey,
-        sources: BTreeMap<crate::protocol::ProgramSourceId, crate::ids::GlobalPhysicalTableId>,
-        mut rows: Vec<crate::protocol::SupportingRow>,
-    ) -> Result<Self, Error> {
-        let mut ranges = sources
-            .values()
-            .map(|physical| (*physical, 0..0))
-            .collect::<BTreeMap<_, _>>();
-        rows.sort_unstable();
-        for (index, row) in rows.iter().enumerate() {
-            if !row.is_wire_valid() || (index > 0 && rows[index - 1] == *row) {
-                return Err(Error::InvalidAuthoritySourceClosure {
-                    subscription,
-                    transition: "invalid or duplicate supporting physical row version".to_owned(),
-                });
-            }
-            let Some(range) = ranges.get_mut(&row.physical_table) else {
-                return Err(Error::InvalidAuthoritySourceClosure {
-                    subscription,
-                    transition: "supporting row physical table is outside the query dataset"
-                        .to_owned(),
-                });
-            };
-            if range.start == range.end {
-                range.start = index;
-            }
-            range.end = index + 1;
-        }
-        let count = sources
-            .values()
-            .try_fold(sources.len(), |count, physical| {
-                count
-                    .checked_add(ranges[physical].len())
-                    .ok_or(Error::InvalidStoredValue(
-                        "supporting row source expansion is too large",
-                    ))
-            })?;
-        Ok(Self {
-            rows,
-            sources: sources
-                .into_iter()
-                .map(|(source, physical)| (source, physical, ranges[&physical].clone()))
-                .collect(),
-            fact_count: count,
-        })
-    }
-
-    fn fact_refs(&self) -> impl Iterator<Item = PeerSourceFactRef<'_>> {
-        self.sources
-            .iter()
-            .map(|(source, _, _)| PeerSourceFactRef::Coverage {
-                source,
-                complete: true,
-            })
-            .chain(self.sources.iter().flat_map(|(source, _, range)| {
-                self.rows[range.clone()]
-                    .iter()
-                    .map(move |row| PeerSourceFactRef::Input {
-                        source,
-                        version_table: &row.version_table,
-                        row: row.row,
-                        version: &row.version,
-                    })
-            }))
-    }
-
-    pub(super) fn materialize(&self) -> Vec<ProgramFactEntry> {
-        let mut facts = Vec::with_capacity(self.fact_count);
-        facts.extend(self.fact_refs().map(PeerSourceFactRef::into_owned));
-        facts
-    }
-
-    fn delta_from(&self, previous: &Self) -> (Vec<ProgramFactEntry>, Vec<ProgramFactEntry>) {
-        if self.sources.len() != previous.sources.len()
-            || !self.sources.iter().zip(&previous.sources).all(
-                |((source, physical, _), (old_source, old_physical, _))| {
-                    source == old_source && physical == old_physical
-                },
-            )
-        {
-            return peer_source_fact_delta_refs(self.fact_refs(), previous.fact_refs());
-        }
-        // Equal compiler source maps imply equal complete coverage facts.
-        // Compare physical rows once, independently of their role fanout.
-        let mut current = self.rows.iter().peekable();
-        let mut prior = previous.rows.iter().peekable();
-        let mut adds = Vec::new();
-        let mut removes = Vec::new();
-        while let (Some(next), Some(old)) = (current.peek(), prior.peek()) {
-            match next.cmp(old) {
-                std::cmp::Ordering::Less => self.expand_row(current.next().unwrap(), &mut adds),
-                std::cmp::Ordering::Greater => {
-                    previous.expand_row(prior.next().unwrap(), &mut removes)
-                }
-                std::cmp::Ordering::Equal => {
-                    current.next();
-                    prior.next();
-                }
-            }
-        }
-        for row in current {
-            self.expand_row(row, &mut adds);
-        }
-        for row in prior {
-            previous.expand_row(row, &mut removes);
-        }
-        // Expansion above is physical-row-major, whereas the old fact delta
-        // is source-major. Preserve its exact order at the owned boundary.
-        adds.sort_unstable();
-        removes.sort_unstable();
-        (adds, removes)
-    }
-
-    fn expand_row(&self, row: &SupportingRow, facts: &mut Vec<ProgramFactEntry>) {
-        for (source, physical, _) in &self.sources {
-            if *physical == row.physical_table {
-                facts.push(
-                    PeerSourceFactRef::Input {
-                        source,
-                        version_table: &row.version_table,
-                        row: row.row,
-                        version: &row.version,
-                    }
-                    .into_owned(),
-                );
-            }
-        }
-    }
-}
-
-// Preserve the existing exact-order/error oracle at its owned output boundary.
-#[cfg(test)]
-fn ordered_supporting_source_facts(
-    subscription: crate::protocol::SubscriptionKey,
-    sources: BTreeMap<ProgramSourceId, crate::ids::GlobalPhysicalTableId>,
-    rows: Vec<SupportingRow>,
-) -> Result<Vec<ProgramFactEntry>, Error> {
-    OrderedSupportingSnapshot::new(subscription, sources, rows)
-        .map(|snapshot| snapshot.materialize())
-}
-
-#[test]
-fn physical_manifest_delta_matches_expanded_fact_oracle() {
-    // Internal comparison/work oracle: public rows cannot distinguish one
-    // physical comparison from repeated compiler-role-expanded comparisons.
-    use crate::ids::GlobalPhysicalTableId;
-    use crate::protocol::{ProgramSourceRole, ReadViewKey, ResultRowLayer, RowVersionRefEntry};
-    use crate::query::{BindingId, ShapeId};
-    let uuid = uuid::Uuid::from_u128;
-    let subscription = crate::protocol::SubscriptionKey {
-        shape_id: ShapeId(uuid(1)),
-        binding_id: BindingId(uuid(2)),
-        read_view: ReadViewKey::default(),
-    };
-    let a = GlobalPhysicalTableId(uuid(11));
-    let b = GlobalPhysicalTableId(uuid(12));
-    let source = |table: &str, role| ProgramSourceId {
-        table: table.to_owned().into(),
-        path: vec![role],
-    };
-    let sources = BTreeMap::from([
-        (source("alpha", ProgramSourceRole::Root), a),
-        (source("alpha", ProgramSourceRole::Alias("other".into())), a),
-        (source("beta", ProgramSourceRole::Root), b),
-        (
-            source("empty", ProgramSourceRole::Root),
-            GlobalPhysicalTableId(uuid(13)),
-        ),
-    ]);
-    for count in [0, 1, 32, 1024] {
-        let rows = (0..count)
-            .map(|i| SupportingRow {
-                physical_table: if i % 2 == 0 { a } else { b },
-                version_table: if i % 3 == 0 {
-                    "authored-z"
-                } else {
-                    "authored-a"
-                }
-                .to_owned()
-                .into(),
-                row: RowUuid(uuid(i as u128 + 100)),
-                version: RowVersionRefEntry {
-                    tx: TxId::new(TxTime(i as u64 + 10), NodeUuid(uuid(3))),
-                    schema_version: Some(SchemaVersionId(uuid(4))),
-                    layer: if i % 4 == 0 {
-                        ResultRowLayer::Deletion
-                    } else {
-                        ResultRowLayer::Content
-                    },
-                    batch: None,
-                    branch_or_prefix: Some(vec![(i % 7) as u8]),
-                    row_digest: None,
-                },
-            })
-            .collect::<Vec<_>>();
-        let old =
-            OrderedSupportingSnapshot::new(subscription, sources.clone(), rows.clone()).unwrap();
-        let old_facts = old.materialize().into_iter().collect::<BTreeSet<_>>();
-        for change in 0..4 {
-            let mut next_rows = rows.clone();
-            match change {
-                1 => {
-                    next_rows.pop();
-                }
-                2 => {
-                    if let Some(row) = next_rows.first_mut() {
-                        row.version.tx = TxId::new(TxTime(10_000), NodeUuid(uuid(3)));
-                    }
-                }
-                3 => next_rows.clear(),
-                _ => {}
-            }
-            next_rows.reverse();
-            for source_change in 0..3 {
-                let mut next_sources = sources.clone();
-                if source_change == 1 {
-                    next_sources.insert(
-                        source("alpha", ProgramSourceRole::Alias("new-role".into())),
-                        a,
-                    );
-                } else if source_change == 2 {
-                    for physical in next_sources.values_mut() {
-                        if *physical == a {
-                            *physical = b;
-                        } else if *physical == b {
-                            *physical = a;
-                        }
-                    }
-                }
-                let next =
-                    OrderedSupportingSnapshot::new(subscription, next_sources, next_rows.clone())
-                        .unwrap();
-                let next_facts = next.materialize().into_iter().collect::<BTreeSet<_>>();
-                let expected = (
-                    next_facts
-                        .difference(&old_facts)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    old_facts
-                        .difference(&next_facts)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                );
-                MATERIALIZED_PEER_SOURCE_FACTS.with(|n| n.set(0));
-                let actual = next.delta_from(&old);
-                assert_eq!(
-                    actual, expected,
-                    "count={count} change={change} sources={source_change}"
-                );
-                assert_eq!(
-                    MATERIALIZED_PEER_SOURCE_FACTS.with(|n| n.get()),
-                    actual.0.len() + actual.1.len()
-                );
-                assert_eq!(
-                    old.materialize().into_iter().collect::<BTreeSet<_>>(),
-                    old_facts
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn ordered_physical_expansion_matches_sorted_fact_reference() {
-    // Internal protocol projection: control authored-label ordering, repeated
-    // source roles and physical-table order independently of public schemas.
-    // Public sync tests separately exercise admission and subscription results.
-    use crate::ids::GlobalPhysicalTableId;
-    use crate::protocol::{
-        CoveredInputEntry, ProgramSourceCoverageEntry, ProgramSourceId, ProgramSourceRole,
-        ReadViewKey, ResultRowLayer, RowVersionRefEntry, SubscriptionKey, SupportingRow,
-    };
-    use crate::query::{BindingId, ShapeId};
-    let uuid = |id| uuid::Uuid::from_bytes([id; 16]);
-    let subscription = SubscriptionKey {
-        shape_id: ShapeId(uuid(1)),
-        binding_id: BindingId(uuid(2)),
-        read_view: ReadViewKey::default(),
-    };
-    let physical_a = GlobalPhysicalTableId(uuid(9));
-    let physical_b = GlobalPhysicalTableId(uuid(3));
-    let sources = BTreeMap::from([
-        (
-            ProgramSourceId {
-                table: "alpha".to_owned().into(),
-                path: vec![ProgramSourceRole::Root],
-            },
-            physical_a,
-        ),
-        (
-            ProgramSourceId {
-                table: "alpha".to_owned().into(),
-                path: vec![ProgramSourceRole::Alias("peer".into())],
-            },
-            physical_a,
-        ),
-        (
-            ProgramSourceId {
-                table: "beta".to_owned().into(),
-                path: vec![ProgramSourceRole::Root],
-            },
-            physical_b,
-        ),
-        (
-            ProgramSourceId {
-                table: "empty".to_owned().into(),
-                path: vec![ProgramSourceRole::Root],
-            },
-            GlobalPhysicalTableId(uuid(5)),
-        ),
-    ]);
-    let mut rows = Vec::new();
-    for id in 0..32u8 {
-        rows.push(SupportingRow {
-            physical_table: if id % 2 == 0 { physical_a } else { physical_b },
-            version_table: if id % 3 == 0 { "native-z" } else { "native-a" }
-                .to_owned()
-                .into(),
-            row: RowUuid(uuid(id % 7)),
-            version: RowVersionRefEntry {
-                tx: TxId::new(TxTime(u64::from(id)), NodeUuid(uuid(4))),
-                schema_version: (id % 2 == 0).then_some(SchemaVersionId(uuid(6))),
-                layer: if id % 4 == 0 {
-                    ResultRowLayer::Deletion
-                } else {
-                    ResultRowLayer::Content
-                },
-                batch: None,
-                branch_or_prefix: (id % 3 == 0).then(|| vec![id]),
-                row_digest: (id % 5 == 0).then(|| vec![id, 0]),
-            },
-        });
-    }
-    let reference = |rows: &[SupportingRow]| {
-        let mut facts = sources
-            .keys()
-            .map(|source| {
-                ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
-                    source: source.clone(),
-                    complete: true,
-                })
-            })
-            .collect::<Vec<_>>();
-        for row in rows {
-            for (source, physical) in &sources {
-                if *physical == row.physical_table {
-                    facts.push(ProgramFactEntry::CoveredInput(CoveredInputEntry {
-                        source: source.clone(),
-                        version_table: row.version_table.clone(),
-                        source_row: row.row,
-                        version: row.version.clone(),
-                    }));
-                }
-            }
-        }
-        facts.sort_unstable();
-        facts.dedup();
-        facts
-    };
-    for prefix in [0, 1, 7, 32] {
-        for reverse in [false, true] {
-            let mut input = rows[..prefix].to_vec();
-            if reverse {
-                input.reverse();
-            }
-            let rotations = input.len().max(1);
-            for _ in 0..rotations {
-                let actual =
-                    ordered_supporting_source_facts(subscription, sources.clone(), input.clone())
-                        .unwrap();
-                assert_eq!(actual, reference(&input));
-                assert!(actual.windows(2).all(|pair| pair[0] < pair[1]));
-                if !input.is_empty() {
-                    input.rotate_left(1);
-                }
-            }
-        }
-    }
-    let mut duplicate = rows.clone();
-    duplicate.push(rows[0].clone());
-    assert!(matches!(
-        ordered_supporting_source_facts(subscription, sources.clone(), duplicate),
-        Err(Error::InvalidAuthoritySourceClosure { .. })
-    ));
-    let mut outside = rows.clone();
-    outside[0].physical_table = GlobalPhysicalTableId(uuid(99));
-    assert!(matches!(
-        ordered_supporting_source_facts(subscription, sources.clone(), outside),
-        Err(Error::InvalidAuthoritySourceClosure { .. })
-    ));
-    for malformed_layer in [false, true] {
-        let mut invalid = rows.clone();
-        if malformed_layer {
-            invalid[0].version.layer = ResultRowLayer::ContentOrDeletion;
-        } else {
-            invalid[0].version_table = String::new().into();
-        }
-        assert!(matches!(
-            ordered_supporting_source_facts(subscription, sources.clone(), invalid),
-            Err(Error::InvalidAuthoritySourceClosure { .. })
-        ));
-    }
-}
-
-fn peer_source_fact_delta_refs<'a>(
-    current: impl IntoIterator<Item = PeerSourceFactRef<'a>>,
-    previous: impl IntoIterator<Item = PeerSourceFactRef<'a>>,
-) -> (Vec<ProgramFactEntry>, Vec<ProgramFactEntry>) {
-    // Both inputs are sorted, unique peer-safe projections. Unchanged facts
-    // stay borrowed, including their role paths and version discriminators.
-    let mut current = current.into_iter().peekable();
-    let mut previous = previous.into_iter().peekable();
-    let mut adds = Vec::new();
-    let mut removes = Vec::new();
-    while let (Some(next), Some(prior)) = (current.peek(), previous.peek()) {
-        match next.cmp(prior) {
-            std::cmp::Ordering::Less => adds.push(current.next().unwrap().into_owned()),
-            std::cmp::Ordering::Greater => removes.push(previous.next().unwrap().into_owned()),
-            std::cmp::Ordering::Equal => {
-                current.next();
-                previous.next();
-            }
-        }
-    }
-    adds.extend(current.map(PeerSourceFactRef::into_owned));
-    removes.extend(previous.map(PeerSourceFactRef::into_owned));
-    (adds, removes)
-}
-
-// Keep the old filtered-predecessor oracle unchanged while testing the new
-// borrowed representation used by both manifest and settled-state inputs.
-#[cfg(test)]
-fn peer_source_fact_delta<'a>(
-    current: impl IntoIterator<Item = &'a ProgramFactEntry>,
-    previous: impl IntoIterator<Item = &'a ProgramFactEntry>,
-) -> (Vec<ProgramFactEntry>, Vec<ProgramFactEntry>) {
-    peer_source_fact_delta_refs(
-        current.into_iter().filter_map(PeerSourceFactRef::from_fact),
-        previous
-            .into_iter()
-            .filter_map(PeerSourceFactRef::from_fact),
-    )
-}
-
-#[test]
-fn borrowed_manifest_delta_materializes_only_changed_facts() {
-    // Internal work/ordering oracle: public sync results cannot distinguish
-    // borrowed comparisons from rebuilding every unchanged proof object.
-    use crate::ids::GlobalPhysicalTableId;
-    use crate::protocol::{
-        ProgramSourceRole, ReadFrontierSettledEntry, ReadViewKey, ResultRowLayer,
-    };
-    use crate::query::{BindingId, ShapeId};
-
-    let uuid = uuid::Uuid::from_u128;
-    let subscription = SubscriptionKey {
-        shape_id: ShapeId(uuid(1)),
-        binding_id: BindingId(uuid(2)),
-        read_view: ReadViewKey::default(),
-    };
-    let physical = GlobalPhysicalTableId(uuid(3));
-    let sources = ["left", "right"]
-        .into_iter()
-        .map(|role| {
-            (
-                ProgramSourceId {
-                    table: "items".to_owned().into(),
-                    path: vec![
-                        ProgramSourceRole::Root,
-                        ProgramSourceRole::Alias(role.into()),
-                    ],
-                },
-                physical,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    for count in [32, 1024] {
-        let rows = (0..count)
-            .map(|index| SupportingRow {
-                physical_table: physical,
-                version_table: "stored-items".to_owned().into(),
-                row: RowUuid(uuid(100 + index)),
-                version: RowVersionRefEntry {
-                    tx: TxId::new(TxTime(10), NodeUuid(uuid(4))),
-                    schema_version: Some(SchemaVersionId(uuid(5))),
-                    layer: ResultRowLayer::Content,
-                    batch: None,
-                    branch_or_prefix: Some(vec![0, 1]),
-                    row_digest: Some(vec![2, 3]),
-                },
-            })
-            .collect::<Vec<_>>();
-        let previous =
-            OrderedSupportingSnapshot::new(subscription, sources.clone(), rows.clone()).unwrap();
-        let previous_facts = previous.materialize().into_iter().collect::<BTreeSet<_>>();
-        let mut changed = rows.clone();
-        changed[0].version.tx = TxId::new(TxTime(11), NodeUuid(uuid(4)));
-        changed.reverse();
-        for current_rows in [rows, changed, Vec::new()] {
-            MATERIALIZED_PEER_SOURCE_FACTS.with(|value| value.set(0));
-            let current =
-                OrderedSupportingSnapshot::new(subscription, sources.clone(), current_rows)
-                    .unwrap();
-            assert_eq!(
-                MATERIALIZED_PEER_SOURCE_FACTS.with(|value| value.get()),
-                0,
-                "validation/source mapping must not materialize expanded facts"
-            );
-            assert_eq!(current.fact_refs().count(), current.fact_count);
-            let current_facts = current.materialize().into_iter().collect::<BTreeSet<_>>();
-            let expected = (
-                current_facts
-                    .difference(&previous_facts)
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                previous_facts
-                    .difference(&current_facts)
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            );
-            MATERIALIZED_PEER_SOURCE_FACTS.with(|value| value.set(0));
-            let actual = peer_source_fact_delta_refs(current.fact_refs(), previous.fact_refs());
-            assert_eq!(actual, expected);
-            assert_eq!(
-                MATERIALIZED_PEER_SOURCE_FACTS.with(|value| value.get()),
-                expected.0.len() + expected.1.len()
-            );
-
-            // The retained-state route has a broader fact set. Local facts
-            // cannot turn into removals, and false coverage is not equal to true.
-            let mut retained = previous_facts.clone();
-            retained.insert(ProgramFactEntry::ReadFrontierSettled(
-                ReadFrontierSettledEntry {
-                    scope: "local-only".into(),
-                    tier: DurabilityTier::Local,
-                    stream: None,
-                    frontier: Vec::new(),
-                },
-            ));
-            MATERIALIZED_PEER_SOURCE_FACTS.with(|value| value.set(0));
-            assert_eq!(
-                peer_source_fact_delta_refs(
-                    current.fact_refs(),
-                    retained.iter().filter_map(PeerSourceFactRef::from_fact)
-                ),
-                expected
-            );
-            assert_eq!(
-                MATERIALIZED_PEER_SOURCE_FACTS.with(|value| value.get()),
-                expected.0.len() + expected.1.len()
-            );
-            assert_eq!(
-                previous.materialize().into_iter().collect::<BTreeSet<_>>(),
-                previous_facts
-            );
-        }
-        let mut incomplete = previous_facts.clone();
-        let coverage = incomplete
-            .iter()
-            .find(|fact| matches!(fact, ProgramFactEntry::ProgramSourceCoverage(_)))
-            .unwrap()
-            .clone();
-        incomplete.remove(&coverage);
-        let ProgramFactEntry::ProgramSourceCoverage(mut entry) = coverage.clone() else {
-            unreachable!()
-        };
-        entry.complete = false;
-        let incomplete_coverage = ProgramFactEntry::ProgramSourceCoverage(entry);
-        incomplete.insert(incomplete_coverage.clone());
-        assert_eq!(
-            peer_source_fact_delta_refs(
-                previous.fact_refs(),
-                incomplete.iter().filter_map(PeerSourceFactRef::from_fact)
-            ),
-            (vec![coverage], vec![incomplete_coverage])
-        );
-    }
-}
-
-#[test]
-fn borrowed_peer_delta_matches_filtered_predecessor_without_removing_local_facts() {
-    // Internal set-projection contract: the public Db API cannot inject local
-    // non-peer bookkeeping into a claimed authority predecessor. Protocol-level
-    // receiver tests separately cover application, reset and atomic rejection.
-    use crate::protocol::{
-        ProgramSourceCoverageEntry, ProgramSourceId, ProgramSourceRole, ReadFrontierSettledEntry,
-    };
-    let source = |table: &str| {
-        ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
-            source: ProgramSourceId {
-                table: table.to_owned().into(),
-                path: vec![ProgramSourceRole::Root],
-            },
-            complete: true,
-        })
-    };
-    let local = ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
-        scope: "local-only".into(),
-        tier: DurabilityTier::Local,
-        stream: None,
-        frontier: vec![],
-    });
-    let subsets = [
-        BTreeSet::new(),
-        BTreeSet::from([source("tasks")]),
-        BTreeSet::from([source("projects")]),
-        BTreeSet::from([source("tasks"), source("projects")]),
-    ];
-    for current in &subsets {
-        for predecessor in &subsets {
-            for include_local in [false, true] {
-                let mut previous = predecessor.clone();
-                if include_local {
-                    previous.insert(local.clone());
-                }
-                let before = previous.clone();
-                let filtered = previous
-                    .iter()
-                    .filter(|fact| fact.is_peer_source_closure_fact())
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                let expected: (Vec<_>, Vec<_>) = (
-                    current.difference(&filtered).cloned().collect(),
-                    filtered.difference(current).cloned().collect(),
-                );
-                assert_eq!(peer_source_fact_delta(current, &previous), expected);
-                assert_eq!(
-                    previous, before,
-                    "comparison must not mutate the predecessor"
-                );
-            }
-        }
-    }
-}
 
 fn apply_covered_input_closure_admission_delta(
     state: &mut AuthorityResultState,
@@ -1015,6 +301,7 @@ pub(crate) fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
 }
 
 pub(crate) struct MaintainedViewBundleInputs<'a> {
+    pub(crate) supporting_update: Option<crate::protocol::SupportingRowsUpdate>,
     pub(crate) shape: &'a ValidatedQuery,
     pub(crate) has_default_read_view: bool,
     /// Selected-authority relays must forward their exact authority receipt;
@@ -1441,6 +728,7 @@ where
             .collect::<Vec<_>>();
         let update = self
             .view_update_for_maintained_result_members(MaintainedViewBundleInputs {
+                supporting_update: None,
                 shape,
                 has_default_read_view: true,
                 allow_authoritative_scalar_exit_refresh: true,
@@ -1464,6 +752,32 @@ where
         update
     }
 
+    pub(crate) fn supporting_row_for_fact(
+        &self,
+        read_schema: SchemaVersionId,
+        fact: &ProgramFactEntry,
+    ) -> Result<Option<SupportingRow>, Error> {
+        let ProgramFactEntry::CoveredInput(input) = fact else {
+            return Ok(None);
+        };
+        let physical_table = self
+            .catalogue
+            .physical_mappings
+            .get(&read_schema)
+            .and_then(|mapping| mapping.identities.tables.get(input.source.table.as_str()))
+            .ok_or(Error::InvalidStoredValue(
+                "supporting row physical table mapping missing",
+            ))?
+            .id;
+
+        Ok(Some(SupportingRow {
+            physical_table,
+            version_table: input.version_table,
+            row: input.source_row,
+            version: input.version.clone(),
+        }))
+    }
+
     pub(crate) fn supporting_rows_for_facts<I>(
         &self,
         read_schema: SchemaVersionId,
@@ -1475,50 +789,33 @@ where
     {
         let mut rows = Vec::new();
         for fact in facts {
-            let ProgramFactEntry::CoveredInput(input) = fact.borrow() else {
-                continue;
-            };
-            let physical_table = self
-                .catalogue
-                .physical_mappings
-                .get(&read_schema)
-                .and_then(|mapping| mapping.identities.tables.get(input.source.table.as_str()))
-                .ok_or(Error::InvalidStoredValue(
-                    "supporting row physical table mapping missing",
-                ))?
-                .id;
-            rows.push(crate::protocol::SupportingRow {
-                physical_table,
-                version_table: input.version_table.clone(),
-                row: input.source_row,
-                version: input.version.clone(),
-            });
+            if let Some(row) = self.supporting_row_for_fact(read_schema, fact.borrow())? {
+                rows.push(row);
+            }
         }
         rows.sort_unstable();
         rows.dedup();
         Ok(rows)
     }
 
-    // The wire supplies one ordinary physical dataset. Query scan occurrences
-    // are compiler-owned: every local occurrence scans the same supplied table.
-    // Internal source records are graph bookkeeping, not per-role peer evidence.
-    fn normalize_supporting_snapshot(
+    // v2 sends physical membership transitions. Source roles are expanded only
+    // for changed rows, using this receiver's compiled program, never peer roles.
+    fn normalize_supporting_update(
         &mut self,
         update: &mut ViewUpdateParts,
-        prior_snapshots: &mut BTreeMap<
-            AuthorityResultKey,
-            std::sync::Arc<OrderedSupportingSnapshot>,
-        >,
-    ) -> Result<Option<std::sync::Arc<OrderedSupportingSnapshot>>, Error> {
-        let Some(rows) = update.wire_rows.take() else {
+        revisions: &mut BTreeMap<AuthorityResultKey, [u8; 16]>,
+    ) -> Result<Option<[u8; 16]>, Error> {
+        use crate::protocol::SupportingRowsUpdate;
+        let Some(wire) = update.wire_rows.take() else {
             return Ok(None);
         };
+        let invalid = || Error::InvalidAuthoritySourceClosure {
+            subscription: update.subscription,
+            transition: "invalid supporting-set revision or predecessor".to_owned(),
+        };
         if update.opening_pending {
-            if !rows.is_empty() {
-                return Err(Error::InvalidAuthoritySourceClosure {
-                    subscription: update.subscription,
-                    transition: "opening-pending marker carries supporting rows".to_owned(),
-                });
+            if !wire.is_snapshot() || !wire.added_rows().is_empty() {
+                return Err(invalid());
             }
             update.reset_input_set = false;
             return Ok(None);
@@ -1535,10 +832,31 @@ where
             )) => return Ok(None),
             Err(error) => return Err(error),
         };
-        // Admission already retains this compiler-owned set under the exact
-        // authority receipt. Normalization must not rediscover the same source
-        // capabilities on every successor's complete physical manifest.
-        let discovered_sources;
+        let revision = wire.revision();
+        if revision == [0; 16] {
+            return Err(invalid());
+        }
+        if let SupportingRowsUpdate::Delta { predecessor, .. } = &wire {
+            let current = revisions.get(&key).copied().or_else(|| {
+                self.query
+                    .authority_results
+                    .get(&key)
+                    .and_then(|state| state.supporting_revision)
+            });
+            if current != Some(*predecessor)
+                || (*predecessor == revision
+                    && (!wire.added_rows().is_empty() || !wire.removed_rows().is_empty()))
+            {
+                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    eprintln!(
+                        "v2 predecessor mismatch subscription={:?} key={key:?} retained={current:?} received={predecessor:?} revision={revision:?}",
+                        update.subscription
+                    );
+                }
+                return Err(invalid());
+            }
+        }
+        let discovered;
         let sources = if let Some(compiled) = self
             .query
             .authority_results
@@ -1547,11 +865,11 @@ where
         {
             compiled
         } else {
-            discovered_sources =
+            discovered =
                 self.compiled_covered_input_sources_for_subscription(update.subscription)?;
-            &discovered_sources
+            &discovered
         };
-        let mut source_tables = BTreeMap::new();
+        let mut physical_sources = BTreeMap::<_, Vec<_>>::new();
         for source in sources {
             let physical = self
                 .catalogue
@@ -1562,65 +880,82 @@ where
                     "compiled source physical table mapping missing",
                 ))?
                 .id;
-            source_tables.insert(source.clone(), physical);
+            physical_sources.entry(physical).or_default().push(source);
         }
-        let snapshot = std::sync::Arc::new(OrderedSupportingSnapshot::new(
-            update.subscription,
-            source_tables,
-            rows,
-        )?);
-        let delta = if let Some(previous) = prior_snapshots.get(&key) {
-            Some(snapshot.delta_from(previous))
-        } else {
-            self.query
-                .authority_results
-                .get(&key)
-                .filter(|state| {
-                    matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
-                })
-                .map(|state| {
-                    if let Some(previous) = &state.supporting_snapshot {
-                        // Test-only full-state oracle checks every exercised
-                        // cache hit without adding production snapshot work.
-                        #[cfg(test)]
-                        assert_eq!(
-                            previous.materialize().into_iter().collect::<BTreeSet<_>>(),
-                            state
-                                .settled_program_facts
-                                .iter()
-                                .filter(|fact| fact.is_peer_source_closure_fact())
-                                .cloned()
-                                .collect::<BTreeSet<_>>(),
-                            "physical predecessor must match the exact retained peer closure",
-                        );
-                        snapshot.delta_from(previous)
-                    } else {
-                        peer_source_fact_delta_refs(
-                            snapshot.fact_refs(),
-                            state
-                                .settled_program_facts
-                                .iter()
-                                .filter_map(PeerSourceFactRef::from_fact),
-                        )
+        let expand = |rows: &[SupportingRow]| -> Result<Vec<ProgramFactEntry>, Error> {
+            let mut facts = Vec::new();
+            let mut seen = BTreeSet::new();
+            for row in rows {
+                if !row.is_wire_valid() || !seen.insert(row) {
+                    return Err(Error::InvalidAuthoritySourceClosure {
+                        subscription: update.subscription,
+                        transition: "invalid or duplicate supporting physical row version"
+                            .to_owned(),
+                    });
+                }
+                let roles = physical_sources.get(&row.physical_table).ok_or_else(|| {
+                    Error::InvalidAuthoritySourceClosure {
+                        subscription: update.subscription,
+                        transition: "supporting row physical table is outside the query dataset"
+                            .to_owned(),
                     }
-                })
+                })?;
+                for source in roles {
+                    facts.push(ProgramFactEntry::CoveredInput(CoveredInputEntry {
+                        source: (*source).clone(),
+                        version_table: row.version_table,
+                        source_row: row.row,
+                        version: row.version.clone(),
+                    }));
+                }
+            }
+            facts.sort_unstable();
+            Ok(facts)
         };
-        if let Some((adds, removes)) = delta {
-            // Complete wire snapshots become one atomic local input transition.
-            // Replacing the dataset does not reopen the application's subscription.
-            update.reset_input_set = false;
-            // Incoming facts are exclusively peer-safe. Other settled facts
-            // cannot match an addition and must not become removals. Borrow
-            // the broader predecessor rather than clone/filter its full set.
-            update.program_fact_adds = adds;
-            update.program_fact_removes = removes;
-        } else {
-            update.reset_input_set = true;
-            update.program_fact_adds = snapshot.materialize();
-            update.program_fact_removes.clear();
+        update.reset_input_set = wire.is_snapshot();
+        update.program_fact_adds = expand(wire.added_rows())?;
+        update.program_fact_removes = expand(wire.removed_rows())?;
+        if wire.is_snapshot() {
+            update
+                .program_fact_adds
+                .extend(sources.iter().cloned().map(|source| {
+                    ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
+                        source,
+                        complete: true,
+                    })
+                }));
+            update.program_fact_adds.sort_unstable();
+            // A fresh usage/recovery snapshot may refresh an already-live
+            // canonical result. Keep established application listeners
+            // incremental. Scope-sized comparison is confined to snapshots,
+            // never performed for ordinary wire deltas.
+            if !revisions.contains_key(&key)
+                && let Some(state) = self.query.authority_results.get(&key)
+                && matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
+                && state.covered_input_sources == *sources
+            {
+                let current = update.program_fact_adds.iter().collect::<BTreeSet<_>>();
+                let previous = state
+                    .settled_program_facts
+                    .iter()
+                    .filter(|fact| fact.is_peer_source_closure_fact())
+                    .collect::<BTreeSet<_>>();
+                let adds = current
+                    .difference(&previous)
+                    .map(|fact| (*fact).clone())
+                    .collect();
+                update.program_fact_removes = previous
+                    .difference(&current)
+                    .map(|fact| (*fact).clone())
+                    .collect();
+                update.program_fact_adds = adds;
+                update.reset_input_set = false;
+            }
         }
-        prior_snapshots.insert(key, std::sync::Arc::clone(&snapshot));
-        Ok(Some(snapshot))
+        // Membership, duplicate coordinate and add/remove overlap validation is
+        // shared with internal source admission and stages only changed keys.
+        revisions.insert(key, revision);
+        Ok(Some(revision))
     }
 
     #[cfg_attr(
@@ -1632,6 +967,7 @@ where
         inputs: MaintainedViewBundleInputs<'_>,
     ) -> Result<SyncMessage, Error> {
         let MaintainedViewBundleInputs {
+            supporting_update,
             shape,
             has_default_read_view,
             allow_authoritative_scalar_exit_refresh,
@@ -2209,10 +1545,15 @@ where
                     authorization_progress: None,
                     opening_pending: false,
                 },
-                supporting_rows: self.supporting_rows_for_facts(
-                    shape.schema_version(),
-                    maintained_facts.active_peer_source_closure_fact_refs(),
-                )?,
+                supporting_rows: match supporting_update {
+                    Some(update) => update,
+                    None => crate::protocol::SupportingRowsUpdate::snapshot(
+                        self.supporting_rows_for_facts(
+                            shape.schema_version(),
+                            maintained_facts.active_peer_source_closure_fact_refs(),
+                        )?,
+                    ),
+                },
             },
         ))
     }
@@ -2222,7 +1563,7 @@ where
         &mut self,
         mut update: ViewUpdateParts,
     ) -> Result<(), Error> {
-        let snapshot = self.normalize_supporting_snapshot(&mut update, &mut BTreeMap::new())?;
+        let snapshot = self.normalize_supporting_update(&mut update, &mut BTreeMap::new())?;
         self.validate_received_view_update_global_time_durability(&update)
             .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))
@@ -2257,17 +1598,8 @@ where
     ) -> Result<(), Error> {
         let mut prior_snapshots = BTreeMap::new();
         let mut snapshots = Vec::with_capacity(updates.len());
-        let mut last_snapshot_slots = BTreeMap::new();
-        for (index, update) in updates.iter_mut().enumerate() {
-            if let Ok(key) = self.authority_result_key_for_subscription(update.subscription)
-                && let Some(previous) = last_snapshot_slots.insert(key, index)
-            {
-                // Only the last frame for a receipt can leave a useful cache.
-                // Do not retain every complete manifest in a queued batch, or
-                // carry an earlier wire cache past a later non-wire frame.
-                snapshots[previous] = None;
-            }
-            snapshots.push(self.normalize_supporting_snapshot(update, &mut prior_snapshots)?);
+        for update in &mut updates {
+            snapshots.push(self.normalize_supporting_update(update, &mut prior_snapshots)?);
         }
         drop(prior_snapshots);
         if updates.is_empty() {
@@ -2917,7 +2249,7 @@ where
         &mut self,
         update: ViewUpdateParts,
         preloaded_tx_ids: Option<&BTreeSet<TxId>>,
-        normalized_snapshot: Option<std::sync::Arc<OrderedSupportingSnapshot>>,
+        normalized_snapshot: Option<[u8; 16]>,
     ) -> Result<(), Error> {
         let ViewUpdateParts {
             wire_rows: _,
@@ -2959,7 +2291,7 @@ where
         // alter provisional facts before advancing its generation, so a
         // generation comparison alone would not be a sufficient cache proof.
         if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
-            state.supporting_snapshot = None;
+            state.supporting_revision = None;
         }
         let reset_cleared_shared_state = Self::reset_replaces_authority_source_closure(
             reset_input_set,
@@ -3226,7 +2558,7 @@ where
                 // Only this exact successfully applied frame can install its
                 // normalized predecessor. Legacy/deferred/opening frames do
                 // not preserve an earlier frame's cache accidentally.
-                state.supporting_snapshot = normalized_snapshot;
+                state.supporting_revision = normalized_snapshot;
             }
         }
         Ok(())

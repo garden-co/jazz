@@ -422,7 +422,7 @@ fn canonical_view_update_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
     // covered inputs are the exact closure counterpart to their old result
     // member assertions.
     let mut adds = program_fact_adds
-        .iter()
+        .added_rows().iter()
         .filter_map(|fact| match fact {
             input if input.version.layer == crate::protocol::ResultRowLayer::Content => {
                 Some((input.version_table.clone(), input.row, input.version.tx))

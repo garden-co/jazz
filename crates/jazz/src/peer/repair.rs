@@ -160,6 +160,17 @@ impl PeerState {
     }
 
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
+        if let SyncMessage::ViewUpdate(view) = update
+            && view.supporting_rows.is_snapshot()
+            && !view.peer_payload_inventory.opening_pending
+        {
+            // A generic fresh snapshot supersedes any incremental publisher
+            // baseline. The maintained path installs its prepared successor
+            // after this metadata call; other paths rebuild once on next drain.
+            let state = self.publication_states.entry(view.subscription).or_default();
+            state.supporting_revision = None;
+            state.physical_support_counts.clear();
+        }
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
@@ -529,15 +540,28 @@ impl PeerState {
         }
     }
 
-    fn record_outgoing_view_update(&mut self, update: &SyncMessage) {
+    fn record_outgoing_view_update<S: OrderedKvStorage>(
+        &mut self, node: &NodeState<S>, schema: crate::ids::SchemaVersionId,
+        update: &SyncMessage,
+    ) -> Result<(), Error> {
         self.record_outgoing_view_update_metadata(update);
         if let SyncMessage::ViewUpdate(view) = update {
             let state = self.publication_states.entry(view.subscription).or_default();
             if let Some(maintained) = &mut state.maintained_subscription_view {
-                state.program_fact_set = maintained.maintained.active_peer_source_closure_facts();
+                let facts = maintained.maintained.active_peer_source_closure_facts();
+                let mut counts = BTreeMap::new();
+                for fact in &facts {
+                    if let Some(row) = node.supporting_row_for_fact(schema, fact)? {
+                        *counts.entry(row).or_default() += 1;
+                    }
+                }
+                state.physical_support_counts = counts;
+                state.supporting_revision = Some(view.supporting_rows.revision());
+                state.program_fact_set = facts;
                 maintained.maintained.acknowledge_peer_source_closure();
             }
         }
+        Ok(())
     }
 
     fn refresh_maintained_subscription_view_footprint(&mut self, subscription: SubscriptionKey) {

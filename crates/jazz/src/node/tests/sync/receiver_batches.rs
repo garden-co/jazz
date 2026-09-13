@@ -2214,7 +2214,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                     durability: DurabilityTier::Global,
                 })],
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, first_closure).unwrap(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, first_closure).unwrap()),
             },
         ))
         .unwrap();
@@ -2247,7 +2247,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
                     durability: DurabilityTier::Global,
                 })],
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, second_closure).unwrap(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, second_closure).unwrap()),
             },
         ))
         .unwrap();
@@ -2305,7 +2305,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                     durability: DurabilityTier::Global,
                 })],
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, first_closure).unwrap(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, first_closure).unwrap()),
             },
         ))
         .unwrap();
@@ -2345,7 +2345,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
                     durability: DurabilityTier::Global,
                 })],
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, complete_closure).unwrap(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(reader.supporting_rows_for_facts(reader.catalogue.current_schema_version_id, complete_closure).unwrap()),
             },
         ))
         .unwrap();

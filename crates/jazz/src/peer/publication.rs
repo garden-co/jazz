@@ -76,6 +76,70 @@ pub(crate) struct ReconciledMaintainedSubscriptionClone {
     allow_storage_witness_fallback: bool,
 }
 
+// Stages only changed physical reference counts. No mutation/acknowledgement
+// occurs until native carrier preparation has completed successfully.
+struct PreparedSupportingUpdate {
+    wire: crate::protocol::SupportingRowsUpdate,
+    counts: BTreeMap<crate::protocol::SupportingRow, usize>,
+    reset: bool,
+}
+
+impl PreparedSupportingUpdate {
+    fn prepare<S: OrderedKvStorage>(
+        node: &NodeState<S>, schema: crate::ids::SchemaVersionId,
+        state: &PeerSubscriptionState, complete: Option<&BTreeSet<ProgramFactEntry>>,
+        adds: &[ProgramFactEntry], removes: &[ProgramFactEntry],
+    ) -> Result<Self, Error> {
+        let revision = *uuid::Uuid::new_v4().as_bytes();
+        let mut counts = BTreeMap::new();
+        if let Some(complete) = complete {
+            for fact in complete {
+                if let Some(row) = node.supporting_row_for_fact(schema, fact)? {
+                    *counts.entry(row).or_default() += 1;
+                }
+            }
+            return Ok(Self {
+                wire: crate::protocol::SupportingRowsUpdate::Snapshot {
+                    revision, rows: counts.keys().cloned().collect(),
+                }, counts, reset: true,
+            });
+        }
+        let predecessor = state.supporting_revision.ok_or(Error::InvalidStoredValue(
+            "incremental publisher has no physical predecessor"))?;
+        for (facts, adding) in [(removes, false), (adds, true)] {
+            for fact in facts {
+                if let Some(row) = node.supporting_row_for_fact(schema, fact)? {
+                    let before = state.physical_support_counts.get(&row).copied().unwrap_or(0);
+                    let count = counts.entry(row).or_insert(before);
+                    *count = if adding { count.checked_add(1) } else { count.checked_sub(1) }
+                        .ok_or(Error::InvalidStoredValue("physical supporting reference count overflow/underflow"))?;
+                }
+            }
+        }
+        let mut physical_adds = Vec::new();
+        let mut physical_removes = Vec::new();
+        for (row, count) in &counts {
+            match (state.physical_support_counts.contains_key(row), *count > 0) {
+                (false, true) => physical_adds.push(row.clone()),
+                (true, false) => physical_removes.push(row.clone()),
+                _ => {},
+            }
+        }
+        Ok(Self { wire: crate::protocol::SupportingRowsUpdate::Delta {
+            predecessor, revision, adds: physical_adds, removes: physical_removes,
+        }, counts, reset: false })
+    }
+
+    fn commit(self, state: &mut PeerSubscriptionState) {
+        if self.reset { state.physical_support_counts.clear(); }
+        for (row, count) in self.counts {
+            if count == 0 { state.physical_support_counts.remove(&row); }
+            else { state.physical_support_counts.insert(row, count); }
+        }
+        state.supporting_revision = Some(self.wire.revision());
+    }
+}
+
 struct MaintainedCanonicalUpdate {
     changed: bool,
     update: SyncMessage,
@@ -979,7 +1043,7 @@ impl PeerState {
                     settled_through: self.maintained_publication_cut(node, subscription),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    supporting_rows: Vec::new(),
+                    supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
                 }),
                 allow_storage_witness_fallback: false,
             }));
@@ -1224,7 +1288,7 @@ impl PeerState {
             ))?
             .maintained;
         let mut complete_program_fact_set = None;
-        let (program_fact_adds, program_fact_removes) = if initial_snapshot_completed {
+        let (program_fact_adds, program_fact_removes) = if initial_snapshot_completed || state.supporting_revision.is_none() {
             let current = maintained.active_peer_source_closure_facts();
             let adds = current.iter().cloned().collect();
             complete_program_fact_set = Some(current);
@@ -1239,6 +1303,10 @@ impl PeerState {
             complete_program_fact_set = Some(current);
             delta
         };
+        let supporting = PreparedSupportingUpdate::prepare(
+            node, shape.schema_version(), state, complete_program_fact_set.as_ref(),
+            &program_fact_adds, &program_fact_removes,
+        )?;
         let published_fact_adds = program_fact_adds.clone();
         let published_fact_removes = program_fact_removes.clone();
         let fact_add_count = program_fact_adds.len();
@@ -1249,13 +1317,18 @@ impl PeerState {
             &program_fact_adds,
             &program_fact_removes,
         ) {
-            let supporting_rows = node.supporting_rows_for_facts(
-                shape.schema_version(),
-                maintained.active_peer_source_closure_fact_refs(),
-            )?;
+            let mut supporting = supporting;
+            // Polling may discard an unchanged update. Such a frame must not
+            // advance the sender cursor, whether returned explicitly or not.
+            if let crate::protocol::SupportingRowsUpdate::Delta { predecessor, revision, .. } = &mut supporting.wire {
+                *revision = *predecessor;
+            }
+            let changed = initial_snapshot_completed || supporting.reset;
+            let supporting_rows = supporting.wire.clone();
             // Even a cancelled-out drain is acknowledged only after its
             // supporting manifest has been constructed successfully.
             if let Some(state) = self.publication_states.get_mut(&subscription) {
+                supporting.commit(state);
                 if let Some(current) = complete_program_fact_set {
                     state.program_fact_set = current;
                 }
@@ -1264,7 +1337,7 @@ impl PeerState {
                 }
             }
             return Ok(Some(MaintainedCanonicalUpdate {
-                changed: initial_snapshot_completed,
+                changed,
                 update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: self.maintained_publication_cut(node, subscription),
@@ -1310,6 +1383,7 @@ impl PeerState {
             scoped
                 .view_update_for_maintained_result_members(
                     crate::node::MaintainedViewBundleInputs {
+                        supporting_update: Some(supporting.wire.clone()),
                         shape,
                         has_default_read_view: read_view.is_default(),
                         allow_authoritative_scalar_exit_refresh: !self
@@ -1373,6 +1447,7 @@ impl PeerState {
                 .publication_states
                 .entry(view.subscription)
                 .or_default();
+            supporting.commit(state);
             if let Some(current) = complete_program_fact_set {
                 state.program_fact_set = current;
             } else {
@@ -1797,9 +1872,9 @@ impl PeerState {
                     settled_through: self.maintained_publication_cut(node, subscription),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    supporting_rows: Vec::new(),
+                    supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
                 });
-                self.record_outgoing_view_update(&update);
+                self.record_outgoing_view_update(node, shape.schema_version(), &update)?;
                 self.publication_states
                     .entry(subscription)
                     .or_default()
@@ -1961,6 +2036,7 @@ impl PeerState {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             scoped.view_update_for_maintained_result_members(
             crate::node::MaintainedViewBundleInputs {
+                        supporting_update: None,
                     shape,
                     has_default_read_view: read_view.is_default(),
                     allow_authoritative_scalar_exit_refresh: !self
@@ -2037,7 +2113,7 @@ impl PeerState {
             initial_received: true,
         };
         self.replace_maintained_subscription_view(node, subscription, maintained_subscription);
-        self.record_outgoing_view_update(&update);
+        self.record_outgoing_view_update(node, shape.schema_version(), &update)?;
         self.publication_states
             .entry(subscription)
             .or_default()
@@ -2515,6 +2591,7 @@ impl PeerState {
                 .maintained;
             scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
+                        supporting_update: None,
                     shape,
                     has_default_read_view: read_view.is_default(),
                     allow_authoritative_scalar_exit_refresh: !self
@@ -2545,11 +2622,25 @@ impl PeerState {
                 },
             ).await
         };
-        let update = update?;
+        let mut update = update?;
+        if let SyncMessage::ViewUpdate(view) = &mut update {
+            self.bind_cloned_supporting_revision(maintained_subscription, view);
+        }
         self.record_outgoing_view_update_metadata(&update);
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(maintained_subscription);
         Ok(Some(update))
+    }
+
+    // A late usage gets the same physical state as the canonical publisher.
+    // Its snapshot must establish that publisher's cursor, because future
+    // deltas are shared/fanned out from that canonical stream.
+    fn bind_cloned_supporting_revision(&self, source: SubscriptionKey, view: &mut crate::protocol::ViewUpdatePayload) {
+        if let Some(revision) = self.publication_states.get(&source).and_then(|state| state.supporting_revision)
+            && let crate::protocol::SupportingRowsUpdate::Snapshot { revision: target, .. } = &mut view.supporting_rows
+        {
+            *target = revision;
+        }
     }
 
     /// Consume canonical maintained-view work and return its publishable
@@ -2714,6 +2805,7 @@ impl PeerState {
                 .maintained;
             scoped.view_update_for_maintained_result_members(
                 crate::node::MaintainedViewBundleInputs {
+                        supporting_update: None,
                     shape,
                     has_default_read_view: read_view.is_default(),
                     allow_authoritative_scalar_exit_refresh: !self
@@ -2744,7 +2836,10 @@ impl PeerState {
                 },
             ).await
         };
-        let target_reset = target_reset?;
+        let mut target_reset = target_reset?;
+        if let SyncMessage::ViewUpdate(view) = &mut target_reset {
+            self.bind_cloned_supporting_revision(maintained_subscription, view);
+        }
         self.record_outgoing_view_update_metadata(&target_reset);
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(maintained_subscription);

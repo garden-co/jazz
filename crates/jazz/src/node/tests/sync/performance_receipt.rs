@@ -350,7 +350,7 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     };
     let result_member_count = payload
         .supporting_rows
-        .iter()
+        .added_rows().iter()
         .filter(|input| matches!(input, _))
         .count();
     let version_bundle_count = crate::protocol::expand_version_carriers(version_carriers)

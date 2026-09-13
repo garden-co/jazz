@@ -95,7 +95,7 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
         subscription: format!("{subscription:?}"),
         version_bundles,
         peer_payload_inventory: complete_tx_payload_refs,
-        supporting_rows: program_fact_adds,
+        supporting_rows: program_fact_adds.added_rows().to_vec(),
     }
 }
 
@@ -559,6 +559,7 @@ impl MaintainedSubscriptionViewSubscription {
             .collect::<BTreeSet<_>>();
         let mut update = core
             .view_update_for_maintained_result_members(crate::node::MaintainedViewBundleInputs {
+                supporting_update: None,
                 shape: _shape,
                 has_default_read_view: true,
                 allow_authoritative_scalar_exit_refresh: true,
@@ -645,7 +646,7 @@ fn assert_retraction_without_replacement_leak(
         panic!("expected view update");
     };
     assert!(
-        !program_fact_adds.iter().any(|fact| matches!(
+        !program_fact_adds.added_rows().iter().any(|fact| matches!(
             fact,
             input
                 if input.row == row_uuid && input.version.tx == unreadable_tx_id

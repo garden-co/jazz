@@ -347,9 +347,81 @@ pub struct ViewUpdatePayload {
     pub version_carriers: Vec<VersionCarrier>,
     /// Per-peer payload coverage and authorization progress.
     pub peer_payload_inventory: PeerPayloadInventory,
-    /// Complete authorized supporting physical row/version set for this subscription.
-    /// Install atomically after every referenced native version is available.
-    pub supporting_rows: Vec<SupportingRow>,
+    /// Atomic physical supporting-set snapshot or exact-predecessor successor.
+    /// Native bodies for additions must be available before installation.
+    pub supporting_rows: SupportingRowsUpdate,
+}
+
+/// Wire v2 supporting-set transition. Revisions are opaque 16-byte identities,
+/// scoped to the admitted subscription/authority, never history timestamps.
+/// Postcard discriminants are pinned: Snapshot = 0, Delta = 1; field order is
+/// declaration order. There is no v1 complete-manifest compatibility decoder.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum SupportingRowsUpdate {
+    /// Initial or recovery complete set; supersedes pending predecessors.
+    Snapshot {
+        /// Fresh opaque revision, not an authorization token.
+        revision: [u8; 16],
+        /// Complete exact physical supporting versions.
+        rows: Vec<SupportingRow>,
+    },
+    /// Atomic change against one exact retained predecessor.
+    Delta {
+        /// Revision that must already be installed or queued in this usage.
+        predecessor: [u8; 16],
+        /// Successor revision. An empty confirmation may repeat its predecessor.
+        revision: [u8; 16],
+        /// Physical memberships entering the supporting set.
+        adds: Vec<SupportingRow>,
+        /// Physical memberships leaving this set, not globally deleted bytes.
+        removes: Vec<SupportingRow>,
+    },
+}
+
+impl SupportingRowsUpdate {
+    /// Construct a complete initial/recovery snapshot with a fresh revision.
+    pub fn snapshot(rows: Vec<SupportingRow>) -> Self {
+        Self::Snapshot {
+            revision: *uuid::Uuid::new_v4().as_bytes(),
+            rows,
+        }
+    }
+
+    /// Exact successor identity.
+    pub fn revision(&self) -> [u8; 16] {
+        match self {
+            Self::Snapshot { revision, .. } | Self::Delta { revision, .. } => *revision,
+        }
+    }
+
+    /// Native bodies needed by this message: all snapshot rows or delta adds.
+    pub fn added_rows(&self) -> &[SupportingRow] {
+        match self {
+            Self::Snapshot { rows, .. } => rows,
+            Self::Delta { adds, .. } => adds,
+        }
+    }
+
+    /// Physical memberships removed by this message.
+    pub fn removed_rows(&self) -> &[SupportingRow] {
+        match self {
+            Self::Snapshot { .. } => &[],
+            Self::Delta { removes, .. } => removes,
+        }
+    }
+
+    /// Whether this update establishes an independent complete predecessor.
+    pub fn is_snapshot(&self) -> bool {
+        matches!(self, Self::Snapshot { .. })
+    }
+
+    /// Mutably access rows whose bodies this message supplies or references.
+    pub fn added_rows_mut(&mut self) -> &mut Vec<SupportingRow> {
+        match self {
+            Self::Snapshot { rows, .. } => rows,
+            Self::Delta { adds, .. } => adds,
+        }
+    }
 }
 
 impl ViewUpdatePayload {
@@ -736,8 +808,19 @@ impl SyncMessage {
         let Some(view) = self.carried_view_update() else {
             return Ok(());
         };
+        if view.supporting_rows.revision() == [0; 16]
+            || matches!(&view.supporting_rows, SupportingRowsUpdate::Delta { predecessor, revision, adds, removes }
+                if *predecessor == [0; 16] || (predecessor == revision && (!adds.is_empty() || !removes.is_empty())))
+        {
+            return Err(WireContractError::InvalidSupportingRevision);
+        }
         let mut identities = std::collections::BTreeSet::new();
-        for row in &view.supporting_rows {
+        for row in view
+            .supporting_rows
+            .added_rows()
+            .iter()
+            .chain(view.supporting_rows.removed_rows())
+        {
             if !row.is_wire_valid() {
                 return Err(WireContractError::InvalidSupportingRow);
             }
@@ -759,6 +842,8 @@ impl SyncMessage {
 /// A semantic value violates the frozen peer-wire contract.
 #[derive(Debug)]
 pub enum WireContractError {
+    /// A transition has a nil revision or a nonempty self-successor.
+    InvalidSupportingRevision,
     /// A version carrier is structurally malformed.
     VersionCarrier(VersionBundleRunError),
     /// A supporting native row reference is malformed.
@@ -770,6 +855,9 @@ pub enum WireContractError {
 impl std::fmt::Display for WireContractError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidSupportingRevision => {
+                write!(f, "supporting transition revision is invalid")
+            }
             Self::VersionCarrier(error) => error.fmt(f),
             Self::InvalidSupportingRow => write!(f, "supporting row reference is invalid"),
             Self::DuplicateSupportingRow => write!(
@@ -6335,7 +6423,7 @@ mod tests {
             settled_through: GlobalTime(0),
             version_carriers: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory::default(),
-            supporting_rows: vec![row.clone(), row],
+            supporting_rows: SupportingRowsUpdate::snapshot(vec![row.clone(), row]),
         });
         assert!(matches!(
             message.validate_wire_contract(),

@@ -451,6 +451,7 @@ fn assert_protocol_view_update_rows(
     // receiver reconstructs result membership locally, so the authority must
     // not send rendered result members as a second path.
     let added_rows = program_fact_adds
+        .added_rows()
         .iter()
         .filter_map(|fact| match fact {
             input => Some(input.row),
@@ -1082,7 +1083,7 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
     };
     assert_eq!(served, subscription);
     assert!(
-        program_fact_adds.iter().any(|fact| {
+        program_fact_adds.added_rows().iter().any(|fact| {
             matches!(
                 fact,
                 input

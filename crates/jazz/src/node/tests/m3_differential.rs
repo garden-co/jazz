@@ -504,7 +504,7 @@ fn m3_recursive_seed_closure_excludes_unrelated_group_bodies() {
         panic!("expected recursive seed view update");
     };
     let seed_inputs = program_fact_adds
-        .iter()
+        .added_rows().iter()
         .filter_map(|fact| match fact {
             input if input.version_table.as_str() == "group_access_edges" => Some(input),
             _ => None,
@@ -591,7 +591,7 @@ fn recursive_covered_inputs_remain_partitioned_between_live_sessions() {
     };
     let covered_seeds = payload
         .supporting_rows
-        .iter()
+        .added_rows().iter()
         .filter_map(|fact| match fact {
             input if input.version_table.as_str() == "group_access_edges" => Some(input.row),
             _ => None,

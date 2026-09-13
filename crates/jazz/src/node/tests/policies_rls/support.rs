@@ -40,7 +40,7 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     // source occurrence is therefore the peer-wire equivalent of these
     // single-table result assertions.
     let mut result_member_adds = program_fact_adds
-        .iter()
+        .added_rows().iter()
         .filter_map(|fact| match fact {
             input if input.version.layer == crate::protocol::ResultRowLayer::Content => {
                 Some((input.version_table.clone(), input.row, input.version.tx))

@@ -1777,7 +1777,7 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     assert!(matches!(
         initial,
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { supporting_rows: program_fact_adds, .. })
-            if program_fact_adds.iter().any(|fact| matches!(
+            if program_fact_adds.added_rows().iter().any(|fact| matches!(
                 fact,
                 input
                     if input.row == target && input.version.tx == initial_tx
@@ -1799,7 +1799,7 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     assert!(matches!(
         transfer_update,
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { supporting_rows: program_fact_removes, .. })
-            if !program_fact_removes.iter().any(|fact| matches!(
+            if !program_fact_removes.added_rows().iter().any(|fact| matches!(
                 fact,
                 input
                     if input.row == target && input.version.tx == initial_tx
@@ -1822,7 +1822,7 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     assert!(matches!(
         regrant,
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { supporting_rows: program_fact_adds, .. })
-            if program_fact_adds.iter().any(|fact| matches!(
+            if program_fact_adds.added_rows().iter().any(|fact| matches!(
                 fact,
                 input
                     if input.row == target && input.version.tx == restored_tx
@@ -1833,7 +1833,7 @@ fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer()
     assert!(matches!(
         delete_update,
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { supporting_rows: program_fact_removes, .. })
-            if !program_fact_removes.iter().any(|fact| matches!(
+            if !program_fact_removes.added_rows().iter().any(|fact| matches!(
                 fact,
                 input
                     if input.row == target && input.version.tx == restored_tx
@@ -2138,6 +2138,7 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
         panic!("expected view update");
     };
     let covered_source_tables = program_fact_adds
+        .added_rows()
         .iter()
         .map(|input| input.version_table.to_string())
         .collect::<BTreeSet<_>>();

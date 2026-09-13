@@ -2796,9 +2796,7 @@ where
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 }
                                 let repair = pending_row_version_repairs.pop_front().expect("active repair");
-                                if repair.superseded {
-                                    continue;
-                                }
+                                if !repair.superseded {
                                 let (subscription, settled_through) = match &repair.update {
                                     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                         subscription,
@@ -2820,6 +2818,21 @@ where
                                     repair.authority_receipt_eligible,
                                 )?;
                                 scope_view_cuts.insert(subscription, settled_through);
+                                }
+                                while pending_row_version_fetches.front().is_some_and(|fetch|
+                                    fetch.requests.is_empty() && fetch.sent_count == 0)
+                                {
+                                    pending_row_version_fetches.pop_front();
+                                    let successor = pending_row_version_repairs.pop_front().expect("paired pending successor");
+                                    if successor.superseded { continue; }
+                                    stage_initial_coverage_clear_for_update(&successor.update,
+                                        &self.latest_coverage_subscriptions, &mut pending_initial_coverage_clears);
+                                    if let SyncMessage::ViewUpdate(view) = &successor.update {
+                                        scope_view_cuts.insert(view.subscription, view.settled_through);
+                                    }
+                                    push_view_update_message_for_receiver(&mut pending_view_updates,
+                                        successor.update, successor.authority_receipt_eligible)?;
+                                }
                             }
                             message @ SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                 subscription,
@@ -2827,7 +2840,7 @@ where
                                 ..
                             }) => {
                                 if matches!(&message, SyncMessage::ViewUpdate(payload)
-                                    if !payload.peer_payload_inventory.opening_pending)
+                                    if !payload.peer_payload_inventory.opening_pending && payload.supporting_rows.is_snapshot())
                                 {
                                     // Keep the active request until its correlated reply
                                     // arrives, but discard obsolete work that was never
@@ -2854,7 +2867,10 @@ where
                                     let mut node = self.node.lock().await;
                                     node.missing_known_state_row_version_refs(&message).await?
                                 };
-                                if missing.is_empty() {
+                                let predecessor_is_waiting = pending_row_version_repairs.iter().any(|repair|
+                                    !repair.superseded && matches!(&repair.update, SyncMessage::ViewUpdate(view)
+                                        if view.subscription == subscription));
+                                if missing.is_empty() && !predecessor_is_waiting {
                                     stage_initial_coverage_clear_for_update(
                                         &message,
                                         &self.latest_coverage_subscriptions,
@@ -4572,7 +4588,7 @@ where
                                         opening_pending: true,
                                         ..Default::default()
                                     },
-                                    supporting_rows: Vec::new(),
+                                    supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
                                 }))
                             } else {
                                 None
@@ -7105,7 +7121,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
                 .map(|bundles| bundles.len())
                 .unwrap_or_default(),
             peer_payload_inventory.complete_tx_payloads.len(),
-            program_fact_adds.len()
+            program_fact_adds.added_rows().len() + program_fact_adds.removed_rows().len()
         ),
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {
@@ -7167,7 +7183,7 @@ where
             node.borrow().client_relay_scope().is_some(),
             payload.subscription,
             payload.peer_payload_inventory.opening_pending,
-            payload.supporting_rows.len(),
+            payload.supporting_rows.added_rows().len(),
             payload.version_carriers.len()
         );
     }

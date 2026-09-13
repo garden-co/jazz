@@ -1415,7 +1415,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
                 durability: DurabilityTier::Edge,
             })],
             peer_payload_inventory: PeerPayloadInventory::default(),
-            supporting_rows: Vec::new(),
+            supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
         }),
     );
 

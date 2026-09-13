@@ -435,7 +435,7 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         .query_update(&mut core, &shape, &binding)
         .unwrap();
     let SyncMessage::ViewUpdate(payload) = &update else { panic!("expected snapshot"); };
-    assert_eq!(payload.supporting_rows.iter().map(|input| input.row).collect::<BTreeSet<_>>(),
+    assert_eq!(payload.supporting_rows.added_rows().iter().map(|input| input.row).collect::<BTreeSet<_>>(),
         BTreeSet::from([chat, alice_message, alice_profile, bob_message, bob_profile]));
     assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
     assert!(

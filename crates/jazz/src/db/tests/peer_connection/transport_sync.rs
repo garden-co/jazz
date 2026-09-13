@@ -32,9 +32,9 @@ fn unordered_supporting_snapshots_preserve_public_subscription_rows() {
             // wire describes a set, not a requirement to trust sender order.
             for message in received.borrow_mut().iter_mut() {
                 if let SyncMessage::ViewUpdate(view) = message
-                    && view.supporting_rows.len() > 1
+                    && view.supporting_rows.added_rows().len() > 1
                 {
-                    view.supporting_rows.reverse();
+                    view.supporting_rows.added_rows_mut().reverse();
                     reversed = true;
                 }
             }
@@ -178,10 +178,11 @@ fn malformed_authority_closure_reaches_only_its_public_subscription() {
         let subscription = update.subscription;
         let duplicate = update
             .supporting_rows
+            .added_rows()
             .first()
             .cloned()
             .expect("nonempty authority opening has a covered-input witness");
-        update.supporting_rows.push(duplicate);
+        update.supporting_rows.added_rows_mut().push(duplicate);
         subscription
     };
     let authority_result = client
@@ -312,10 +313,11 @@ fn malformed_authority_closure_fails_one_shot_owner_tick_loudly() {
             .expect("authority must send the opening");
         let duplicate = update
             .supporting_rows
+            .added_rows()
             .first()
             .cloned()
             .expect("opening must contain an input witness");
-        update.supporting_rows.push(duplicate);
+        update.supporting_rows.added_rows_mut().push(duplicate);
     }
     let error = client
         .tick()
@@ -1705,7 +1707,7 @@ fn known_state_repair_batches_more_than_one_wire_request() {
         subscriber.borrow_mut().tick().unwrap();
         if responses.borrow().iter().any(|message| {
             matches!(message, SyncMessage::ViewUpdate(payload)
-                if payload.supporting_rows.len() == count)
+                if payload.supporting_rows.added_rows().len() == count)
         }) {
             break;
         }
@@ -1713,7 +1715,7 @@ fn known_state_repair_batches_more_than_one_wire_request() {
     let mut stripped = false;
     for message in responses.borrow_mut().iter_mut() {
         if let SyncMessage::ViewUpdate(payload) = message
-            && payload.supporting_rows.len() == count
+            && payload.supporting_rows.added_rows().len() == count
         {
             payload.version_carriers.clear();
             stripped = true;
@@ -1873,7 +1875,7 @@ fn row_version_repair_preserves_preceding_complete_subscription_updates() {
     for message in responses.borrow_mut().iter_mut() {
         if let SyncMessage::ViewUpdate(payload) = message {
             views += 1;
-            assert!(!payload.supporting_rows.is_empty());
+            assert!(!payload.supporting_rows.added_rows().is_empty());
             if views == 2 {
                 payload.version_carriers.clear();
             }

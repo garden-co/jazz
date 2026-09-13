@@ -937,7 +937,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
                     settled_through,
                     ..
                 }) if *settled_through > GlobalTime(0)
-                    && program_fact_adds.iter().any(|fact| {
+                    && program_fact_adds.added_rows().iter().any(|fact| {
                         matches!(fact,
                             input
                                 if input.version_table.as_str() == "todos"

@@ -47,7 +47,7 @@ fn covered_input_for_row(
         panic!("expected view update");
     };
     program_fact_adds
-        .iter()
+        .added_rows().iter()
         .find_map(|fact| match fact {
             input if input.row == row_uuid => Some(input.clone()),
             _ => None,
@@ -85,6 +85,64 @@ fn view_update_parts(message: SyncMessage, defer_settlement: bool) -> ViewUpdate
 }
 
 #[test]
+fn physical_deltas_require_exact_predecessors_and_reopen_requires_snapshot() {
+    // Internal protocol/work-bound coverage: public clients cannot inject a
+    // wrong predecessor or inspect physical manifest size. Query assertions
+    // below still check the receiver's derived rows, not just wire fields.
+    use crate::protocol::SupportingRowsUpdate;
+    let (reader_dir, mut reader) = open_node_with_uuid(node(0xb3));
+    let (_core_dir, mut core) = open_node_with_uuid(node(0xb2));
+    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    for index in 0..32u8 {
+        accept_global(&mut core, MergeableCommit::new("todos", row(index), 1000 + u64::from(index))
+            .cells(title_cells("before")));
+    }
+    let mut peer = relay_with_system_binding(subscription);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let SyncMessage::ViewUpdate(view) = &initial else { unreachable!() };
+    assert!(view.supporting_rows.is_snapshot());
+    assert_eq!(view.supporting_rows.added_rows().len(), 32);
+    let initial_revision = view.supporting_rows.revision();
+    reader.apply_sync_message_settled(initial).unwrap();
+    let key = reader.authority_result_key_for_subscription(subscription).unwrap();
+    let original_facts = reader.query.authority_results[&key].settled_program_facts.clone();
+    let noop = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let SyncMessage::ViewUpdate(view) = &noop else { unreachable!() };
+    assert_eq!(view.supporting_rows.revision(), initial_revision, "discardable no-op cannot advance the chain");
+    reader.apply_sync_message_settled(noop).unwrap();
+    let mut updates = Vec::new();
+    let mut predecessor = initial_revision;
+    for index in 0..2u64 {
+        accept_global(&mut core, MergeableCommit::new("todos", row(7), 2000 + index)
+            .cells(title_cells(if index == 0 { "first" } else { "second" })));
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate(view) = &update else { unreachable!() };
+        let SupportingRowsUpdate::Delta { predecessor: actual, revision, adds, removes } = &view.supporting_rows
+            else { panic!("ordinary successor must not reconstruct a snapshot") };
+        assert_eq!(*actual, predecessor);
+        assert_eq!(adds.len(), 1);
+        assert_eq!(removes.len(), 1);
+        assert_eq!(adds[0].row, row(7));
+        assert_eq!(removes[0].row, row(7));
+        predecessor = *revision;
+        updates.push(update);
+    }
+    assert!(reader.apply_sync_message_settled(updates[1].clone()).is_err(), "cannot skip a predecessor");
+    assert_eq!(reader.query.authority_results[&key].settled_program_facts, original_facts);
+    reader.apply_view_updates_in_batch(updates.iter().cloned().map(|update| view_update_parts(update, false)).collect()).resolve().unwrap();
+    assert_eq!(reader.query.authority_results[&key].supporting_revision, Some(predecessor));
+    assert_eq!(receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).len(), 32);
+    drop(reader);
+    let mut reopened = open_node_at(&reader_dir, schema());
+    register_shape_binding(&mut reopened, &shape, &binding);
+    assert!(reopened.apply_sync_message_settled(updates.pop().unwrap()).is_err(), "durable facts are not a recovered transport predecessor");
+    reopened.apply_sync_message_settled(system_authority_reset(&mut core, &shape, &binding, subscription)).unwrap();
+    assert_eq!(receiver_rows(&mut reopened, &shape, &binding, DurabilityTier::Global).len(), 32);
+}
+
+#[test]
 fn physical_manifest_normalization_reuses_only_the_existing_admitted_source_cache() {
     // Internal mechanism receipt: public rows cannot show redundant compiler
     // discovery or explicitly evict a derived authority-receipt cache.
@@ -109,7 +167,7 @@ fn physical_manifest_normalization_reuses_only_the_existing_admitted_source_cach
     assert_eq!(discoveries(), 0, "successor normalization reuses admitted capabilities");
     assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
     let SyncMessage::ViewUpdate(mut malformed) = reset.clone() else { unreachable!() };
-    malformed.supporting_rows.push(malformed.supporting_rows[0].clone());
+    { let duplicate = malformed.supporting_rows.added_rows()[0].clone(); malformed.supporting_rows.added_rows_mut().push(duplicate); }
     assert!(reader.apply_sync_message_settled(SyncMessage::ViewUpdate(malformed)).is_err());
     assert_eq!(discoveries(), 0);
     assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
@@ -142,14 +200,15 @@ fn physical_manifest_cache_is_receipt_scoped_and_cleared_by_legacy_deferred_and_
     let reset = system_authority_reset(&mut core, &shape, &binding, subscription);
     reader.apply_sync_message_settled(reset.clone()).unwrap();
     let key = reader.authority_result_key_for_subscription(subscription).unwrap();
-    let original = reader.query.authority_results[&key].supporting_snapshot.clone().unwrap();
+    let original = reader.query.authority_results[&key].supporting_revision.unwrap();
     let facts = reader.query.authority_results[&key].settled_program_facts.clone();
-    assert_eq!(original.materialize().into_iter().collect::<BTreeSet<_>>(), facts);
+    let SyncMessage::ViewUpdate(initial_view) = &reset else { unreachable!() };
+    assert_eq!(original, initial_view.supporting_rows.revision());
 
     let SyncMessage::ViewUpdate(mut malformed) = reset.clone() else { unreachable!() };
-    malformed.supporting_rows.push(malformed.supporting_rows[0].clone());
+    { let duplicate = malformed.supporting_rows.added_rows()[0].clone(); malformed.supporting_rows.added_rows_mut().push(duplicate); }
     assert!(reader.apply_sync_message_settled(SyncMessage::ViewUpdate(malformed)).is_err());
-    assert!(std::sync::Arc::ptr_eq(reader.query.authority_results[&key].supporting_snapshot.as_ref().unwrap(), &original));
+    assert_eq!(reader.query.authority_results[&key].supporting_revision, Some(original));
     assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
 
     let mut legacy = view_update_parts(reset.clone(), false);
@@ -157,27 +216,27 @@ fn physical_manifest_cache_is_receipt_scoped_and_cleared_by_legacy_deferred_and_
     legacy.reset_input_set = false;
     legacy.version_carriers.clear();
     reader.apply_view_updates_in_batch(vec![view_update_parts(reset.clone(), false), legacy]).resolve().unwrap();
-    assert!(reader.query.authority_results[&key].supporting_snapshot.is_none());
+    assert!(reader.query.authority_results[&key].supporting_revision.is_none());
     assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
     reader.apply_sync_message_settled(reset.clone()).unwrap();
-    assert!(reader.query.authority_results[&key].supporting_snapshot.is_some());
+    assert!(reader.query.authority_results[&key].supporting_revision.is_some());
 
     reader.apply_view_update(view_update_parts(reset.clone(), true)).resolve().unwrap();
-    assert!(reader.query.authority_results[&key].supporting_snapshot.is_none());
+    assert!(reader.query.authority_results[&key].supporting_revision.is_none());
     reader.apply_sync_message_settled(reset.clone()).unwrap();
-    assert!(reader.query.authority_results[&key].supporting_snapshot.is_some());
+    assert!(reader.query.authority_results[&key].supporting_revision.is_some());
     reader.clear_settled_result_view(key.clone());
-    assert!(reader.query.authority_results[&key].supporting_snapshot.is_none());
+    assert!(reader.query.authority_results[&key].supporting_revision.is_none());
     reader.apply_sync_message_settled(reset.clone()).unwrap();
     assert_eq!(reader.query.authority_results[&key].settled_program_facts, facts);
     assert_eq!(receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global).len(), 1);
     drop(reader);
     let mut reopened = open_node_at(&reader_dir, schema());
-    assert!(reopened.query.authority_results.values().all(|state| state.supporting_snapshot.is_none()));
+    assert!(reopened.query.authority_results.values().all(|state| state.supporting_revision.is_none()));
     register_shape_binding(&mut reopened, &shape, &binding);
     reopened.apply_sync_message_settled(reset).unwrap();
     let state = &reopened.query.authority_results[&key];
-    assert!(state.supporting_snapshot.is_some());
+    assert!(state.supporting_revision.is_some());
     assert_eq!(state.settled_program_facts, facts);
 }
 
@@ -208,7 +267,9 @@ fn physical_manifest_cache_never_outlives_its_facts_across_cancelled_receive_wri
         register_shape_binding(&mut reader, &shape, &binding);
         reader.apply_sync_message_settled(initial.clone()).unwrap();
         let key = reader.authority_result_key_for_subscription(subscription).unwrap();
-        assert!(reader.query.authority_results[&key].supporting_snapshot.is_some());
+        assert!(reader.query.authority_results[&key].supporting_revision.is_some());
+        let predecessor_facts = reader.query.authority_results[&key].settled_program_facts.clone();
+        let predecessor_revision = reader.query.authority_results[&key].supporting_revision;
         control.take_observed();
         control.pause_on(TestStorageOperation::WriteMany);
         let mut receive = Box::pin(reader.apply_view_update(view_update_parts(successor.clone(), false)));
@@ -231,18 +292,23 @@ fn physical_manifest_cache_never_outlives_its_facts_across_cancelled_receive_wri
         assert!(stopped, "receive did not reach a bounded write boundary");
         drop(receive);
         let state = &reader.query.authority_results[&key];
-        if let Some(snapshot) = &state.supporting_snapshot {
-            assert_eq!(snapshot.materialize().into_iter().collect::<BTreeSet<_>>(),
-                state.settled_program_facts.iter().filter(|fact| fact.is_peer_source_closure_fact()).cloned().collect());
+        if let Some(revision) = state.supporting_revision {
+            if Some(revision) == predecessor_revision {
+                assert_eq!(state.settled_program_facts, predecessor_facts);
+            } else {
+                assert!(completed, "successor revision cannot survive incomplete installation");
+                let SyncMessage::ViewUpdate(view) = &successor else { unreachable!() };
+                assert_eq!(revision, view.supporting_rows.revision());
+            }
         } else {
             observed_invalidation = true;
         }
-        if completed { assert!(state.supporting_snapshot.is_some()); }
+        if completed { assert!(state.supporting_revision.is_some()); }
         drop(reader);
         control.resume();
         let storage = crate::db::block_on(reopen_handle.reopen(families.clone())).unwrap();
         let reopened = NodeState::new_with_shared_test_catalogue(node(0xe7), schema.clone(), storage).unwrap();
-        assert!(reopened.query.authority_results.values().all(|state| state.supporting_snapshot.is_none()));
+        assert!(reopened.query.authority_results.values().all(|state| state.supporting_revision.is_none()));
         if completed { break; }
     }
     assert!(completed, "all receive writes must be covered");
@@ -258,7 +324,7 @@ fn physical_manifest_cache_never_outlives_its_facts_across_cancelled_receive_wri
     replay.version_carriers.clear();
     control.fail_next(TestStorageOperation::WriteMany);
     assert!(reader.apply_view_update(replay).resolve().is_err());
-    assert!(reader.query.authority_results[&key].supporting_snapshot.is_none());
+    assert!(reader.query.authority_results[&key].supporting_revision.is_none());
 }
 
 #[test]
@@ -326,7 +392,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
 
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        supporting_rows: Vec::new(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
     });
     reader.apply_sync_message_settled(late).unwrap();
 
@@ -360,7 +426,7 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
 
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        supporting_rows: Vec::new(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
     });
 
     reader.apply_sync_message_settled(late).unwrap();
@@ -415,7 +481,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
 
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        supporting_rows: Vec::new(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
     });
     assert!(
         reader
@@ -451,7 +517,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
 
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        supporting_rows: Vec::new(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
     });
 
     assert!(
@@ -541,7 +607,7 @@ fn complete_empty_snapshot_for_duplicate_usage_replaces_canonical_view() {
 
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: Vec::new(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
             },
         ))
         .unwrap();
@@ -755,7 +821,7 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     };
     assert_eq!(*settled_through, GlobalTime::new(20, 0).unwrap());
     assert!(!peer_payload_inventory.opening_pending);
-    assert!(program_fact_adds.iter().any(|fact| matches!(
+    assert!(program_fact_adds.added_rows().iter().any(|fact| matches!(
         fact,
         input
             if input.row == row_b && input.version.tx == tx_b
@@ -828,7 +894,7 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
     else {
         panic!("expected view update");
     };
-    assert!(program_fact_adds.iter().any(|fact| matches!(
+    assert!(program_fact_adds.added_rows().iter().any(|fact| matches!(
         fact,
         input
             if input.row == row_uuid && input.version.tx == tx_id
@@ -988,7 +1054,7 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
     // fresh attachment's complete authority input manifest.
     assert!(!peer_payload_inventory.opening_pending);
     assert!(version_bundles.is_empty());
-    assert_eq!(supporting_rows.len(), 1, "fresh response still supplies the complete input set");
+    assert_eq!(supporting_rows.added_rows().len(), 1, "fresh response still supplies the complete input set");
     assert!(!reader.has_settled_authority_result(&authority));
     reader.apply_sync_message_settled(update).unwrap();
     assert!(reader.has_settled_authority_result(&authority));
@@ -1225,7 +1291,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
     };
     assert_eq!(
         program_fact_adds
-            .iter()
+            .added_rows().iter()
             .map(|input| input.row)
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([row_a, row_b]),
@@ -1870,13 +1936,13 @@ fn settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec(
         reader
             .supporting_rows_for_facts(shape.schema_version(), facts.iter().cloned())
             .unwrap(),
-        reset_payload.supporting_rows,
+        reset_payload.supporting_rows.added_rows(),
         "local compiled roles retain exactly the physical snapshot"
     );
 
     let mut removal = reset_payload.clone();
     removal.version_carriers.clear();
-    removal.supporting_rows.clear();
+    removal.supporting_rows.added_rows_mut().clear();
     // The complete empty set removes every row while the receiver retains its
     // locally compiled source inventory for future snapshots.
     let manifest = facts
@@ -2065,7 +2131,7 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     else {
         panic!("expected view update");
     };
-    assert!(program_fact_adds.iter().any(|fact| matches!(
+    assert!(program_fact_adds.added_rows().iter().any(|fact| matches!(
         fact,
         input
             if input.row == row_uuid && input.version.tx == tx_id

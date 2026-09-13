@@ -1084,9 +1084,9 @@ pub(crate) struct AuthorityResultState {
     /// Exact authoritative membership and an occurrence index for replacement.
     /// Non-row facts paired with the membership.
     settled_program_facts: BTreeSet<ViewFactEntry>,
-    /// Derived physical predecessor for complete received manifests. Invalidate
-    /// before settled-fact mutation; never recover it as authority evidence.
-    supporting_snapshot: Option<std::sync::Arc<views::OrderedSupportingSnapshot>>,
+    /// Exact v2 transport predecessor. Invalidate before settled-fact mutation;
+    /// never recover it as authority evidence after restart or scope teardown.
+    supporting_revision: Option<[u8; 16]>,
     /// O(changed) admission indexes for the exact source closure. These are
     /// receiver-local indexes over `settled_program_facts`, rebuilt on reopen;
     /// they never replace the durable closure itself.
@@ -2617,7 +2617,7 @@ fn version_indirect_descriptors(
 }
 
 pub(crate) struct ViewUpdateParts {
-    pub(crate) wire_rows: Option<Vec<crate::protocol::SupportingRow>>,
+    pub(crate) wire_rows: Option<crate::protocol::SupportingRowsUpdate>,
     pub(crate) subscription: SubscriptionKey,
     pub(crate) settled_through: GlobalTime,
     pub(crate) defer_settlement: bool,

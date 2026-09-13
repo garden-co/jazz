@@ -696,7 +696,7 @@ where
         // Stage the local successor before changing Groove or receipt state.
         // The runtime validates its complete batch before mutation; keeping
         // this mirror staged gives the same all-or-nothing failure boundary.
-        let mut staged_records = receiver.installed_records.clone();
+        let mut staged_records = BTreeMap::<CoveredInputEntry, Option<Vec<u8>>>::new();
         let mut changes = BTreeMap::<ProgramSourceId, (Vec<Vec<u8>>, Vec<Vec<u8>>)>::new();
         for fact in &incremental.removes {
             let ProgramFactEntry::CoveredInput(input) = fact else {
@@ -704,17 +704,18 @@ where
                     "incremental receiver frame contains a non-source fact",
                 ));
             };
-            let Some(records) = staged_records.get_mut(&input.source) else {
+            let Some(records) = receiver.installed_records.get(&input.source) else {
                 return Err(Error::InvalidStoredValue(
                     "incremental covered input removes an unknown source occurrence",
                 ));
             };
-            if let Some(record) = records.remove(input) {
+            if let Some(record) = records.get(input) {
+                staged_records.insert(input.clone(), None);
                 changes
                     .entry(input.source.clone())
                     .or_default()
                     .1
-                    .push(record);
+                    .push(record.clone());
             } else if input.version.layer == ResultRowLayer::Content {
                 return Err(Error::InvalidStoredValue(
                     "incremental covered input removes a content witness absent from receiver predecessor",
@@ -745,14 +746,20 @@ where
             else {
                 continue;
             };
-            let records = staged_records
-                .get_mut(&input.source)
+            let records = receiver
+                .installed_records
+                .get(&input.source)
                 .expect("receiver records are initialized with every compiled source");
-            if records.insert(input.clone(), record.clone()).is_some() {
+            let present = match staged_records.get(input) {
+                Some(record) => record.is_some(),
+                None => records.contains_key(input),
+            };
+            if present {
                 return Err(Error::InvalidStoredValue(
                     "incremental covered input duplicates a receiver content witness",
                 ));
             }
+            staged_records.insert(input.clone(), Some(record.clone()));
             changes
                 .entry(input.source.clone())
                 .or_default()
@@ -793,7 +800,22 @@ where
             .replace_source(authority_result_key.clone(), incremental.generation);
         receiver.installed_closure = Some((authority_result_key.clone(), incremental.generation));
         receiver.installed_generation = Some(incremental.generation);
-        receiver.installed_records = staged_records;
+        // Every fallible preparation and the atomic runtime batch succeeded.
+        // Commit only touched mirror entries; untouched records never clone.
+        for (input, record) in staged_records {
+            let records = receiver
+                .installed_records
+                .get_mut(&input.source)
+                .expect("staged source was validated before runtime mutation");
+            match record {
+                Some(record) => {
+                    records.insert(input, record);
+                }
+                None => {
+                    records.remove(&input);
+                }
+            }
+        }
         Ok(true)
     }
     /// Install one exact authority closure into a receiver-owned source map.

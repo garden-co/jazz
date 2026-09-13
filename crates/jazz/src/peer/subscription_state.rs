@@ -137,6 +137,8 @@ pub(super) struct PeerSubscriptionState {
     pub(super) awaiting_selected_authority_source: bool,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
     pub(super) program_fact_set: BTreeSet<ProgramFactEntry>,
+    pub(super) supporting_revision: Option<[u8; 16]>,
+    pub(super) physical_support_counts: BTreeMap<crate::protocol::SupportingRow, usize>,
     /// Shared Local-plus-authority provenance. Receiver/materialization state
     /// remains peer-owned; exact-source reconciliation is shared with the DB
     /// facade rather than reimplemented at this transport boundary.
@@ -151,6 +153,8 @@ pub(super) struct PeerSubscriptionState {
 
 impl PeerSubscriptionState {
     pub(super) fn clear_groove_runtime_handles(&mut self) {
+        self.supporting_revision = None;
+        self.physical_support_counts.clear();
         self.maintained_subscription_view = None;
         if let Some(prepared_query) = &mut self.prepared_query {
             // The compiled plan belongs to one runtime, but its semantic

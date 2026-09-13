@@ -156,7 +156,7 @@ impl FastResumeFixture {
         };
         FastResumeReceipt {
             version_carriers: payload.version_carriers.len(),
-            covered_inputs: payload.supporting_rows.len(),
+            covered_inputs: payload.supporting_rows.added_rows().len(),
         }
     }
 }

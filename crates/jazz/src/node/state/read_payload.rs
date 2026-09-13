@@ -639,7 +639,7 @@ where
         let mut missing = BTreeSet::new();
         // Every referenced native body must be available, including retained rows
         // whose bytes may have been evicted since the previous complete snapshot.
-        for row in program_fact_adds {
+        for row in program_fact_adds.added_rows() {
             let tx_id = row.version.tx;
             let version_ref = RowVersionRef::new(row.version_table.to_string(), row.row, tx_id);
             if self.inline_version_bundle_covers(

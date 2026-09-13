@@ -1640,7 +1640,7 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
             durability: DurabilityTier::Local,
         })],
         peer_payload_inventory: PeerPayloadInventory::default(),
-        supporting_rows: Vec::new(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
     });
 
     send_subscriber_with_sync_context(
@@ -2486,7 +2486,7 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
                 && !update.peer_payload_inventory.opening_pending,
             "the empty reset must carry its settled authorization receipt"
         );
-        assert!(update.supporting_rows.is_empty());
+        assert!(update.supporting_rows.added_rows().is_empty());
     }
     drop(sent);
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
@@ -2652,7 +2652,7 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
     assert!(
         refreshed
             .iter()
-            .all(|update| { update.supporting_rows.is_empty() })
+            .all(|update| { update.supporting_rows.added_rows().is_empty() })
     );
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
         unreachable!("accepted client is served by a subscriber link")

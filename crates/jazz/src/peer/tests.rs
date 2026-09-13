@@ -151,7 +151,7 @@ fn late_initial_drain_resets_the_complete_retained_source_closure() {
     accept_global(&mut core, second_tx, 2);
     let SyncMessage::ViewUpdate(update) = peer.query_update(&mut core, &shape, &binding).unwrap()
     else { panic!("expected completed source reset") };
-    let rows = update.supporting_rows.iter().map(|input| input.row).collect::<BTreeSet<_>>();
+    let rows = update.supporting_rows.added_rows().iter().map(|input| input.row).collect::<BTreeSet<_>>();
     assert_eq!(rows, BTreeSet::from([first, second]));
 }
 
@@ -175,6 +175,7 @@ fn direct_supporting_manifest_preserves_owned_reference_wire_bytes() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let subscription = subscription_key(&shape, &binding);
     let mut peer = PeerState::new();
+    let mut previous = BTreeSet::<crate::protocol::SupportingRow>::new();
     for step in 0..4 {
         if step == 1 || step == 3 {
             let commit = MergeableCommit::new("todos", row(2), 2_000 + step);
@@ -201,13 +202,23 @@ fn direct_supporting_manifest_preserves_owned_reference_wire_bytes() {
         let SyncMessage::ViewUpdate(payload) = &mut reference else {
             panic!("expected supporting manifest");
         };
-        assert_eq!(payload.supporting_rows, expected, "transition {step}");
+        let current = expected.iter().cloned().collect::<BTreeSet<_>>();
+        let expected_update = match &payload.supporting_rows {
+            crate::protocol::SupportingRowsUpdate::Snapshot { revision, .. } =>
+                crate::protocol::SupportingRowsUpdate::Snapshot { revision: *revision, rows: expected.clone() },
+            crate::protocol::SupportingRowsUpdate::Delta { predecessor, revision, .. } =>
+                crate::protocol::SupportingRowsUpdate::Delta { predecessor: *predecessor, revision: *revision,
+                    adds: current.difference(&previous).cloned().collect(),
+                    removes: previous.difference(&current).cloned().collect() },
+        };
+        assert_eq!(payload.supporting_rows, expected_update, "transition {step}");
+        previous = current;
         assert!(expected.windows(2).all(|pair| pair[0] < pair[1]));
         // Even repeated borrowed facts must not introduce duplicate wire rows.
         let repeated = maintained.active_peer_source_closure_fact_refs()
             .chain(maintained.active_peer_source_closure_fact_refs());
         assert_eq!(core.supporting_rows_for_facts(shape.schema_version(), repeated).unwrap(), expected);
-        payload.supporting_rows = expected;
+        payload.supporting_rows = expected_update;
         assert_eq!(crate::wire::encode_sync_message(&update).unwrap(),
             crate::wire::encode_sync_message(&reference).unwrap());
     }
@@ -246,9 +257,9 @@ fn supporting_rows_deduplicate_same_table_self_join_source_roles() {
     else {
         panic!("expected self-join delta update")
     };
-    assert_eq!(supporting_rows.len(), 1, "shared aliases deduplicate physical witnesses");
-    assert_eq!(supporting_rows[0].row, shared);
-    assert_eq!(supporting_rows[0].version.tx, updated_tx);
+    assert_eq!(supporting_rows.added_rows().len(), 1, "shared aliases deduplicate physical witnesses");
+    assert_eq!(supporting_rows.added_rows()[0].row, shared);
+    assert_eq!(supporting_rows.added_rows()[0].version.tx, updated_tx);
     let subscription = subscription_key(&shape, &binding);
     let internal_paths = peer.publication_states[&subscription].program_fact_set.iter()
         .filter_map(|fact| match fact {
@@ -262,9 +273,9 @@ fn supporting_rows_deduplicate_same_table_self_join_source_roles() {
     accept_global(&mut core, deletion_tx, 3);
     let SyncMessage::ViewUpdate(payload) = peer.query_update(&mut core, &shape, &binding).unwrap()
     else { panic!("expected self-join deletion snapshot") };
-    assert!(payload.supporting_rows.iter().any(|input| input.row == shared
+    assert!(payload.supporting_rows.added_rows().iter().any(|input| input.row == shared
         && input.version.tx == deletion_tx && input.version.layer == crate::protocol::ResultRowLayer::Deletion));
-    assert!(!payload.supporting_rows.iter().any(|input| input.row == shared
+    assert!(!payload.supporting_rows.added_rows().iter().any(|input| input.row == shared
         && input.version.layer == crate::protocol::ResultRowLayer::Content));
 }
 
@@ -499,7 +510,7 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     // members.
     assert_eq!(
         program_fact_adds
-            .iter()
+            .added_rows().iter()
 
             .count(),
         1,
@@ -521,7 +532,7 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
 
     assert_eq!(
         program_fact_adds
-            .iter()
+            .added_rows().iter()
 
             .count(),
         1,
@@ -542,7 +553,7 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     else {
         panic!("expected view update");
     };
-    assert!(supporting_rows.iter().any(|input| input.row == live && input.version.tx == deleted_tx));
+    assert!(supporting_rows.added_rows().iter().any(|input| input.row == live && input.version.tx == deleted_tx));
 }
 
 #[test]
@@ -598,7 +609,7 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
     else {
         panic!("expected view update");
     };
-    assert_eq!(supporting_rows.len(), 2, "duplicate receives complete supporting closure");
+    assert_eq!(supporting_rows.added_rows().len(), 2, "duplicate receives complete supporting closure");
 }
 
 #[test]
@@ -2064,8 +2075,8 @@ fn view_update_added_rows(update: SyncMessage) -> BTreeSet<RowUuid> {
     else {
         panic!("expected view update");
     };
-    program_fact_adds
-        .into_iter()
+    program_fact_adds.added_rows()
+        .iter()
         .filter_map(|fact| covered_input_result_row(&fact))
         .map(|(_, row_uuid, _)| row_uuid)
         .collect()
@@ -2075,7 +2086,7 @@ type ExpectedSupportingSnapshots = BTreeMap<SubscriptionKey, BTreeSet<ResultRowE
 
 fn remember_supporting_snapshot(expected: &mut ExpectedSupportingSnapshots, update: SyncMessage) {
     let SyncMessage::ViewUpdate(payload) = update else { panic!("expected snapshot") };
-    expected.insert(payload.subscription, payload.supporting_rows.iter().filter_map(covered_input_result_row).collect());
+    expected.insert(payload.subscription, payload.supporting_rows.added_rows().iter().filter_map(covered_input_result_row).collect());
 }
 
 fn assert_view_update_rows(
@@ -2086,14 +2097,20 @@ fn assert_view_update_rows(
 ) {
     let SyncMessage::ViewUpdate(payload) = update else { panic!("expected view update") };
     let rows = expected.entry(payload.subscription).or_default();
+    let mut actual = if payload.supporting_rows.is_snapshot() { BTreeSet::new() } else { rows.clone() };
+    for entry in payload.supporting_rows.removed_rows().iter().filter_map(covered_input_result_row) {
+        assert!(actual.remove(&entry), "wire removal must exist in the test predecessor");
+    }
+    for entry in payload.supporting_rows.added_rows().iter().filter_map(covered_input_result_row) {
+        assert!(actual.insert(entry), "wire addition must be absent from the test predecessor");
+    }
     for (table, row, tx) in expected_removes {
         rows.remove(&(table.to_owned().into(), row, tx));
     }
     for (table, row, tx) in expected_adds {
         rows.insert((table.to_owned().into(), row, tx));
     }
-    let actual = payload.supporting_rows.iter().filter_map(covered_input_result_row).collect::<BTreeSet<_>>();
-    assert_eq!(&actual, rows, "complete supporting content snapshot");
+    assert_eq!(&actual, rows, "reconstructed supporting content set");
 }
 
 fn assert_view_update_row_order(
@@ -2253,7 +2270,7 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
     };
     assert_eq!(
         program_fact_adds
-            .iter()
+            .added_rows().iter()
             .filter_map(covered_input_result_row)
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([(
@@ -2339,7 +2356,7 @@ fn maintained_structured_change_ships_only_covered_inputs() {
         panic!("expected child view update")
     };
     assert!(
-        child_fact_adds.iter().any(|fact| {
+        child_fact_adds.added_rows().iter().any(|fact| {
             { let input = fact; input.version_table.as_str( ) == "todos"
                         && input.row == row(0xb1)
                         && input.version.tx == child_tx
@@ -2366,7 +2383,7 @@ fn maintained_structured_change_ships_only_covered_inputs() {
         panic!("expected duplicate structured view update")
     };
     assert!(
-        program_fact_adds.iter().any(|fact| {
+        program_fact_adds.added_rows().iter().any(|fact| {
             { let input = fact; input.version_table.as_str( ) == "todos"
                         && input.row == row(0xb1)
                         && input.version.tx == child_tx
@@ -2401,7 +2418,7 @@ fn maintained_structured_change_ships_only_covered_inputs() {
         "the peer must ship the changed covered row input in the same successor frame, not defer it behind a terminal patch; supporting_rows={program_fact_adds:?}"
     );
     assert!(
-        program_fact_adds.iter().any(|fact| {
+        program_fact_adds.added_rows().iter().any(|fact| {
             { let input = fact; input.version_table.as_str( ) == "todos"
                         && input.row == row(0xb1)
                         && input.version.tx == child_update_tx
@@ -2410,7 +2427,7 @@ fn maintained_structured_change_ships_only_covered_inputs() {
         "a retained parent membership must still publish the nested child's changed covered input"
     );
     assert!(
-        !program_fact_adds.iter().any(|fact| {
+        !program_fact_adds.added_rows().iter().any(|fact| {
             { let input = fact; input.version_table.as_str( ) == "todos"
                         && input.row == row(0xb1)
                         && input.version.tx == child_tx
@@ -2430,7 +2447,9 @@ fn maintained_structured_change_ships_only_covered_inputs() {
         panic!("expected idempotent view update")
     };
     assert!(version_carriers.is_empty());
-    assert_eq!(program_fact_adds, previous_supporting_rows, "idempotent frame repeats complete snapshot");
+    assert_eq!(program_fact_adds.revision(), previous_supporting_rows.revision());
+    assert!(program_fact_adds.added_rows().is_empty());
+    assert!(program_fact_adds.removed_rows().is_empty(), "idempotent confirmation has no membership changes");
 }
 
 #[test]
@@ -2856,17 +2875,17 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         vec![("todos", second_row, second_tx)],
         vec![("todos", first_row, first_tx)],
     );
-    assert!(program_fact_adds.iter().all(|fact| {
+    assert!(program_fact_adds.added_rows().iter().all(|fact| {
         !{ let input = fact; input.row == first_row
                 && input.version.layer == crate::protocol::ResultRowLayer::Content }
     }));
-    assert!(program_fact_adds.iter().any(|fact| {
+    assert!(program_fact_adds.added_rows().iter().any(|fact| {
         { let input = fact; input.row == first_row
                 && input.version.tx == delete_first_tx
                 && input.version.layer == crate::protocol::ResultRowLayer::Deletion }
     }), "the authorized deletion witness clears cached state without restoring the deleted content input");
     assert!(
-        !program_fact_adds.iter().any(|fact| {
+        !program_fact_adds.added_rows().iter().any(|fact| {
             { let input = fact; input.version_table.as_str( ) == "todos"
                         && input.row == first_row
                         && input.version.tx == first_tx
@@ -3061,7 +3080,7 @@ fn maintained_subscription_view_order_by_limit_updates_move_rows_across_boundary
         panic!("expected view update");
     };
     assert!(
-        program_fact_adds.iter().any(|fact| {
+        program_fact_adds.added_rows().iter().any(|fact| {
             { let input = fact; input.version_table.as_str( ) == "todos"
                         && input.row == charlie
                         && input.version.tx == charlie_promoted_tx
@@ -3571,7 +3590,7 @@ fn maintained_subscription_view_aggregate_rehydrate_ships_covered_inputs() {
 
     assert_eq!(
         program_fact_adds
-            .iter()
+            .added_rows().iter()
             .map(|input| input.row)
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0x10), row(0x11)]),
@@ -3607,7 +3626,7 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
     };
     assert_eq!(
         program_fact_adds
-            .iter()
+            .added_rows().iter()
             .map(|input| input.row)
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([row(0x10), row(0x11)]),
@@ -3630,7 +3649,7 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
         panic!("expected view update");
     };
 
-    assert!(program_fact_adds.iter().any(|fact| {
+    assert!(program_fact_adds.added_rows().iter().any(|fact| {
         { let input = fact; input.version_table.as_ref( ) == "todos" && input.row == row(0x12)
         }
     }));
@@ -4899,7 +4918,7 @@ fn policy_revocation_withdraws_covered_input_without_tombstoning_cached_row() {
     let SyncMessage::ViewUpdate(payload) = &revoke else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.iter().all(|fact| {
+    assert!(payload.supporting_rows.added_rows().iter().all(|fact| {
         !{ let input = fact; input.row == doc
                     && input.version.layer == crate::protocol::ResultRowLayer::Deletion
          }
@@ -4934,7 +4953,7 @@ fn policy_revocation_withdraws_covered_input_without_tombstoning_cached_row() {
     let SyncMessage::ViewUpdate(payload) = &delete_after_revoke else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.iter().all(|fact| {
+    assert!(payload.supporting_rows.added_rows().iter().all(|fact| {
         !{ let input = fact; input.row == doc
                     && input.version.layer == crate::protocol::ResultRowLayer::Deletion
          }
@@ -4966,7 +4985,7 @@ fn policy_revocation_withdraws_covered_input_without_tombstoning_cached_row() {
     let SyncMessage::ViewUpdate(payload) = &unseen_update else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.iter().all(|fact| {
+    assert!(payload.supporting_rows.added_rows().iter().all(|fact| {
         !{ let input = fact; input.row == doc
                     && input.version.layer == crate::protocol::ResultRowLayer::Deletion
          }
@@ -5017,7 +5036,7 @@ fn policy_visible_delete_carries_tombstone_and_clears_receiver_current_row() {
     let SyncMessage::ViewUpdate(payload) = &delete else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.iter().any(|fact| {
+    assert!(payload.supporting_rows.added_rows().iter().any(|fact| {
         { let input = fact; input.row == doc
                     && input.version.tx == delete_tx
                     && input.version.layer == crate::protocol::ResultRowLayer::Deletion
@@ -5102,13 +5121,13 @@ fn concurrent_policy_revoke_cannot_cross_authorize_another_rows_tombstone() {
     let SyncMessage::ViewUpdate(payload) = &mixed else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.iter().any(|fact| {
+    assert!(payload.supporting_rows.added_rows().iter().any(|fact| {
         { let input = fact; input.row == deleted_doc
                     && input.version.tx == delete_tx
                     && input.version.layer == crate::protocol::ResultRowLayer::Deletion
          }
     }));
-    assert!(payload.supporting_rows.iter().all(|fact| {
+    assert!(payload.supporting_rows.added_rows().iter().all(|fact| {
         !{ let input = fact; input.row == revoked_doc
                     && input.version.layer == crate::protocol::ResultRowLayer::Deletion
          }
@@ -5181,7 +5200,7 @@ fn same_row_policy_revoke_and_delete_do_not_leak_a_tombstone() {
     let SyncMessage::ViewUpdate(payload) = &mixed else {
         panic!("expected view update");
     };
-    assert!(payload.supporting_rows.iter().all(|fact| {
+    assert!(payload.supporting_rows.added_rows().iter().all(|fact| {
         !{ let input = fact; input.row == doc
                     && input.version.layer == crate::protocol::ResultRowLayer::Deletion
          }
@@ -6046,11 +6065,11 @@ fn duplicate_usage_reconciles_canonical_membership_after_deletion_witness() {
         panic!("expected canonical view update");
     };
     assert_eq!(*subscription, canonical);
-    assert!(supporting_rows.iter().any(|input| input.row == live
+    assert!(supporting_rows.added_rows().iter().any(|input| input.row == live
         && input.version.tx == deleted_tx
         && input.version.layer == crate::protocol::ResultRowLayer::Deletion),
         "the supporting snapshot carries the deletion that makes the result empty");
-    assert!(supporting_rows.iter().all(|input| input.row == live));
+    assert!(supporting_rows.added_rows().iter().all(|input| input.row == live));
 
     // The clone is a distinct concrete receiver. Production subscription
     // admission records its immutable policy binding before an owner-loop
@@ -6140,7 +6159,7 @@ fn duplicate_usage_reopens_stale_canonical_query_before_cloning() {
     assert_eq!(
         payload
             .supporting_rows
-            .iter()
+            .added_rows().iter()
             .filter_map(covered_input_result_row)
             .map(|(_, row, _)| row)
             .collect::<BTreeSet<_>>(),
@@ -6166,7 +6185,7 @@ fn duplicate_usage_reopens_stale_canonical_query_before_cloning() {
     assert_eq!(
         payload
             .supporting_rows
-            .iter()
+            .added_rows().iter()
             .filter_map(covered_input_result_row)
             .map(|(_, row, _)| row)
             .collect::<BTreeSet<_>>(),
@@ -6208,9 +6227,9 @@ fn maintained_publication_reuses_complete_successor_closure() {
     let traversals = SOURCE_CLOSURE_TRAVERSALS.with(|count| count.get());
     assert_eq!(traversals, 1, "only the complete wire manifest traverses the closure; transition bookkeeping uses changed identities");
     let SyncMessage::ViewUpdate(view) = update else { panic!("expected complete manifest") };
-    assert_eq!(view.supporting_rows.iter().map(|row| row.row).collect::<BTreeSet<_>>(), expected);
-    assert_eq!(view.supporting_rows.len(), 150, "complete manifest has no duplicate rows");
-    assert_eq!(view.supporting_rows.iter().find(|row| row.row == row_from_u64(0)).unwrap().version.tx, tx, "changed row carries its current exact version");
+    assert_eq!(view.supporting_rows.added_rows().iter().map(|row| row.row).collect::<BTreeSet<_>>(), expected);
+    assert_eq!(view.supporting_rows.added_rows().len(), 150, "complete manifest has no duplicate rows");
+    assert_eq!(view.supporting_rows.added_rows().iter().find(|row| row.row == row_from_u64(0)).unwrap().version.tx, tx, "changed row carries its current exact version");
     let state = &peer.publication_states[&subscription];
     assert_eq!(state.program_fact_set, state.maintained_subscription_view.as_ref().unwrap().maintained.active_peer_source_closure_facts());
 }
@@ -6257,8 +6276,8 @@ fn maintained_publication_retries_source_changes_after_abandoned_drain() {
     let SyncMessage::ViewUpdate(view) = update else {
         panic!("expected update")
     };
-    assert_eq!(view.supporting_rows.len(), 1);
-    assert_eq!(view.supporting_rows[0].version.tx, second);
+    assert_eq!(view.supporting_rows.added_rows().len(), 1);
+    assert_eq!(view.supporting_rows.added_rows()[0].version.tx, second);
     let state = &peer.publication_states[&subscription];
     let current = state
         .maintained_subscription_view
@@ -6374,7 +6393,7 @@ fn maintained_publication_bundle_failure_retains_source_journal() {
     let SyncMessage::ViewUpdate(view) = retry else {
         panic!("expected retry")
     };
-    assert_eq!(view.supporting_rows[0].version.tx, second);
+    assert_eq!(view.supporting_rows.added_rows()[0].version.tx, second);
     let state = &peer.publication_states[&subscription];
     assert_eq!(
         state.program_fact_set,

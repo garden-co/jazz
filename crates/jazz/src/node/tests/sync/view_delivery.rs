@@ -308,7 +308,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     };
     assert!(version_bundles.is_empty());
     assert_eq!(peer_payload_inventory_refs, vec![tx_id]);
-    assert!(program_fact_adds.iter().any(|fact| matches!(
+    assert!(program_fact_adds.added_rows().iter().any(|fact| matches!(
         fact,
         input
             if input.row == row && input.version.tx == tx_id
