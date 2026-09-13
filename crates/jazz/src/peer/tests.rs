@@ -6211,3 +6211,120 @@ fn maintained_publication_retries_source_changes_after_abandoned_drain() {
     assert_ne!(current, previous);
     assert_eq!(state.program_fact_set, current);
 }
+
+// Internal: independently supplied predecessor resets have no public control
+// that isolates baseline invalidation from new terminal work.
+#[test]
+fn maintained_publication_independent_source_reset_rebuilds_baseline() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x94));
+    let first = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 1000).cells(title_cells("initial")),
+        )
+        .unwrap();
+    accept_global(&mut core, first, 1);
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::new();
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let original = peer.publication_states[&subscription]
+        .program_fact_set
+        .clone();
+    assert!(!original.is_empty());
+    peer.apply_outgoing_view_delta(subscription, true, &[], &[], &[], &[]);
+    assert!(
+        peer.publication_states[&subscription]
+            .program_fact_set
+            .is_empty()
+    );
+    peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        peer.publication_states[&subscription].program_fact_set,
+        original
+    );
+}
+
+// Internal: force a storage failure after terminal consumption, before bundle
+// construction succeeds; the public API cannot pause at this exact boundary.
+#[test]
+fn maintained_publication_bundle_failure_retains_source_journal() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    let schema = schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let mut core = crate::db::block_on(NodeState::new_with_shared_test_catalogue(
+        node(0x95),
+        schema.clone(),
+        storage,
+    ))
+    .unwrap();
+    let first = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 1000).cells(title_cells("initial")),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        first,
+        Fate::Accepted,
+        Some(GlobalTime(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::new();
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let previous = peer.publication_states[&subscription]
+        .program_fact_set
+        .clone();
+    let second = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 2000).cells(title_cells("updated")),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        second,
+        Fate::Accepted,
+        Some(GlobalTime(2)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    crate::db::block_on(peer.drain_maintained_subscription_view_changes(
+        &mut core,
+        &shape,
+        subscription,
+        None,
+        None,
+    ))
+    .unwrap();
+    eviction.evict_all();
+    control.fail_next(TestStorageOperation::Get);
+    let failure = crate::db::block_on(peer.query_update(&mut core, &shape, &binding));
+    assert!(
+        failure.is_err(),
+        "cold bundle lookup must fail: {failure:?}"
+    );
+    assert_eq!(
+        peer.publication_states[&subscription].program_fact_set,
+        previous
+    );
+    let retry = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let SyncMessage::ViewUpdate(view) = retry else {
+        panic!("expected retry")
+    };
+    assert_eq!(view.supporting_rows[0].version.tx, second);
+    let state = &peer.publication_states[&subscription];
+    assert_eq!(
+        state.program_fact_set,
+        state
+            .maintained_subscription_view
+            .as_ref()
+            .unwrap()
+            .maintained
+            .active_peer_source_closure_facts()
+    );
+}
