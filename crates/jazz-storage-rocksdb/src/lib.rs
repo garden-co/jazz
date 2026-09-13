@@ -25,7 +25,7 @@ use groove::storage::{
     BoxedStorage, ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation,
     ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCodecProfile, StorageCursor,
     StorageEpochManifest, StorageFactory, StorageFuture, StorageScan, Value, WriteManyOutcome,
-    validate_physical_storage_names,
+    WriteOperation, validate_physical_storage_names,
 };
 
 trait RocksResultExt<T> {
@@ -1047,6 +1047,56 @@ impl OrderedKvStorage for RocksDbStorage {
     fn column_family_names(&self) -> Option<Vec<String>> {
         Some(self.column_families.iter().cloned().collect())
     }
+
+    fn write_many_borrowed_outcome<'a>(
+        &'a self,
+        operations: Vec<WriteOperation<'a>>,
+    ) -> StorageFuture<'a, WriteManyOutcome> {
+        Box::pin(async move {
+            // Match owned-batch prevalidation and acknowledgement semantics.
+            for operation in &operations {
+                let cf = match operation {
+                    WriteOperation::Set { cf, .. } | WriteOperation::Delete { cf, .. } => *cf,
+                };
+                if cf != "default"
+                    && let Err(error) = self.cf_handle(cf)
+                {
+                    return WriteManyOutcome::Uncommitted(error);
+                }
+            }
+            let _guard = self
+                .mutation_gate
+                .lock()
+                .expect("RocksDB mutation gate poisoned");
+            let result = (|| -> Result<(), Error> {
+                let mut batch = WriteBatch::default();
+                for operation in operations {
+                    match operation {
+                        WriteOperation::Set { cf, key, value } => {
+                            if cf == "default" {
+                                batch.put(key, value);
+                            } else {
+                                batch.put_cf(self.cf_handle(cf)?, key, value);
+                            }
+                        }
+                        WriteOperation::Delete { cf, key } => {
+                            if cf == "default" {
+                                batch.delete(key);
+                            } else {
+                                batch.delete_cf(self.cf_handle(cf)?, key);
+                            }
+                        }
+                    }
+                }
+                self.db.write_opt(&batch, &self.write_options).storage()?;
+                self.finish_write_batch()
+            })();
+            match result {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1388,6 +1438,97 @@ mod tests {
                 .iter()
                 .any(|name| name == "must-not-be-admitted"),
             "open must reject before admitting requested families"
+        );
+    }
+
+    /// Alice's borrowed publication and Bob's owned publication must persist
+    /// identical ordered bytes, including overwrite/delete and atomic failure.
+    #[test]
+    fn borrowed_publication_matches_owned_bytes_and_rejects_invalid_family_atomically() {
+        use groove::storage::{OwnedWriteOperation, WriteManyOutcome};
+        let alice_dir = tempfile::tempdir().unwrap();
+        let bob_dir = tempfile::tempdir().unwrap();
+        let alice = RocksDbStorage::open(alice_dir.path(), &["records"]).unwrap();
+        let bob = RocksDbStorage::open(bob_dir.path(), &["records"]).unwrap();
+        let operations = vec![
+            OwnedWriteOperation::Set {
+                cf: "records".into(),
+                key: b"a".to_vec(),
+                value: vec![7; 8192],
+            },
+            OwnedWriteOperation::Set {
+                cf: "records".into(),
+                key: b"a".to_vec(),
+                value: b"latest".to_vec(),
+            },
+            OwnedWriteOperation::Set {
+                cf: "records".into(),
+                key: b"b".to_vec(),
+                value: b"removed".to_vec(),
+            },
+            OwnedWriteOperation::Delete {
+                cf: "records".into(),
+                key: b"b".to_vec(),
+            },
+        ];
+        assert!(matches!(
+            ready(
+                alice.write_many_borrowed_outcome(
+                    operations
+                        .iter()
+                        .map(OwnedWriteOperation::as_write_operation)
+                        .collect()
+                )
+            ),
+            WriteManyOutcome::Committed
+        ));
+        assert!(matches!(
+            ready(bob.write_many_outcome(operations)),
+            WriteManyOutcome::Committed
+        ));
+        drop(alice);
+        drop(bob);
+        let alice = RocksDbStorage::open(alice_dir.path(), &["records"]).unwrap();
+        let bob = RocksDbStorage::open(bob_dir.path(), &["records"]).unwrap();
+        for key in [b"a", b"b"] {
+            let actual = ready(alice.get("records".into(), key.to_vec())).unwrap();
+            assert_eq!(
+                actual,
+                ready(bob.get("records".into(), key.to_vec())).unwrap()
+            );
+            assert_eq!(
+                actual,
+                if key == b"a" {
+                    Some(b"latest".to_vec())
+                } else {
+                    None
+                }
+            );
+        }
+        let invalid = [
+            OwnedWriteOperation::Delete {
+                cf: "records".into(),
+                key: b"a".to_vec(),
+            },
+            OwnedWriteOperation::Delete {
+                cf: "missing".into(),
+                key: b"a".to_vec(),
+            },
+        ];
+        assert!(matches!(
+            ready(
+                alice.write_many_borrowed_outcome(
+                    invalid
+                        .iter()
+                        .map(OwnedWriteOperation::as_write_operation)
+                        .collect()
+                )
+            ),
+            WriteManyOutcome::Uncommitted(_)
+        ));
+        assert_eq!(
+            ready(alice.get("records".into(), b"a".to_vec())).unwrap(),
+            Some(b"latest".to_vec())
         );
     }
 
