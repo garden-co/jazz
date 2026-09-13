@@ -88,3 +88,15 @@ a parent scope to its children. Flamegraph node occurrences are stack-context
 occurrences, not invocation counts. Use explicit opt-in counters if a thesis
 depends on calls or processed rows. Profile sampling totals and benchmark
 wall-time minima/medians are separate receipts, not interchangeable clocks.
+
+Validate symbol filters and ancestry against the code before assigning a
+removable budget. For example, `for jazz::protocol::SupportingRow` matches both
+Serialize and Deserialize implementations; use the exact trait/function when
+separating encode from decode. A derived `Clone` frame containing whole query
+execution beneath it is not evidence that cloning itself runs that query.
+Optimized inline ancestry can be misleading. Cross-check such scopes with a
+phase-bounded native profile using `perf script --no-inline` and the actual
+call sites before proposing a large win. Keep instrumented phase timings
+separate from clean benchmark timings: per-phase clock reads can materially
+perturb a densely instrumented workload. The evidence and examples are in
+[the performance outcome log](https://github.com/garden-co/jazz/issues/2913).
