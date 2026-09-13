@@ -60,6 +60,7 @@ try {
   const fixture = {
     fetchedAt: "2026-09-13T12:00:00Z",
     runCount: 4,
+    excludedRuns: 0,
     excludedResults: 0,
     warnings: [],
     releases: [
@@ -94,6 +95,12 @@ try {
   await page.goto(origin);
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
   assert.equal(await page.locator(".chart-point").count(), 4);
+  assert.match(await page.locator(".chart").textContent(), /2026-09-11/);
+  assert.match(await page.locator(".chart").textContent(), /2026-09-14/);
+  assert.match(await page.locator(".chart").textContent(), /RUN DAY \(UTC\)/);
+  assert.equal(await page.locator(".legend .stage").count(), 3);
+  assert.equal(await page.getByRole("option", { name: "Past PR trial" }).count(), 0);
+  assert.equal(await page.getByRole("option", { name: "Other branch" }).count(), 0);
   await page.getByLabel("Checkpoint status").selectOption("open");
   assert.equal(await page.locator(".chart-point").count(), 2);
   assert.equal(await page.locator(".chart line[stroke-dasharray='7 5']").count(), 1);

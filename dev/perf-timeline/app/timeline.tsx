@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   checkpoint,
+  calendarDay,
   formatTime,
   stages,
   type Benchmark,
@@ -80,11 +81,11 @@ function Chart({
   spread: boolean;
 }) {
   const width = 1100,
-    height = 370,
+    height = 395,
     left = 78,
     right = 30,
     top = 25,
-    bottom = 80;
+    bottom = 105;
   const values = points.flatMap((p) => (spread ? [p.min, p.max] : [p.median]));
   const low = logarithmic ? Math.min(...values) * 0.8 : 0;
   const high = Math.max(...values) * 1.1;
@@ -198,10 +199,13 @@ function Chart({
               i === points.length - 1) && (
               <g>
                 <text x={x(i)} y={height - bottom + 28} textAnchor="middle" className="axis-text">
+                  {calendarDay(p.date)}
+                </text>
+                <text x={x(i)} y={height - bottom + 46} textAnchor="middle" className="axis-text">
                   {p.release ??
                     (p.pr ? `PR #${p.pr}` : p.stage === "main" ? "main commit" : "commit")}
                 </text>
-                <text x={x(i)} y={height - bottom + 45} textAnchor="middle" className="axis-sha">
+                <text x={x(i)} y={height - bottom + 63} textAnchor="middle" className="axis-sha">
                   {p.sha.slice(0, 7)}
                 </text>
               </g>
@@ -212,7 +216,7 @@ function Chart({
           WALLCLOCK · {logarithmic ? "LOG SCALE" : "ZERO-BASED SCALE"}
         </text>
         <text x={width - right} y={height - 6} textAnchor="end" className="axis-caption">
-          MEASURED CHECKPOINTS →
+          MEASURED CHECKPOINTS · RUN DAY (UTC) →
         </text>
       </svg>
     </div>
@@ -244,7 +248,7 @@ export function Dashboard() {
       const requested = new URLSearchParams(window.location.search).get("benchmark");
       setBenchmarkId(
         (current) =>
-          current ??
+          incoming.benchmarks.find((b) => b.id === current)?.id ??
           incoming.benchmarks.find((b) => b.id === requested || b.name === requested)?.id ??
           incoming.benchmarks.find((b) => b.name === priority[0])?.id ??
           incoming.benchmarks[0]?.id ??
@@ -526,8 +530,8 @@ export function Dashboard() {
                   </div>
                   <p className="chart-note">
                     Each line follows one branch or PR, ordered by run time—not commit ancestry.
-                    Past PR trials remain separate from measurements on main. Min–max is sample
-                    range, not a confidence interval.
+                    Dates are run calendar days in UTC. Only releases, main and open PRs are shown.
+                    Min–max is sample range, not a confidence interval.
                   </p>
                 </section>
                 {current && (
@@ -659,9 +663,10 @@ export function Dashboard() {
                     : "No version tags are currently available."}
                 </p>
                 <div className="data-stamp">
-                  {data.runCount} runs returned by CodSpeed · {data.excludedResults} non-wallclock
-                  or invalid results excluded · Retrieved {date(data.fetchedAt)} · Cached up to 5
-                  min (stale responses up to 15 min)
+                  {data.runCount} runs returned by CodSpeed · {data.excludedRuns}{" "}
+                  past-PR/other-branch runs excluded · {data.excludedResults} non-wallclock or
+                  invalid results excluded · Retrieved {date(data.fetchedAt)} · Cached up to 5 min
+                  (stale responses up to 15 min)
                 </div>
               </section>
             )}

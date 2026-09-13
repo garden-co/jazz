@@ -15,11 +15,13 @@ pnpm --filter jazz-perf-timeline build
 - Y: wallclock **median in seconds**, automatically formatted as s/ms/µs. The
   optional min–max whisker is observed sample range, not a confidence interval.
 - X: measured release/PR/commit checkpoints, ordered by **run timestamp**, with
-  equal spacing. This is not a Git ancestry diagram or elapsed-time scale.
+  equal spacing. Labels show the run's **UTC calendar day**, PR/release and
+  commit hash. This is not a Git ancestry diagram or elapsed-time scale.
 - Thick amber: exact semantic-version Git-tag commit. Solid green: main runs.
-  Dashed purple: currently open PRs. Dotted gray: historical closed/merged PR
-  trials. A PR having merged does not make its earlier experimental commits
-  measurements of main. Separate branches/PRs are never connected.
+  Dashed purple: currently open PRs. Historical closed/merged PR trials and
+  other branches are completely excluded from the API dataset, navigation,
+  receipts and plots. A PR having merged does not make its earlier experimental
+  commits measurements of main. Separate branches/PRs are never connected.
 - Releases without an exact measured commit are identified but never assigned
   estimated values. Version tags are used, not inferred npm publication dates.
 - Missing and simulation-only results are excluded. Completed measurements from

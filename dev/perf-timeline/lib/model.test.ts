@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildTimeline, formatTime, type RawRun } from "./model.ts";
+import { buildTimeline, formatTime, calendarDay, type RawRun } from "./model.ts";
 
 const run = (id: string, branch = "main", prStatus?: string): RawRun => ({
   id,
@@ -26,7 +26,7 @@ const run = (id: string, branch = "main", prStatus?: string): RawRun => ({
   ],
 });
 
-test("exact release commits take precedence; past PR trials are not main measurements", () => {
+test("only exact releases, main and open PRs are retained throughout the dataset", () => {
   const data = buildTimeline(
     [
       run("release"),
@@ -42,10 +42,23 @@ test("exact release commits take precedence; past PR trials are not main measure
   assert.equal(points.get("release")?.stage, "released");
   assert.equal(points.get("main")?.stage, "main");
   assert.equal(points.get("1")?.stage, "open");
-  assert.equal(points.get("2")?.stage, "archived");
-  assert.equal(points.get("3")?.stage, "archived");
-  assert.equal(points.get("4")?.stage, "unknown");
-  assert.notEqual(points.get("1")?.series, points.get("2")?.series);
+  assert.equal(points.has("2"), false);
+  assert.equal(points.has("3"), false);
+  assert.equal(points.has("4"), false);
+  assert.equal(data.excludedRuns, 3);
+  assert.equal(points.size, 3);
+});
+
+test("benchmarks with only excluded runs disappear from navigation data", () => {
+  assert.deepEqual(
+    buildTimeline([run("past", "trial", "MERGED"), run("other", "other")], []).benchmarks,
+    [],
+  );
+});
+
+test("calendar-day labels explicitly use UTC across midnight and year boundaries", () => {
+  assert.equal(calendarDay("2026-09-13T23:30:00-07:00"), "2026-09-14");
+  assert.equal(calendarDay("2026-01-01T00:30:00+02:00"), "2025-12-31");
 });
 
 test("does not fabricate released timings from neighboring commits", () => {

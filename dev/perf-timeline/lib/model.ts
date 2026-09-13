@@ -1,4 +1,4 @@
-export type Stage = "released" | "main" | "open" | "archived" | "unknown";
+export type Stage = "released" | "main" | "open";
 export type Distribution = { min: number; median: number; max: number };
 export type RawRun = {
   id: string;
@@ -36,6 +36,7 @@ export type Timeline = {
   benchmarks: Benchmark[];
   releases: Release[];
   runCount: number;
+  excludedRuns: number;
   excludedResults: number;
   warnings: string[];
 };
@@ -44,8 +45,6 @@ export const stages: Record<Stage, { label: string; color: string; dash: string 
   released: { label: "Released", color: "#b66822", dash: "" },
   main: { label: "Main", color: "#167968", dash: "" },
   open: { label: "Open PR", color: "#7761b8", dash: "7 5" },
-  archived: { label: "Past PR trial", color: "#939086", dash: "2 5" },
-  unknown: { label: "Other branch", color: "#758594", dash: "3 5" },
 };
 
 export function buildTimeline(
@@ -56,6 +55,7 @@ export function buildTimeline(
   const tagged = new Map(releases.map((r) => [r.sha, r.name]));
   const benchmarks = new Map<string, Benchmark>();
   let excludedResults = 0;
+  let excludedRuns = 0;
   // A result ID is the measurement receipt. Do not average reruns, manufacture
   // zeros for missing jobs, or mix instruction-simulation results into seconds.
   const seen = new Set<string>();
@@ -64,15 +64,19 @@ export function buildTimeline(
     const branch = run.commit.branch;
     const pr = branch?.pullRequest;
     const release = tagged.get(run.commit.hash) ?? null;
-    const stage: Stage = release
+    const stage: Stage | null = release
       ? "released"
       : branch?.name === "main"
         ? "main"
         : pr?.status === "OPEN"
           ? "open"
-          : pr && ["MERGED", "CLOSED"].includes(pr.status)
-            ? "archived"
-            : "unknown";
+          : null;
+    // Exclude these at the source boundary, not merely from the chart: no
+    // sidebar, sparkline, receipt, filter or API result should retain them.
+    if (!stage) {
+      excludedRuns++;
+      continue;
+    }
     for (const result of run.results) {
       const time = result.walltime;
       if (
@@ -119,6 +123,7 @@ export function buildTimeline(
     benchmarks: [...benchmarks.values()].sort((a, b) => a.name.localeCompare(b.name)),
     releases,
     runCount: runs.length,
+    excludedRuns,
     excludedResults,
     warnings: [],
   };
@@ -136,4 +141,8 @@ export function checkpoint(point: Point): string {
   return (
     point.release ?? (point.pr ? `#${point.pr} · ${point.sha.slice(0, 7)}` : point.sha.slice(0, 7))
   );
+}
+
+export function calendarDay(timestamp: string): string {
+  return new Date(timestamp).toISOString().slice(0, 10);
 }
