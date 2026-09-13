@@ -1949,6 +1949,9 @@ fn run_connect_and_subscribe(
         jazz_sim::phase_attribution::reset();
         jazz::cold_settle_attribution::reset();
         jazz::groove::cold_settle_attribution::reset();
+        if std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_some() {
+            eprintln!("ARRANGEMENT_CAPTURE_BEGIN\t{label}");
+        }
     }
     work_budget::start();
     alloc_metrics::reset_and_start();
@@ -2169,6 +2172,9 @@ fn run_connect_and_subscribe(
     let projection_nodes_at_readiness = jazz::groove::cold_settle_attribution::map_node_work();
     #[cfg(feature = "cold-settle-attribution")]
     {
+        if std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_some() {
+            eprintln!("ARRANGEMENT_CAPTURE_END\t{label}");
+        }
         attribution.phase_timing = jazz_sim::phase_attribution::snapshot();
         if let Some(mut path) = std::env::var_os("JAZZ_PHASE_TIMELINE") {
             path.push(format!(".{label}.json"));
