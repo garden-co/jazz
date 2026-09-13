@@ -9,7 +9,11 @@ default = []
 bench-alloc-metrics = []
 bench-perf-control = []
 bench-alloc-sites = ["dep:backtrace", "jazz-sim/bench-alloc-sites"]
-cold-settle-attribution = ["jazz/cold-settle-attribution", "jazz-sim/cold-settle-attribution", "dep:tracing"]
+cold-settle-attribution = [
+  "jazz/cold-settle-attribution",
+  "jazz-sim/cold-settle-attribution",
+  "dep:tracing",
+]
 
 [dependencies]
 jazz-sim = { path = "../../../crates/jazz-sim" }
