@@ -158,6 +158,64 @@ fn late_initial_drain_resets_the_complete_retained_source_closure() {
 /// Wire closure deduplicates physical witnesses while self-join aliases remain
 /// distinct inside the evaluator; deletion still carries its authorized witness.
 #[test]
+fn direct_supporting_manifest_preserves_owned_reference_wire_bytes() {
+    // Internal protocol test: the public Db API cannot observe manifest ordering
+    // or compare the old owned-set construction with the borrowed path.
+    let (_dir, mut core) = open_node_with_uuid(node(0x91));
+    for (index, id) in [row(3), row(1), row(2)].into_iter().enumerate() {
+        let tx = core.commit_mergeable_settled(
+            MergeableCommit::new("todos", id, 1_000 + index as u64)
+                .cells(title_cells("shared")),
+        ).unwrap();
+        accept_global(&mut core, tx, index as u64 + 1);
+    }
+    let shape = Query::from(table("todos").alias("root"))
+        .flat_join(table("todos").alias("peer"), "root.title", "peer.title")
+        .validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::new();
+    for step in 0..4 {
+        if step == 1 || step == 3 {
+            let commit = MergeableCommit::new("todos", row(2), 2_000 + step);
+            let commit = if step == 3 {
+                commit.deletion(DeletionEvent::Deleted)
+            } else {
+                commit.cells(title_cells("updated"))
+            };
+            let tx = core.commit_mergeable_settled(commit).unwrap();
+            accept_global(&mut core, tx, 10 + step);
+        }
+        let update = if step == 0 {
+            peer.rehydrate_query(&mut core, &shape, &binding).unwrap()
+        } else {
+            peer.query_update(&mut core, &shape, &binding).unwrap()
+        };
+        let maintained = &peer.publication_states[&subscription]
+            .maintained_subscription_view.as_ref().unwrap().maintained;
+        // The old manifest pipeline: clone/deduplicate facts before mapping to
+        // physical rows. Multiple self-join roles must still emit one version.
+        let owned = maintained.active_peer_source_closure_facts();
+        let expected = core.supporting_rows_for_facts(shape.schema_version(), owned).unwrap();
+        let mut reference = update.clone();
+        let SyncMessage::ViewUpdate(payload) = &mut reference else {
+            panic!("expected supporting manifest");
+        };
+        assert_eq!(payload.supporting_rows, expected, "transition {step}");
+        assert!(expected.windows(2).all(|pair| pair[0] < pair[1]));
+        // Even repeated borrowed facts must not introduce duplicate wire rows.
+        let repeated = maintained.active_peer_source_closure_fact_refs()
+            .chain(maintained.active_peer_source_closure_fact_refs());
+        assert_eq!(core.supporting_rows_for_facts(shape.schema_version(), repeated).unwrap(), expected);
+        payload.supporting_rows = expected;
+        assert_eq!(crate::wire::encode_sync_message(&update).unwrap(),
+            crate::wire::encode_sync_message(&reference).unwrap());
+    }
+}
+
+/// Wire closure deduplicates physical witnesses while self-join aliases remain
+/// distinct inside the evaluator; deletion still carries its authorized witness.
+#[test]
 fn supporting_rows_deduplicate_same_table_self_join_source_roles() {
     let (_dir, mut core) = open_node_with_uuid(node(0x8f));
     let shared = row(0x8e);

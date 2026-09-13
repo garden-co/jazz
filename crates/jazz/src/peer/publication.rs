@@ -1251,7 +1251,7 @@ impl PeerState {
         ) {
             let supporting_rows = node.supporting_rows_for_facts(
                 shape.schema_version(),
-                maintained.active_peer_source_closure_facts(),
+                maintained.active_peer_source_closure_fact_refs(),
             )?;
             // Even a cancelled-out drain is acknowledged only after its
             // supporting manifest has been constructed successfully.
