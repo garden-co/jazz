@@ -34,6 +34,12 @@ jq -c '.data.repository.runs[]
 ```
 
 The selected `result.id` values become `HEAD_RESULT_ID` and `BASE_RESULT_ID`.
+Exact distributions are also available directly, without the MCP. Query
+`benchmarkResultById(id: "RESULT_ID") { id walltime { min median max mean } }`
+inside the same `repository` selection. These fields are seconds (verified
+against native runner logs on 2026-09-13); their names are **not** the MCP's
+`minSeconds`/`medianSeconds`. GraphQL aliases allow several result IDs in one
+request. Preserve the result IDs and raw distribution response beside profiles.
 Select the exact run and actual commit hash, not the first array entry: run
 ordering is not an authority for recency, and MCP discovery can initially show
 a synthetic merge hash before the run resolves to its source commit. Results
