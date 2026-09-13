@@ -1449,10 +1449,41 @@ where
             let Some(wanted_rows) = wanted_add_rows_by_tx.get(&bundle.tx.tx_id) else {
                 continue;
             };
-            bundle.versions.retain(|version| {
-                version.deletion().is_some()
-                    || wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-            });
+            // Selection is expressed in the read schema, but bundle rows
+            // have already been resolved to their authored schema. Comparing
+            // logical names here drops a renamed row (or admits a reused
+            // name). Keep the compiler-bound physical identity end to end.
+            let wanted_physical = wanted_rows
+                .iter()
+                .map(|(table, row)| {
+                    maintained_facts
+                        .physical_tables
+                        .get(&groove::Intern::new(table.clone()))
+                        .copied()
+                        .map(|table| (table, *row))
+                        .ok_or(Error::InvalidStoredValue(
+                            "exclusive scope has no physical table identity",
+                        ))
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let mut selected = Vec::with_capacity(bundle.versions.len());
+            for version in std::mem::take(&mut bundle.versions) {
+                let physical = self
+                    .catalogue
+                    .physical_mappings
+                    .get(&version.schema_version())
+                    .and_then(|mapping| mapping.identities.tables.get(version.table()))
+                    .map(|table| table.id)
+                    .ok_or(Error::InvalidStoredValue(
+                        "exclusive bundle has no authored physical table identity",
+                    ))?;
+                if version.deletion().is_some()
+                    || wanted_physical.contains(&(physical, version.row_uuid()))
+                {
+                    selected.push(version);
+                }
+            }
+            bundle.versions = selected;
             bundle.tx.n_total_writes = bundle
                 .versions
                 .len()

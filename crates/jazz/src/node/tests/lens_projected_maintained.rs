@@ -211,9 +211,10 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
 
 /// A projected result name may also have belonged to a different old physical
 /// table. Even when both rows share an exclusive transaction and row UUID, the
-/// maintained wire witness must fail closed rather than selecting by name/key.
+/// native witness must select by its bound physical table. An unproven
+/// materialized witness must still reject the ambiguous name/key combination.
 #[test]
-fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
+fn maintained_renamed_witness_uses_physical_proof_and_rejects_unproven_collision() {
     let base = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("tasks").column("title", PublicColumnType::Text))
@@ -294,11 +295,29 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
         "the evolved tasks view contains the renamed todos row, not the dropped old tasks row"
     );
 
-    let mut peer = PeerState::new();
+    let authored = core.query_versions_for_tx(collision_tx).unwrap();
+    let canonical = authored.iter().find(|version| version.table() == "todos").unwrap();
+    let expected_wire = core.version_record_from_row(canonical).unwrap();
+    // Without the resolver's physical proof, the projected logical name is
+    // ambiguous. Keep the original fail-closed boundary independently of the
+    // now-capable native publication path (assertion update approved by Anselm).
+    let mut unproven = canonical.clone();
+    unproven.table = "tasks".to_owned().into();
     assert!(matches!(
-        peer.current_rows_update(&mut core, "tasks").resolve(),
+        core.canonical_history_version_for_maintained_witness(&unproven).resolve(),
         Err(Error::InvalidStoredValue(
             "maintained witness maps to zero or multiple physical tables"
         ))
     ));
+    // The convenience whole-table query prefers the node's original read
+    // schema; explicitly request the evolved view of the renamed table here.
+    let mut peer = PeerState::new();
+    let update = peer.rehydrate_query(&mut core, &shape, &shape.bind(BTreeMap::new()).unwrap()).unwrap();
+    let bundles = version_bundles_for_update(&update);
+    assert_eq!(bundles.len(), 1);
+    assert_eq!(bundles[0].versions, vec![expected_wire]);
+    let shipped = &bundles[0].versions[0];
+    assert_eq!(shipped.table(), "todos");
+    assert_eq!(shipped.schema_version(), base.version_id());
+    assert_eq!(shipped.cell_at(0), Some(v("canonical renamed todo")));
 }
