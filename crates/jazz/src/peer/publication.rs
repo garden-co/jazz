@@ -1109,14 +1109,15 @@ impl PeerState {
             .get(&subscription)
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .is_some_and(|maintained| maintained.initial_received);
-        let transitions = self.drain_maintained_subscription_view_changes(
-            node,
-            shape,
-            subscription,
-            result_table_filter,
-            progress_waker,
-        )
-        .await?;
+        let transitions = self
+            .drain_maintained_subscription_view_changes(
+                node,
+                shape,
+                subscription,
+                result_table_filter,
+                progress_waker,
+            )
+            .await?;
         let initial_state = self
             .publication_states
             .get(&subscription)
@@ -1149,7 +1150,8 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        let public_result_is_silent = result_member_adds.is_empty() && result_member_removes.is_empty();
+        let public_result_is_silent =
+            result_member_adds.is_empty() && result_member_removes.is_empty();
         // A deletion witness can require a one-shot membership reconciliation
         // only when it produced no exact source-closure transition. Once the
         // deletion-register carrier is present, it is the authoritative
@@ -1188,7 +1190,8 @@ impl PeerState {
                 .await
                 .map(|update| {
                     update.map(|update| MaintainedCanonicalUpdate {
-                changed: true,                        update,
+                        changed: true,
+                        update,
                         allow_storage_witness_fallback: false,
                     })
                 });
@@ -1201,34 +1204,43 @@ impl PeerState {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        // Source terminals can emit a transient +/− pair in separate runtime
-        // batches before this publication drain returns. Peer wire frames are
-        // unordered set transitions, not an operation log, so derive their
-        // disjoint delta from the acknowledged predecessor and the maintained
-        // successor closure. This preserves O(changed inputs) without sending
-        // an ambiguous pair or a replacement snapshot.
-        let previous_program_fact_set = self
+        // Source terminals can emit a transient +/− pair across runtime
+        // batches. Bundle selection and predecessor bookkeeping consume the
+        // disjoint net transition, not that operation log. Probe only identities
+        // touched since the last successful publication against the predecessor
+        // and final maintained closure. The complete supporting-row wire
+        // manifest is still constructed separately below.
+        let state = self
             .publication_states
             .get(&subscription)
-            .map(PeerSubscriptionState::program_fact_set)
-            .unwrap_or_default();
-        let current_program_fact_set = self
-            .publication_states
-            .get(&subscription)
-            .and_then(|state| state.maintained_subscription_view.as_ref())
-            .map(|view| view.maintained.active_peer_source_closure_facts())
+            .ok_or(Error::InvalidStoredValue(
+                "maintained subscription publication state is missing",
+            ))?;
+        let maintained = &state
+            .maintained_subscription_view
+            .as_ref()
             .ok_or(Error::InvalidStoredValue(
                 "maintained subscription view is missing source closure state",
-            ))?;
+            ))?
+            .maintained;
+        let mut complete_program_fact_set = None;
         let (program_fact_adds, program_fact_removes) = if initial_snapshot_completed {
-            // A reopened evaluator can finish hydration after the opening
-            // call returned, with the previous publication closure retained.
-            // Its first drain is a reset, not a delta against that closure:
-            // unchanged inputs still belong in the complete reset manifest.
-            (current_program_fact_set.iter().cloned().collect(), Vec::new())
+            let current = maintained.active_peer_source_closure_facts();
+            let adds = current.iter().cloned().collect();
+            complete_program_fact_set = Some(current);
+            (adds, Vec::new())
+        } else if let Some(delta) =
+            maintained.unpublished_peer_source_delta(&state.program_fact_set)
+        {
+            delta
         } else {
-            canonical_set_delta(&previous_program_fact_set, &current_program_fact_set)
+            let current = maintained.active_peer_source_closure_facts();
+            let delta = canonical_set_delta(&state.program_fact_set, &current);
+            complete_program_fact_set = Some(current);
+            delta
         };
+        let published_fact_adds = program_fact_adds.clone();
+        let published_fact_removes = program_fact_removes.clone();
         let fact_add_count = program_fact_adds.len();
         let fact_remove_count = program_fact_removes.len();
         if maintained_view_update_is_empty(
@@ -1237,16 +1249,28 @@ impl PeerState {
             &program_fact_adds,
             &program_fact_removes,
         ) {
+            let supporting_rows = node.supporting_rows_for_facts(
+                shape.schema_version(),
+                maintained.active_peer_source_closure_facts(),
+            )?;
+            // Even a cancelled-out drain is acknowledged only after its
+            // supporting manifest has been constructed successfully.
+            if let Some(state) = self.publication_states.get_mut(&subscription) {
+                if let Some(current) = complete_program_fact_set {
+                    state.program_fact_set = current;
+                }
+                if let Some(view) = &mut state.maintained_subscription_view {
+                    view.maintained.acknowledge_peer_source_closure();
+                }
+            }
             return Ok(Some(MaintainedCanonicalUpdate {
-                changed: initial_snapshot_completed,                update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                changed: initial_snapshot_completed,
+                update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: self.maintained_publication_cut(node, subscription),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    supporting_rows: node.supporting_rows_for_facts(
-                        shape.schema_version(),
-                        current_program_fact_set.clone(),
-                    )?,
+                    supporting_rows,
                 }),
                 allow_storage_witness_fallback: false,
             }));
@@ -1270,7 +1294,8 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
+        let (policy_identity, policy_claims) =
+            self.served_subscription_policy_binding(subscription)?;
         let settled_through = self.maintained_publication_cut(node, subscription);
         let update = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
@@ -1282,29 +1307,31 @@ impl PeerState {
                     "maintained subscription view subscription missing",
                 ))?
                 .maintained;
-            scoped.view_update_for_maintained_result_members(
-                crate::node::MaintainedViewBundleInputs {
-                    shape,
-                    has_default_read_view: read_view.is_default(),
-                    allow_authoritative_scalar_exit_refresh: !self
-                        .subscription_awaits_selected_authority_source(subscription),
-                    subscription,
-                    settled_through,
-                    peer_complete_tx_payloads,
-                    known_state,
-                    complete_exclusive_payloads: self.ship_complete_exclusive_payloads
-                        && self.role == PeerRole::Relay,
-                    previous_result_set: previous_result_tx_ids,
-                    result_member_adds,
-                    result_member_removes,
-                    program_fact_adds,
-                    program_fact_removes,
-                    identity: policy_identity,
-                    tier,
-                    maintained_facts: maintained,
-                    allow_storage_witness_fallback,
-                },
-            ).await
+            scoped
+                .view_update_for_maintained_result_members(
+                    crate::node::MaintainedViewBundleInputs {
+                        shape,
+                        has_default_read_view: read_view.is_default(),
+                        allow_authoritative_scalar_exit_refresh: !self
+                            .subscription_awaits_selected_authority_source(subscription),
+                        subscription,
+                        settled_through,
+                        peer_complete_tx_payloads,
+                        known_state,
+                        complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                            && self.role == PeerRole::Relay,
+                        previous_result_set: previous_result_tx_ids,
+                        result_member_adds,
+                        result_member_removes,
+                        program_fact_adds,
+                        program_fact_removes,
+                        identity: policy_identity,
+                        tier,
+                        maintained_facts: maintained,
+                        allow_storage_witness_fallback,
+                    },
+                )
+                .await
         };
         let update = update?;
         let bundle_elapsed = bundle_start.elapsed();
@@ -1338,24 +1365,35 @@ impl PeerState {
         }
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(subscription);
-        // The maintained view was only borrowed while constructing this
-        // update. Reuse its already-computed complete successor closure for
-        // predecessor bookkeeping; no second traversal or cache lifetime is
-        // needed, and the complete wire manifest is constructed unchanged.
+        // Advance the predecessor and retire the journal only after the
+        // fallible bundle construction succeeds. Failed/cancelled attempts
+        // leave every changed identity available to the next drain.
         self.record_outgoing_view_update_metadata(&update);
         if let SyncMessage::ViewUpdate(view) = &update {
-            self.publication_states
+            let state = self
+                .publication_states
                 .entry(view.subscription)
-                .or_default()
-                .program_fact_set = current_program_fact_set;
+                .or_default();
+            if let Some(current) = complete_program_fact_set {
+                state.program_fact_set = current;
+            } else {
+                for fact in published_fact_removes {
+                    state.program_fact_set.remove(&fact);
+                }
+                state.program_fact_set.extend(published_fact_adds);
+            }
+            if let Some(view) = &mut state.maintained_subscription_view {
+                view.maintained.acknowledge_peer_source_closure();
+            }
         }
         Ok(Some(MaintainedCanonicalUpdate {
-                changed: true,            update,
+            changed: true,
+            update,
             allow_storage_witness_fallback,
         }))
     }
 
-    async fn drain_maintained_subscription_view_changes<S>(
+    pub(super) async fn drain_maintained_subscription_view_changes<S>(
         &mut self,
         node: &mut NodeState<S>,
         shape: &ValidatedQuery,

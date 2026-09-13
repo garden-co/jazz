@@ -173,6 +173,10 @@ pub(crate) struct MaintainedSubscriptionView {
     /// +/− pair observed in one drain is never serialized as an ambiguous
     /// ordered operation.
     source_fact_weights: BTreeMap<ProgramFactEntry, [i64; 3]>,
+    /// Enabled only by peer publication after recording a complete predecessor.
+    /// Retain candidates across failed/cancelled drains and bundle construction;
+    /// only successful publication may acknowledge them.
+    unpublished_source_facts: Option<BTreeSet<ProgramFactEntry>>,
     selected_deletion_witnesses: BTreeMap<ProgramFactEntry, VersionRow>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
@@ -199,6 +203,7 @@ impl Default for MaintainedSubscriptionView {
             storage_backed_result_materialization: false,
             inline_content_branch_keys: BTreeSet::new(),
             source_fact_weights: BTreeMap::new(),
+            unpublished_source_facts: None,
             selected_deletion_witnesses: BTreeMap::new(),
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
@@ -863,22 +868,61 @@ impl MaintainedSubscriptionView {
             .collect()
     }
 
+    /// Compare only touched identities with the last successful publication.
+    /// An untracked/reopened view requires one complete baseline comparison.
+    pub(crate) fn unpublished_peer_source_delta(
+        &self,
+        previous: &BTreeSet<ProgramFactEntry>,
+    ) -> Option<(Vec<ProgramFactEntry>, Vec<ProgramFactEntry>)> {
+        let candidates = self.unpublished_source_facts.as_ref()?;
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+        for fact in candidates {
+            #[cfg(test)]
+            SOURCE_CLOSURE_POINT_LOOKUPS.with(|count| count.set(count.get() + 1));
+            let present = self.selected_deletion_witnesses.contains_key(fact)
+                || self
+                    .source_fact_weights
+                    .get(fact)
+                    .is_some_and(|weights| weights.iter().any(|weight| *weight > 0));
+            match (previous.contains(fact), present) {
+                (false, true) => adds.push(fact.clone()),
+                (true, false) => removes.push(fact.clone()),
+                _ => {}
+            }
+        }
+        Some((adds, removes))
+    }
+
+    pub(crate) fn forget_peer_source_closure_baseline(&mut self) {
+        self.unpublished_source_facts = None;
+    }
+
+    pub(crate) fn acknowledge_peer_source_closure(&mut self) {
+        self.unpublished_source_facts
+            .get_or_insert_with(BTreeSet::new)
+            .clear();
+    }
+
     /// Exact selected-scope tombstones carry provenance but no app input tuple.
     pub(crate) fn replace_selected_deletion_witnesses(
         &mut self,
         witnesses: BTreeMap<ProgramFactEntry, VersionRow>,
     ) -> (Vec<ProgramFactEntry>, Vec<ProgramFactEntry>) {
-        let adds = witnesses
+        let adds: Vec<_> = witnesses
             .keys()
             .filter(|fact| !self.selected_deletion_witnesses.contains_key(*fact))
             .cloned()
             .collect();
-        let removes = self
+        let removes: Vec<_> = self
             .selected_deletion_witnesses
             .keys()
             .filter(|fact| !witnesses.contains_key(*fact))
             .cloned()
             .collect();
+        if let Some(changes) = &mut self.unpublished_source_facts {
+            changes.extend(adds.iter().chain(&removes).cloned());
+        }
         self.selected_deletion_witnesses = witnesses;
         (adds, removes)
     }
@@ -893,6 +937,11 @@ impl MaintainedSubscriptionView {
         fact: ProgramFactEntry,
         weight: i64,
     ) -> Option<bool> {
+        if fact.is_peer_source_closure_fact()
+            && let Some(changes) = &mut self.unpublished_source_facts
+        {
+            changes.insert(fact.clone());
+        }
         let slot = match origin {
             SourceFactOrigin::Version => 0,
             SourceFactOrigin::Replacement => 1,
@@ -957,7 +1006,11 @@ impl MaintainedSubscriptionView {
                     result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
                 })
                 .sum::<usize>();
-        let versions_bytes = self.versions.footprint_bytes()
+        let journal_bytes = self.unpublished_source_facts.as_ref().map_or(0, |facts| {
+            btree_set_bytes(facts.len()) + facts.len() * mem::size_of::<ProgramFactEntry>()
+        });
+        let versions_bytes = journal_bytes
+            + self.versions.footprint_bytes()
             + btree_map_bytes(self.selected_deletion_witnesses.len())
             + self
                 .selected_deletion_witnesses
@@ -4207,6 +4260,110 @@ mod tests {
         }
     }
 
+    // Internal: publication retry candidates and lookup counts have no public
+    // API representation. Compare them with the independently enumerated set.
+    #[test]
+    fn unpublished_source_delta_is_bounded_and_retained_until_acknowledged() {
+        for size in [10, 1500] {
+            let mut maintained = MaintainedSubscriptionView::default();
+            for time in 1..=size {
+                let fact = ProgramFactEntry::CoveredInput(
+                    covered_input_for_version(
+                        test_source(),
+                        &version(
+                            RowUuid::from_bytes((time as u128).to_be_bytes()),
+                            time,
+                            "source",
+                        ),
+                        &aliases(),
+                    )
+                    .unwrap(),
+                );
+                maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact, 1);
+            }
+            let previous = maintained.active_peer_source_closure_facts();
+            assert!(
+                maintained
+                    .unpublished_peer_source_delta(&previous)
+                    .is_none()
+            );
+            maintained.acknowledge_peer_source_closure();
+            let fact = previous.iter().next().unwrap().clone();
+            maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1);
+            SOURCE_CLOSURE_POINT_LOOKUPS.with(|count| count.set(0));
+            SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(0));
+            let delta = maintained.unpublished_peer_source_delta(&previous).unwrap();
+            assert_eq!(delta, (Vec::new(), vec![fact.clone()]));
+            assert_eq!(SOURCE_CLOSURE_POINT_LOOKUPS.with(|count| count.get()), 1);
+            assert_eq!(SOURCE_CLOSURE_TRAVERSALS.with(|count| count.get()), 0);
+            // A failed/cancelled caller does not acknowledge. A fresh drain
+            // with no events must still expose the same pending removal.
+            assert_eq!(
+                maintained.unpublished_peer_source_delta(&previous).unwrap(),
+                delta
+            );
+            let current = maintained.active_peer_source_closure_facts();
+            assert_eq!(
+                previous.difference(&current).cloned().collect::<Vec<_>>(),
+                delta.1
+            );
+            maintained.acknowledge_peer_source_closure();
+            assert_eq!(
+                maintained.unpublished_peer_source_delta(&current),
+                Some((vec![], vec![]))
+            );
+        }
+    }
+
+    // Internal: exercise independent signed terminal origins and selected
+    // deletion witnesses against the exact predecessor, including retries.
+    #[test]
+    fn unpublished_source_delta_coalesces_origins_and_selected_witnesses() {
+        let version = deletion(row(1), 1);
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(test_source(), &version, &aliases()).unwrap(),
+        );
+        let mut maintained = MaintainedSubscriptionView::default();
+        maintained.acknowledge_peer_source_closure();
+        let empty = BTreeSet::new();
+        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1);
+        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1);
+        assert_eq!(
+            maintained.unpublished_peer_source_delta(&empty),
+            Some((vec![], vec![]))
+        );
+        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1);
+        assert_eq!(
+            maintained.unpublished_peer_source_delta(&empty),
+            Some((vec![fact.clone()], vec![]))
+        );
+        let previous = BTreeSet::from([fact.clone()]);
+        maintained.acknowledge_peer_source_closure();
+        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1);
+        maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), 1);
+        assert_eq!(
+            maintained.unpublished_peer_source_delta(&previous),
+            Some((vec![], vec![]))
+        );
+        maintained.replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version)]));
+        maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), -1);
+        assert_eq!(
+            maintained.unpublished_peer_source_delta(&previous),
+            Some((vec![], vec![]))
+        );
+        maintained.replace_selected_deletion_witnesses(BTreeMap::new());
+        assert_eq!(
+            maintained.unpublished_peer_source_delta(&previous),
+            Some((vec![], vec![fact.clone()]))
+        );
+        maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), -1);
+        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1);
+        assert_eq!(
+            maintained.unpublished_peer_source_delta(&previous),
+            Some((vec![], vec![]))
+        );
+    }
+
     #[test]
     fn shared_covered_input_publishes_only_first_add_and_final_remove() {
         let aliases = aliases();
@@ -5135,5 +5292,6 @@ mod terminal_role_hash_tests {
 
 #[cfg(test)]
 std::thread_local! {
+    pub(crate) static SOURCE_CLOSURE_POINT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static SOURCE_CLOSURE_TRAVERSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }

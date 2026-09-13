@@ -6148,11 +6148,66 @@ fn maintained_publication_reuses_complete_successor_closure() {
     SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(0));
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let traversals = SOURCE_CLOSURE_TRAVERSALS.with(|count| count.get());
-    assert_eq!(traversals, 2, "one closure for canonical transition and one for the complete wire manifest; bookkeeping must reuse the former");
+    assert_eq!(traversals, 1, "only the complete wire manifest traverses the closure; transition bookkeeping uses changed identities");
     let SyncMessage::ViewUpdate(view) = update else { panic!("expected complete manifest") };
     assert_eq!(view.supporting_rows.iter().map(|row| row.row).collect::<BTreeSet<_>>(), expected);
     assert_eq!(view.supporting_rows.len(), 150, "complete manifest has no duplicate rows");
     assert_eq!(view.supporting_rows.iter().find(|row| row.row == row_from_u64(0)).unwrap().version.tx, tx, "changed row carries its current exact version");
     let state = &peer.publication_states[&subscription];
     assert_eq!(state.program_fact_set, state.maintained_subscription_view.as_ref().unwrap().maintained.active_peer_source_closure_facts());
+}
+
+// Internal: interrupt exactly between terminal consumption and publication;
+// the public API does not expose this cancellation boundary.
+#[test]
+fn maintained_publication_retries_source_changes_after_abandoned_drain() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x94));
+    let first = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 1_000).cells(title_cells("initial")),
+        )
+        .unwrap();
+    accept_global(&mut core, first, 1);
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::new();
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let previous = peer.publication_states[&subscription]
+        .program_fact_set
+        .clone();
+    let second = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(1), 2_000).cells(title_cells("updated")),
+        )
+        .unwrap();
+    accept_global(&mut core, second, 2);
+    let abandoned = crate::db::block_on(peer.drain_maintained_subscription_view_changes(
+        &mut core,
+        &shape,
+        subscription,
+        None,
+        None,
+    ))
+    .unwrap();
+    assert!(!abandoned.program_fact_adds.is_empty());
+    assert_eq!(
+        peer.publication_states[&subscription].program_fact_set,
+        previous
+    );
+    let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let SyncMessage::ViewUpdate(view) = update else {
+        panic!("expected update")
+    };
+    assert_eq!(view.supporting_rows.len(), 1);
+    assert_eq!(view.supporting_rows[0].version.tx, second);
+    let state = &peer.publication_states[&subscription];
+    let current = state
+        .maintained_subscription_view
+        .as_ref()
+        .unwrap()
+        .maintained
+        .active_peer_source_closure_facts();
+    assert_ne!(current, previous);
+    assert_eq!(state.program_fact_set, current);
 }
