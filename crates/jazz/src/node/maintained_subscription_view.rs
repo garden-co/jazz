@@ -868,13 +868,11 @@ impl MaintainedSubscriptionView {
                         .apply_delta(identity.clone(), Arc::clone(&payload), weight);
                     self.replacements
                         .apply_delta(key, identity, payload, weight);
-                    for origin in [SourceFactOrigin::Version, SourceFactOrigin::Replacement] {
-                        let fact = ProgramFactEntry::CoveredInput(covered_input.clone());
-                        if let Some(is_present) =
-                            self.apply_source_fact_delta(origin, fact.clone(), weight)
-                        {
-                            record_source_fact_transition(&mut transitions, fact, is_present);
-                        }
+                    let fact = ProgramFactEntry::CoveredInput(covered_input);
+                    if let Some(is_present) =
+                        self.apply_source_fact_weights(fact.clone(), [weight, weight, 0])
+                    {
+                        record_source_fact_transition(&mut transitions, fact, is_present);
                     }
                 }
                 NetEvent::ProgramFact(fact) => {
@@ -1013,29 +1011,42 @@ impl MaintainedSubscriptionView {
         fact: ProgramFactEntry,
         weight: i64,
     ) -> Option<bool> {
-        if fact.is_peer_source_closure_fact()
-            && let Some(changes) = &mut self.unpublished_source_facts
-        {
-            changes.insert(fact.clone());
-        }
         let slot = match origin {
             SourceFactOrigin::Version => 0,
             SourceFactOrigin::Replacement => 1,
             SourceFactOrigin::ProgramFact => 2,
         };
+        let mut deltas = [0; 3];
+        deltas[slot] = weight;
+        self.apply_source_fact_weights(fact, deltas)
+    }
+
+    /// Shared witnesses advance both independent roles with the same signed
+    /// delta. Their union presence is monotonic across those two advances,
+    /// so one before/after check preserves the former transition stream.
+    fn apply_source_fact_weights(
+        &mut self,
+        fact: ProgramFactEntry,
+        deltas: [i64; 3],
+    ) -> Option<bool> {
+        if fact.is_peer_source_closure_fact()
+            && let Some(changes) = &mut self.unpublished_source_facts
+        {
+            changes.insert(fact.clone());
+        }
         match self.source_fact_weights.entry(fact) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                if weight != 0 {
-                    let mut weights = [0; 3];
-                    weights[slot] = weight;
-                    entry.insert(weights);
+                if deltas.iter().any(|weight| *weight != 0) {
+                    entry.insert(deltas);
                 }
-                (weight > 0).then_some(true)
+                deltas.iter().any(|weight| *weight > 0).then_some(true)
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let weights = entry.get_mut();
                 let was_present = weights.iter().any(|weight| *weight > 0);
-                weights[slot] += weight;
+                for (weight, delta) in weights.iter_mut().zip(deltas) {
+                    *weight += delta;
+                }
                 let is_present = weights.iter().any(|weight| *weight > 0);
                 if weights.iter().all(|weight| *weight == 0) {
                     entry.remove();
@@ -4511,6 +4522,94 @@ mod tests {
             maintained.unpublished_peer_source_delta(&previous),
             Some((vec![], vec![]))
         );
+    }
+
+    // Internal: public row results do not expose negative role weights or
+    // journal touches. Compare the fused transition to the former two-step
+    // sequence and an independent signed-state model, without changing the
+    // existing public/shared-witness lifecycle tests.
+    #[test]
+    fn fused_shared_presence_matches_independent_signed_roles() {
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(
+                test_source(),
+                &version(row(0x54), 13, "paired presence"),
+                &aliases(),
+            )
+            .unwrap(),
+        );
+        for version_weight in -2..=2 {
+            for replacement_weight in -2..=2 {
+                for program_weight in -2..=2 {
+                    for delta in -2..=2 {
+                        let initial = [version_weight, replacement_weight, program_weight];
+                        let expected = [
+                            version_weight + delta,
+                            replacement_weight + delta,
+                            program_weight,
+                        ];
+                        let mut fused = MaintainedSubscriptionView::default();
+                        let mut sequential = MaintainedSubscriptionView::default();
+                        for view in [&mut fused, &mut sequential] {
+                            for (origin, weight) in [
+                                (SourceFactOrigin::Version, version_weight),
+                                (SourceFactOrigin::Replacement, replacement_weight),
+                                (SourceFactOrigin::ProgramFact, program_weight),
+                            ] {
+                                view.apply_source_fact_delta(origin, fact.clone(), weight);
+                            }
+                            view.acknowledge_peer_source_closure();
+                        }
+                        let before = initial.iter().any(|weight| *weight > 0);
+                        let after = expected.iter().any(|weight| *weight > 0);
+                        let previous = if before {
+                            BTreeSet::from([fact.clone()])
+                        } else {
+                            BTreeSet::new()
+                        };
+                        let transition =
+                            fused.apply_source_fact_weights(fact.clone(), [delta, delta, 0]);
+                        let old_transitions = [
+                            sequential.apply_source_fact_delta(
+                                SourceFactOrigin::Version,
+                                fact.clone(),
+                                delta,
+                            ),
+                            sequential.apply_source_fact_delta(
+                                SourceFactOrigin::Replacement,
+                                fact.clone(),
+                                delta,
+                            ),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>();
+                        assert_eq!(transition, (before != after).then_some(after));
+                        assert_eq!(transition.into_iter().collect::<Vec<_>>(), old_transitions);
+                        assert_eq!(fused.source_fact_weights, sequential.source_fact_weights);
+                        assert_eq!(
+                            fused.source_fact_weights.get(&fact).copied(),
+                            expected
+                                .iter()
+                                .any(|weight| *weight != 0)
+                                .then_some(expected),
+                        );
+                        assert_eq!(
+                            fused.unpublished_source_facts,
+                            Some(BTreeSet::from([fact.clone()])),
+                        );
+                        assert_eq!(
+                            fused.unpublished_peer_source_delta(&previous),
+                            sequential.unpublished_peer_source_delta(&previous),
+                        );
+                        assert_eq!(
+                            fused.active_peer_source_closure_facts().contains(&fact),
+                            after,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
