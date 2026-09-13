@@ -400,15 +400,19 @@ fn version_witness_public_fields(
         schema.identity.tx_time_field.clone(),
         schema.identity.tx_node_field.clone(),
         schema.identity.schema_field.clone(),
-        schema.parents_field.clone(),
-        schema.authored_columns_field.clone(),
-        schema.created_by_field.clone(),
-        schema.created_at_field.clone(),
-        schema.updated_by_field.clone(),
-        schema.updated_at_field.clone(),
         schema.deletion_field.clone(),
     ];
-    fields.extend(schema.user_fields.values().cloned());
+    if schema.native_table.is_none() {
+        fields.extend([
+            schema.parents_field.clone(),
+            schema.authored_columns_field.clone(),
+            schema.created_by_field.clone(),
+            schema.created_at_field.clone(),
+            schema.updated_by_field.clone(),
+            schema.updated_at_field.clone(),
+        ]);
+        fields.extend(schema.user_fields.values().cloned());
+    }
     fields.extend(schema.identity.branch_or_prefix_field.clone());
     fields
 }
@@ -1075,6 +1079,7 @@ mod tests {
             path: vec![crate::protocol::ProgramSourceRole::Root],
         };
         let witness = VersionWitnessSchema {
+            native_table: None,
             source: source.clone(),
             descriptor: RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
             identity: VersionIdentityFields {

@@ -2515,6 +2515,25 @@ where
         Ok(None)
     }
 
+    pub(crate) fn maintained_reference_for_result_member<'a>(
+        &self,
+        versions: &'a [super::maintained_version::MaintainedVersion],
+        result_schema: SchemaVersionId,
+        result_table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<&'a super::maintained_version::MaintainedVersion>, Error> {
+        let table_id = self.physical_table_id_for_schema(result_schema, result_table)?;
+        for version in versions.iter().rev() {
+            if version.row_uuid() == row_uuid
+                && version.deletion().is_none()
+                && self.maintained_version_physical_table(version)? == table_id
+            {
+                return Ok(Some(version));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) async fn prepare_query_binding_for_link(
         &mut self,
         shape: &ValidatedQuery,
@@ -3630,9 +3649,12 @@ where
             let witnesses = self
                 .selected_deletion_witnesses(&authority_result_key, shape.schema_version())
                 .await?;
-            transitions.supporting_changed |= local
-                .maintained
-                .replace_selected_deletion_witnesses(witnesses);
+            transitions.supporting_changed |= local.maintained.replace_selected_deletion_witnesses(
+                witnesses
+                    .into_iter()
+                    .map(|(key, row)| (key, row.into()))
+                    .collect(),
+            );
         }
         Ok((
             local.subscription,
@@ -4271,22 +4293,6 @@ where
 mod bindings;
 
 use bindings::*;
-fn local_maintained_view_content_witness<'a>(
-    versions: &'a [VersionRow],
-    table: &str,
-    row_uuid: RowUuid,
-) -> Option<&'a VersionRow> {
-    // `versions_by_tx` is canonically ordered by encoded record, not by write time.
-    // Within one transaction the complete content witness sorts after the
-    // metadata-only register projection, so search from the back.
-    versions.iter().rev().find(|version| {
-        version.table() == table
-            && version.row_uuid() == row_uuid
-            && !version.is_register_record()
-            && version.deletion().is_none()
-    })
-}
-
 fn current_row_has_required_subscription_cells(
     row: &CurrentRow,
     table: &TableSchema,

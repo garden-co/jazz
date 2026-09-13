@@ -3,6 +3,97 @@
 use super::*;
 
 #[test]
+fn native_witness_terminals_project_only_coordinates_and_keep_fallback_payloads() {
+    // Internal compiler oracle: public row equality cannot expose a redundant
+    // terminal payload. The opt-in resolver models the native-history proof;
+    // the ordinary fake resolver deliberately supplies no such capability.
+    struct NativeResolver(FakeSourceResolver);
+    impl SourceGraphPreparer for NativeResolver {
+        fn prepare_source_graph<'a>(
+            &'a mut self,
+            request: &'a SourceRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ResolvedSource, SourceResolutionError>>
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                let mut source = self.0.prepare_source_graph(request).await?;
+                source.native_witness_table = Some(crate::ids::PhysicalTableId(7));
+                Ok(source)
+            })
+        }
+    }
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: system_policy_context(),
+        input: row_set_input(0x21),
+        output: row_set_output(BTreeSet::from([
+            ProgramFactKey::VersionWitnesses,
+            ProgramFactKey::ReplacementWitnesses,
+        ])),
+    };
+    let native = lower_query_program(
+        request.clone(),
+        &mut NativeResolver(FakeSourceResolver::default()),
+    )
+    .unwrap();
+    let fallback = lower_query_program(request, &mut FakeSourceResolver::default()).unwrap();
+    let mut checked = 0;
+    for terminal in &native.lowered.terminals {
+        let OutputTerminalSchema::Fact(ProgramFactOutput {
+            schema:
+                ProgramFactSchema::VersionWitnesses(schema)
+                | ProgramFactSchema::ReplacementWitnesses(schema),
+            ..
+        }) = &terminal.output
+        else {
+            continue;
+        };
+        let fields = graph_declared_output_fields(&terminal.graph).unwrap();
+        for field in [
+            "row_uuid",
+            "tx_time",
+            "tx_node_id",
+            "schema_version",
+            "_deletion",
+        ] {
+            assert!(fields.contains(field), "native witness lost {field}");
+        }
+        let corresponding = fallback
+            .lowered
+            .terminals
+            .iter()
+            .find(|other| other.sink == terminal.sink)
+            .unwrap();
+        let fallback_fields = graph_declared_output_fields(&corresponding.graph).unwrap();
+        assert!(fields.len() < fallback_fields.len());
+        for witness in schema.content.iter().chain(schema.deletion.iter()) {
+            assert_eq!(witness.native_table, Some(crate::ids::PhysicalTableId(7)));
+            for field in [
+                &witness.parents_field,
+                &witness.created_by_field,
+                &witness.updated_by_field,
+                &witness.authored_columns_field,
+            ] {
+                assert!(!fields.contains(field), "native witness retained {field}");
+                assert!(
+                    fallback_fields.contains(field),
+                    "unproven witness lost {field}"
+                );
+            }
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 2,
+        "both independent witness roles must be checked"
+    );
+}
+
+#[test]
 fn compiler_boundary_has_no_usage_or_lifecycle_mode() {
     let request = QueryProgramRequest {
         authorization_mode: QueryAuthorizationMode::TrustedServing,
