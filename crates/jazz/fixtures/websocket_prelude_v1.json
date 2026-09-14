@@ -46,10 +46,18 @@
       "name": "native_scope_isolated_session",
       "writer": "rust-native",
       "peer_identity": "[\"https://fixture.example\",\"scope-user\"]",
-      "auth": {},
+      "auth": {
+        "backend_secret": "backend-secret",
+        "backend_session": {
+          "authMode": "external",
+          "claims": {},
+          "issuer": "https://fixture.example",
+          "user_id": "scope-user"
+        }
+      },
       "bootstrap_catalogue": false,
       "requested_link": "scope_isolated_client_relay",
-      "json": "{\"peer_identity\":\"[\\\"https://fixture.example\\\",\\\"scope-user\\\"]\",\"auth\":{\"jwt_token\":null,\"backend_secret\":null,\"admin_secret\":null,\"backend_session\":null},\"requested_link\":\"scope_isolated_client_relay\"}"
+      "json": "{\"peer_identity\":\"[\\\"https://fixture.example\\\",\\\"scope-user\\\"]\",\"auth\":{\"jwt_token\":null,\"backend_secret\":\"backend-secret\",\"admin_secret\":null,\"backend_session\":{\"authMode\":\"external\",\"claims\":{},\"issuer\":\"https://fixture.example\",\"user_id\":\"scope-user\"}},\"requested_link\":\"scope_isolated_client_relay\"}"
     }
   ]
 }
