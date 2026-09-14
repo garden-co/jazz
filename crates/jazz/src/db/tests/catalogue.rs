@@ -71,6 +71,35 @@ fn offline_replica_opens_requested_schema_only_after_published_lineage() {
             .contains("awaiting published catalogue admission")
     );
     assert!(block_on(alice.register_schema_view(target.clone())).is_err());
+    assert!(
+        alice
+            .insert(
+                "items",
+                BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("must not be written under A".to_owned())
+                ),]),
+                Default::default()
+            )
+            .is_err()
+    );
+    // A live authority that has not published B cannot authorize the request.
+    let (upstream, downstream) = duplex();
+    let accepted = bob.accept_subscriber_with_trust(
+        downstream,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let connection = block_on(alice.connect_upstream(upstream));
+    for _ in 0..20 {
+        bob.tick().unwrap();
+        alice.tick().unwrap();
+    }
+    assert!(alice.prepare_query(&Query::from("items")).is_err());
+    assert!(block_on(alice.register_schema_view(target.clone())).is_err());
+    block_on(alice.detach_connection_async(&connection)).unwrap();
+    drop(connection);
+    drop(accepted);
     // Closing while offline neither admits B nor destroys A's data.
     block_on(alice.close()).unwrap();
     drop(alice);

@@ -35,7 +35,11 @@ describe("offline persistent schema bootstrap", () => {
         type Session = Awaited<ReturnType<typeof createJazzSession>>;
         const sessions = new Set<Session>();
         let readerSecret: string | undefined;
-        async function open(clientApp: typeof oldApp, name: string, asReader = reader) {
+        async function open(
+          clientApp: Parameters<typeof createJazzSession>[0]["app"],
+          name: string,
+          asReader = reader,
+        ) {
           const session = await createJazzSession({
             appId: settings.appId,
             serverUrl: server.url,
@@ -97,6 +101,16 @@ describe("offline persistent schema bootstrap", () => {
           const reopened = await open(newApp, "reader");
           expect(await reopened.db.all(newApp.entries, { tier: "local" })).toHaveLength(1);
           await close(reopened.session);
+          // An incompatible, unpublished target cannot borrow B's admission.
+          const incompatible = s.defineApp({ entries: s.table({ text: s.boolean() }) });
+          const rejected = await open(incompatible, "reader");
+          await expect(rejected.db.all(incompatible.entries, { tier: "global" })).rejects.toThrow(
+            /awaiting published catalogue admission/,
+          );
+          await close(rejected.session);
+          const retained = await open(newApp, "reader");
+          expect(await retained.db.all(newApp.entries, { tier: "local" })).toHaveLength(1);
+          await close(retained.session);
         } finally {
           for (const session of sessions) await close(session);
           await server.stop();

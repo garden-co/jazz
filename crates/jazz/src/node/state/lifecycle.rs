@@ -56,7 +56,7 @@ where
         S: ReopenableStorage + 'static,
     {
         let meta_database = Database::new_with_storage_layout(
-            JazzSchema::empty().lower_to_groove(),
+            JazzSchema::empty().lower_catalogue_meta_to_groove(),
             storage,
             StorageLayout::jazz_class_v1(),
         )
