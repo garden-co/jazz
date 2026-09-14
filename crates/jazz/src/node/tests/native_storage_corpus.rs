@@ -2338,3 +2338,47 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
         "removing every physical application family and the engine-owned large-value metadata plane must fail even though transaction records remain"
     );
 }
+
+/// Current native storage reads and extends bytes written by the actual npm
+/// alpha.54 binary. This internal adapter receipt is needed to inspect immutable
+/// history directly; application-level binding tests cannot expose that history.
+#[test]
+fn published_alpha54_native_corpus_reopens_and_accepts_current_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let archive = decode_native_physical_fixture(
+        include_str!("../../../fixtures/published-alpha54-native-rocksdb.tar.gz.base64"),
+        "10d139b12fd21530fd553ee148e975d4e2f55d11b43bf3bd90d00179f5703575",
+        "published alpha.54 RocksDB",
+    ).unwrap();
+    let path = unpack_native_rocksdb_archive(directory.path(), &archive).unwrap();
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text),
+    ));
+    let table = schema.tables().iter().find(|table| table.name == "notes").unwrap().clone();
+    let open = || {
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        YieldingStorage::wrap(ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+            &path, &refs, RocksDurability::FullSync, &epoch_1_storage_codec_profile().unwrap(),
+        ).expect("current adapter opens published alpha.54 root"))
+    };
+    let check = |state: &mut NodeState<_>| {
+        let versions = state.query_table_versions("notes").unwrap();
+        for body in ["published alpha.54 original", "published alpha.54 current"] {
+            assert!(versions.iter().any(|version| version.row_uuid() == row(43)
+                && version.cell(&table, "body").unwrap() == Some(v(body))),
+                "published history missing {body}");
+        }
+    };
+    let mut reopened = crate::db::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
+    check(&mut reopened);
+    reopened.commit_mergeable_settled(MergeableCommit::new("notes", row(44), 102)
+        .cells(BTreeMap::from([("body".to_owned(), v("current main writer"))])))
+        .unwrap();
+    drop(reopened);
+    let mut reopened = crate::db::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
+    check(&mut reopened);
+    assert!(reopened.query_table_versions("notes").unwrap().iter().any(|version|
+        version.row_uuid() == row(44)
+        && version.cell(&table, "body").unwrap() == Some(v("current main writer"))));
+}

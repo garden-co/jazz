@@ -22,3 +22,5 @@ dev/t --exact node::tests::harness::native_jazz_corpus_staging_rejects_normalize
 dev/t --exact node::tests::harness::native_jazz_corpus_publication_rejects_existing_output_and_preserves_it
 dev/t --exact node::tests::harness::native_jazz_corpus_digest_is_sensitive_to_application_row_bytes
 dev/t --exact node::tests::harness::native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_families
+# Immutable bytes produced by the distributed alpha.54 Linux NAPI artifact.
+dev/t --exact node::tests::harness::published_alpha54_native_corpus_reopens_and_accepts_current_writes
