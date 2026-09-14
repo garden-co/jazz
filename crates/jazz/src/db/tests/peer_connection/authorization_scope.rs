@@ -157,6 +157,127 @@ fn foreground_initial_subscription_completes_empty_owner_answer() {
     assert_foreground_initial_owner_snapshot(false);
 }
 
+// Internal topology receipt: ordinary single-Db subscriptions do not enter
+// the foreground owner's initial reset path. Observe only public stream output.
+#[test]
+fn foreground_owner_reset_preserves_flat_join_occurrences() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("users")
+                    .column("name", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("ownerId", "users")
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xe4; 16]);
+    let owner = open_db(0xe4, author, &schema);
+    owner.set_relay_authority_session_owner_for_test();
+    let user = row(0xe5);
+    owner
+        .insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String("user".to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(user),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for id in [row(0xe6), row(0xe7)] {
+        owner
+            .insert(
+                "todos",
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String("todo".to_owned())),
+                    (
+                        "ownerId".to_owned(),
+                        Value::Nullable(Some(Box::new(Value::Uuid(user.0)))),
+                    ),
+                ]),
+                crate::db::InsertOptions {
+                    row_id: Some(id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    owner.tick().unwrap();
+    let foreground = open_memory_subscription_db(author, &schema);
+    foreground.set_non_durable_client();
+    let query = prepared(
+        &foreground,
+        &Query::from("users").join_via_column("todos", "ownerId", "id", []),
+    );
+    let mut stream = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    assert!(stream.try_next_event().is_none());
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = owner.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let mut first = None;
+    for _ in 0..64 {
+        owner.tick().unwrap();
+        foreground.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            first = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        ..
+    }) = first
+    else {
+        panic!("expected a complete first join snapshot: {first:?}");
+    };
+    assert_eq!(added.len(), 2);
+    assert!(added.iter().all(|output| output.row_uuid() == user));
+    let expected = [row(0xe6), row(0xe7)].map(|todo| {
+        OutputOccurrenceId::new(ObjectId::from_uuid(user.0), [ObjectId::from_uuid(todo.0)])
+    });
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<BTreeSet<_>>(),
+        expected.iter().cloned().collect()
+    );
+    assert_eq!(
+        added.iter().map(|output| output.index).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    // Removing one joined row must address only that occurrence of the user.
+    owner
+        .delete("todos", row(0xe6), Default::default())
+        .unwrap();
+    let mut removed_occurrences = Vec::new();
+    for _ in 0..64 {
+        owner.tick().unwrap();
+        foreground.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            let SubscriptionEvent::Delta { removed, .. } = event else {
+                panic!("join subscription failed after its initial reset: {event:?}");
+            };
+            removed_occurrences.extend(removed.into_iter().map(|output| output.occurrence_id));
+        }
+        if !removed_occurrences.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(removed_occurrences, vec![expected[0].clone()]);
+}
+
 /// Alice's foreground receives Bob's persistent owner's truthful Local answer
 /// after cold storage resumes, without an authority or unsolicited polling.
 /// This covers host callback progress, not dependence on one specific wake:

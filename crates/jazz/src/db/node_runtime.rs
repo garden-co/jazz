@@ -3965,6 +3965,22 @@ where
                 retained.push(Rc::downgrade(&state));
                 continue;
             }
+            let mut snapshot_index = {
+                let state_ref = state.borrow();
+                let SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } = &state_ref.kind;
+                let maintained = maintained_subscription
+                    .as_ref()
+                    .expect("replacement maintained subscription installed");
+                let mut index = relation_snapshot_index_with_root_occurrences(
+                    &snapshot,
+                    maintained.root_occurrence_ids(),
+                )?;
+                index.terminal_records = maintained.decoded_terminal_records()?;
+                index
+            };
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
             let settled_binding_view = BindingViewKey {
                 shape_id: shape.shape_id(),
@@ -4054,7 +4070,6 @@ where
                     let terminal_layout = maintained_subscription
                         .as_ref()
                         .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
-                    let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
                     let _ = apply_maintained_update_to_snapshot(
                         &mut snapshot,
                         &mut snapshot_index,
@@ -4073,32 +4088,15 @@ where
                     }
                 }
             }
-            let root_occurrence_ids = if shape.query().aggregate.is_some() || terminal_rows {
-                // A fresh compiler-owned root collector has already produced
-                // this reset snapshot. Pair its roots directly rather than
-                // reconstructing positions from membership state.
-                snapshot
-                    .rows
-                    .iter()
-                    .take(snapshot.root_count)
-                    .map(|row| {
-                        crate::tools::OutputOccurrenceId::single_source(
-                            crate::tools::ObjectId::from_uuid(row.row_uuid().0),
-                        )
-                    })
-                    .collect()
-            } else {
-                let state_ref = state.borrow();
-                let SubscriptionKind::Prepared {
-                    maintained_subscription,
-                    ..
-                } = &state_ref.kind;
-                maintained_subscription
-                    .as_ref()
-                    .expect("replacement maintained subscription installed")
-                    .root_occurrence_ids()
-                    .to_vec()
-            };
+            // Preserve the graph's complete tuple identities and their current
+            // positions, including any terminal edits drained during this reset.
+            // Public root UUIDs alone cannot distinguish flat-join occurrences.
+            let mut positioned_roots = snapshot_index.roots.iter().collect::<Vec<_>>();
+            positioned_roots.sort_by_key(|(_, position)| **position);
+            let root_occurrence_ids = positioned_roots
+                .into_iter()
+                .map(|(occurrence, _)| occurrence.clone())
+                .collect::<Vec<_>>();
             let settled = subscription_is_settled(
                 &node.borrow(),
                 active_authority_view_receipts,
