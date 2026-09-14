@@ -255,7 +255,7 @@ function Chart({
           {logarithmic ? "LOG SCALE" : "ZERO-BASED SCALE"}
         </text>
         <text x={width - right} y={height - 6} textAnchor="end" className="axis-caption">
-          MEASURED CHECKPOINTS · RUN DAY (UTC) →
+          MEASURED CHECKPOINTS · CHECKPOINT DAY (UTC) →
         </text>
       </svg>
     </div>
@@ -685,10 +685,10 @@ export function Dashboard() {
                         result.{" "}
                       </>
                     )}
-                    Each line follows one branch or PR, ordered by run time—not commit ancestry.
-                    Dates are UTC. Historical backfills use release publication dates; receipts
-                    retain actual measurement dates. Min–max is sample range, not a confidence
-                    interval.
+                    Each line follows one branch, PR or historical backfill, ordered by checkpoint
+                    date. Dates are UTC. Historical backfills use release publication dates;
+                    receipts retain actual measurement dates. Min–max is sample range, not a
+                    confidence interval.
                   </p>
                 </section>
                 {current && (
@@ -882,9 +882,10 @@ export function Dashboard() {
                 </p>
                 <p>
                   “Released” includes main commits proven to be ancestors of a semantic-version tag,
-                  plus exact tag matches. Only exact matches carry a version label on the x-axis;
-                  older points retain their measured commit. No timing is inferred for an unmeasured
-                  release.{" "}
+                  plus exact tag matches. Exact matches carry the release version; historical
+                  backfills add an explicit “backfill” label and retain their actual harness commit
+                  and measurement date in the receipt. Other points retain their measured commit. No
+                  timing is inferred for an unmeasured release.{" "}
                   {data.releases.length
                     ? data.releases.map((r) => (
                         <span key={r.name}>
