@@ -3812,13 +3812,35 @@ where
                 state.upstream_subscription_handles.clone(),
             )
         };
+        let awaiting_initial_owner_result = state.borrow().pending_initial_owner_result;
+        if awaiting_initial_owner_result {
+            let owner = node.lock().await;
+            let ready = !upstream_subscription_handles.is_empty()
+                && upstream_subscription_handles.iter().all(|handle| {
+                    owner
+                        .authority_result_key_for_subscription(handle.subscription)
+                        .is_ok_and(|key| {
+                            owner.has_settled_authority_result(&key)
+                                && !owner.opening_pending_for_authority_result(&key)
+                        })
+                });
+            if !ready {
+                retained.push(Rc::downgrade(&state));
+                continue;
+            }
+        }
         let request_claims = state
             .borrow()
             .request_identity_claims
             .as_ref()
             .map(|(_, claims)| claims.clone());
         let groove_runtime_token = node.lock().await.groove_runtime_token();
-        if state.borrow().groove_runtime_token != groove_runtime_token {
+        // A foreground's provisional graph may already have consumed an empty
+        // first batch. Initialize it again after the owner's complete answer so
+        // the ordinary cold-graph gate covers evaluation of all recovered inputs.
+        if awaiting_initial_owner_result
+            || state.borrow().groove_runtime_token != groove_runtime_token
+        {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=reopen_runtime stale={} current={}",
@@ -3928,6 +3950,7 @@ where
                     .local_subscription_cleanup
                     .set(Some((groove_runtime_token, subscription_id)));
                 state_ref.pending_initial_local_snapshot = replacement_is_cold;
+                state_ref.pending_initial_owner_result = false;
                 if replacement_is_cold {
                     // Own the replacement before yielding its cold initial batch;
                     // otherwise the next owner turn would retire and reopen it.

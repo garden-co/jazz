@@ -14,6 +14,149 @@ fn schema_with_explicit_public_read() -> JazzSchema {
     )
 }
 
+fn open_memory_subscription_db(
+    author: AuthorSubject,
+    schema: &JazzSchema,
+) -> Db<groove::storage::MemoryStorage> {
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage: groove::storage::MemoryStorage::new(&refs).unwrap(),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xda; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xda))),
+    }))
+    .unwrap()
+}
+
+// A standalone memory cache owns its local view even while its remote peer
+// cannot respond. This distinguishes storage choice from foreground ownership.
+#[test]
+fn standalone_memory_subscription_does_not_wait_for_remote_upstream() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let db = open_memory_subscription_db(author, &schema);
+    let (up, _unresponsive_remote) = duplex();
+    let _upstream = block_on(db.connect_upstream(up));
+    let query = prepared(&db, &Query::from("todos"));
+    let mut stream = block_on(db.subscribe(&query, ReadOpts::default())).unwrap();
+    assert!(
+        matches!(stream.try_next_event(), Some(SubscriptionEvent::Delta { reset: true, added, .. }) if added.is_empty())
+    );
+}
+
+// Internal topology receipt: the public client factory cannot hold back an
+// owner connection while observing the foreground's raw subscription stream.
+fn assert_foreground_initial_owner_snapshot(seed_owner: bool) {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let owner = open_db(0xd8, author, &schema);
+    owner.set_relay_authority_session_owner_for_test();
+    let expected = row(0xd9);
+    if seed_owner {
+        owner
+            .insert(
+                "todos",
+                cells("saved", false, author),
+                crate::db::InsertOptions {
+                    row_id: Some(expected),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        owner.tick().unwrap();
+    }
+    let foreground = open_memory_subscription_db(author, &schema);
+    foreground.set_non_durable_client();
+    let query = prepared(&foreground, &Query::from("todos"));
+    let mut stream = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    for _ in 0..3 {
+        foreground.tick().unwrap();
+        assert!(
+            stream.try_next_event().is_none(),
+            "memory is not the owner's answer"
+        );
+    }
+    // LocalOnly explicitly observes this foreground, without contacting its owner.
+    let mut local = block_on(foreground.subscribe(
+        &query,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert!(
+        matches!(local.try_next_event(), Some(SubscriptionEvent::Delta { reset: true, added, .. }) if added.is_empty())
+    );
+    drop(local);
+    // A cancelled opening must not hold up a sibling's initial result.
+    let cancelled = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    drop(cancelled);
+    let (up, down) = duplex();
+    let upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = owner.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let mut initial = None;
+    for _ in 0..64 {
+        foreground.tick().unwrap();
+        owner.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            initial = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        settled: true,
+        ..
+    }) = initial
+    else {
+        panic!(
+            "owner result must complete the first snapshot, including an empty result: {initial:?}"
+        );
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        if seed_owner { vec![expected] } else { vec![] }
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    // Once initialized, losing upstream must not suppress ordinary local writes.
+    drop(upstream);
+    let offline = row(0xdb);
+    foreground
+        .insert(
+            "todos",
+            cells("offline", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(offline),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    foreground.tick().unwrap();
+    assert!(
+        matches!(stream.try_next_event(), Some(SubscriptionEvent::Delta { added, .. })
+        if added.iter().any(|row| row.row_uuid() == offline))
+    );
+}
+
+#[test]
+fn foreground_initial_subscription_waits_for_owner_rows() {
+    assert_foreground_initial_owner_snapshot(true);
+}
+
+#[test]
+fn foreground_initial_subscription_completes_empty_owner_answer() {
+    assert_foreground_initial_owner_snapshot(false);
+}
+
 /// Alice's foreground receives Bob's persistent owner's truthful Local answer
 /// after cold storage resumes, without an authority or unsolicited polling.
 /// This covers host callback progress, not dependence on one specific wake:

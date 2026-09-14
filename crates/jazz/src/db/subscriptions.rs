@@ -1196,7 +1196,16 @@ where
             .map(|(index, occurrence)| (occurrence, index))
             .collect();
         snapshot_index.terminal_records = subscription.decoded_terminal_records()?;
-        let pending_initial_local_snapshot = !subscription.initial_snapshot_received();
+        let pending_initial_owner_result = authorization_mode
+            == QueryAuthorizationMode::ClientLocal
+            && read_tier == DurabilityTier::Local
+            && propagates_upstream
+            && self.node.upstream_durability_floor.get() == DurabilityTier::Local;
+        // Even a warm, empty foreground graph is provisional until its owner
+        // has answered. Refresh initializes the published graph from those inputs.
+        let pending_initial_local_snapshot =
+            pending_initial_owner_result || !subscription.initial_snapshot_received();
+        let settled = settled && !pending_initial_owner_result;
         let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
         let scalar_reconciliation_enabled = read_tier < DurabilityTier::Edge
@@ -1233,6 +1242,7 @@ where
             snapshot_source: SubscriptionSnapshotSource::LocalMaintained,
             settled,
             pending_initial_local_snapshot,
+            pending_initial_owner_result,
             sender,
         }));
         {

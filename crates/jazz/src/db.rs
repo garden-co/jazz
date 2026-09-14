@@ -4349,6 +4349,9 @@ struct SubscriptionState {
     /// initial publication (or retain the last complete replacement facade)
     /// until that batch arrives, including a completed zero-row batch.
     pending_initial_local_snapshot: bool,
+    /// A non-durable foreground has not yet received its local owner's answer.
+    /// This gates only opening; later disconnections retain the published view.
+    pending_initial_owner_result: bool,
     sender: SubscriptionSender,
 }
 
