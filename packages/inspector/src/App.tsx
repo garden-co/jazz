@@ -16,7 +16,6 @@ interface StoredConnection {
   name: string;
   serverUrl: string;
   appId: string;
-  adminSecret: string;
   env: string;
   schemaHash: string;
 }
@@ -27,7 +26,10 @@ interface StoredConnections {
   connections: StoredConnection[];
 }
 
-type LegacyStoredConfig = Omit<StoredConnection, "id" | "name">;
+type LegacyStoredConfig = Omit<StoredConnection, "id" | "name"> & {
+  adminSecret?: string;
+  branch?: string;
+};
 
 const STORAGE_KEY = "jazz-inspector-standalone-config";
 const DEFAULT_SERVER_URL = "https://v2.sync.jazz.tools/";
@@ -43,22 +45,26 @@ export default function App() {
     const connections = readStoredConnections();
     const fragmentConfig = readFragmentConfig();
     const activeConnection = getActiveConnection(connections);
-    const screen: AppScreen = fragmentConfig || !activeConnection ? "form" : null;
 
     return {
       connections,
-      fragmentConfig,
-      screen,
+      editingConnectionId: fragmentConfig ? null : (activeConnection?.id ?? null),
+      initialFormValues: fragmentConfig ?? storedConnectionToFormValues(activeConnection) ?? null,
+      screen: "form" as AppScreen,
     };
   });
-  const [fragmentConfig] = useState<DbConfigFormValues | null>(initialState.fragmentConfig);
   const [connectionStore, setConnectionStore] = useState<StoredConnections>(
     initialState.connections,
   );
   const [screen, setScreen] = useState<AppScreen>(initialState.screen);
   const [connectionFormMode, setConnectionFormMode] = useState<ConnectionFormMode>("connect");
-  const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
-  const [formValues, setFormValues] = useState<DbConfigFormValues | null>(null);
+  const [editingConnectionId, setEditingConnectionId] = useState<string | null>(
+    initialState.editingConnectionId,
+  );
+  const [formValues, setFormValues] = useState<DbConfigFormValues | null>(
+    initialState.initialFormValues,
+  );
+  const [activeAdminSecret, setActiveAdminSecret] = useState<string | null>(null);
   const [schemaHashes, setSchemaHashes] = useState<SchemaHashInfo[]>([]);
   const [availableSchemaHashes, setAvailableSchemaHashes] = useState<SchemaHashInfo[]>([]);
   const [client, setClient] = useState<Awaited<
@@ -74,6 +80,7 @@ export default function App() {
   const activeConnection = getActiveConnection(connectionStore);
 
   const clearRuntime = () => {
+    setActiveAdminSecret(null);
     setClient((previousClient) => {
       if (previousClient) {
         void previousClient.shutdown();
@@ -96,7 +103,7 @@ export default function App() {
   };
 
   const handleSchemaSelect = (schemaHash: string) => {
-    if (!formValues) return;
+    if (!formValues || !formValues.adminSecret) return;
 
     const connectionId = editingConnectionId ?? createConnectionId();
     const connection: StoredConnection = {
@@ -104,7 +111,6 @@ export default function App() {
       name: formValues.name.trim() || deriveConnectionName(formValues),
       serverUrl: formValues.serverUrl,
       appId: formValues.appId,
-      adminSecret: formValues.adminSecret,
       env: formValues.env || "dev",
       schemaHash,
     };
@@ -124,6 +130,7 @@ export default function App() {
     };
 
     clearRuntime();
+    setActiveAdminSecret(formValues.adminSecret);
     updateConnectionStore(nextStore);
     setConnectionFormMode("connect");
     setEditingConnectionId(null);
@@ -136,13 +143,16 @@ export default function App() {
     if (!activeConnection || activeConnection.schemaHash === schemaHash) return;
     const nextConnection = { ...activeConnection, schemaHash };
     const nextStore = replaceConnection(connectionStore, nextConnection, nextConnection.id);
+    const existingAdminSecret = activeAdminSecret;
     setIsSwitchingSchema(true);
     setError(null);
     clearRuntime();
+    setActiveAdminSecret(existingAdminSecret);
     updateConnectionStore(nextStore);
   };
 
   const handleManageConnections = () => {
+    clearRuntime();
     setConnectionFormMode("connect");
     setEditingConnectionId(null);
     setFormValues(null);
@@ -172,20 +182,26 @@ export default function App() {
     setSchemaHashes([]);
     setError(null);
     setIsSwitchingSchema(false);
+    if (connection.id === activeConnection?.id) {
+      clearRuntime();
+    }
     setScreen("form");
   };
 
   const handleUseConnection = (connectionId: string) => {
-    if (connectionStore.activeConnectionId === connectionId) {
-      setScreen(null);
-      return;
-    }
+    const connection = connectionStore.connections.find(
+      (storedConnection) => storedConnection.id === connectionId,
+    );
+    if (!connection) return;
+
     const nextStore = { ...connectionStore, activeConnectionId: connectionId };
     clearRuntime();
-    setError(null);
-    setIsSwitchingSchema(false);
+    setConnectionFormMode("connect");
+    setEditingConnectionId(connection.id);
+    setFormValues(storedConnectionToFormValues(connection) ?? null);
+    setSchemaHashes([]);
     updateConnectionStore(nextStore);
-    setScreen(null);
+    setScreen("form");
   };
 
   const handleDeleteConnection = (connectionId: string) => {
@@ -207,11 +223,12 @@ export default function App() {
     updateConnectionStore(nextStore);
     if (nextConnections.length === 0) {
       setScreen("form");
+      setFormValues(null);
     }
   };
 
   useEffect(() => {
-    if (!activeConnection) return;
+    if (!activeConnection || !activeAdminSecret) return;
 
     let active = true;
 
@@ -222,20 +239,20 @@ export default function App() {
             appId: activeConnection.appId,
             serverUrl: activeConnection.serverUrl,
             env: activeConnection.env,
-            adminSecret: activeConnection.adminSecret,
+            adminSecret: activeAdminSecret,
           }),
           fetchStoredWasmSchema(activeConnection.serverUrl, {
             appId: activeConnection.appId,
-            adminSecret: activeConnection.adminSecret,
+            adminSecret: activeAdminSecret,
             schemaHash: activeConnection.schemaHash,
           }),
           fetchSchemaHashes(activeConnection.serverUrl, {
             appId: activeConnection.appId,
-            adminSecret: activeConnection.adminSecret,
+            adminSecret: activeAdminSecret,
           }) as Promise<SchemaHashesResult>,
           fetchStoredPermissions(activeConnection.serverUrl, {
             appId: activeConnection.appId,
-            adminSecret: activeConnection.adminSecret,
+            adminSecret: activeAdminSecret,
           }).catch(() => null),
         ]);
 
@@ -270,7 +287,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [activeConnection]);
+  }, [activeConnection, activeAdminSecret]);
 
   if (screen === "connections") {
     return (
@@ -298,7 +315,7 @@ export default function App() {
                 ) ?? activeConnection,
               )
             : undefined))
-        : (formValues ?? fragmentConfig ?? { serverUrl: DEFAULT_SERVER_URL });
+        : (formValues ?? { serverUrl: DEFAULT_SERVER_URL });
     const formTitle =
       connectionFormMode === "edit"
         ? "Edit connection"
@@ -345,7 +362,7 @@ export default function App() {
     );
   }
 
-  if (!client || !wasmSchema || !activeConnection) {
+  if (!client || !wasmSchema || !activeConnection || !activeAdminSecret) {
     return (
       <main className={styles.statePage}>
         <section className={styles.stateCard}>
@@ -371,7 +388,7 @@ export default function App() {
           connection={{
             serverUrl: activeConnection.serverUrl,
             appId: activeConnection.appId,
-            adminSecret: activeConnection.adminSecret,
+            adminSecret: activeAdminSecret,
           }}
         >
           <BrowserRouter>
@@ -475,7 +492,7 @@ function storedConnectionToFormValues(
     name: connection.name,
     serverUrl: connection.serverUrl,
     appId: connection.appId,
-    adminSecret: connection.adminSecret,
+    adminSecret: "",
     env: connection.env,
   };
 }
@@ -486,8 +503,18 @@ function readStoredConnections(): StoredConnections {
     if (!raw) return emptyConnectionStore();
     const parsed = JSON.parse(raw) as unknown;
     const migrated = migrateStoredConnections(parsed);
-    return migrated ?? emptyConnectionStore();
+    if (!migrated) {
+      localStorage.removeItem(STORAGE_KEY);
+      return emptyConnectionStore();
+    }
+    writeStoredConnections(migrated);
+    return migrated;
   } catch {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Storage can be unavailable; do not let cleanup mask the original read failure.
+    }
     return emptyConnectionStore();
   }
 }
@@ -497,7 +524,14 @@ function migrateStoredConnections(parsed: unknown): StoredConnections | null {
     return {
       version: 2,
       activeConnectionId: parsed.activeConnectionId,
-      connections: parsed.connections,
+      connections: parsed.connections.map(({ id, name, serverUrl, appId, env, schemaHash }) => ({
+        id,
+        name,
+        serverUrl,
+        appId,
+        env,
+        schemaHash,
+      })),
     };
   }
 
@@ -507,7 +541,6 @@ function migrateStoredConnections(parsed: unknown): StoredConnections | null {
       name: deriveConnectionName(parsed),
       serverUrl: parsed.serverUrl,
       appId: parsed.appId,
-      adminSecret: parsed.adminSecret,
       env: parsed.env || "dev",
       schemaHash: parsed.schemaHash,
     };
@@ -549,7 +582,6 @@ function isLegacyStoredConfig(value: unknown): value is LegacyStoredConfig {
   return (
     typeof candidate.serverUrl === "string" &&
     typeof candidate.appId === "string" &&
-    typeof candidate.adminSecret === "string" &&
     typeof candidate.schemaHash === "string"
   );
 }
@@ -621,11 +653,13 @@ function readFragmentConfig(): DbConfigFormValues | null {
     return null;
   }
 
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+
   return {
     name: (params.get("name") ?? "").trim(),
     serverUrl: (params.get("serverUrl") ?? "").trim(),
     appId: (params.get("appId") ?? "").trim(),
-    adminSecret: (params.get("adminSecret") ?? "").trim(),
+    adminSecret: "",
     env: (params.get("env") ?? "dev").trim() || "dev",
   };
 }

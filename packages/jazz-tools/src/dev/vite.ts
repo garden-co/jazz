@@ -182,11 +182,7 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
       }
       console.log(
-        `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(
-          managed.serverUrl,
-          managed.appId,
-          managed.adminSecret,
-        )}`,
+        `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(managed.serverUrl, managed.appId)}`,
       );
 
       if (options.inspector !== false) wireInspectorOverlay(viteServer);

@@ -23,6 +23,14 @@ Then open `http://localhost:5173` in your browser (Vite’s default dev server p
 The inspector derives app-scoped endpoints automatically from `serverUrl` and `appId`, so there is
 no separate path-prefix setting.
 
+Saved connections retain connection details, but never the admin secret. Re-enter the secret after
+reloading or opening a saved connection. Development links prefill non-secret details only; legacy
+secrets in URL fragments and saved connection data are removed.
+
+For a managed development server, copy the admin secret from the interactive terminal banner. If
+your server runs without a TTY, configure a known secret using the integration's
+`adminSecret` option before starting it, then enter that same secret in the Inspector.
+
 ## Building the Inspector
 
 The package provides standalone web and embedded builds.

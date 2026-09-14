@@ -12366,8 +12366,16 @@ mod tests {
             .run(|worker| Ok(worker.persistent.query_runtime_waker_for_test()))
             .unwrap()
             .expect("installed native foreground scheduler supplies the query waker");
-        query_waker.wake_by_ref();
-        query_waker.wake_by_ref();
+        // Rust coalesces pending signals until the owner flushes them. Keep
+        // both wakes in one owner operation so its flush cannot race between
+        // them; cross-operation callback coalescing belongs to the platform.
+        relay
+            .run(move |_| {
+                query_waker.wake_by_ref();
+                query_waker.wake_by_ref();
+                Ok(())
+            })
+            .unwrap();
         assert!(
             reader_wake.wait_for_queued(1),
             "the storage wake must cross the native foreground callback"
