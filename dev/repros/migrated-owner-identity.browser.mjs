@@ -29,8 +29,8 @@ window.migratedOwnerIdentity = {
   },
   async reopenOldLocal() {
     db = await createDb({ ...config, account });
-    // This direct local read must install the original B-authored unit in the
-    // fresh A follower before its later strict authority view arrives.
+    // Exercise a local read before the strict authority read after reopening.
+    // This is a smoke check; it does not reproduce the native identity conflict.
     return await db.all(oldApp.entries, { tier: "local" });
   },
   async readOldGlobal() {
