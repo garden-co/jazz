@@ -16,7 +16,8 @@ import {
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
-import { DATA_HELP, dataCommand } from "./data-cli/command.js";
+import { dataCommand, type DataCommandMode } from "./data-cli/command.js";
+import { dataHelp } from "./data-cli/help.js";
 import type { StoredPermissionsHead } from "./runtime/schema-fetch.js";
 
 export interface BuildOptions {
@@ -544,13 +545,29 @@ function isMainModule(): boolean {
   return realpathOrSelf(entry) === realpathOrSelf(fileURLToPath(import.meta.url));
 }
 
+/**
+ * Which data command (if any) this argv selects.
+ *
+ * Exactly two entry points: `sql` and `schema tables|describe`. There is no
+ * `schema list` alias: one canonical path per task keeps the surface guessable.
+ */
+function dataCommandMode(args: string[]): DataCommandMode | undefined {
+  const [command, subcommand] = args;
+  if (command === "sql") return "sql";
+  if (command !== "schema") return undefined;
+  if (subcommand === "tables") return "tables";
+  if (subcommand === "describe") return "describe";
+  return undefined;
+}
+
 function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
-  console.log("  sql '<statement>'     Query application rows (read-only unless --write)");
-  console.log("  schema tables         List tables in the deployed or local schema");
+  console.log(
+    "  sql '<statement>'     Query or mutate application rows (read-only unless --write)",
+  );
+  console.log("  schema tables         List tables from the local or a stored schema");
   console.log("  schema describe <table> Show columns, types, defaults, and references");
-  console.log("  data query            Compatibility form: [appId] --sql <statement>");
   console.log("  validate              Validate root schema.ts and optional permissions.ts");
   console.log("  schema hash           Print the short hash of the current schema.ts");
   console.log("  schema export         Print the compiled structural schema as JSON");
@@ -607,18 +624,38 @@ function printHelp(): void {
 }
 
 if (isMainModule()) {
-  if (process.argv.slice(2).some((arg) => arg === "--help" || arg === "-h")) {
-    if (
-      process.argv[2] === "data" ||
-      process.argv[2] === "sql" ||
-      (process.argv[2] === "schema" &&
-        ["tables", "list", "describe"].includes(process.argv[3] ?? ""))
-    )
-      console.log(DATA_HELP);
-    else printHelp();
+  const rawArgs = process.argv.slice(2);
+  const dataMode = dataCommandMode(rawArgs);
+  if (dataMode) {
+    const wantsHelp = rawArgs.some((arg) => arg === "--help" || arg === "-h");
+    const wantsCapabilities = dataMode === "sql" && rawArgs.includes("--capabilities");
+    // Help is answered before any environment loading, credential, schema, or
+    // connection resolution.
+    if (wantsHelp) {
+      console.log(dataHelp(dataMode, wantsCapabilities));
+      process.exit(0);
+    }
+    const envFiles = readEnvFiles(rawArgs);
+    if (envFiles.length > 0) {
+      for (const file of envFiles) loadEnvFile(resolve(process.cwd(), file));
+    } else {
+      loadDotEnv();
+    }
+    const code = await dataCommand(
+      rawArgs.slice(dataMode === "sql" ? 1 : 2),
+      {
+        appId: resolveEnvVar(APP_ID_ENV_VARS),
+        serverUrl: resolveEnvVar(SERVER_URL_ENV_VARS),
+      },
+      dataMode,
+    );
+    process.exit(code);
+  }
+  if (rawArgs.some((arg) => arg === "--help" || arg === "-h")) {
+    printHelp();
     process.exit(0);
   }
-  const envFiles = readEnvFiles(process.argv.slice(2));
+  const envFiles = readEnvFiles(rawArgs);
   if (envFiles.length > 0) {
     for (const file of envFiles) {
       loadEnvFile(resolve(process.cwd(), file));
@@ -628,37 +665,7 @@ if (isMainModule()) {
   }
   const command = process.argv[2] ?? "";
 
-  if (
-    command === "sql" ||
-    command === "data" ||
-    (command === "schema" && ["tables", "list", "describe"].includes(process.argv[3] ?? ""))
-  ) {
-    const mode =
-      command === "sql"
-        ? "sql"
-        : command === "data"
-          ? "data"
-          : process.argv[3] === "describe"
-            ? "describe"
-            : "tables";
-    const task =
-      command === "data" && process.argv[3] !== "query"
-        ? Promise.reject(
-            new Error("Usage: jazz-tools data query [appId] --sql <statement> [options]"),
-          )
-        : dataCommand(
-            process.argv.slice(command === "sql" ? 3 : 4),
-            {
-              appId: resolveEnvVar(APP_ID_ENV_VARS),
-              serverUrl: resolveEnvVar(SERVER_URL_ENV_VARS),
-            },
-            mode,
-          );
-    task.catch((err) => {
-      console.error(err.message);
-      process.exit(1);
-    });
-  } else if (command === "validate") {
+  if (command === "validate") {
     const { options } = parseArgs();
     validate(options).catch((err) => {
       console.error(err.message);
