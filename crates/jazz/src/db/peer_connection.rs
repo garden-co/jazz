@@ -5623,7 +5623,11 @@ where
                                     Ok(Some(reconciled)) => reconciled,
                                     Ok(None) => {
                                         group.pending_initial_subscribers.insert(subscription);
-                                        serve_again = true;
+                                        if !peer.subscription_awaits_selected_authority_source(
+                                            group_subscription,
+                                        ) {
+                                            serve_again = true;
+                                        }
                                         continue;
                                     }
                                     Err(crate::node::Error::QueryCapability(detail)) => {
@@ -5783,7 +5787,11 @@ where
                                 Ok(Some(update)) => update,
                                 Ok(None) => {
                                     group.pending_initial_subscribers.insert(subscription);
-                                    serve_again = true;
+                                    if !peer.subscription_awaits_selected_authority_source(
+                                        group_subscription,
+                                    ) {
+                                        serve_again = true;
+                                    }
                                     continue;
                                 }
                                 Err(crate::node::Error::QueryCapability(detail)) => {

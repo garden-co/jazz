@@ -183,6 +183,7 @@ struct ServerShellTickScheduler {
 struct ServerShellTickState {
     queued: AtomicBool,
     delayed: AtomicBool,
+    deferred: AtomicBool,
 }
 
 /// A storage-future wake is translated back into one serialized shell turn.
@@ -232,11 +233,34 @@ impl ServerShellTickScheduler {
             state.queued.store(false, Ordering::Release);
         }
     }
+
+    fn schedule_deferred_tick(&self) {
+        // Deferred work gets one bounded host-timer turn. The shell owner must
+        // remain available for inbound transport while an unresolved
+        // subscription or upload coalesces more work.
+        if self.state.deferred.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let jobs = self.jobs.clone();
+        let activity_tx = self.activity_tx.clone();
+        let io_wakers = Arc::clone(&self.io_wakers);
+        let state = Arc::clone(&self.state);
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(1));
+            state.deferred.store(false, Ordering::Release);
+            Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
+        });
+    }
 }
 
 impl TickScheduler for ServerShellTickScheduler {
-    fn schedule_tick(&self, _urgency: TickUrgency) {
-        Self::enqueue_tick(&self.jobs, &self.activity_tx, &self.io_wakers, &self.state);
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        match urgency {
+            TickUrgency::Deferred => self.schedule_deferred_tick(),
+            TickUrgency::Immediate | TickUrgency::AfterCurrentTurn => {
+                Self::enqueue_tick(&self.jobs, &self.activity_tx, &self.io_wakers, &self.state);
+            }
+        }
     }
 
     fn schedule_tick_after(&self, delay_ms: u64) {
