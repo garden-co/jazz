@@ -449,7 +449,7 @@ impl NativeRelayHost {
             .find(|relay| relay.scope == scope)
             .map(|relay| relay.relay.clone());
         if live_relay.is_none() && self.private_scope_workers.contains_key(&scope) {
-            live_relay = match self.registry.open(config) {
+            live_relay = match self.registry.open_admitted(config) {
                 Ok(relay) => Some(relay),
                 Err(error) => return Err(relay_status(error)),
             };

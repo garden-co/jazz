@@ -1995,6 +1995,8 @@ where
                                     identity: policy_binding.0,
                                     claims: policy_binding.1,
                                 });
+                            #[cfg(any(test, feature = "testing"))]
+                            crate::delivery_diagnostics::record(|| format!("repair_fetch_send runtime={} count={sent_count} delegated={}", self.node.borrow().groove_runtime_token(), delegated_session.is_some()));
                             if let Err(error) = self
                                 .transport
                                 .send(SyncMessage::FetchRowVersions {
@@ -2772,6 +2774,8 @@ where
                                 continue;
                             }
                             SyncMessage::RowVersionPayloads { version_bundles } => {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("repair_payload_received runtime={} bundles={} pending_repairs={} sent_count={:?}", self.node.borrow().groove_runtime_token(), version_bundles.len(), pending_row_version_repairs.len(), pending_row_version_fetches.front().map(|fetch| fetch.sent_count)));
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
                                         &self.node,
@@ -2802,11 +2806,13 @@ where
                                 let batch = fetch.requests.iter().take(fetch.sent_count).cloned().collect::<Vec<_>>();
                                 {
                                     let mut node = self.node.lock().await;
-                                    let applied_bundles = node.apply_row_version_payloads_for_requests(
+                                    let result = node.apply_row_version_payloads_for_requests(
                                         &batch,
                                         version_bundles,
-                                    )
-                                    .await?;
+                                    ).await;
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_payload_apply runtime={} result={:?}", node.groove_runtime_token(), result.as_ref().map(Vec::len).map_err(std::mem::discriminant)));
+                                    let applied_bundles = result?;
                                     // Only the still-selected authority receipt can later be
                                     // served to this durable foreground scope without a fresh
                                     // policy check. A stale/fallback repair may populate the
@@ -5125,8 +5131,12 @@ where
                             requests,
                             delegated_session,
                         } => {
+                            #[cfg(any(test, feature = "testing"))]
+                            crate::delivery_diagnostics::record(|| format!("repair_fetch_received runtime={} requests={} local={local_receiver} partial={partial_edge_query_host} delegated={} session_binding={}", self.node.borrow().groove_runtime_token(), requests.len(), delegated_session.is_some(), session_claim_binding.is_some()));
                             if let Err(message) = validate_fetch_row_versions(&requests) {
                                 let _ = message;
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                 drop_peer_request(&self.node);
                                 continue;
                             }
@@ -5134,6 +5144,8 @@ where
                                 let Some(binding) = admitted_request_policy_binding(
                                     *ingest_context, peer, session_claim_binding.clone(), delegated_session,
                                 ) else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
@@ -5155,11 +5167,15 @@ where
                                 // contents into scope-ledger authority.
                                 let PeerRole::ClientLink { identity: peer_identity } = peer.role()
                                 else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
                                 let Some((session_identity, _)) = session_claim_binding.as_ref()
                                 else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
@@ -5172,6 +5188,8 @@ where
                                             && peer_identity == *session_identity
                                     });
                                 if delegated_session.is_some() || !scope_matches {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
@@ -5184,6 +5202,8 @@ where
                                     delegated_session,
                                 );
                                 let Some(repair_policy_binding) = repair_policy_binding else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
@@ -5193,12 +5213,14 @@ where
                             };
                             let responses = {
                                 let mut node = self.node.lock().await;
-                                peer.serve_row_versions(
+                                let result = peer.serve_row_versions(
                                     &mut node,
                                     &requests,
                                     repair_context,
-                                )
-                                .await?
+                                ).await;
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("repair_fetch_served runtime={} result={:?}", node.groove_runtime_token(), result.as_ref().map(|responses| responses.iter().map(|response| match response { SyncMessage::RowVersionPayloads { version_bundles } => version_bundles.len(), _ => 0 }).sum::<usize>()).map_err(std::mem::discriminant)));
+                                result?
                             };
                             for response in responses {
                                 queue_sync_context_control(

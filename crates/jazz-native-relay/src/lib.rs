@@ -1156,7 +1156,7 @@ impl NativeRelayHost {
                 config.supported_abi = supported_abi;
                 let scope = config.scope.clone();
                 let peer_identity = config.identity.author;
-                let relay = self.registry.open(config).map_err(relay_status)?;
+                let relay = self.registry.open_admitted(config).map_err(relay_status)?;
                 self.ensure_private_scope_worker(
                     admitted_scope,
                     &scope,
@@ -1347,7 +1347,7 @@ impl NativeRelayHost {
             )
         };
         let scope = config.scope.clone();
-        let relay = self.registry.open(config).map_err(relay_status)?;
+        let relay = self.registry.open_admitted(config).map_err(relay_status)?;
         self.ensure_private_scope_worker(admitted_scope, &scope, relay.clone(), author)?;
         let relay_handle = self
             .allocate()
@@ -2241,6 +2241,11 @@ pub unsafe extern "C" fn jazz_native_relay_host_execute(
 /// but only the native relay can interpret them.
 ///
 /// # Safety
+/// The trusted platform must durably bind the supplied SQLite root to the
+/// admitted app/environment/account ownership scope. Raw paths supplied by
+/// application code are not sufficient admission. Account-session setup derives
+/// this root from its versioned account identity; linked identities may share
+/// that root but receive separate live session capabilities and repair ledgers.
 /// `host`, request bytes, and `out` follow the same rules as
 /// [`jazz_native_relay_host_execute`].
 #[unsafe(no_mangle)]
@@ -3184,6 +3189,19 @@ pub struct RelayScope {
 }
 
 impl RelayScope {
+    // Versioned, length-delimited ledger owner identity; lengths count UTF-8 bytes.
+    fn ledger_owner_encoding(&self) -> String {
+        let mut owner = String::from("jazz-native-relay-owner-v1:");
+        for field in [
+            &self.app_namespace,
+            &self.storage_namespace,
+            self.auth_scope.as_ref().expect("validated relay scope"),
+        ] {
+            owner.push_str(&format!("{}:{field}", field.len()));
+        }
+        owner
+    }
+
     pub fn validate(&self) -> Result<(), RelayError> {
         for (field, value) in [
             ("app namespace", self.app_namespace.as_str()),
@@ -3796,6 +3814,7 @@ struct RelayInner {
     sqlite_path: PathBuf,
     schema_version: jazz::ids::SchemaVersionId,
     identity: DbIdentity,
+    scope_admitted: bool,
 }
 
 struct RelayLiveness {
@@ -5126,6 +5145,7 @@ impl RelayWorker {
 
     fn open(
         config: RelayOpenConfig,
+        client_relay_scope: Option<jazz::db::ClientRelayScope>,
         wire: NativeRelayWire,
         liveness: Arc<RelayLiveness>,
         owner_wake_queued: Arc<AtomicBool>,
@@ -5137,19 +5157,29 @@ impl RelayWorker {
             .map(String::as_str)
             .collect::<Vec<_>>();
         let codec_profile = epoch_1_storage_codec_profile().map_err(RelayError::Storage)?;
+        let db_config = DbConfig {
+            schema: config.schema.clone(),
+            storage: SqliteStorage::open_with_durability_and_codec_profile(
+                config.sqlite_path,
+                &refs,
+                SqliteDurability::WalNoSync,
+                &codec_profile,
+            )
+            .map_err(RelayError::Storage)?,
+            identity: config.identity,
+            id_source: None,
+        };
         let persistent = Rc::new(
-            block_on(Db::open(DbConfig {
-                schema: config.schema.clone(),
-                storage: SqliteStorage::open_with_durability_and_codec_profile(
-                    config.sqlite_path,
-                    &refs,
-                    SqliteDurability::WalNoSync,
-                    &codec_profile,
-                )
-                .map_err(RelayError::Storage)?,
-                identity: config.identity,
-                id_source: None,
-            }))
+            match client_relay_scope {
+                Some(scope) => {
+                    // SAFETY: only the trusted host's admitted-scope path constructs
+                    // this capability, before storage or foreground peers are exposed.
+                    // Trusted platform admission owns the durable account/root binding;
+                    // account-session setup derives that root from versioned account data.
+                    block_on(unsafe { Db::open_scope_isolated_client_relay(db_config, scope) })
+                }
+                None => block_on(Db::open(db_config)),
+            }
             .map_err(RelayError::Db)?,
         );
         let upstream = block_on(persistent.connect_upstream(Box::new(QueueTransport {
@@ -6421,6 +6451,14 @@ enum RelayCommand {
 
 impl NativeRelay {
     pub fn spawn(config: RelayOpenConfig) -> Result<Self, RelayError> {
+        Self::spawn_with_scope(config, None)
+    }
+
+    fn spawn_with_scope(
+        config: RelayOpenConfig,
+        client_relay_scope: Option<jazz::db::ClientRelayScope>,
+    ) -> Result<Self, RelayError> {
+        let scope_admitted = client_relay_scope.is_some();
         // This is before channel/thread creation and the worker's SQLite open.
         config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
@@ -6451,6 +6489,7 @@ impl NativeRelay {
                 let _liveness = OwnerLiveness(owner_liveness.clone());
                 let mut worker = match RelayWorker::open(
                     config,
+                    client_relay_scope,
                     owner_wire,
                     owner_liveness,
                     owner_wake_queued_for_worker,
@@ -6521,6 +6560,7 @@ impl NativeRelay {
                 sqlite_path,
                 schema_version,
                 identity,
+                scope_admitted,
             }),
         })
     }
@@ -6665,6 +6705,27 @@ pub struct NativeRelayRegistry {
 
 impl NativeRelayRegistry {
     pub fn open(&self, config: RelayOpenConfig) -> Result<NativeRelay, RelayError> {
+        self.open_with_scope(config, None)
+    }
+
+    fn open_admitted(&self, config: RelayOpenConfig) -> Result<NativeRelay, RelayError> {
+        config.validate()?;
+        // SAFETY: callers resolved an immutable trusted host admission capability;
+        // arbitrary public RelayScope text never reaches this constructor.
+        let scope = unsafe {
+            jazz::db::ClientRelayScope::from_admitted_storage_owner(
+                config.scope.ledger_owner_encoding(),
+                config.identity.author,
+            )
+        };
+        self.open_with_scope(config, Some(scope))
+    }
+
+    fn open_with_scope(
+        &self,
+        config: RelayOpenConfig,
+        client_relay_scope: Option<jazz::db::ClientRelayScope>,
+    ) -> Result<NativeRelay, RelayError> {
         config.validate()?;
         let mut relays = self
             .relays
@@ -6674,6 +6735,7 @@ impl NativeRelayRegistry {
             if existing.inner.sqlite_path != config.sqlite_path
                 || existing.inner.schema_version != config.schema.version_id()
                 || existing.inner.identity != config.identity
+                || existing.inner.scope_admitted != client_relay_scope.is_some()
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
             }
@@ -6693,7 +6755,7 @@ impl NativeRelayRegistry {
         {
             return Err(RelayError::StorageAlreadyOwned);
         }
-        let relay = NativeRelay::spawn(config.clone())?;
+        let relay = NativeRelay::spawn_with_scope(config.clone(), client_relay_scope)?;
         relays.insert(config.scope, relay.clone());
         Ok(relay)
     }
@@ -14706,5 +14768,143 @@ mod tests {
         assert!(registry.close(&relay_config.scope).unwrap());
         assert!(matches!(stale.pump(), Err(RelayError::Closed)));
         assert!(registry.open(relay_config).unwrap().pump().is_ok());
+    }
+    /// A cold sibling asks its admitted native owner for an exact authored body.
+    /// Internal wire access is required to isolate repair from ordinary initial
+    /// snapshots, which can conceal a dropped repair by shipping the body inline.
+    #[test]
+    fn admitted_native_owner_repairs_cold_foreground_rows_across_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("admitted-repair.sqlite");
+        let row = RowUuid::from_bytes([0x51; 16]);
+        let mut request = None;
+        for (reopen, different_scope) in [(false, false), (true, false), (true, true)] {
+            let fixture = NativeHostAbiFixture::new();
+            let capability = fixture.admit(
+                &path,
+                if different_scope {
+                    "other-linked-session"
+                } else {
+                    "repair-account"
+                },
+                &schema(),
+                if different_scope { 0x33 } else { 0x31 },
+            );
+            let foreground = fixture.open_foreground(&capability);
+            let client = unsafe { &*fixture.host }
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(foreground)
+                .unwrap()
+                .clone();
+            if !reopen {
+                fixture.insert_todo(foreground, *row.0.as_bytes(), "repair me");
+                for _ in 0..16 {
+                    fixture.tick(foreground);
+                }
+                request = client
+                    .relay
+                    .wire()
+                    .take_outbound()
+                    .unwrap()
+                    .into_iter()
+                    .find_map(|message| match message {
+                        SyncMessage::CommitUnit { tx, versions }
+                            if versions.iter().any(|version| version.row_uuid() == row) =>
+                        {
+                            Some(jazz::protocol::RowVersionRef::new("todos", row, tx.tx_id))
+                        }
+                        _ => None,
+                    });
+                assert!(request.is_some(), "authored row reached its durable owner");
+            }
+            let cold = fixture.open_foreground(&capability);
+            for _ in 0..16 {
+                fixture.tick(cold);
+            }
+            let cold_client = unsafe { &*fixture.host }
+                .inner
+                .lock()
+                .unwrap()
+                .foreground_client(cold)
+                .unwrap()
+                .clone();
+            let request = request.clone().unwrap();
+            let id = cold_client.id;
+            let replies = cold_client
+                .relay
+                .run(move |worker| {
+                    let client = worker.foreground_client(id)?;
+                    client.wire.outbound.lock().unwrap().push(
+                        SyncMessage::FetchRowVersions {
+                            requests: vec![request],
+                            delegated_session: None,
+                        },
+                        "cold foreground repair",
+                    )?;
+                    // Only the owner consumes this request. Inspect the reply before
+                    // the cold foreground's semantic tick can process it.
+                    for _ in 0..16 {
+                        block_on(worker.persistent.tick()).map_err(RelayError::Db)?;
+                    }
+                    Ok(worker
+                        .foreground_client(id)?
+                        .wire
+                        .inbound
+                        .lock()
+                        .unwrap()
+                        .drain_messages())
+                })
+                .unwrap();
+            let versions = replies
+                .into_iter()
+                .filter_map(|message| match message {
+                    SyncMessage::RowVersionPayloads { version_bundles } => Some(version_bundles),
+                    _ => None,
+                })
+                .flatten()
+                .flat_map(|bundle| bundle.versions)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                versions.len(),
+                if different_scope { 0 } else { 1 },
+                "repair ledger is exact to the admitted session, reopen={reopen} different_scope={different_scope}"
+            );
+            if !different_scope {
+                assert_eq!(versions[0].row_uuid(), row);
+            }
+        }
+    }
+
+    #[test]
+    fn native_admitted_scope_owner_encoding_and_generic_reuse_are_separate() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(directory.path().join("scope-mode.sqlite"), Some("alice"));
+        assert_eq!(
+            config.scope.ledger_owner_encoding(),
+            "jazz-native-relay-owner-v1:17:native-relay-test7:default5:alice"
+        );
+        let registry = NativeRelayRegistry::default();
+        let raw = registry.open(config.clone()).unwrap();
+        assert!(matches!(
+            registry.open_admitted(config.clone()),
+            Err(RelayError::ScopeConfigurationMismatch)
+        ));
+        registry.close(&config.scope).unwrap();
+        drop(raw);
+        let admitted = registry.open_admitted(config.clone()).unwrap();
+        assert!(matches!(
+            registry.open(config.clone()),
+            Err(RelayError::ScopeConfigurationMismatch)
+        ));
+        let mut wrong = config.clone();
+        wrong.identity.author = AuthorSubject::for_test_bytes([0x99; 16]);
+        assert!(matches!(
+            registry.open_admitted(wrong),
+            Err(RelayError::ScopeConfigurationMismatch)
+        ));
+        registry.close(&config.scope).unwrap();
+        drop(admitted);
     }
 }

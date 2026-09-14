@@ -44,3 +44,10 @@ pub fn snapshot() -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+pub(crate) fn opaque_hash(value: &impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hash);
+    hash.finish()
+}
