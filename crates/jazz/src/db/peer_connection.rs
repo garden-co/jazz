@@ -3308,8 +3308,14 @@ where
                                         .min()
                                 };
                                 let observed = self.node.borrow();
-                                let observed_claims = observed
-                                    .session_claim_revision(expected.link);
+                                let observed_claims = if request.delegated_session.is_some() {
+                                    // Delegated subjects have independent local and authority
+                                    // claim counters. Only the admitted authority receipt can
+                                    // advance the remote revision for this immutable snapshot.
+                                    0
+                                } else {
+                                    observed.session_claim_revision(expected.link)
+                                };
                                 let observed_policy = observed.active_catalogue_seq();
                                 drop(observed);
                                 // Context components are monotonic per admitted
@@ -3417,9 +3423,8 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
-                                // Transport admission remains bound to the
-                                // backend's SYSTEM link, while this support
-                                // lease uses the now-current authority context
+                                // Transport admission retains its authority link,
+                                // while this support lease uses the current context
                                 // under the immutable delegated subject named
                                 // by the request and receipt.
                                 let scope_authority = AuthorityContext {

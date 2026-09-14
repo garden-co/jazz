@@ -4704,6 +4704,7 @@ type ForegroundSubscriptionOpen =
 
 struct ConnectedClient {
     author: jazz::ids::AuthorSubject,
+    claims: BTreeMap<String, Value>,
     refreshed_claims: Option<BTreeMap<String, Value>>,
     retiring: bool,
     admitted_scope_advice: bool,
@@ -4970,6 +4971,7 @@ where
 /// independent from the JSI call that started it. Dropping it cancels any
 /// chunk-demand waiter held by the future.
 struct ForegroundPendingOperation {
+    advice_request: Option<jazz::protocol::PermissionAdviceRequestId>,
     subscription: Option<u64>,
     future: ForegroundOperationFuture,
     finish_on_cancel: bool,
@@ -5374,7 +5376,15 @@ impl RelayWorker {
             .values_mut()
             .filter(|client| client.author == author)
         {
+            if client.claims != claims {
+                for operation in client.pending_operations.values() {
+                    if let Some(request) = operation.advice_request {
+                        self.persistent.cancel_permission_advice_request(request);
+                    }
+                }
+            }
             client.db.set_identity_claims(author, claims.clone());
+            client.claims = claims.clone();
             client.refreshed_claims = Some(claims.clone());
             client.poll_claim_refresh();
         }
@@ -5421,6 +5431,7 @@ impl RelayWorker {
         // admitted. Only the ordinary peer's owner/storage preparation may
         // wait; opening the new memory foreground must return synchronously.
         let persistent = Rc::clone(&self.persistent);
+        let admitted_claims = claims.clone();
         let admission: RelayAdmissionFuture = Box::pin(async move {
             persistent
                 .accept_subscriber_with_claims_async(relay_transport, identity.author, claims)
@@ -5436,6 +5447,7 @@ impl RelayWorker {
             id,
             ConnectedClient {
                 author: identity.author,
+                claims: admitted_claims,
                 refreshed_claims: None,
                 retiring: false,
                 admitted_scope_advice,
@@ -5781,10 +5793,20 @@ impl RelayWorker {
         }
         // The foreground's immediate upstream is a partial replica and cannot
         // issue advice. The capability binds this lease to the persistent Db's
-        // authenticated upstream subject; request on that ordinary Db while
-        // keeping cancellation and delivery exclusively foreground-owned.
-        let advice = self.persistent.request_permission_advice(action);
-        self.start_foreground_operation(
+        // authenticated upstream subject. Capture its exact current binding for
+        // the scoped relay link; cancellation and delivery remain foreground-owned.
+        let admitted = self.foreground_client(client)?;
+        let advice = self
+            .persistent
+            .request_permission_advice_with_delegated_session(
+                action,
+                jazz::protocol::DelegatedSessionBinding {
+                    identity: admitted.author,
+                    claims: admitted.claims.clone(),
+                },
+            );
+        let request_id = advice.request_id();
+        let result = self.start_foreground_operation(
             client,
             None,
             Box::pin(async move {
@@ -5796,7 +5818,15 @@ impl RelayWorker {
                     },
                 ))
             }),
-        )
+        )?;
+        if let ForegroundOperationPoll::Pending { operation } = result {
+            self.foreground_client_mut(client)?
+                .pending_operations
+                .get_mut(&operation)
+                .expect("pending advice is retained")
+                .advice_request = Some(request_id);
+        }
+        Ok(result)
     }
 
     fn start_foreground_operation(
@@ -5819,6 +5849,7 @@ impl RelayWorker {
             client.pending_operations.insert(
                 operation,
                 ForegroundPendingOperation {
+                    advice_request: None,
                     subscription,
                     future,
                     finish_on_cancel: false,
@@ -9376,6 +9407,60 @@ mod tests {
         generic.close().unwrap();
     }
 
+    /// The owner command boundary makes a credential change deterministic before
+    /// any socket reply; public advice delivery must retire only changed claims.
+    #[test]
+    fn native_advice_claim_refresh_retires_only_changed_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("advice-refresh.sqlite"),
+            Some("advice-refresh"),
+        ))
+        .unwrap();
+        let identity = fresh_client_identity(relay.inner.identity.author).unwrap();
+        let claims = BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]);
+        let client = relay
+            .attach_foreground_client(
+                identity,
+                claims.clone(),
+                ForegroundNodeLease {
+                    node: identity.node,
+                    confirmed_tx_time: TxTime::default(),
+                },
+            )
+            .unwrap();
+        let id = client.id;
+        relay
+            .run(move |worker| {
+                let ForegroundOperationPoll::Pending { operation } = worker
+                    .request_foreground_permission_advice(
+                        id,
+                        ForegroundPermissionAdviceAction::Read {
+                            table: "todos".into(),
+                            row: [1; 16],
+                        },
+                    )?
+                else {
+                    panic!("advice waits for authority");
+                };
+                worker.refresh_account_claims(identity.author, claims);
+                assert!(matches!(
+                    worker.poll_foreground_operation(id, operation)?,
+                    ForegroundOperationPoll::Pending { .. }
+                ));
+                worker.refresh_account_claims(identity.author, BTreeMap::new());
+                assert!(matches!(
+                    worker.poll_foreground_operation(id, operation)?,
+                    ForegroundOperationPoll::Ready(ForegroundOperationResult::PermissionAdvice(
+                        ForegroundPermissionAdvice::Unknown
+                    ))
+                ));
+                Ok(())
+            })
+            .unwrap();
+        client.close().unwrap();
+    }
+
     // The native socket queue and owner suspension are private scheduling
     // boundaries; public row receipts below prove accepted work survives them.
     #[test]
@@ -11576,6 +11661,7 @@ mod tests {
                     .insert(
                         99,
                         ForegroundPendingOperation {
+                            advice_request: None,
                             subscription: None,
                             future,
                             finish_on_cancel: false,
