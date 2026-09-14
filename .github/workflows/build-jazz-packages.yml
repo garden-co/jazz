@@ -243,6 +243,9 @@ jobs:
         run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          # The action already installs cmdline-tools; its default also asks for retired SDK "tools".
+          packages: platform-tools
       - name: Install pinned Android NDK
         run: sdkmanager --install "ndk;27.1.12297006"
       - name: Build and verify Android relay archive slices

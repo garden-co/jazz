@@ -66,6 +66,9 @@ jobs:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          # The action already installs cmdline-tools; its default also asks for retired SDK "tools".
+          packages: platform-tools
       - run: sdkmanager --install "ndk;27.1.12297006"
       - run: pnpm --filter jazz-rn build:relay:android
         env:
@@ -131,6 +134,9 @@ jobs:
         with:
           rust-toolchain: ""
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          # The action already installs cmdline-tools; its default also asks for retired SDK "tools".
+          packages: platform-tools
       # The host receipt is a separate runner from the archive producer, so
       # provision the NDK that CMake uses to compile the JNI bridge here too.
       - run: sdkmanager --install "ndk;27.1.12297006"

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  readdirSync,
   cpSync,
   symlinkSync,
   rmSync,
@@ -178,4 +179,40 @@ test("download-only native link jobs stage their payload before generating consu
     assert.ok(download >= 0 && stage > download && consumer > stage);
     assert.match(steps[stage].run, /JAZZ_NATIVE_RELAY_SOURCE_REVISION=/);
   }
+});
+
+test("Android SDK setup explicitly selects supported packages instead of deprecated defaults", async () => {
+  const { parse } = await import("yaml");
+  const directory = join(repository, ".github/workflows");
+  const callsites = [];
+  for (const file of readdirSync(directory).filter((name) => /\.ya?ml$/.test(name))) {
+    const workflow = parse(readFileSync(join(directory, file), "utf8"));
+    for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+      for (const step of job.steps ?? []) {
+        if (!step.uses?.startsWith("android-actions/setup-android@")) continue;
+        const location = `${file}:${jobName}`;
+        callsites.push(location);
+        assert.equal(
+          typeof step.with?.packages,
+          "string",
+          `${location} must override setup-android's legacy default`,
+        );
+        const packages = step.with.packages.trim().split(/\s+/);
+        assert.ok(
+          packages.includes("platform-tools"),
+          `${location} must install adb/platform-tools`,
+        );
+        assert.ok(
+          !packages.includes("tools"),
+          `${location} must not request the retired SDK tools package`,
+        );
+      }
+    }
+  }
+  for (const required of [
+    "build-jazz-packages.yml:build-jazz-rn-android",
+    "rn-native-artifacts.yml:android",
+    "rn-native-artifacts.yml:android-link",
+  ])
+    assert.ok(callsites.includes(required), `missing Android SDK setup at ${required}`);
 });
