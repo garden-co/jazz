@@ -544,16 +544,21 @@ function serializeQueryOptions(options?: QueryOptions): string {
       : {
           ...options,
           ...(branch === undefined ? {} : { branch: encodeBranchSelector(branch) }),
-          ...(base === undefined
-            ? {}
-            : {
-                base: Array.isArray(base)
-                  ? [encodeBranchSelector(base[0]), base[1]]
-                  : encodeBranchSelector(base),
-              }),
+          ...(base === undefined ? {} : { base: encodeBranchBase(base) }),
         };
   const serialized = JSON.stringify(serializedOptions);
   return isInspectorLocalQueryOptions(options) ? `inspector-local:${serialized}` : serialized;
+}
+
+function isFrozenBranchBase(
+  base: NonNullable<QueryOptions["base"]>,
+): base is readonly [NonNullable<QueryOptions["branch"]>, unknown] {
+  return Array.isArray(base);
+}
+
+function encodeBranchBase(base: NonNullable<QueryOptions["base"]>): unknown {
+  if (isFrozenBranchBase(base)) return [encodeBranchSelector(base[0]), base[1]];
+  return encodeBranchSelector(base);
 }
 
 /**
