@@ -1668,7 +1668,7 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
 }
 
 #[test]
-fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
+fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
     // This stays internal because trust is authenticated by the host at the
     // transport boundary; exposing it through a public client fixture would
     // test the HTTP/WebSocket bootstrap race rather than this hop contract.
@@ -1700,9 +1700,28 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     );
     client_link.borrow_mut().tick().unwrap();
     assert!(
-        client_transport.try_recv().is_none(),
-        "ordinary sessions must not receive authority catalogue snapshots"
+        matches!(
+            client_transport.try_recv(),
+            Some(SyncMessage::CatalogueSnapshot(_))
+        ),
+        "admitted sessions receive the initial catalogue before query compilation"
     );
+    assert!(client_transport.try_recv().is_none());
+
+    // A resumed connection receives an actual snapshot even with unchanged A;
+    // a peer requesting absent B needs that explicit authoritative outcome.
+    let cursor = client_link.borrow_mut().take_resume_cursor().unwrap();
+    let (mut client_transport, core_client_transport) = duplex();
+    let client_link = core.accept_subscriber_with_resume(
+        core_client_transport,
+        AuthorSubject::for_test_bytes([0xc1; 16]),
+        cursor,
+    );
+    client_link.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = client_transport.try_recv() else {
+        panic!("resumed unchanged authority must send its catalogue");
+    };
+    assert_eq!(snapshot.current_write_schema.schema, base.version_id());
 
     let evolved = SchemaVersion::new(build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
@@ -1763,7 +1782,24 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     client_link.borrow_mut().tick().unwrap();
     assert!(
         client_transport.try_recv().is_none(),
-        "catalogue changes stay authority-only on ordinary session links"
+        "later idle changes remain request-driven on ordinary session links"
+    );
+    let cursor = client_link.borrow_mut().take_resume_cursor().unwrap();
+    let (mut resumed_transport, core_resumed_transport) = duplex();
+    let resumed = core.accept_subscriber_with_resume(
+        core_resumed_transport,
+        AuthorSubject::for_test_bytes([0xc1; 16]),
+        cursor,
+    );
+    resumed.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = resumed_transport.try_recv() else {
+        panic!("resumed session must receive published B before querying");
+    };
+    assert!(
+        snapshot
+            .schemas
+            .iter()
+            .any(|schema| schema.id == evolved.id)
     );
 }
 

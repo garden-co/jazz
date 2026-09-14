@@ -262,6 +262,28 @@ connection cannot resolve that wait. Discovery uses a requested-schema point
 lookup, and only a miss needs the genesis-kind prefix and genesis-schema lookup;
 ordinary recovery still validates the entire durable catalogue once.
 
+A host-authenticated application session, or relay with one explicitly admitted
+session scope, receives the same full application catalogue snapshot before its
+first query that ordinary view delivery already sends. This is application-wide
+schema/lineage/physical-identity metadata, including policy expressions present
+in schema payloads; it does not carry application rows or grant row access.
+A generic relay with no admitted session scope gains no eager catalogue delivery.
+Authentication, application routing, and source catalogue readiness precede this
+announcement. An owner itself awaiting requested-schema admission must also wait
+for a validated snapshot from its current upstream before announcing its
+recovered catalogue to a downstream foreground; otherwise
+it could incorrectly reject that foreground's same requested schema as absent.
+A validated snapshot missing the requested schema is still forwarded so the
+foreground can reject explicitly. This failed initial admission does not wait
+for a future publication on an idle connection; after publication the caller
+reconnects or reopens to make a new admission attempt. Transient send backpressure retains the
+unannounced snapshot for retry. This eager application-session delivery occurs
+only before its first accepted snapshot on a physical connection. Resuming a
+cursor clears only its catalogue-announcement marker, so unchanged metadata is
+still delivered once and subscription resume state remains intact. Later changes continue
+to accompany ordinary view delivery. Idle session ticks do not clone or hash the
+full catalogue. Trusted authority/backend links retain continuous propagation.
+
 A joiner with no local lineage
 installs the authority's genesis record, then replays the dense Active/tombstone
 catalogue chain, then applies pointers and data; it never manufactures genesis

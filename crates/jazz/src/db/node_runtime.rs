@@ -2717,11 +2717,15 @@ where
         }
         let local_receiver = self.receives_commits_as_local() && !edge_authority;
         let (peer, ingest_context, session_claims, session_claim_revision) = match cursor {
-            Some(cursor) => {
+            Some(mut cursor) => {
                 assert_eq!(
                     cursor.ingest_context.identity, identity,
                     "a resume cursor may only be used by its authenticated identity"
                 );
+                // Catalogue receipt is per physical connection. Retain the
+                // cursor's subscription state, but force the new connection's
+                // initial metadata even when the authority is unchanged.
+                cursor.peer.reset_catalogue_snapshot_announcement();
                 (
                     cursor.peer,
                     cursor.ingest_context,

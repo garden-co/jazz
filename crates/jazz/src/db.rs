@@ -1255,6 +1255,7 @@ pub(crate) type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
 /// Shared futures release their waiter registrations when individual reads cancel.
 struct PendingOpenSchema {
     connection_epoch: Option<u64>,
+    authoritative_catalogue_received: bool,
     schema: SchemaVersionId,
     result: Option<Result<(), Error>>,
     sender: Option<futures::channel::oneshot::Sender<Result<(), Error>>>,
@@ -1268,6 +1269,7 @@ impl PendingOpenSchema {
         let (sender, receiver) = futures::channel::oneshot::channel();
         Self {
             connection_epoch: None,
+            authoritative_catalogue_received: false,
             schema,
             result: None,
             sender: Some(sender),
