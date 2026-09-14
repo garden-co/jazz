@@ -3896,6 +3896,8 @@ where
         }
 
         let tables = program.lowered.maintained_terminal_tables.clone();
+        let targeted_refresh_tables = program.lowered.targeted_refresh_tables.clone();
+        let targeted_refresh_uncertain = program.lowered.targeted_refresh_uncertain;
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
         let binding_source_shape = program
             .request
@@ -3960,6 +3962,8 @@ where
             .iter()
             .map(|(name, table)| (name.clone().into(), table.id))
             .collect();
+        maintained.targeted_refresh_tables = targeted_refresh_tables;
+        maintained.targeted_refresh_uncertain = targeted_refresh_uncertain;
         maintained.edge_availability_owner = edge_availability_owner;
         maintained.set_read_view(read_view_key);
         // Resolve names from permanent physical catalogue identities, never
