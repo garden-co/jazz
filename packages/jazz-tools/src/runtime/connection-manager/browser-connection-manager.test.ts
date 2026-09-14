@@ -790,7 +790,7 @@ describe("BrowserConnectionManager auth update failures", () => {
     const onUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason);
     process.on("unhandledRejection", onUnhandledRejection);
     try {
-      expect(manager.updateAuth({ jwtToken: "new.jwt" })).toBeUndefined();
+      expect(manager.updateAuth({ mode: "bearer", jwtToken: "new.jwt" })).toBeUndefined();
       // Node emits unhandledRejection only after the current host turn; crossing
       // it is necessary to observe an escaped promise rather than a microtask.
       const hostTurn = deferred();
@@ -847,7 +847,7 @@ describe("BrowserConnectionManager auth update failures", () => {
     const onUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason);
     process.on("unhandledRejection", onUnhandledRejection);
     try {
-      expect(manager.updateAuth({ jwtToken: "new.jwt" })).toBeUndefined();
+      expect(manager.updateAuth({ mode: "bearer", jwtToken: "new.jwt" })).toBeUndefined();
       contexts[0]!.onFailure(new Error("connection A failed"));
       await expect(manager.reconnect()).resolves.toBeUndefined();
       expect(createConnection).toHaveBeenCalledTimes(2);
