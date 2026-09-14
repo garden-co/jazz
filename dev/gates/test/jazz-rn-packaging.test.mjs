@@ -2301,7 +2301,10 @@ test("relay artifact staging targets every supported Android ABI and iOS framewo
     packageJson.scripts["build:relay:android"],
     "bash scripts/build-relay-artifacts.sh android && node ../../dev/artifacts/rn-packages.mjs stage android",
   );
-  assert.equal(packageJson.scripts["build:relay:ios"], "bash scripts/build-relay-artifacts.sh ios");
+  assert.equal(
+    packageJson.scripts["build:relay:ios"],
+    "bash scripts/build-relay-artifacts.sh ios && node ../../dev/artifacts/rn-packages.mjs stage ios",
+  );
   assert.match(script, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(script, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(script, /\[x86_64\]=x86_64-linux-android/);

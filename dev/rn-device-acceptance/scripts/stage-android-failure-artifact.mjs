@@ -79,7 +79,10 @@ export function stageAndroidFailureArtifact({ root, output, sourceRevision, runI
   if (!existsSync(apk)) return { status: "apk-unavailable" };
   const apkFingerprint = fingerprint(apk);
   const producer = JSON.parse(
-    readFileSync(join(root, "crates/jazz-rn/android/jazz-native-relay.manifest.json"), "utf8"),
+    readFileSync(
+      join(root, "crates/jazz-rn/npm/android/android/jazz-native-relay.manifest.json"),
+      "utf8",
+    ),
   );
   if (producer.sourceRevision !== sourceRevision || !Number.isSafeInteger(producer.nativeRelayAbi))
     throw new Error("native producer source mismatch");

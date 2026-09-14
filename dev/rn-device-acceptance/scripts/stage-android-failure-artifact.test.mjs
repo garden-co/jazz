@@ -39,7 +39,7 @@ test(
       };
       assert.deepEqual(stageAndroidFailureArtifact(args), { status: "apk-unavailable" });
       put(
-        "crates/jazz-rn/android/jazz-native-relay.manifest.json",
+        "crates/jazz-rn/npm/android/android/jazz-native-relay.manifest.json",
         JSON.stringify({ sourceRevision, nativeRelayAbi: 1 }),
       );
       put("fixture.c", "int synthetic_fixture(void) { return 7; }\n");
