@@ -3472,7 +3472,8 @@ fn nullable_json_bound_predicates_keep_null_and_non_null_routes_distinct() {
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("documents")
                 .nullable_column("payload", PublicColumnType::Json { schema: None })
-                .nullable_column("baseline", PublicColumnType::Text),
+                .nullable_column("baseline", PublicColumnType::Text)
+                .index_only(["payload"]),
         ),
     );
     let db = open_db(0x71, AuthorSubject::SYSTEM, &schema);
