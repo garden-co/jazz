@@ -107,6 +107,16 @@ rebuild in the checkout whose tests you are running. The boundary is deliberate
 and fail-closed: native production can succeed even when a TypeScript consumer
 build/test subsequently fails.
 
+**Generated fingerprint expectations.** The NAPI `native-artifact-fingerprint.cjs`
+and Jazz Tools `src/runtime/native-artifact-fingerprint-{napi,wasm}.ts` are
+ignored build outputs, never source-controlled digest updates. After a fresh
+checkout or branch change, use `pnpm build:core` for release workspace artifacts
+or `pnpm build:correctness-artifacts` before TypeScript correctness consumers.
+Both paths regenerate expectations from the selected native artifacts; release
+CI derives them from the verified downloaded manifests before compiling Jazz
+Tools. Keep runtime mismatch checks and producer/consumer provenance checks
+enabled. The handwritten `native-artifact-fingerprints.ts` remains source.
+
 **Correctness-artifact cache boundary.** Native/WASM generations are producer
 state, not Turbo cache entries. A NAPI generation can retain many GiB of Cargo
 products, so Turbo's local/remote archives would both be unbounded and unsafe

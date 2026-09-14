@@ -72,3 +72,7 @@ data-multi/
 # Generated browser benchmark phase receipts.
 packages/jazz-tools/.vitest-browser-bench/
 /.vercel/
+
+# Derived from the locally built or release-assembled native artifacts.
+/packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts
+/packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts

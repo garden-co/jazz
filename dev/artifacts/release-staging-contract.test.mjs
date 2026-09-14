@@ -311,6 +311,41 @@ test("release fingerprint staging verifies downloaded WASM bytes before deriving
   assert.throws(() => stageNativeFingerprints(root), /downloaded WASM artifact hash mismatch/);
 });
 
+test("generated fingerprint expectations stay out of Git after fresh release assembly", () => {
+  const root = releaseFixture();
+  try {
+    writeWasmRelease(root);
+    writeReleaseNapiManifest(root);
+    writeFileSync(join(root, ".gitignore"), readFileSync(join(repositoryRoot, ".gitignore")));
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["add", "."], { cwd: root });
+    stageNativeFingerprints(root);
+    const runtime = "packages/jazz-tools/src/runtime/";
+    for (const kind of ["napi", "wasm"]) {
+      const path = `${runtime}native-artifact-fingerprint-${kind}.ts`;
+      assert.ok(existsSync(join(root, path)), "fresh assembly regenerates the expectation");
+      assert.equal(
+        execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", path], {
+          cwd: root,
+          encoding: "utf8",
+        }),
+        "",
+      );
+    }
+    const handwritten = `${runtime}native-artifact-fingerprints.ts`;
+    writeFileSync(join(root, handwritten), "// handwritten runtime contract\n");
+    assert.equal(
+      execFileSync("git", ["ls-files", "--others", "--exclude-standard", "--", handwritten], {
+        cwd: root,
+        encoding: "utf8",
+      }).trim(),
+      handwritten,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("profiling fingerprint staging requires explicit admission, matching hashes and release NAPI", () => {
   const root = releaseFixture();
   writeWasmRelease(root);
