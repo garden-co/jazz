@@ -37,6 +37,17 @@ it("preserves nullable JSON across persistent browser reopen and subsequent writ
           .id,
       );
     }
+    const streamed = await db.insertStreaming(app.documents, {
+      label: "streamed root null",
+      payload: (async function* () {
+        yield " ".repeat(4095);
+        yield "null";
+        yield "\n".repeat(90_000);
+      })(),
+    });
+    await streamed.wait({ tier: "global" });
+    ids.push(streamed.value.id);
+    values.push(null);
     await db.shutdown();
     db = await createBrowserTestDb(config);
     for (let index = 0; index < ids.length; index++) {

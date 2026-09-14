@@ -3711,8 +3711,8 @@ where
         }
     }
 
-    // The current graph below carries storage cells, not materialized public
-    // values. In particular JSON has a distinct internal cell descriptor.
+    // The current graph retains inline/indirect cells, with nullable JSON's
+    // logical null layer applied. JSON retains its internal scalar kind.
     // Bind the prepared layout to that same source contract; materialization
     // belongs at the public read boundary, not in terminal-layout repair.
     let descriptor = if branch_witness_field.is_none() {
@@ -3985,7 +3985,14 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields_for_current_stora
                 .map(|field| {
                     (
                         user_column_field(&column.name),
-                        (field.identity.clone(), field.value_type.clone()),
+                        (
+                            field.identity.clone(),
+                            if column.is_nullable_json() {
+                                column.logical_cell_descriptor_type().nullable()
+                            } else {
+                                field.value_type.clone()
+                            },
+                        ),
                     )
                 })
         })
@@ -4056,9 +4063,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
         .chain(table.columns.iter().map(|column| {
             let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
             {
-                column.column_type.clone()
+                column.logical_cell_descriptor_type()
             } else {
-                ValueType::Nullable(Box::new(column.column_type.clone()))
+                column.logical_cell_descriptor_type().nullable()
             };
             current_row_column_field(column, value_type)
         }))
@@ -4770,13 +4777,45 @@ fn inline_current_record(
     Ok(descriptor.create(&values)?)
 }
 
+// Inline candidates may retain indirect JSON. CurrentRow::cell can normalize
+// inline source immediately; the shared async projector classifies references.
+fn inline_current_records_graph(
+    table: &TableSchema,
+    descriptor: RecordDescriptor,
+    records: Vec<Vec<u8>>,
+) -> GraphBuilder {
+    let graph = GraphBuilder::inline_records(descriptor, records);
+    let nullable_json = table
+        .columns
+        .iter()
+        .filter(|column| column.is_nullable_json())
+        .map(|column| user_column_field(&column.name))
+        .collect::<BTreeSet<_>>();
+    if nullable_json.is_empty() {
+        return graph;
+    }
+    graph.project_fields(descriptor.fields().iter().map(|field| {
+        let name = field.name.as_ref().expect("named inline current field");
+        let mut projection = if nullable_json.contains(name) {
+            ProjectField::nullable_json(name, name)
+        } else {
+            ProjectField::named(name)
+        };
+        projection.output_identity = field
+            .identity
+            .clone()
+            .unwrap_or_else(|| records::FieldIdentity::Name(name.clone()));
+        projection
+    }))
+}
+
 fn inline_current_graph(table: &TableSchema, rows: Vec<CurrentRow>) -> Result<GraphBuilder, Error> {
     let descriptor = current_row_descriptor(table);
     let records = rows
         .iter()
         .map(|row| inline_current_record(table, &descriptor, row))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(GraphBuilder::inline_records(descriptor, records))
+    Ok(inline_current_records_graph(table, descriptor, records))
 }
 
 fn inline_current_graph_with_source_metadata(
@@ -4862,7 +4901,7 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((
-        GraphBuilder::inline_records(descriptor.clone(), records),
+        inline_current_records_graph(table, descriptor, records),
         descriptor,
         metadata,
     ))
@@ -5098,7 +5137,7 @@ fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((
-        GraphBuilder::inline_records(descriptor.clone(), records),
+        inline_current_records_graph(table, descriptor, records),
         descriptor,
         metadata,
     ))
@@ -5221,7 +5260,7 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
             .chain(table.columns.iter().map(|column| {
                 (
                     user_column_field(&column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone())),
+                    column.logical_cell_descriptor_type().nullable(),
                 )
             }))
             .chain([

@@ -4484,6 +4484,7 @@ fn nullable_json_null_policies_allow_both_null_forms_and_reject_objects() {
     for value in [
         Value::Nullable(None),
         Value::Nullable(Some(Box::new(Value::String("null".into())))),
+        Value::String(format!("{}null{}", " ".repeat(4095), "\n".repeat(90_000))),
     ] {
         let write = db
             .insert(
@@ -4493,8 +4494,11 @@ fn nullable_json_null_policies_allow_both_null_forms_and_reject_objects() {
             )
             .unwrap();
         let id = write.row_uuid();
-        db.tick().unwrap();
-        server.tick().unwrap();
+        // Indirect JSON also transfers its immutable chunk dependencies.
+        for _ in 0..32 {
+            db.tick().unwrap();
+            server.tick().unwrap();
+        }
         db.tick().unwrap();
         block_on(write.wait(DurabilityTier::Global)).unwrap();
         let denied = db.update(
@@ -4513,7 +4517,7 @@ fn nullable_json_null_policies_allow_both_null_forms_and_reject_objects() {
     }
     let query = db.prepare_query(&db.table("documents")).unwrap();
     let rows = db.read(&query).unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
     assert!(
         rows.iter()
             .all(|row| row.cell(&schema.tables[0], "metadata") == Some(Value::Nullable(None)))

@@ -3566,3 +3566,60 @@ fn nullable_json_bound_predicates_keep_null_and_non_null_routes_distinct() {
         }
     }
 }
+
+/// The prepared layout and each live operation must agree after JSON null
+/// normalization, including an indirect object followed by a clearing update.
+#[test]
+fn nullable_json_maintained_subscription_keeps_one_logical_layout() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("label", PublicColumnType::Text)
+                .nullable_column("payload", PublicColumnType::Json { schema: None }),
+        ),
+    );
+    let db = open_db(0x72, AuthorSubject::SYSTEM, &schema);
+    let id = db
+        .insert(
+            "documents",
+            BTreeMap::from([
+                ("label".into(), Value::String("initial".into())),
+                ("payload".into(), Value::Nullable(None)),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let mut subscription =
+        prepared_subscribe(&db, &Query::from("documents"), ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        initial.rows[0].cell(&schema.tables[0], "payload"),
+        Some(Value::Nullable(None))
+    );
+    for source in [
+        "{\"nested\":null}".to_owned(),
+        format!("{{\"body\":\"{}\"}}", "x".repeat(100_000)),
+        "null".to_owned(),
+    ] {
+        db.update(
+            "documents",
+            id,
+            BTreeMap::from([("payload".into(), Value::String(source.clone()))]),
+            Default::default(),
+        )
+        .unwrap();
+        let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+        assert!(added.is_empty() && removed.is_empty());
+        assert_eq!(updated.len(), 1);
+        let expected = if source == "null" {
+            Value::Nullable(None)
+        } else {
+            Value::Nullable(Some(Box::new(Value::String(source))))
+        };
+        assert_eq!(
+            updated[0].cell(&schema.tables[0], "payload"),
+            Some(expected)
+        );
+    }
+}

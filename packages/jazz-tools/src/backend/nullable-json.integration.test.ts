@@ -45,9 +45,20 @@ it("round-trips nullable JSON and preserves omitted patches through the native b
         payload,
       });
     }
-    expect(await db.all(app.documents.where({ payload: null }), { tier: "edge" })).toMatchObject([
-      { id: row.id, payload: null },
-    ]);
+    const streamed = await db.insertStreaming(app.documents, {
+      label: "streamed root null",
+      payload: (async function* () {
+        yield " ".repeat(4095);
+        yield "null";
+        yield "\n".repeat(90_000);
+      })(),
+    });
+    await streamed.wait({ tier: "global" });
+    expect(
+      await db.one(app.documents.where({ id: streamed.value.id }), { tier: "edge" }),
+    ).toMatchObject({ payload: null });
+    const nulls = await db.all(app.documents.where({ payload: null }), { tier: "edge" });
+    expect(nulls.map((value) => value.id).sort()).toEqual([row.id, streamed.value.id].sort());
   } finally {
     await session?.close();
     await server.stop();
