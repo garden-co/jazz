@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { schema as s, generateAuthSecret } from "../../src/index.js";
+import { schema as s, generateAuthSecret, type JsonValue } from "../../src/index.js";
 import { createBrowserTestDb } from "./support.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
@@ -23,7 +23,13 @@ it("preserves nullable JSON across persistent browser reopen and subsequent writ
   };
   let db = await createBrowserTestDb(config);
   try {
-    const values = [null, { nested: null }, [null, 1], "null", { body: "x".repeat(100_000) }];
+    const values: JsonValue[] = [
+      null,
+      { nested: null },
+      [null, 1],
+      "null",
+      { body: "x".repeat(100_000) },
+    ];
     const ids = [];
     for (const payload of values) {
       ids.push(

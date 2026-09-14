@@ -5483,6 +5483,44 @@ mod tests {
         ));
     }
 
+    /// Raw JSON equality probes cannot represent logical root-null equivalence.
+    /// Inspect the access plan because a full scan can mask an unsafe probe
+    /// declaration in an otherwise equivalent public snapshot.
+    #[test]
+    fn nullable_json_index_probes_never_underselect_logical_nulls() {
+        use crate::tools::{ColumnType as PublicType, SchemaBuilder, TableSchemaBuilder};
+        let schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("documents")
+                        .nullable_column("payload", PublicType::Json { schema: None })
+                        .column("label", PublicType::Text)
+                        .index_only(["payload", "label"]),
+                )
+                .build(),
+        )
+        .unwrap();
+        let table = &schema.tables[0];
+        for value in [
+            Value::Nullable(None),
+            Value::String("null".into()),
+            Value::String(" \nnull\t".into()),
+            Value::String("{}".into()),
+        ] {
+            let mut equalities = BTreeMap::from([("payload".into(), value)]);
+            assert!(select_current_access_path(table, &equalities).is_none());
+            equalities.insert("label".into(), Value::String("selected".into()));
+            assert!(
+                matches!(select_current_access_path(table, &equalities), Some(CurrentAccessPath::Index { column, intersections, .. }) if column == "label" && intersections.is_empty())
+            );
+            let row_id = uuid::Uuid::from_u128(7);
+            equalities.insert("id".into(), Value::Uuid(row_id));
+            assert!(
+                matches!(select_current_access_path(table, &equalities), Some(CurrentAccessPath::PrimaryKey(values)) if values == vec![Value::Uuid(row_id)])
+            );
+        }
+    }
+
     /// This is an internal planner assertion because the fallback is only
     /// observable as the absence of an optional physical access path. A
     /// system query has no identity claims, so considering a claim predicate

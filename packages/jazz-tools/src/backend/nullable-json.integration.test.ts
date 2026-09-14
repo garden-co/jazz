@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { schema as s, type JsonValue } from "../index.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createJazzSession } from "./index.js";
 
@@ -31,13 +31,14 @@ it("round-trips nullable JSON and preserves omitted patches through the native b
     const row = await db
       .insert(app.documents, { label: "document", payload: null })
       .wait({ tier: "global" });
-    for (const payload of [
+    const values: JsonValue[] = [
       { nested: null },
       [null, 1],
       "null",
       { body: "x".repeat(100_000) },
       null,
-    ]) {
+    ];
+    for (const payload of values) {
       await db.update(app.documents, row.id, { payload }).wait({ tier: "global" });
       await db.update(app.documents, row.id, { label: "patched" }).wait({ tier: "global" });
       expect(await db.one(app.documents.where({ id: row.id }), { tier: "edge" })).toMatchObject({
