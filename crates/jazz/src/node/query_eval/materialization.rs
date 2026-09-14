@@ -290,7 +290,10 @@ where
     ) -> Result<Option<CurrentRow>, Error> {
         let tx_versions = self.local_maintained_tx_versions(local, tx_id, cache);
         let Some(version) = tx_versions.iter().rev().find(|v| {
-            v.table() == table_name && v.row_uuid() == row_uuid && v.deletion().is_none()
+            v.table() == table_name
+                && v.row_uuid() == row_uuid
+                && !v.is_register_record()
+                && v.deletion().is_none()
         }) else {
             return Ok(None);
         };

@@ -2525,6 +2525,7 @@ where
         let table_id = self.physical_table_id_for_schema(result_schema, result_table)?;
         for version in versions.iter().rev() {
             if version.row_uuid() == row_uuid
+                && !version.is_register_record()
                 && version.deletion().is_none()
                 && self.maintained_version_physical_table(version)? == table_id
             {

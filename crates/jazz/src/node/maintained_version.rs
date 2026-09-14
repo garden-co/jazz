@@ -101,6 +101,12 @@ impl MaintainedVersion {
             Self::Materialized(v) => v.deletion(),
         }
     }
+    pub(crate) fn is_register_record(&self) -> bool {
+        match self {
+            Self::Native(_) => false,
+            Self::Materialized(v) => v.is_register_record(),
+        }
+    }
     pub(super) fn layer(&self) -> VersionLayer {
         if self.deletion().is_some() {
             VersionLayer::Deletion

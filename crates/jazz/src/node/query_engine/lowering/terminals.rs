@@ -3235,6 +3235,35 @@ fn content_version_witness_graph_from_visible_graph(
     event_kind: &str,
     routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
+    if source.native_witness_table.is_some() {
+        // A source-shaped authorized relation already carries exact version
+        // coordinates. A flat join can instead expose only row/transaction
+        // keys, without schema/branch metadata. Prove every projected input
+        // is present before bypassing the coordinate-recovery join below.
+        let mut fields = inline_version_witness_fields_for_tagged_rows(source, event_kind)?;
+        fields.extend(routing_param_fields.iter().map(|field| {
+            let mut projected = ProjectField::named(field);
+            projected.expression = groove::ivm::ProjectExpr::Field(FieldRef::stored_name(field));
+            projected
+        }));
+        let complete_coordinates =
+            graph_declared_output_fields(&visible_graph).is_some_and(|available| {
+                fields.iter().all(|field| match &field.expression {
+                    groove::ivm::ProjectExpr::Field(
+                        FieldRef::Name(name) | FieldRef::StoredName(name),
+                    ) => available.contains(name),
+                    groove::ivm::ProjectExpr::Literal(_)
+                    | groove::ivm::ProjectExpr::TypedLiteral { .. }
+                    | groove::ivm::ProjectExpr::Null(_) => true,
+                    _ => false,
+                })
+            });
+        if complete_coordinates {
+            // Preserve bag weights and authority routes: independent role
+            // reducers own positive-presence lifetimes, not this projection.
+            return Ok(visible_graph.project_fields(fields));
+        }
+    }
     // Visibility can be a wide join tuple, not a source-shaped record. Resolve
     // its exact row/version keys back to complete witnesses in both storage
     // and covered-input realizations. Never reopen an unrestricted source as

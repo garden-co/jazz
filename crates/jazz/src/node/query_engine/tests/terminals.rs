@@ -1,6 +1,7 @@
 //! Public collectors, correlated result trees, and hidden terminal facts.
 
 use super::*;
+use groove::ivm::{FieldRef, ProjectField};
 
 #[test]
 fn native_witness_terminals_project_only_coordinates_and_keep_fallback_payloads() {
@@ -21,6 +22,19 @@ fn native_witness_terminals_project_only_coordinates_and_keep_fallback_payloads(
             Box::pin(async move {
                 let mut source = self.0.prepare_source_graph(request).await?;
                 source.native_witness_table = Some(crate::ids::PhysicalTableId(7));
+                // Make the source's carrier declaration explicit, as native
+                // policy/source projections do. An opaque fake Table alone
+                // cannot prove which coordinates reach its output.
+                source.graph =
+                    source
+                        .graph
+                        .project_fields(source.row_shape.descriptor.fields().iter().map(|field| {
+                            let name = field.name.as_ref().unwrap();
+                            let mut projected = ProjectField::named(name);
+                            projected.expression =
+                                groove::ivm::ProjectExpr::Field(FieldRef::stored_name(name));
+                            projected
+                        }));
                 Ok(source)
             })
         }
@@ -44,6 +58,7 @@ fn native_witness_terminals_project_only_coordinates_and_keep_fallback_payloads(
     let mut checked = 0;
     for terminal in &native.lowered.terminals {
         let OutputTerminalSchema::Fact(ProgramFactOutput {
+            terminal: role,
             schema:
                 ProgramFactSchema::VersionWitnesses(schema)
                 | ProgramFactSchema::ReplacementWitnesses(schema),
@@ -69,6 +84,24 @@ fn native_witness_terminals_project_only_coordinates_and_keep_fallback_payloads(
             .find(|other| other.sink == terminal.sink)
             .unwrap();
         let fallback_fields = graph_declared_output_fields(&corresponding.graph).unwrap();
+        if matches!(
+            role,
+            ProgramFactTerminal::VersionWitnessContent
+                | ProgramFactTerminal::ReplacementWitnessContent
+        ) {
+            let has_payload_source = |graph: &GraphBuilder| {
+                matches!(graph,
+                GraphBuilder::Table { table, .. } if table == "resolved_todos_content_versions")
+            };
+            assert!(
+                !graph_any(&terminal.graph, &has_payload_source),
+                "native coordinates must not reopen a payload source"
+            );
+            assert!(
+                graph_any(&corresponding.graph, &has_payload_source),
+                "unproven witnesses still require their payload source"
+            );
+        }
         assert!(fields.len() < fallback_fields.len());
         for witness in schema.content.iter().chain(schema.deletion.iter()) {
             assert_eq!(witness.native_table, Some(crate::ids::PhysicalTableId(7)));
