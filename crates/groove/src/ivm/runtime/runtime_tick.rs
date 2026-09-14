@@ -127,6 +127,11 @@ pub(crate) struct ResidentTick {
     publication: PendingResidentPublication,
 }
 
+enum EvaluationPollStep {
+    Complete,
+    ResidentRequestsReady,
+}
+
 struct EvaluationFailure {
     kind: EvaluationFailureKind,
     affected_nodes: HashSet<NodeId>,
@@ -796,8 +801,23 @@ impl IncrementalEvaluation<'_> {
         runtime: &mut IvmRuntime,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), EvaluationFailure>> {
+        loop {
+            match std::task::ready!(self.poll_step(runtime, cx))? {
+                EvaluationPollStep::Complete => return Poll::Ready(Ok(())),
+                // Preserve same-poll resident visibility without retaining one
+                // stack frame for every synchronously available chunk.
+                EvaluationPollStep::ResidentRequestsReady => continue,
+            }
+        }
+    }
+
+    fn poll_step(
+        &mut self,
+        runtime: &mut IvmRuntime,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<EvaluationPollStep, EvaluationFailure>> {
         if self.discarded {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(Ok(EvaluationPollStep::Complete));
         }
         let ready = self.requests.poll(cx);
         if ready == 0 {
@@ -908,7 +928,7 @@ impl IncrementalEvaluation<'_> {
             self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
             self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
             drop(evaluator);
-            return self.poll(runtime, cx);
+            return Poll::Ready(Ok(EvaluationPollStep::ResidentRequestsReady));
         }
 
         let mut terminal_consumers = HashMap::<NodeId, usize>::default();
@@ -1012,7 +1032,7 @@ impl IncrementalEvaluation<'_> {
                             ready = self.requests.poll_eager_retry(cx);
                         }
                         if ready > 0 {
-                            return self.poll(runtime, cx);
+                            return Poll::Ready(Ok(EvaluationPollStep::ResidentRequestsReady));
                         }
                         return Poll::Pending;
                     }
@@ -1216,7 +1236,7 @@ impl IncrementalEvaluation<'_> {
         } else {
             runtime.cheap_stats()
         };
-        Poll::Ready(Ok(()))
+        Poll::Ready(Ok(EvaluationPollStep::Complete))
     }
 }
 
