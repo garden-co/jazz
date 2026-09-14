@@ -644,11 +644,13 @@ jobs:
           TEMPORARY_DIRECTORY=$(mktemp -d)
           pnpm --filter jazz-rn pack --pack-destination "${TEMPORARY_DIRECTORY}"
           TARBALL=$(ls "${TEMPORARY_DIRECTORY}"/jazz-rn-*.tgz | head -n 1)
+          node dev/artifacts/verify-rn-pack-size.mjs "${TARBALL}"
           tar -xzf "${TARBALL}" -C "${TEMPORARY_DIRECTORY}"
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(node dev/artifacts/release-artifact-source-revision.mjs)" \
             JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
             node crates/jazz-rn/scripts/verify-relay-artifacts.mjs \
               --package-root "${TEMPORARY_DIRECTORY}/package" android ios
+          echo "JAZZ_RN_VERIFIED_TARBALL=${TARBALL}" >> "$GITHUB_ENV"
 
       - name: Verify packed jazz-tools manifest
         run: |
@@ -731,7 +733,7 @@ jobs:
           if npm view "jazz-rn@${RN_VERSION}" version >/dev/null 2>&1; then
             echo "jazz-rn@${RN_VERSION} already exists on npm; skipping publish."
           else
-            pnpm --filter jazz-rn publish --tag alpha --access public --no-git-checks
+            npm publish "${JAZZ_RN_VERIFIED_TARBALL}" --tag alpha --access public
           fi
 
       - name: Publish jazz-tools (alpha tag)

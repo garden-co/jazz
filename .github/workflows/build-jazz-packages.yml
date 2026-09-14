@@ -493,6 +493,7 @@ jobs:
           TEMPORARY_DIRECTORY=$(mktemp -d)
           pnpm --filter jazz-rn pack --pack-destination "${TEMPORARY_DIRECTORY}"
           TARBALL=$(ls "${TEMPORARY_DIRECTORY}"/jazz-rn-*.tgz | head -n 1)
+          node dev/artifacts/verify-rn-pack-size.mjs "${TARBALL}"
           tar -xzf "${TARBALL}" -C "${TEMPORARY_DIRECTORY}"
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
             JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
