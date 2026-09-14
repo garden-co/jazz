@@ -1092,6 +1092,23 @@ where
         self.node.set_scheduler(scheduler);
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only access to the same host waker passed to Groove query
+    /// evaluation. Native relay receipts use this to model a storage future
+    /// becoming ready without introducing a second wake path.
+    #[doc(hidden)]
+    pub fn query_runtime_waker_for_test(&self) -> Option<Waker> {
+        self.node.query_runtime_waker()
+    }
+
+    /// Consume a query-runtime storage wake on the owner thread and dirty
+    /// subscriber links before the next peer tick. Ordinary host ticks are
+    /// unchanged when no storage wake is pending.
+    #[doc(hidden)]
+    pub fn mark_subscriber_connections_dirty_after_query_runtime_wake(&self) {
+        self.node
+            .mark_subscriber_connections_dirty_after_query_runtime_wake();
+    }
     /// Configure automatic edge-cache byte-budget eviction.
     ///
     /// `None` disables automatic eviction and preserves the historical manual
@@ -1467,6 +1484,24 @@ where
     /// Test/bench-only snapshot of sync-path counters.
     pub fn sync_metrics_for_test(&self) -> crate::node::SyncMetrics {
         self.node.node.borrow().sync_metrics().clone()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only count of maintained subscription rehydrate entrypoints.
+    pub fn maintained_subscription_rehydrate_attempts_for_test(&self) -> u64 {
+        self.node
+            .maintained_subscription_rehydrate_attempts_for_test()
+    }
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only snapshot of the subscriber dirty-generation boundary.
+    pub fn subscriber_dirty_epoch_for_test(&self) -> u64 {
+        self.node.subscriber_dirty_epoch_for_test()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only mirror of the server-shell progress boundary.
+    pub fn mark_subscriber_connections_dirty_for_test(&self) {
+        self.node.mark_subscriber_connections_dirty();
     }
 
     #[cfg(any(test, feature = "testing"))]

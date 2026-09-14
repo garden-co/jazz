@@ -4953,6 +4953,10 @@ fn poll_relay_tick<S>(
 where
     S: jazz::groove::storage::OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
+    // The storage waker only records cross-thread readiness. The Db consumes
+    // that marker here, on the relay owner, before its thread-affine peers
+    // are ticked; ordinary native pumps do not dirty every subscriber.
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
     let tick = pending.get_or_insert_with(|| {
         let db = Rc::clone(db);
         Box::pin(async move { db.tick().await })
@@ -12279,6 +12283,350 @@ mod tests {
             wakes.iter().any(|(foreground, _, _)| *foreground == 2),
             "the post-commit wake targets the retained reader foreground"
         );
+    }
+
+    #[test]
+    fn native_relay_storage_wake_progresses_unavailable_authority_and_recovers_once() {
+        // This is the native owner/authority liveness receipt: a retained Edge
+        // subscription remains unsettled while its authority is absent, an
+        // unrelated owner RPC still completes, and one host wake is enough to
+        // dirty the subscriber. Installing an in-process history-complete core
+        // then settles the same retained receiver without re-registering it.
+        let directory = tempfile::tempdir().unwrap();
+        let registry = NativeRelayRegistry::default();
+        let mut relay_config = config(
+            directory.path().join("authority-liveness.sqlite"),
+            Some("alice"),
+        );
+        relay_config.schema = permissive_schema();
+        let relay = registry.open(relay_config).unwrap();
+        let reader = relay
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xd5; 16]),
+                    author: AuthorSubject::for_test_bytes([0xd6; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let reader_wake = Arc::new(QueuedNativeWake::active());
+        reader
+            .set_foreground_wake_callback(
+                2,
+                Some(Arc::new(ForegroundWakeState::new(
+                    ForegroundWakeRegistration {
+                        callback: queue_native_wake,
+                        context: Arc::as_ptr(&reader_wake) as usize,
+                    },
+                ))),
+            )
+            .unwrap();
+
+        let subscription = reader
+            .subscribe_foreground_query_with_options(
+                postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                ReadOpts {
+                    tier: CoreDurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            )
+            .unwrap();
+        for _ in 0..32 {
+            relay.pump().unwrap();
+        }
+        let initial_events = match reader.drain_foreground_subscription(subscription).unwrap() {
+            ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(
+                events,
+            )) => events,
+            _ => panic!("initial Edge subscription did not drain"),
+        };
+        assert!(
+            initial_events.is_empty(),
+            "an unavailable authority keeps the Edge subscription opener pending"
+        );
+        reader_wake.queued.lock().unwrap().clear();
+        relay.wire().take_outbound().unwrap();
+
+        let baseline_storage = relay
+            .run(|worker| Ok(block_on(worker.persistent.encoded_storage_bytes_for_test()).unwrap()))
+            .unwrap();
+        let baseline_dirty_epoch = relay
+            .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
+            .unwrap();
+        let baseline_rehydrate_attempts = relay
+            .run(|worker| {
+                Ok(worker
+                    .persistent
+                    .maintained_subscription_rehydrate_attempts_for_test())
+            })
+            .unwrap();
+        let baseline_network_depth = relay.wire().queue_depths().unwrap();
+
+        let query_waker = relay
+            .run(|worker| Ok(worker.persistent.query_runtime_waker_for_test()))
+            .unwrap()
+            .expect("installed native foreground scheduler supplies the query waker");
+        query_waker.wake_by_ref();
+        query_waker.wake_by_ref();
+        assert!(
+            reader_wake.wait_for_queued(1),
+            "the storage wake must cross the native foreground callback"
+        );
+        assert_eq!(
+            reader_wake.queued(),
+            1,
+            "coalesced storage wakes queue one native owner callback"
+        );
+        assert_eq!(
+            relay
+                .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
+                .unwrap(),
+            baseline_dirty_epoch,
+            "the callback is not allowed to mutate thread-affine state"
+        );
+        reader_wake.deliver_queued();
+        reader.pump_foreground().unwrap();
+        assert_eq!(
+            relay
+                .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
+                .unwrap(),
+            baseline_dirty_epoch.wrapping_add(1),
+            "the native owner consumes the wake before ticking subscribers"
+        );
+        assert_eq!(
+            relay
+                .run(|worker| {
+                    Ok(worker
+                        .persistent
+                        .maintained_subscription_rehydrate_attempts_for_test())
+                })
+                .unwrap(),
+            baseline_rehydrate_attempts,
+            "an unavailable authority does not spin rehydration"
+        );
+        assert_eq!(
+            relay
+                .run(|worker| {
+                    Ok(block_on(worker.persistent.encoded_storage_bytes_for_test()).unwrap())
+                })
+                .unwrap(),
+            baseline_storage,
+            "a liveness wake does not write relay storage"
+        );
+        assert_eq!(
+            relay.wire().queue_depths().unwrap(),
+            baseline_network_depth,
+            "an unavailable authority does not emit a network retry"
+        );
+        assert_eq!(
+            relay
+                .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
+                .unwrap(),
+            baseline_dirty_epoch.wrapping_add(1),
+            "one owner wake dirties the subscriber exactly once"
+        );
+        reader_wake.queued.lock().unwrap().clear();
+        let expected_dirty_epoch_after_wake = baseline_dirty_epoch.wrapping_add(1);
+        let idle_rehydrate_attempts = baseline_rehydrate_attempts;
+        let mut idle_wakes = 0;
+        for idle_turn in 0..16 {
+            relay.pump().unwrap();
+            let queued = reader_wake.queued();
+            idle_wakes += queued;
+            assert!(
+                idle_wakes <= 4,
+                "unavailable authority exceeded four idle native wakes by turn {idle_turn}"
+            );
+            if queued == 0 {
+                break;
+            }
+            reader_wake.deliver_queued();
+            reader.pump_foreground().unwrap();
+        }
+        assert_eq!(
+            reader_wake.queued(),
+            0,
+            "bounded idle pumping must reach native-wake quiescence"
+        );
+        let idle_dirty_epoch = relay
+            .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
+            .unwrap();
+        let idle_extra_dirty_epochs =
+            idle_dirty_epoch.wrapping_sub(expected_dirty_epoch_after_wake);
+        assert!(
+            idle_extra_dirty_epochs <= 1,
+            "idle owner turns exceeded one residual native dirty transition: {idle_extra_dirty_epochs}"
+        );
+        assert_eq!(
+            relay
+                .run(|worker| {
+                    Ok(worker
+                        .persistent
+                        .maintained_subscription_rehydrate_attempts_for_test())
+                })
+                .unwrap(),
+            idle_rehydrate_attempts,
+            "idle owner turns must not retry maintained registration"
+        );
+        assert_eq!(
+            relay
+                .run(|worker| {
+                    Ok(block_on(worker.persistent.encoded_storage_bytes_for_test()).unwrap())
+                })
+                .unwrap(),
+            baseline_storage,
+            "idle authority waits must not grow relay storage"
+        );
+        assert_eq!(
+            relay.wire().queue_depths().unwrap(),
+            baseline_network_depth,
+            "idle authority waits must not grow network queues"
+        );
+        // The pending Edge subscription must not monopolise the owner. An
+        // unrelated local query must complete through the same foreground RPC
+        // surface while the authority remains unavailable.
+        let read_started = std::time::Instant::now();
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        reader
+            .with_db(move |db| {
+                block_on(db.all_serialized_query(
+                    &query,
+                    ReadOpts::default(),
+                    None,
+                    None,
+                    None,
+                    false,
+                    || false,
+                    |_| {},
+                ))
+                .map_err(RelayError::Db)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            read_started.elapsed() < Duration::from_secs(1),
+            "unrelated local read exceeded its one-second owner deadline"
+        );
+
+        let relay_identity = relay
+            .run(|worker| Ok(worker.persistent.identity()))
+            .unwrap();
+        let relay_endpoint = jazz::wire::WireAuthorityEndpoint::fresh(relay_identity.node);
+        let core_schema = permissive_schema();
+        let core_column_families = core_schema.column_families();
+        let core_refs = core_column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let core = Rc::new(
+            block_on(Db::open_history_complete(DbConfig {
+                schema: core_schema,
+                storage: MemoryStorage::new(&core_refs).unwrap(),
+                identity: DbIdentity {
+                    node: NodeUuid::from_bytes([0xe5; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+                id_source: None,
+            }))
+            .unwrap(),
+        );
+        let core_endpoint = jazz::wire::WireAuthorityEndpoint::fresh(core.identity().node);
+        let relay_context = jazz::db::ConnectionSessionContext {
+            local: relay_endpoint,
+            remote: Some(core_endpoint),
+            link_identity: relay_identity.author,
+            negotiated_features: jazz::wire::current_wire_features(),
+        };
+        let core_context = jazz::db::ConnectionSessionContext {
+            local: core_endpoint,
+            remote: Some(relay_endpoint),
+            link_identity: relay_identity.author,
+            negotiated_features: jazz::wire::current_wire_features(),
+        };
+        let (_generation, socket_wire) = relay
+            .run(move |worker| worker.begin_socket_upstream(Some(relay_context)))
+            .unwrap();
+        let reverse_wire = NativeRelayWire {
+            inbound: Arc::clone(&socket_wire.outbound),
+            outbound: Arc::clone(&socket_wire.inbound),
+            liveness: socket_wire.liveness.clone(),
+            connection_liveness: socket_wire.connection_liveness.clone(),
+            trusted_encoder: Arc::new(AtomicBool::new(false)),
+        };
+        let _core_subscriber = core.accept_subscriber(
+            Box::new(QueueTransport {
+                wire: reverse_wire,
+                session_context: Some(core_context),
+            }),
+            relay_identity.author,
+        );
+
+        let mut settled_events = Vec::new();
+        for _ in 0..96 {
+            block_on(core.tick()).unwrap();
+            relay.pump().unwrap();
+            if reader_wake.queued() != 0 {
+                reader_wake.deliver_queued();
+                reader.pump_foreground().unwrap();
+            }
+            if let ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(
+                events,
+            )) = reader.drain_foreground_subscription(subscription).unwrap()
+            {
+                settled_events.extend(events.into_iter().filter(|event| {
+                    matches!(
+                        event,
+                        ForegroundSubscriptionEvent::Delta { settled: true, .. }
+                            | ForegroundSubscriptionEvent::StructuredDelta { settled: true, .. }
+                    )
+                }));
+            }
+            if !settled_events.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            settled_events.len(),
+            1,
+            "authority readiness must settle the retained receiver once"
+        );
+        for _ in 0..32 {
+            block_on(core.tick()).unwrap();
+            relay.pump().unwrap();
+            if reader_wake.queued() != 0 {
+                reader_wake.deliver_queued();
+                reader.pump_foreground().unwrap();
+            }
+            if let ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(
+                events,
+            )) = reader.drain_foreground_subscription(subscription).unwrap()
+            {
+                settled_events.extend(events.into_iter().filter(|event| {
+                    matches!(
+                        event,
+                        ForegroundSubscriptionEvent::Delta { settled: true, .. }
+                            | ForegroundSubscriptionEvent::StructuredDelta { settled: true, .. }
+                    )
+                }));
+            }
+        }
+        assert_eq!(
+            settled_events.len(),
+            1,
+            "extra authority and owner turns must not duplicate recovery"
+        );
+        assert_eq!(
+            relay
+                .run(|worker| {
+                    Ok(worker
+                        .persistent
+                        .maintained_subscription_rehydrate_attempts_for_test())
+                })
+                .unwrap(),
+            baseline_rehydrate_attempts + 1,
+            "authority recovery rehydrates the retained receiver exactly once"
+        );
+        reader.close().unwrap();
     }
 
     #[test]
