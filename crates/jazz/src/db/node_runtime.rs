@@ -3852,6 +3852,8 @@ where
         if let Some(changed_physical_tables) = changed_physical_tables.as_ref()
             && !subscription_needs_targeted_refresh(&state, changed_physical_tables)
         {
+            // Targeted refresh skips evaluation, not subscription liveness.
+            retained.push(Rc::downgrade(&state));
             continue;
         }
         #[cfg(test)]
