@@ -3624,17 +3624,30 @@ fn missing_nullable_json_claim(
 }
 
 fn nullable_json_null_literal_field(
+    operand: &NormalizedValueRef,
     left: &LoweredValueRef,
     right: &LoweredValueRef,
-    source: &ResolvedSource,
+    source_id: &SourceId,
+    table: &crate::schema::TableSchema,
 ) -> Option<String> {
+    let NormalizedValueRef::SourceField {
+        source: operand_source,
+        field: column_name,
+    } = operand
+    else {
+        return None;
+    };
+    if operand_source != source_id {
+        return None;
+    }
     let (LoweredValueRef::Field(field), LoweredValueRef::Literal(value)) = (left, right) else {
         return None;
     };
-    if !source.table_schema.columns.iter().any(|column| {
-        column.is_nullable_json()
-            && (field == &column.name || field == &user_column_field(&column.name))
-    }) {
+    if !table
+        .columns
+        .iter()
+        .any(|column| column.is_nullable_json() && column_name == &column.name)
+    {
         return None;
     }
     let mut value = value;
@@ -3655,10 +3668,29 @@ fn lower_two_valued_ne(
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     let lowered_left = lower_value_ref(left, source_id, source, request)?;
     let lowered_right = lower_value_ref(right, source_id, source, request)?;
-    if let Some(field) = nullable_json_null_literal_field(&lowered_left, &lowered_right, source)
-        .or_else(|| nullable_json_null_literal_field(&lowered_right, &lowered_left, source))
-    {
-        return Ok(GroovePredicateExpr::IsNotNull { field });
+    if let Some(field) = nullable_json_null_literal_field(
+        left,
+        &lowered_left,
+        &lowered_right,
+        source_id,
+        &source.table_schema,
+    )
+    .or_else(|| {
+        nullable_json_null_literal_field(
+            right,
+            &lowered_right,
+            &lowered_left,
+            source_id,
+            &source.table_schema,
+        )
+    }) {
+        if !missing_nullable_json_claim(left, &lowered_left, request)?
+            && !missing_nullable_json_claim(right, &lowered_right, request)?
+        {
+            return Ok(GroovePredicateExpr::IsNotNull { field });
+        }
+        // Invalid claim operands retain the existing two-valued Not(In)
+        // behavior below; they are not an authored JSON root-null selector.
     }
     // Groove comparisons deliberately use SQL-null semantics. Jazz comparison
     // predicates are two-valued, so unequal means either exactly one operand is
@@ -3700,16 +3732,28 @@ fn lower_compare(
     let right_operand = right;
     let left = lower_value_ref(left, source_id, source, request)?;
     let right = lower_value_ref(right, source_id, source, request)?;
-    if let Some(field) = nullable_json_null_literal_field(&left, &right, source)
-        .or_else(|| nullable_json_null_literal_field(&right, &left, source))
-    {
+    if let Some(field) = nullable_json_null_literal_field(
+        left_operand,
+        &left,
+        &right,
+        source_id,
+        &source.table_schema,
+    )
+    .or_else(|| {
+        nullable_json_null_literal_field(
+            right_operand,
+            &right,
+            &left,
+            source_id,
+            &source.table_schema,
+        )
+    }) {
+        if missing_nullable_json_claim(left_operand, &left, request)?
+            || missing_nullable_json_claim(right_operand, &right, request)?
+        {
+            return Ok(constant_predicate(false));
+        }
         match op {
-            ComparisonOp::Eq
-                if missing_nullable_json_claim(left_operand, &left, request)?
-                    || missing_nullable_json_claim(right_operand, &right, request)? =>
-            {
-                return Ok(constant_predicate(false));
-            }
             ComparisonOp::Eq => return Ok(GroovePredicateExpr::IsNull { field }),
             ComparisonOp::Ne => return Ok(GroovePredicateExpr::IsNotNull { field }),
             _ => {}
@@ -4074,4 +4118,67 @@ pub(super) fn has_explicit_closure_path(shape: &NormalizedRowSetShape) -> bool {
         .closure_paths
         .iter()
         .any(|path| matches!(path, ClosurePath::ExplicitInclude { .. }))
+}
+
+#[cfg(test)]
+mod nullable_json_dispatch_tests {
+    use super::*;
+
+    /// Metadata dispatch must never infer a logical column from a lowered
+    /// carrier name: another column/source can have exactly that spelling.
+    #[test]
+    fn nullable_json_null_dispatch_uses_exact_source_metadata() {
+        use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+        let schema = crate::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("documents")
+                        .column("payload", ColumnType::Text)
+                        .nullable_column("_app_payload", ColumnType::Json { schema: None }),
+                )
+                .build(),
+        )
+        .unwrap();
+        let source = SourceId {
+            table: "documents".into(),
+            path: SourcePath {
+                components: vec![SourceRole::Root],
+            },
+        };
+        let field = LoweredValueRef::Field("_app_payload".into());
+        let value = LoweredValueRef::Literal(LiteralValue::String("null".into()));
+        for (column, expected) in [
+            ("payload", None),
+            ("_app_payload", Some("_app_payload".to_owned())),
+        ] {
+            let operand = NormalizedValueRef::SourceField {
+                source: source.clone(),
+                field: column.into(),
+            };
+            assert_eq!(
+                nullable_json_null_literal_field(
+                    &operand,
+                    &field,
+                    &value,
+                    &source,
+                    &schema.tables[0]
+                ),
+                expected
+            );
+            let other_source = SourceId {
+                table: "other".into(),
+                path: source.path.clone(),
+            };
+            assert_eq!(
+                nullable_json_null_literal_field(
+                    &operand,
+                    &field,
+                    &value,
+                    &other_source,
+                    &schema.tables[0]
+                ),
+                None
+            );
+        }
+    }
 }
