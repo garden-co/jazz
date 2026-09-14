@@ -4430,4 +4430,20 @@ fn queued_resident_insert_refreshes_only_matching_subscription_inputs() {
         notes.try_next_event().is_none(),
         "unrelated subscription must not receive a local event",
     );
+    let notes_write = db
+        .enqueue_insert(
+            "notes".to_owned(),
+            [("title".into(), Value::String("later matching write".into()))].into(),
+            Default::default(),
+        )
+        .unwrap();
+    db.drive_queued_mutation_once();
+    let event = notes
+        .try_next_event()
+        .expect("subscription must survive an unrelated local refresh");
+    let SubscriptionEvent::Delta { added, .. } = event else {
+        panic!("expected a row delta");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), notes_write.row_uuid());
 }
