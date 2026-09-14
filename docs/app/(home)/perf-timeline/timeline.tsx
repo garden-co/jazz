@@ -240,7 +240,8 @@ function Chart({
                   {calendarDay(p.date)}
                 </text>
                 <text x={x(i)} y={height - bottom + 46} textAnchor="middle" className="axis-text">
-                  {p.release ??
+                  {p.backfill?.releaseTag ??
+                    p.release ??
                     (p.pr ? `PR #${p.pr}` : p.stage === "main" ? "main commit" : "commit")}
                 </text>
                 <text x={x(i)} y={height - bottom + 63} textAnchor="middle" className="axis-sha">
@@ -255,7 +256,7 @@ function Chart({
           {logarithmic ? "LOG SCALE" : "ZERO-BASED SCALE"}
         </text>
         <text x={width - right} y={height - 6} textAnchor="end" className="axis-caption">
-          MEASURED CHECKPOINTS · RUN DAY (UTC) →
+          MEASURED CHECKPOINTS · CHECKPOINT DAY (UTC) →
         </text>
       </svg>
     </div>
@@ -272,7 +273,7 @@ export function Dashboard() {
   const [days, setDays] = useState("all");
   const [stage, setStage] = useState("all");
   const [branch, setBranch] = useState("all");
-  const [logarithmic, setLogarithmic] = useState(false);
+  const [logarithmic, setLogarithmic] = useState(true);
   const [spread, setSpread] = useState(false);
   const [estimated, setEstimated] = useState(true);
 
@@ -328,7 +329,7 @@ export function Dashboard() {
     ...new Map(
       (benchmark?.points ?? []).map((p) => [
         p.series,
-        p.pr ? `PR #${p.pr} · ${p.branch}` : p.branch,
+        p.series === "main" ? "main" : p.pr ? `PR #${p.pr} · ${p.branch}` : p.branch,
       ]),
     ).entries(),
   ];
@@ -685,9 +686,9 @@ export function Dashboard() {
                         result.{" "}
                       </>
                     )}
-                    Each line follows one branch or PR, ordered by run time—not commit ancestry.
-                    Dates are run calendar days in UTC. Only releases, main and open PRs are shown.
-                    Min–max is sample range, not a confidence interval.
+                    Each line follows one branch or PR, ordered by checkpoint date. Dates are UTC.
+                    Historical backfills use release publication dates; receipts retain actual
+                    measurement dates. Min–max is sample range, not a confidence interval.
                   </p>
                 </section>
                 {current && (
@@ -700,7 +701,10 @@ export function Dashboard() {
                       <div>
                         <h3>{current.title.split("\n")[0]}</h3>
                         <p>
-                          {date(current.date)} · {current.branch}
+                          {current.backfill
+                            ? `Release date ${date(current.date)} · measured ${date(current.measuredAt)}`
+                            : date(current.date)}{" "}
+                          · {current.branch}
                         </p>
                         <div className="receipt-links">
                           <a
@@ -710,6 +714,15 @@ export function Dashboard() {
                           >
                             {current.sha.slice(0, 10)} ↗
                           </a>
+                          {current.backfill && (
+                            <a
+                              href={`${repo}/commit/${current.backfill.engineSha}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Released engine {current.backfill.engineSha.slice(0, 10)} ↗
+                            </a>
+                          )}
                           {current.pr && (
                             <a href={`${repo}/pull/${current.pr}`} target="_blank" rel="noreferrer">
                               PR #{current.pr} ({current.prStatus?.toLowerCase()}) ↗
@@ -761,6 +774,16 @@ export function Dashboard() {
                       </div>
                     )}
                     <div className="receipt-id">
+                      {current.backfill && (
+                        <span>
+                          Historical harness {current.sha.slice(0, 10)} ·{" "}
+                          {current.backfill.dateSource} ·{" "}
+                          <a href={current.backfill.workflowUrl} target="_blank" rel="noreferrer">
+                            Provenance artifact ↗
+                          </a>{" "}
+                          ·{" "}
+                        </span>
+                      )}
                       {current.includedInRelease && (
                         <span>
                           Included in {current.includedInRelease}
@@ -809,7 +832,10 @@ export function Dashboard() {
                             <td>
                               <StageLabel stage={p.stage} />
                             </td>
-                            <td>{date(p.date)}</td>
+                            <td>
+                              {date(p.date)}
+                              {p.backfill && <small> · measured {date(p.measuredAt)}</small>}
+                            </td>
                             <td className="numeric">{p.median.toFixed(9)} s</td>
                             <td className="numeric">
                               {formatTime(p.min)} – {formatTime(p.max)}
@@ -856,9 +882,10 @@ export function Dashboard() {
                 </p>
                 <p>
                   “Released” includes main commits proven to be ancestors of a semantic-version tag,
-                  plus exact tag matches. Only exact matches carry a version label on the x-axis;
-                  older points retain their measured commit. No timing is inferred for an unmeasured
-                  release.{" "}
+                  plus exact tag matches and audited historical backfills of released engines.
+                  Release points carry the release version; historical backfills retain their actual
+                  harness commit and measurement date in the receipt. Other points retain their
+                  measured commit. No timing is inferred for an unmeasured release.{" "}
                   {data.releases.length
                     ? data.releases.map((r) => (
                         <span key={r.name}>
