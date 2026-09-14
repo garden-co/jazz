@@ -2,8 +2,8 @@
 
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    CmpOp, PolicyExpr, PolicyValue, RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind,
-    RelKeyRef, RelPredicateCmpOp, RelPredicateExpr, RelProjectColumn, RelProjectExpr,
+    CmpOp, Operation, PolicyExpr, PolicyValue, RelColumnRef, RelExpr, RelJoinCondition,
+    RelJoinKind, RelKeyRef, RelPredicateCmpOp, RelPredicateExpr, RelProjectColumn, RelProjectExpr,
     RelRecursionBound, RelValueRef, RowIdRef,
 };
 use jazz::tools::{SchemaBuilder, TablePolicies};
@@ -140,4 +140,23 @@ pub fn reachable_access(
             },
         },
     }
+}
+
+/// A user may read a row they own directly, or one inherited from the org that
+/// owns it. `org_column` must be a foreign key to `org_table`, whose own SELECT
+/// policy decides membership.
+pub fn owner_or_org_access(owner_column: &str, org_column: &str) -> PolicyExpr {
+    PolicyExpr::or(vec![
+        session_user_id_column(owner_column),
+        PolicyExpr::Inherits {
+            operation: Operation::Select,
+            via_column: org_column.to_owned(),
+            max_depth: None,
+        },
+    ])
+}
+
+/// SELECT-only policies for benchmark fixtures.
+pub fn select_only(policy: PolicyExpr) -> TablePolicies {
+    TablePolicies::new().with_select(policy)
 }

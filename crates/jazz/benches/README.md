@@ -22,6 +22,7 @@ the facade-level Criterion and realistic lanes, including:
 - `cold_subscription`
 - `relation_include_delivery`
 - `selective_global_hydration`
+- `saas_policy_reads` (see [SAAS_POLICY_READS.md](SAAS_POLICY_READS.md))
 
 All active Criterion benches now exercise the workspace `jazz` engine facade
 directly instead of going through the legacy

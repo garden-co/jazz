@@ -127,6 +127,14 @@ name = "owner_filter_diagnostic"
 harness = false
 required-features = ["testing"]
 
+# Realistic SaaS read shape: policy-scoped pages, a non-trivial owner share,
+# and an identity that is not SYSTEM. Supersedes selective_global_hydration for
+# hosted multi-tenant workloads; the two are complementary controls.
+[[bench]]
+name = "saas_policy_reads"
+harness = false
+required-features = ["testing"]
+
 [[bench]]
 name = "observer_write_path"
 harness = false

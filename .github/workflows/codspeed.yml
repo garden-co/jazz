@@ -189,6 +189,42 @@ jobs:
           mode: walltime
           run: cargo codspeed run -m walltime --package jazz --bench selective_global_hydration
 
+  saas-policy-reads-walltime:
+    # Realistic SaaS read shape: row-level security, a non-trivial owner share,
+    # and a requesting identity that is not SYSTEM. Complements the
+    # maintained-selective-hydration job above, which is the policy-free
+    # control. Keep both: the policy-free arm selects the declared index while a
+    # policy-scoped arm does not, and only the pair makes that difference
+    # visible in a trend.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
+    name: SaaS policy reads wall time
+    runs-on: codspeed-macro
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: true
+          shared-key: codspeed-saas-policy-reads-${{ runner.arch }}-v1
+          workspaces: . -> target
+
+      - name: Install cargo-codspeed
+        run: cargo install cargo-codspeed --version 5.0.1 --locked
+
+      - name: Build SaaS policy-read benchmark
+        run: cargo codspeed build -m walltime --package jazz --features testing --bench saas_policy_reads
+
+      - name: Run SaaS policy-read benchmark
+        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+        with:
+          mode: walltime
+          run: cargo codspeed run -m walltime --package jazz --bench saas_policy_reads
+
   native-workloads-walltime:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
     name: ${{ matrix.workload }} native wall time
