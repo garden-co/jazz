@@ -144,6 +144,8 @@ jobs:
         with:
           name: jazz-rn-relay-android
           path: crates/jazz-rn
+      - name: Stage downloaded android payload package
+        run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" node dev/artifacts/rn-packages.mjs stage android
       - name: Generate the Expo Android host with the staged relay package
         run: pnpm --filter todo-client-localfirst-expo verify:expo:android
       - name: Link the relay through the application AAR
@@ -174,6 +176,8 @@ jobs:
         with:
           name: jazz-rn-relay-ios
           path: crates/jazz-rn
+      - name: Stage downloaded ios payload package
+        run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" node dev/artifacts/rn-packages.mjs stage ios
       - name: Generate the Expo iOS host with the staged relay package
         run: pnpm --filter todo-client-localfirst-expo verify:expo:ios
       - name: Install the staged native pod

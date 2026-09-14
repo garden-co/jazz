@@ -129,3 +129,53 @@ test("payload resolution follows pnpm links, rejects version mismatch, and previ
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("preview rewrites both ordinary dependencies to the exact source URLs", () => {
+  const root = mkdtempSync(join(tmpdir(), "rn-preview-test-"));
+  try {
+    const version = "2.0.0-alpha.55";
+    const commit = "a".repeat(40);
+    json(join(root, "package.json"), {
+      name: "jazz-rn",
+      version,
+      dependencies: { "jazz-rn-ios": "workspace:*", "jazz-rn-android": "workspace:*" },
+    });
+    for (const platform of ["android", "ios"])
+      json(join(root, "npm", platform, "package.json"), { name: `jazz-rn-${platform}`, version });
+    execFileSync("node", [
+      join(repository, "dev/artifacts/rn-preview-dependencies.mjs"),
+      commit,
+      root,
+    ]);
+    const metadata = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+    assert.deepEqual(
+      metadata.dependencies,
+      Object.fromEntries(
+        ["ios", "android"].map((platform) => [
+          `jazz-rn-${platform}`,
+          `https://pkg.pr.new/garden-co/jazz/jazz-rn-${platform}@${commit}`,
+        ]),
+      ),
+    );
+    assert.equal(metadata.optionalDependencies, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("download-only native link jobs stage their payload before generating consumers", async () => {
+  const { parse } = await import("yaml");
+  const workflow = parse(
+    readFileSync(join(repository, ".github/workflows/rn-native-artifacts.yml"), "utf8"),
+  );
+  for (const platform of ["android", "ios"]) {
+    const steps = workflow.jobs[`${platform}-link`].steps;
+    const download = steps.findIndex((step) => step.with?.name === `jazz-rn-relay-${platform}`);
+    const stage = steps.findIndex((step) =>
+      step.run?.includes(`rn-packages.mjs stage ${platform}`),
+    );
+    const consumer = steps.findIndex((step) => step.run?.includes("verify:expo:"));
+    assert.ok(download >= 0 && stage > download && consumer > stage);
+    assert.match(steps[stage].run, /JAZZ_NATIVE_RELAY_SOURCE_REVISION=/);
+  }
+});

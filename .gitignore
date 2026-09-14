@@ -82,3 +82,5 @@ packages/jazz-tools/.vitest-browser-bench/
 /crates/jazz-rn/npm/*/ios/
 /crates/jazz-rn/npm/*/native/
 /crates/jazz-rn/npm/*/JazzNativeRelay.xcframework/
+
+/crates/jazz-rn/ios-payload/
