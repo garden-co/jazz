@@ -19,14 +19,35 @@ describe("release config", () => {
       fs.readFileSync(path.join(repoRoot, "packages", "create-jazz", "package.json"), "utf8"),
     ) as { version?: string; files?: string[] };
 
-    const jazzFixedGroup = ["jazz-tools", "jazz-wasm", "jazz-napi", "jazz-rn", "create-jazz"];
+    const originalJazzPackages = ["jazz-tools", "jazz-wasm", "jazz-napi", "jazz-rn", "create-jazz"];
+    const jazzFixedGroup = [
+      "jazz-tools",
+      "jazz-wasm",
+      "jazz-napi",
+      "jazz-rn",
+      "jazz-rn-ios",
+      "jazz-rn-android",
+      "create-jazz",
+    ];
 
     expect(config.fixed).toContainEqual(jazzFixedGroup);
     expect(createJazzPackage.version).toMatch(/^2\.0\.0-alpha\./);
     expect(createJazzPackage.files).toContain("jazz-source-snapshot.json");
 
-    for (const packageName of jazzFixedGroup) {
+    for (const packageName of originalJazzPackages) {
       expect(preState.initialVersions?.[packageName]).toBe("2.0.0-alpha.6");
+    }
+    // The payload packages joined later; they share the release version, not
+    // the original packages' historical prerelease baseline.
+    for (const platform of ["ios", "android"]) {
+      const payload = JSON.parse(
+        fs.readFileSync(
+          path.join(repoRoot, "crates", "jazz-rn", "npm", platform, "package.json"),
+          "utf8",
+        ),
+      ) as { name: string; version: string };
+      expect(payload.name).toBe(`jazz-rn-${platform}`);
+      expect(payload.version).toBe(createJazzPackage.version);
     }
   });
 
