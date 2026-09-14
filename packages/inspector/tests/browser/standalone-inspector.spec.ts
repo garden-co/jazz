@@ -78,7 +78,9 @@ function rowByTitle(page: Page, title: string) {
 }
 
 test.describe("connection page", () => {
-  test("prefills connection form from hash fragment", async ({ page }) => {
+  test("prefills connection fields from hash fragment without retaining the admin secret", async ({
+    page,
+  }) => {
     const fragment = new URLSearchParams({
       serverUrl: SERVER_URL,
       appId: APP_ID,
@@ -88,7 +90,7 @@ test.describe("connection page", () => {
 
     await expect(page.getByLabel("Server URL")).toHaveValue(SERVER_URL);
     await expect(page.getByLabel("App ID")).toHaveValue(APP_ID);
-    await expect(page.getByLabel("Admin secret")).toHaveValue(ADMIN_SECRET);
+    await expect(page.getByLabel("Admin secret")).toHaveValue("");
   });
 
   test("connects to server, shows schema selection and loads data explorer", async ({ page }) => {
@@ -96,6 +98,17 @@ test.describe("connection page", () => {
     await connectFromForm(page);
 
     await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible();
+  });
+
+  test("prefills a stored connection without retaining the admin secret", async ({ page }) => {
+    await page.goto("/");
+    await storeStandaloneConfig(page);
+    await page.reload();
+
+    await expect(page.getByRole("heading", { name: "Add connection" })).toBeVisible();
+    await expect(page.getByLabel("Server URL")).toHaveValue(SERVER_URL);
+    await expect(page.getByLabel("App ID")).toHaveValue(APP_ID);
+    await expect(page.getByLabel("Admin secret")).toHaveValue("");
   });
 
   test("requires an ephemeral secret after loading a stored connection", async ({ page }) => {
@@ -115,10 +128,7 @@ test.describe("connection page", () => {
     await storeStandaloneConfig(page);
     await page.reload();
 
-    await expect(page.getByRole("button", { name: "Connections" })).toBeVisible();
-
-    await page.getByRole("button", { name: "Connections" }).click();
-
+    await page.getByRole("button", { name: "Cancel" }).click();
     await expect(page.getByRole("heading", { name: "Connections" })).toBeVisible();
     await expect(page.getByText("Browser test")).toBeVisible();
 
