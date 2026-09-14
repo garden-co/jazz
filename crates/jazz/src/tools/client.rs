@@ -2790,8 +2790,16 @@ fn public_to_core_value_for_column(
     value: Value,
     column: &crate::tools::public_schema::ColumnDescriptor,
 ) -> Result<CoreValue> {
-    validate_json_value(&value, &column.column_type, column.name_str())
-        .map_err(JazzError::Write)?;
+    validate_json_value(
+        if crate::tools::public_schema::is_nullable_json_null(&value, column) {
+            &Value::Null
+        } else {
+            &value
+        },
+        &column.column_type,
+        column.name_str(),
+    )
+    .map_err(JazzError::Write)?;
     let value = public_to_core_value_for_column_type(value, &column.column_type)?;
     if column.nullable && !matches!(value, CoreValue::Nullable(_)) {
         Ok(CoreValue::Nullable(Some(Box::new(value))))

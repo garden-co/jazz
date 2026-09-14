@@ -840,6 +840,25 @@ impl ColumnSchema {
         }
     }
 
+    pub(crate) fn is_nullable_json(&self) -> bool {
+        self.large_value_kind == LargeValueSemanticKind::Json
+            && matches!(self.column_type, GrooveColumnType::Nullable(_))
+    }
+
+    /// Lower a newly authored logical cell without changing the published JSON
+    /// descriptor. The enclosing version slot still records authored presence.
+    pub(crate) fn storage_value(&self, value: Value) -> Value {
+        if self.is_nullable_json() {
+            match value {
+                Value::Nullable(None) => Value::String("null".to_owned()),
+                Value::Nullable(Some(value)) => *value,
+                value => value,
+            }
+        } else {
+            value
+        }
+    }
+
     /// Attach a literal insert default to this column.
     pub fn with_default(mut self, value: Value) -> Self {
         self.default = Some(value);

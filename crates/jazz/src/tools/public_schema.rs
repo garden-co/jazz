@@ -17,6 +17,13 @@ pub use crate::tools::public_api::types::{
 };
 pub use crate::tools::transaction::{OpenTransactionId, TransactionId};
 
+/// Nullable JSON has one logical null; JSON source is otherwise left intact.
+pub(crate) fn is_nullable_json_null(value: &Value, column: &ColumnDescriptor) -> bool {
+    column.nullable
+        && matches!(column.column_type, ColumnType::Json { .. })
+        && matches!(value, Value::Text(source) if source.trim_matches([' ', '\t', '\r', '\n']) == "null")
+}
+
 /// Validate JSON-bearing public values without changing their source text.
 ///
 /// This is shared by schema-default admission and every facade write path so a

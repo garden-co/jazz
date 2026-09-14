@@ -1556,12 +1556,12 @@ impl VersionRecord {
             })),
         ]
         .into_iter()
-        .chain(table.columns.iter().enumerate().map(|(idx, _column)| {
+        .chain(table.columns.iter().enumerate().map(|(idx, column)| {
             Value::Nullable(
                 cells_by_position
                     .get(idx)
                     .and_then(Clone::clone)
-                    .map(Box::new),
+                    .map(|value| Box::new(column.storage_value(value))),
             )
         }))
         .collect::<Vec<_>>();

@@ -123,3 +123,64 @@ fn json_version_records_freeze_inline_and_indirect_semantics() {
         "schema admission rejects the old inline JSON descriptor"
     );
 }
+
+/// Internal wire receipt: public reads cannot prove unchanged descriptors or
+/// distinguish an omitted update slot from an explicitly authored null.
+#[test]
+fn nullable_json_authored_null_uses_existing_json_scalar_descriptor() {
+    let schema = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .nullable_column("payload", ColumnType::Json { schema: None }),
+            )
+            .build(),
+    )
+    .unwrap();
+    let table = &schema.tables[0];
+    let author = AuthorSubject::for_test_bytes([0x33; 16]);
+    let make = |value| {
+        VersionRecord::encode(
+            table,
+            SchemaVersionId::from_bytes([0x22; 16]),
+            RowUuid::from_bytes([0x44; 16]),
+            vec![],
+            author,
+            7,
+            author,
+            8,
+            &[value],
+            None,
+        )
+        .unwrap()
+    };
+    let omitted = make(None);
+    let null = make(Some(Value::Nullable(None)));
+    let literal = make(Some(Value::String("null".into())));
+    assert_eq!(null.record().raw(), literal.record().raw());
+    assert_ne!(null.record().raw(), omitted.record().raw());
+    assert_eq!(null.cell_at(0), Some(Value::String("null".into())));
+    let field = table
+        .wire_record_descriptor()
+        .fields()
+        .last()
+        .unwrap()
+        .value_type
+        .clone();
+    assert_eq!(
+        field,
+        jazz::groove::large_values::physical_storage_value_type(LargeValueKind::Json).nullable()
+    );
+    for record in [
+        omitted,
+        null,
+        literal,
+        make(Some(Value::Nullable(Some(Box::new(Value::String(
+            "{\"nested\":null}".into(),
+        )))))),
+    ] {
+        let bytes = postcard::to_allocvec(&record).unwrap();
+        let decoded: VersionRecord = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(postcard::to_allocvec(&decoded).unwrap(), bytes);
+    }
+}

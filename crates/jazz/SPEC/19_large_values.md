@@ -69,6 +69,23 @@ and integrity validation have one implementation in Groove. Jazz MUST treat the
 descriptor and all nodes as opaque values except for the root locator/hash fields
 required to bind authorization and lifecycle.
 
+### Nullable JSON compatibility
+
+Nullable JSON columns have one logical null: column null and a JSON document
+whose root is `null` are equivalent for reads, predicates, and policies. This
+rule is specific to nullable JSON; non-nullable JSON and generic Groove null
+semantics are unchanged. Nested nulls, arrays, and the JSON string `"null"`
+remain ordinary non-null JSON values. Nullable root null bypasses an object-only
+JSON schema just as an explicit column null does.
+
+The published `StoredScalar(Json)` physical descriptor remains unchanged.
+New explicit null cells use its existing literal `null` scalar encoding. The
+outer nullable version slot continues to mean authored presence: omitting a
+column from an update does not clear it. Logical projection interprets existing
+root-null sources as null without rewriting their stored source or immutable
+transaction/history bytes. Existing inline and indirect JSON values remain
+readable; no epoch reset, descriptor migration, or fresh database is required.
+
 ### Frozen V1 JSON and chunking boundary
 
 Jazz's JSON columns inherit Groove V1's literal-source contract. A JSON scalar

@@ -634,7 +634,11 @@ fn convert_column_default(
     value: &Value,
 ) -> Result<GrooveValue, SchemaConversionError> {
     crate::tools::public_schema::validate_json_value(
-        value,
+        if crate::tools::public_schema::is_nullable_json_null(value, column) {
+            &Value::Null
+        } else {
+            value
+        },
         &column.column_type,
         column.name.as_str(),
     )
