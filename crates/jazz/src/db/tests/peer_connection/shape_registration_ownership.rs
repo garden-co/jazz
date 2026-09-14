@@ -65,6 +65,13 @@ fn session_peer_cannot_choose_relay_authority_binding_source() {
     let mut opts = RegisterShapeOptions::default();
     opts.binding_source = crate::protocol::BindingSource::RelayAuthoritySession;
 
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
     client_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -509,6 +516,13 @@ fn shape_registration_cardinality_is_checked_before_peer_or_global_retention() {
     let subscriber =
         server.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x80; 16]));
 
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
     for shape_index in 0..EXISTING_SINGLE_PEER_ACTIVE_QUERY_COUNT {
         let shape = distinct_shape(&schema, shape_index);
         client_transport
@@ -581,6 +595,13 @@ fn shape_registration_cardinality_is_checked_before_peer_or_global_retention() {
         extra_server_transport,
         AuthorSubject::for_test_bytes([0x99; 16]),
     );
+    // Finish authenticated startup before exercising the control under test.
+    extra_peer.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        extra_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(extra_transport.try_recv().is_none());
     extra_transport
         .send(register_shape_message(&global_extra))
         .unwrap();

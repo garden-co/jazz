@@ -8,6 +8,27 @@ use crate::db::peer_connection::{
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
+fn finish_catalogue_bootstrap_before_control_backpressure(
+    subscriber: &Rc<LocalMutex<PeerConnection<RocksDbStorage>>>,
+    outbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
+) {
+    subscriber.borrow_mut().transport = Box::new(BackpressureOnceTransport {
+        outbound: Rc::clone(outbound),
+        failed: true,
+    });
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        outbound.borrow_mut().pop_front(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(outbound.borrow().is_empty());
+    // Rearm the first-send fault specifically for the original control test.
+    subscriber.borrow_mut().transport = Box::new(BackpressureOnceTransport {
+        outbound: Rc::clone(outbound),
+        failed: false,
+    });
+}
+
 // Internal contention is deliberately planted: the public boundary is async
 // detach completion and continued local writes, but callers cannot hold these
 // owner guards deterministically through the public API.
@@ -691,6 +712,7 @@ fn ordinary_wire_chunk_response_retries_after_bounded_transport_backpressure() {
         }),
         identity,
     );
+    finish_catalogue_bootstrap_before_control_backpressure(&subscriber, &outbound);
     let batch = ChunkResponseBatch {
         responses: vec![ChunkResponseEntry {
             request_id: 3,
@@ -821,6 +843,7 @@ fn subscriber_control_reply_retries_after_bounded_transport_backpressure() {
         }),
         identity,
     );
+    finish_catalogue_bootstrap_before_control_backpressure(&subscriber, &outbound);
     let rejection = SyncMessage::SubscribeRejected {
         subscription: SubscriptionKey {
             shape_id: ShapeId(uuid::Uuid::from_bytes([4; 16])),
@@ -1485,6 +1508,7 @@ fn authorization_scope_replies_retry_fifo_after_backpressure() {
         }),
         identity,
     );
+    finish_catalogue_bootstrap_before_control_backpressure(&subscriber, &outbound);
     let first = SyncMessage::AuthorizationScopeUnavailable {
         request_id: PermissionAdviceRequestId([7; 16]),
     };
@@ -2009,6 +2033,13 @@ fn ordinary_session_link_rejects_forged_delegated_permission_advice_intent() {
         1,
     );
     let subscriber = server.accept_subscriber(server_transport, ordinary);
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
     client_transport
         .send(SyncMessage::AuthorizationScopeIntent {
             request_id: PermissionAdviceRequestId([0xa1; 16]),
