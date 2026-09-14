@@ -548,7 +548,7 @@ jobs:
           JAZZ_RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
         run: |
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(node dev/artifacts/release-artifact-source-revision.mjs)" \
-            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android ios
+            node dev/artifacts/rn-packages.mjs verify
 
       - name: Resolve lock-stepped npm package versions
         run: |
@@ -589,7 +589,9 @@ jobs:
             packages/jazz-tools/package.json \
             crates/jazz-wasm/package.json \
             crates/jazz-napi/package.json \
-            crates/jazz-rn/package.json; do
+            crates/jazz-rn/package.json \
+            crates/jazz-rn/npm/android/package.json \
+            crates/jazz-rn/npm/ios/package.json; do
             SOURCE_VERSION=$(git show "${GITHUB_SHA}:${package_json}" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>console.log(JSON.parse(s).version))')
             if [ "${SOURCE_VERSION}" != "${PUBLISHED_VERSION}" ]; then
               echo "${package_json} is ${SOURCE_VERSION} at ${GITHUB_SHA}, but this workflow would publish ${PUBLISHED_VERSION}."
@@ -641,16 +643,9 @@ jobs:
       - name: Verify packed jazz-rn relay payload
         env: *release-artifact-source-revision-env
         run: |
-          TEMPORARY_DIRECTORY=$(mktemp -d)
-          pnpm --filter jazz-rn pack --pack-destination "${TEMPORARY_DIRECTORY}"
-          TARBALL=$(ls "${TEMPORARY_DIRECTORY}"/jazz-rn-*.tgz | head -n 1)
-          node dev/artifacts/verify-rn-pack-size.mjs "${TARBALL}"
-          tar -xzf "${TARBALL}" -C "${TEMPORARY_DIRECTORY}"
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(node dev/artifacts/release-artifact-source-revision.mjs)" \
-            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
-            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs \
-              --package-root "${TEMPORARY_DIRECTORY}/package" android ios
-          echo "JAZZ_RN_VERIFIED_TARBALL=${TARBALL}" >> "$GITHUB_ENV"
+          export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(node dev/artifacts/release-artifact-source-revision.mjs)"
+          export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}"
+          node dev/artifacts/rn-packages.mjs pack "$(mktemp -d)"
 
       - name: Verify packed jazz-tools manifest
         run: |
@@ -728,13 +723,7 @@ jobs:
 
       - name: Publish jazz-rn (alpha tag)
         if: env.RELEASE_MODE == 'publish'
-        run: |
-          RN_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-rn/package.json","utf8")).version')
-          if npm view "jazz-rn@${RN_VERSION}" version >/dev/null 2>&1; then
-            echo "jazz-rn@${RN_VERSION} already exists on npm; skipping publish."
-          else
-            npm publish "${JAZZ_RN_VERIFIED_TARBALL}" --tag alpha --access public
-          fi
+        run: node dev/artifacts/publish-rn-packages.mjs
 
       - name: Publish jazz-tools (alpha tag)
         if: env.RELEASE_MODE == 'publish'

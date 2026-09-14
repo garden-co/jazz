@@ -38,9 +38,11 @@ Pod::Spec.new do |s|
   # compile this source with the unavailable-artifact fallback even though the
   # package contains a valid XCFramework.
   relay_header_search_path = "$(PODS_TARGET_SRCROOT)/native/include"
-  relay_framework = File.join(__dir__, "JazzNativeRelay.xcframework")
+  payload_script = File.join(__dir__, "scripts/resolve-payload.cjs")
+  payload_root = Pod::Executable.execute_command("node", [payload_script, "ios"]).strip
+  relay_framework = File.join(payload_root, "JazzNativeRelay.xcframework")
   if File.exist?(relay_framework) then
-    s.vendored_frameworks = "JazzNativeRelay.xcframework"
+    s.vendored_frameworks = relay_framework
     s.pod_target_xcconfig = { "HEADER_SEARCH_PATHS" => relay_header_search_path }
   end
   # Use install_modules_dependencies helper to install the dependencies if React Native version >=0.71.0.

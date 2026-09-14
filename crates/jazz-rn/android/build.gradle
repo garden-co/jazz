@@ -47,6 +47,13 @@ def reactNativeDir = new File([
   "require.resolve('react-native/package.json')",
 ].execute(null, rootProject.projectDir).text.trim()).getParentFile().getAbsoluteFile()
 
+def payloadProcess = ["node", new File(projectDir, "../scripts/resolve-payload.cjs").absolutePath, "android"].execute(null, projectDir)
+def relayPayloadDir = payloadProcess.inputStream.text.trim()
+def payloadError = payloadProcess.errorStream.text
+if (payloadProcess.waitFor() != 0 || relayPayloadDir.isEmpty()) {
+  throw new GradleException("Cannot resolve jazz-rn Android payload: " + payloadError)
+}
+
 def supportsNamespace() {
   def parsed = com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION.tokenize('.')
   def major = parsed[0].toInteger()
@@ -108,15 +115,19 @@ android {
 // the x86_64 emulator ABI used by the installed-app receipt. Keep this list
 // aligned with the sealed artifact manifest before enabling the CMake host.
 def relayNativeArtifactsPresent = ["arm64-v8a", "armeabi-v7a", "x86_64"].every { abi ->
-  file("src/main/jniLibs/${abi}/libjazz_native_relay.a").isFile()
+  file("${relayPayloadDir}/android/src/main/jniLibs/${abi}/libjazz_native_relay.a").isFile()
 } && file("../native/include/jazz_native_relay.h").isFile()
 
+if (!relayNativeArtifactsPresent) {
+  throw new GradleException("jazz-rn Android payload is incomplete")
+}
 if (relayNativeArtifactsPresent) {
   android {
     defaultConfig {
       externalNativeBuild {
         cmake {
           arguments "-DANDROID_STL=c++_shared",
+            "-DJAZZ_RN_ANDROID_PAYLOAD=${relayPayloadDir}",
             "-DREACT_NATIVE_DIR=${reactNativeDir}"
         }
       }

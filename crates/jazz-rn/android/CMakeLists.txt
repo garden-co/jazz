@@ -18,7 +18,7 @@ target_include_directories(jazzrelay PRIVATE
 find_library(log-lib log)
 add_library(jazz_native_relay STATIC IMPORTED)
 set_target_properties(jazz_native_relay PROPERTIES IMPORTED_LOCATION
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/main/jniLibs/${ANDROID_ABI}/libjazz_native_relay.a")
+  "${JAZZ_RN_ANDROID_PAYLOAD}/android/src/main/jniLibs/${ANDROID_ABI}/libjazz_native_relay.a")
 target_link_libraries(jazzrelay
   jazz_native_relay
   ${log-lib}

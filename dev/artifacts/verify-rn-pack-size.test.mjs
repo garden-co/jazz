@@ -16,11 +16,11 @@ test("assembly and release gate packs and publication consumes the verified tarb
   for (const file of ["build-jazz-packages.yml", "publish-jazz-tools-alpha.yml"])
     assert.match(
       readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8"),
-      /node dev\/artifacts\/verify-rn-pack-size.mjs "\$\{TARBALL\}"/,
+      /node dev\/artifacts\/rn-packages.mjs pack/,
     );
   const release = readFileSync(
     new URL("../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
     "utf8",
   );
-  assert.match(release, /npm publish "\$\{JAZZ_RN_VERIFIED_TARBALL\}"/);
+  assert.match(release, /node dev\/artifacts\/publish-rn-packages.mjs/);
 });

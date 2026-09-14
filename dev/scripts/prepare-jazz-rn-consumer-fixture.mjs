@@ -88,11 +88,22 @@ export function prepareJazzRnConsumerFixture({
   fixtureDestination,
   tarball,
   root = workspaceRoot,
+  payloadTarballs,
 }) {
   fs.cpSync(fixtureSource, fixtureDestination, { recursive: true });
   const packageJsonPath = path.join(fixtureDestination, "package.json");
   const manifest = readJson(packageJsonPath);
-  writeJson(packageJsonPath, materializeJazzRnConsumerManifest(manifest, tarball, root));
+  const prepared = materializeJazzRnConsumerManifest(manifest, tarball, root);
+  if (payloadTarballs) {
+    prepared.pnpm = { ...prepared.pnpm, overrides: { ...prepared.pnpm?.overrides } };
+    for (const platform of ["android", "ios"]) {
+      const target = payloadTarballs[platform];
+      if (!target || !fs.statSync(target).isFile())
+        throw new Error(`Missing packed RN ${platform} payload`);
+      prepared.pnpm.overrides[`jazz-rn-${platform}`] = `file:${target}`;
+    }
+  }
+  writeJson(packageJsonPath, prepared);
 }
 
 function main(argv) {
@@ -106,6 +117,12 @@ function main(argv) {
     fixtureSource: path.resolve(fixtureSource),
     fixtureDestination: path.resolve(fixtureDestination),
     tarball: path.resolve(tarball),
+    payloadTarballs: Object.fromEntries(
+      ["android", "ios"].map((platform) => {
+        const name = path.basename(tarball).replace("jazz-rn-", `jazz-rn-${platform}-`);
+        return [platform, path.join(path.dirname(path.resolve(tarball)), name)];
+      }),
+    ),
   });
 }
 
