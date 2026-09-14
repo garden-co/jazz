@@ -11,6 +11,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
+import publishedAlpha54Corpus from "../../fixtures/published-alpha54-browser-jazz-corpus.json?raw";
 import currentCorpus from "../../fixtures/current-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
 import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
@@ -132,6 +133,49 @@ describe("browser Jazz storage compatibility corpus", () => {
     databaseNames.clear();
     receipt(`cleanup:done; pinned-phase=${pinnedCorpusPhase}`);
   });
+
+  it("opens, extends, and reopens the published alpha.54 browser corpus", async () => {
+    const digest = Array.from(
+      new Uint8Array(
+        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(publishedAlpha54Corpus)),
+      ),
+    )
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    expect(digest).toBe("d25af2eae84cd2255a1384930bab25d2efac1153ce8eaa4eb3f5812c6c52d507");
+    const publishedApp = s.defineApp({ notes: s.table({ body: s.string() }) });
+    const appId = "00000000-0000-4000-8000-000000000054";
+    const accounts = await createAccountManager({ appId, serverUrl: "http://127.0.0.1:1" });
+    const dbName = uniqueDbName("published-alpha54-compat");
+    const config: DbConfig = {
+      appId,
+      account: accounts.restoreLocalFirst(
+        "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      ),
+      driver: { type: "persistent", dbName },
+    };
+    let db = await openPersistentDb(config);
+    const physicalDbName = await trackPhysicalDatabase(dbName);
+    await db.shutdown();
+    openDbs.splice(openDbs.indexOf(db), 1);
+    await IndexedDbPageStore.destroy(physicalDbName);
+    await installRawRecords(physicalDbName, JSON.parse(publishedAlpha54Corpus));
+    expect(await rawRecords(physicalDbName)).toEqual(JSON.parse(publishedAlpha54Corpus));
+    db = await openPersistentDb(config);
+    expect(await db.all(publishedApp.notes, { tier: ReadTier.LocalFirst })).toMatchObject([
+      { body: "published alpha.54 current" },
+    ]);
+    await db
+      .insert(publishedApp.notes, { body: "current main browser writer" })
+      .wait({ tier: "local" });
+    await db.shutdown();
+    openDbs.splice(openDbs.indexOf(db), 1);
+    db = await openPersistentDb(config);
+    const bodies = (await db.all(publishedApp.notes, { tier: ReadTier.LocalFirst }))
+      .map((row) => row.body)
+      .sort();
+    expect(bodies).toEqual(["current main browser writer", "published alpha.54 current"]);
+  }, 30_000);
 
   it("produces the current catalogue/history/branch/large-value corpus through public WasmDb", async () => {
     const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");

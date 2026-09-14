@@ -50,6 +50,47 @@ update to this original fixture. The checked-in original archive SHA-256 is
 `10d139b12fd21530fd553ee148e975d4e2f55d11b43bf3bd90d00179f5703575`.
 
 The producer's `local-current-row.base64` is a binding-level semantic receipt,
-not a canonical whole-store logical snapshot. Browser release-produced snapshot
-coverage and a complete release logical inventory remain issue #2309 work;
-this native fixture alone does not close that issue.
+not a canonical whole-store logical snapshot. The companion browser receipt is described below. A complete release logical
+inventory remains issue #2309 work; these fixtures do not yet close that issue.
+
+## Published browser fixture
+
+`packages/jazz-tools/fixtures/published-alpha54-browser-jazz-corpus.json` is a
+raw physical snapshot from real Chromium 145.0.7632.6 IndexedDB, produced through
+the distributed alpha.54 `createAccountManager`, `createDb`, SharedWorker, and
+WASM. It preserves every entry of `pages`, `metadata`, and `storage-manifest`,
+including the actual account owner, replica identity, and foreground lease
+state. Arrays encode ArrayBuffer bytes for JSON transport; the browser corpus
+installer restores those structured-clone types. This is not fake IndexedDB or
+a source-rebuilt WASM receipt. The distributed WASM package omits its source manifest, so provenance preserves
+the manifest from preview workflow `34428566341`, artifact `10133780366`.
+Publish workflow `34434970354` explicitly selected that preview. The preview
+WASM and npm WASM compare byte-for-byte equal; both SHA-256 values are
+`a161d093cd2a1b1c65749997c2d5ce94fd10c813a1be5ab22982d3ff035248fa`.
+The preserved WASM manifest independently records the same source head and
+dirty-diff digest as NAPI, along with wasm-opt 117 and release profile.
+
+The public producer creates an authentic local-first account under the synthetic
+registry scope `http://127.0.0.1:1`, writes and updates one note, shuts down, and
+reopens it before exporting. There is no registry server or upstream repair.
+Current browser code installs the checksum-pinned snapshot, reads its original
+current row, appends another note, and reopens both rows in the canonical
+browser storage compatibility suite.
+
+After extracting and checking the published packages as above, install the full
+published tools dependencies in the isolated ignored directory, then run:
+
+```sh
+npm install --ignore-scripts --no-audit --no-fund --omit=optional --prefix target/published-alpha54 jazz-tools@2.0.0-alpha.54 jazz-wasm@2.0.0-alpha.54
+node dev/fixtures/produce-alpha54-browser.mjs target/published-alpha54/jazz-tools/package target/published-alpha54/jazz-wasm/package target/published-alpha54/browser-final
+```
+
+The runner uses workspace esbuild and Playwright only as build/browser tooling;
+all Jazz application, worker, and WASM code comes from the published packages.
+Its output directory is create-new. `browser-corpus.json` is the immutable
+candidate; `browser-receipt.json` records browser version and public result.
+Normal CI never runs this producer or downloads replacement baseline bytes.
+
+These release fixtures supplement rather than replace the richer original
+source corpora. A complete cross-backend logical inventory remains issue #2309 work; preserving those gaps
+avoids representing the released text-history examples as full corpus parity.
