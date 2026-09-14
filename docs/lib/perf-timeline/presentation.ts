@@ -1,6 +1,6 @@
-import { throughput, type BenchmarkMetadata } from "../../benchmarks/metadata/index.ts";
+import { throughput, type BenchmarkMetadata } from "../../../dev/benchmarks/metadata/index.ts";
 import { formatTime } from "./model.ts";
-export { getBenchmarkMetadata, metadataRevision } from "../../benchmarks/metadata/index.ts";
+export { getBenchmarkMetadata, metadataRevision } from "../../../dev/benchmarks/metadata/index.ts";
 
 /** User-selected rough estimate, deliberately NOT a hardware calibration. */
 export const ESTIMATE_DIVISOR = 5;

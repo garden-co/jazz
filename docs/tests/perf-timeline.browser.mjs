@@ -92,7 +92,7 @@ try {
       body: JSON.stringify(fail ? { error: "unavailable" } : fixture),
     }),
   );
-  await page.goto(origin);
+  await page.goto(`${origin}/perf-timeline`);
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
   async function assertMatchingPreview() {
     const positions = await page.evaluate(() => ({
@@ -188,7 +188,7 @@ try {
   await page.locator(".notice[role=alert]").waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-  await page.goto(`${origin}/?benchmark=second`);
+  await page.goto(`${origin}/perf-timeline?benchmark=second`);
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
   assert.equal(await page.locator(".benchmark-heading code").innerText(), "other_benchmark");
   fixture.benchmarks[0].points = Array.from({ length: 52 }, (_, i) => ({
@@ -198,7 +198,7 @@ try {
     median: i === 0 ? 110 : 19,
     max: i === 0 ? 120 : 20,
   }));
-  await page.goto(`${origin}/?benchmark=first`);
+  await page.goto(`${origin}/perf-timeline?benchmark=first`);
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
   assert.equal(await page.locator(".chart-point").count(), 52);
   await assertMatchingPreview();

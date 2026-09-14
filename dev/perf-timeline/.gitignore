@@ -1,5 +1,0 @@
-.next/
-.vercel/
-.env*
-!.env.example
-next-env.d.ts

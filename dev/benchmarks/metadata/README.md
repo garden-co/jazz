@@ -22,7 +22,7 @@ renamed or unknown cases get no guessed denominator. Semantic workload changes
 must update the metadata/revision and should receive new benchmark names when
 they would invalidate comparisons.
 
-Run the metadata tests with `pnpm --filter jazz-perf-timeline test`. They check
+Run the metadata tests with `pnpm --filter docs test:perf-timeline`. They check
 unique names, source existence, required documentation, every current Divan
 function in these suites, parameterized variants and arithmetic. Each owning
 benchmark should keep its README pointing here rather than maintaining a second

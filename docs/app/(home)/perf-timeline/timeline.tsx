@@ -7,7 +7,7 @@ import {
   displayedTime,
   formatThroughput,
   ESTIMATE_DIVISOR,
-} from "../lib/presentation";
+} from "@/lib/perf-timeline/presentation";
 import {
   checkpoint,
   calendarDay,
@@ -18,7 +18,7 @@ import {
   type Point,
   type Stage,
   type Timeline,
-} from "../lib/model";
+} from "@/lib/perf-timeline/model";
 
 const repo = "https://github.com/garden-co/jazz";
 const codspeed = "https://app.codspeed.io/garden-co/jazz";
@@ -344,15 +344,9 @@ export function Dashboard() {
     window.history.replaceState(null, "", url);
   }
   return (
-    <>
+    <div className="perf-timeline">
       <header className="topbar">
-        <a className="brand" href="/">
-          <span className="brand-mark">
-            jazz<span>↗</span>
-          </span>
-          <span className="brand-divider" />
-          <span className="brand-caption">Performance lab</span>
-        </a>
+        <span className="brand-caption">Performance lab</span>
         <nav>
           <a href={`${repo}/issues/2913`} target="_blank" rel="noreferrer">
             Research log ↗
@@ -895,6 +889,6 @@ export function Dashboard() {
           <span>Measure. Understand. Improve.</span>
         </footer>
       </div>
-    </>
+    </div>
   );
 }

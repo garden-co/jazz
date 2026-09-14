@@ -4,7 +4,7 @@ Small read-only Next.js dashboard for public `garden-co/jazz` CodSpeed wallclock
 history. No Jazz native build, database, or CodSpeed token is needed.
 
 Descriptions and throughput counts come from the benchmark-owned metadata
-catalogue at [../benchmarks/metadata](../benchmarks/metadata/README.md), not from
+catalogue at [../../../dev/benchmarks/metadata](../../../dev/benchmarks/metadata/README.md), not from
 dashboard-specific prose or numbers parsed from names. It currently covers all
 47 known current/retired wallclock series. Unknown names still show timings but
 receive no guessed description or throughput.
@@ -23,10 +23,10 @@ Both sides of the chart show the same Y ticks: rounded 1/2/5 linear steps, or
 in displayed units. The full graph and sparklines share the resulting domain.
 
 ```sh
-pnpm install --filter jazz-perf-timeline... --ignore-scripts
-pnpm --filter jazz-perf-timeline dev
-pnpm --filter jazz-perf-timeline test
-pnpm --filter jazz-perf-timeline build
+pnpm install --filter docs... --ignore-scripts
+pnpm --filter docs dev
+pnpm --filter docs test:perf-timeline
+pnpm --filter docs build
 ```
 
 ## Reading the graph
@@ -68,7 +68,7 @@ and `commit.branch.pullRequest` metadata. The API currently returns available
 repository history without pagination arguments; the UI reports the actual
 returned count, not a claim of exhaustive retention. This public web API is not
 a pinned SDK contract: API errors fail visibly rather than returning demo data.
-See also `../benchmarks/CODSPEED_GQL.md` for profile access.
+See also `../../../dev/benchmarks/CODSPEED_GQL.md` for profile access.
 
 GitHub's public tags endpoint supplies exact version-tag SHA mappings. Optional
 server-only `PERF_GITHUB_TOKEN` can raise its rate limit; never prefix it with
@@ -90,18 +90,14 @@ tags cache for one hour. Refresh reads that cache; it does not bypass rate
 protection. No credentials, callgraph presigned URLs, or private data reach the
 browser. A failed CodSpeed fetch returns HTTP 502 with a retry UI.
 
-## Vercel
+## Docs route and deployment
 
-Use the **garden-co** team and a dedicated project, with repository root directory
-`dev/perf-timeline`. `vercel.json` limits installation/build to this app and skips
-workspace lifecycle scripts. This app must not use the native/WASM artifact
-pipeline or the docs site's Vercel install command.
+The dashboard lives at `/perf-timeline` in the docs app and is intentionally absent
+from site navigation and search content. It uses the shared Fumadocs home layout,
+fonts, and theme. Its stylesheet is scoped to `.perf-timeline`.
 
-```sh
-pnpm dlx vercel --scope garden-co
-pnpm dlx vercel --prod --scope garden-co
-```
+Deploy through the existing docs project; no separate app or Vercel project is
+required. The public API remains `/api/timeline`. Set the optional server-only
+`PERF_GITHUB_TOKEN` on that project only if higher public-source limits are needed.
 
-Run CLI commands from the repository root after linking the project with the
-correct root directory. `.vercel` metadata and local environment files remain
-ignored. Production uses live, cached public sources—not a bundled snapshot.
+After building, run `pnpm --filter docs test:perf-timeline:e2e` for browser checks.

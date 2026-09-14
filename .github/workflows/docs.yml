@@ -1,32 +1,32 @@
-name: Performance timeline app
+name: Docs
 
 on:
   pull_request:
     paths:
-      - "dev/perf-timeline/**"
+      - "docs/**"
       - "dev/benchmarks/metadata/**"
       - "examples/**/metadata.ts"
       - "crates/jazz/benches/metadata.ts"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
-      - ".github/workflows/perf-timeline.yml"
+      - ".github/workflows/docs.yml"
   push:
     branches: [main]
     paths:
-      - "dev/perf-timeline/**"
+      - "docs/**"
       - "dev/benchmarks/metadata/**"
       - "examples/**/metadata.ts"
       - "crates/jazz/benches/metadata.ts"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
-      - ".github/workflows/perf-timeline.yml"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  app:
+  docs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -36,8 +36,9 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      - run: pnpm install --frozen-lockfile --ignore-scripts --filter jazz-perf-timeline...
-      - run: pnpm --filter jazz-perf-timeline test
-      - run: pnpm --filter jazz-perf-timeline build
-      - run: pnpm --filter jazz-perf-timeline exec playwright install --with-deps chromium
-      - run: pnpm --filter jazz-perf-timeline test:e2e
+      - run: pnpm install --frozen-lockfile --ignore-scripts --filter docs...
+      - run: pnpm --filter docs test
+      - run: pnpm --filter docs test:perf-timeline
+      - run: pnpm --filter docs build
+      - run: pnpm --filter docs exec playwright install --with-deps chromium
+      - run: pnpm --filter docs test:perf-timeline:e2e
