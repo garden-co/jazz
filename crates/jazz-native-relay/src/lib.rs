@@ -8190,6 +8190,104 @@ mod tests {
         );
     }
 
+    /// A strict native read crosses both authenticated hops and must retain
+    /// its policy binding without exporting a hop-local relay capability.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn private_session_strict_read_crosses_edge_and_core() {
+        let issuer = TestJwtIssuer::start().await;
+        let schema = schema();
+        let public_schema = schema.public_schema().clone();
+        let core = JazzServer::builder()
+            .with_schema(public_schema.clone())
+            .with_jwks_url(issuer.endpoint())
+            .with_native_transport_connector(jazz_testkit::native_connector())
+            .start()
+            .await
+            .expect("start test server");
+        let edge = JazzServer::builder()
+            .with_app_id(core.app_id())
+            .with_schema(public_schema)
+            .with_jwks_url(issuer.endpoint())
+            .with_admin_secret(core.admin_secret().to_owned())
+            .with_upstream_url(core.base_url())
+            .with_native_transport_connector(jazz_testkit::native_connector())
+            .start()
+            .await
+            .expect("start test server");
+
+        jazz_testkit::wait_for(
+            Duration::from_secs(15),
+            "local Edge attaches its ordinary upstream Core wire",
+            || {
+                let connected =
+                    edge.server_state().edge_upstream_health() == EdgeUpstreamHealth::Connected;
+                async move { connected.then_some(()) }
+            },
+        )
+        .await;
+
+        // Mint this bearer at runtime from the local issuer. No bearer or
+        // signing material is checked into the relay/device fixture.
+        let bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
+        let storage = tempfile::tempdir().expect("private relay storage root");
+        let fixture = NativeHostAbiFixture::new();
+        let admitted = fixture
+            .begin_account_session(
+                &edge.base_url(),
+                &core.app_id().to_string(),
+                &bearer,
+                storage.path(),
+                &schema,
+            )
+            .await;
+        let foreground = fixture.open_foreground(&admitted);
+
+        jazz_testkit::wait_for(
+            Duration::from_secs(15),
+            "native relay's scoped authenticated Edge websocket",
+            || {
+                let connected = edge.server_state().shutdown.active_websockets() > 0;
+                async move { connected.then_some(()) }
+            },
+        )
+        .await;
+
+        let row_id = [0x6b; 16];
+        let committed = fixture.insert_todo(foreground, row_id, "strict two-hop row");
+        fixture
+            .wait_for_core_transaction(foreground, committed)
+            .await;
+        let mut response = fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::All {
+                query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                options_json: r#"{"tier":"edge","local_updates":"deferred"}"#.into(),
+                transaction: None,
+            },
+        );
+        for _ in 0..1000 {
+            let ForegroundDbCommandResponse::Pending { operation } = response else {
+                break;
+            };
+            fixture.tick(foreground);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            response = fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation });
+        }
+        let ForegroundDbCommandResponse::Rows { rows } = response else {
+            panic!("strict scoped relay read did not settle: {response:?}");
+        };
+        assert_exact_todo_rows(&rows, RowUuid::from_bytes(row_id), "strict two-hop row");
+        fixture.revoke_private_session(&admitted);
+        assert_eq!(
+            edge.shutdown().await,
+            jazz_server::ShutdownPhase::StorageClosed
+        );
+        assert_eq!(
+            core.shutdown().await,
+            jazz_server::ShutdownPhase::StorageClosed
+        );
+    }
+
     async fn private_session_restart_receipt(offline: bool) {
         let issuer = TestJwtIssuer::start().await;
         let schema = schema();

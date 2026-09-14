@@ -4647,7 +4647,13 @@ where
                                 }
                                 opts
                             } else {
-                                opts.clone()
+                                // The incoming relay capability belongs to this hop.
+                                // An authority forwards the admitted policy snapshot
+                                // on its own trusted link, without claiming a client
+                                // relay capability on that separate connection.
+                                let mut upstream_opts = opts.clone();
+                                upstream_opts.binding_source = BindingSource::Ordinary;
+                                upstream_opts
                             };
                             // A scope relay has one authority stream per exact
                             // admitted coverage. Foreground connections pin
