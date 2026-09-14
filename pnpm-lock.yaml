@@ -356,6 +356,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.14)
+      playwright:
+        specifier: 1.58.2
+        version: 1.58.2
       postcss:
         specifier: ^8.5.6
         version: 8.5.6

@@ -1,5 +1,8 @@
 # Todo native workload
 
+[metadata.ts](metadata.ts) is the structured source for the timeline's descriptions,
+timing boundaries and throughput units. Update it alongside changes to the harness.
+
 This self-contained Rust variant of the local-first todo example owns the former
 native batch-phase workload. Its schema, deterministic rows, driver, assertions,
 and profiling support live here. There is no legacy Cargo benchmark target.
