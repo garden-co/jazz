@@ -1349,7 +1349,11 @@ mod tests {
                     entry["bootstrap_catalogue"]
                         .as_bool()
                         .expect("fixture bootstrap flag"),
-                    NativeTransportLink::OrdinarySession,
+                    if entry["requested_link"] == "scope_isolated_client_relay" {
+                        NativeTransportLink::ScopeIsolatedClientRelay
+                    } else {
+                        NativeTransportLink::OrdinarySession
+                    },
                 )
                 .expect("encode fixture prelude"),
             )
@@ -1415,7 +1419,7 @@ mod tests {
                     features &= !jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY;
                 }
                 let hello = encode_frame(&WireFrame::Hello(WireHello::current(
-                    WirePeerRole::Server,
+                    WirePeerRole::Core,
                     features,
                 )))
                 .unwrap();
