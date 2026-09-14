@@ -1822,6 +1822,54 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
     );
 }
 
+// Internal exact-resolution oracle: public reads cannot distinguish the
+// canonical stored body from a projected witness or inspect a failed native
+// coordinate without creating malformed protocol traffic.
+#[test]
+fn native_maintained_reference_resolves_only_its_exact_history_coordinate() {
+    use crate::node::maintained_version::{MaintainedVersion, NativeVersionRef};
+    use std::sync::Arc;
+    let schema = branch_view_schema();
+    let (_dir, mut node) = open_history_complete_node_with_schema(
+        NodeUuid::from_bytes([0x74; 16]), schema,
+    );
+    let title = "canonical branch payload".repeat(1_500);
+    let tx_id = node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x75), 10)
+            .branch(branch_selector(0x76))
+            .cells(BTreeMap::from([
+                ("title".to_owned(), Value::String(title)),
+                ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+            ])),
+    ).unwrap();
+    let stored = futures::executor::block_on(node.query_versions_for_tx(tx_id)).unwrap().remove(0);
+    let native = NativeVersionRef {
+        physical_table: node.physical_table_id_for_version(&stored).unwrap(),
+        table: stored.table,
+        branch: stored.branch_key().clone(),
+        row: stored.row_uuid(),
+        time: stored.tx_time(),
+        node: stored.tx_node_alias(),
+        schema: stored.schema_version_alias(),
+        deletion: stored.deletion(),
+    };
+    let resolved = futures::executor::block_on(node.resolve_maintained_version(
+        &MaintainedVersion::Native(Arc::new(native.clone())),
+    )).unwrap();
+    assert!(node.version_record_from_row(&resolved).unwrap() == node.version_record_from_row(&stored).unwrap(),
+        "exact resolution must preserve the canonical wire version, regardless of physical descriptor names");
+    for missing in [
+        NativeVersionRef { branch: BranchKey::default(), ..native.clone() },
+        NativeVersionRef { row: row(0x77), ..native.clone() },
+        NativeVersionRef { physical_table: PhysicalTableId(u64::MAX), ..native.clone() },
+        NativeVersionRef { schema: SchemaVersionAlias(u64::MAX), ..native.clone() },
+    ] {
+        assert!(futures::executor::block_on(node.resolve_maintained_version(
+            &MaintainedVersion::Native(Arc::new(missing)),
+        )).is_err(), "native references must never fall back to another version");
+    }
+}
+
 // This is necessarily an internal protocol-boundary regression test: public
 // mutation APIs canonicalize branch selectors and therefore cannot construct
 // the adversarial VersionRecord values a remote peer may send.

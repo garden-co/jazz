@@ -129,6 +129,9 @@ pub(crate) trait SourceGraphPreparer {
 /// Concrete source selected for one logical source request.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedSource {
+    /// Resolver proof that witness coordinates name retained native history.
+    /// Inline/synthetic sources must leave this absent.
+    pub(crate) native_witness_table: Option<crate::ids::PhysicalTableId>,
     /// Catalogue-owned IDs for logical columns in the selected read schema.
     pub(crate) stored_column_ids: BTreeMap<String, crate::ids::PhysicalColumnId>,
     /// Logical table schema after schema/lens resolution.

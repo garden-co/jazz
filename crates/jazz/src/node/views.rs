@@ -7,6 +7,7 @@
 //! emits [`crate::protocol::SyncMessage`] values.
 
 use super::ingest::validate_received_view_bundle_global_time_durability;
+use super::maintained_version::MaintainedVersion;
 use super::policy::ViewEvaluationContext;
 use super::*;
 use crate::ids::SchemaVersionId;
@@ -40,8 +41,8 @@ fn apply_covered_input_closure_admission_delta(
 }
 
 fn maintained_view_tx_versions_contain_winner(
-    tx_versions: &[VersionRow],
-    winner: &VersionRow,
+    tx_versions: &[MaintainedVersion],
+    winner: &MaintainedVersion,
 ) -> bool {
     tx_versions.iter().any(|candidate| {
         candidate.table() == winner.table()
@@ -899,7 +900,7 @@ where
             &result_member_removes,
             "real row result member removal is missing content transaction for replacement shipping",
         )?;
-        let mut tx_versions_cache = BTreeMap::<TxId, Vec<VersionRow>>::new();
+        let mut tx_versions_cache = BTreeMap::<TxId, Vec<MaintainedVersion>>::new();
         let known_state_position = match &known_state {
             Some(
                 KnownStateDeclaration::Fast { position, .. }
@@ -1029,7 +1030,8 @@ where
                     .extend(
                         versions
                             .into_iter()
-                            .filter(|version| version.deletion().is_none()),
+                            .filter(|version| version.deletion().is_none())
+                            .map(Into::into),
                     );
                 wanted_add_rows_by_tx
                     .entry(tx_id)
@@ -1050,7 +1052,7 @@ where
         // different transaction; once this transaction is marked emitted it
         // cannot repair a missing same-transaction register witness.
         let mut result_add_deletion_winners =
-            BTreeMap::<(String, RowUuid), Option<VersionRow>>::new();
+            BTreeMap::<(String, RowUuid), Option<MaintainedVersion>>::new();
         // Initial snapshots may add thousands of rows. Test membership by
         // coordinate instead of rescanning the entire result-add list for
         // each wanted native body.
@@ -1103,7 +1105,7 @@ where
                 }
                 let (content_winner, _) = maintained_facts.replacement_for(entry_table, *row_uuid);
                 if let Some(content_winner) = content_winner {
-                    if self.version_tx_id(&content_winner)? == *tx_id {
+                    if self.maintained_version_tx_id(&content_winner)? == *tx_id {
                         if content_winner.deletion().is_none() {
                             content_coordinates.insert((
                                 content_winner.table().to_owned(),
@@ -1133,7 +1135,10 @@ where
                         )
                         .await?
                     };
-                tx_versions_cache.insert(*tx_id, fallback_versions);
+                tx_versions_cache.insert(
+                    *tx_id,
+                    fallback_versions.into_iter().map(Into::into).collect(),
+                );
             }
             let mut same_transaction_deletion_winners = Vec::new();
             for (entry_table, row_uuid) in wanted_rows {
@@ -1149,22 +1154,22 @@ where
                             maintained_facts.replacement_for(entry_table, *row_uuid);
                         let winner = match retained_deletion_winner {
                             Some(winner) => Some(winner),
-                            None if allow_storage_witness_fallback => {
-                                self.storage_backed_maintained_deletion_winner(
+                            None if allow_storage_witness_fallback => self
+                                .storage_backed_maintained_deletion_winner(
                                     entry_table,
                                     *row_uuid,
                                     tier,
                                     &mut context,
                                 )
                                 .await?
-                            }
+                                .map(Into::into),
                             None => None,
                         };
                         result_add_deletion_winners.insert(winner_key, winner.clone());
                         winner
                     };
                 if let Some(winner) = deletion_winner
-                    && self.version_tx_id(&winner)? == *tx_id
+                    && self.maintained_version_tx_id(&winner)? == *tx_id
                 {
                     same_transaction_deletion_winners.push(winner);
                 }
@@ -1194,7 +1199,12 @@ where
                     && stored_tx.tx.kind == TxKind::Exclusive
                     && usize::try_from(stored_tx.tx.n_total_writes).ok() != Some(tx_versions.len())
                 {
-                    *tx_versions = self.query_versions_for_tx(*tx_id).await?;
+                    *tx_versions = self
+                        .query_versions_for_tx(*tx_id)
+                        .await?
+                        .into_iter()
+                        .map(Into::into)
+                        .collect();
                 }
                 let filtered_tx_versions = tx_versions
                     .iter()
@@ -1218,18 +1228,27 @@ where
                 // witness: unlike a graph-projected witness, these are
                 // already authored history rows. Keeping that distinction
                 // here preserves the cold current-row O(1) read receipt.
-                let bundle = if maintained_facts.uses_storage_backed_result_materialization()
-                    && needs_storage_fallback
-                    && self
-                        .exact_storage_maintained_versions_are_unambiguous(&filtered_tx_versions)?
+                let exact_rows = (maintained_facts.uses_storage_backed_result_materialization()
+                    && needs_storage_fallback)
+                    .then(|| {
+                        filtered_tx_versions
+                            .iter()
+                            .map(|version| match version {
+                                MaintainedVersion::Materialized(row) => Some(row.clone()),
+                                MaintainedVersion::Native(_) => None,
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .flatten();
+                let bundle = if let Some(rows) = exact_rows.as_ref()
+                    && self.exact_storage_maintained_versions_are_unambiguous(rows)?
                 {
                     self.version_bundle_for_exact_storage_maintained_view_versions_with_tx(
-                        &stored_tx,
-                        &filtered_tx_versions,
+                        &stored_tx, rows,
                     )
                     .await?
                 } else {
-                    self.version_bundle_for_maintained_view_versions_with_tx(
+                    self.version_bundle_for_maintained_references_with_tx(
                         &stored_tx,
                         &filtered_tx_versions,
                     )
@@ -1245,7 +1264,7 @@ where
             ));
         }
         let mut replacement_winners_by_tx =
-            BTreeMap::<TxId, Vec<(String, RowUuid, VersionRow, &'static str)>>::new();
+            BTreeMap::<TxId, Vec<(String, RowUuid, MaintainedVersion, &'static str)>>::new();
         for (entry_table, row_uuid, content_tx_id) in &row_result_adds {
             let deletion_winner = if let Some(winner) =
                 result_add_deletion_winners.get(&(entry_table.as_str().to_owned(), *row_uuid))
@@ -1256,22 +1275,22 @@ where
                     maintained_facts.replacement_for(entry_table, *row_uuid);
                 match retained_deletion_winner {
                     Some(winner) => Some(winner),
-                    None if allow_storage_witness_fallback => {
-                        self.storage_backed_maintained_deletion_winner(
+                    None if allow_storage_witness_fallback => self
+                        .storage_backed_maintained_deletion_winner(
                             entry_table,
                             *row_uuid,
                             tier,
                             &mut context,
                         )
                         .await?
-                    }
+                        .map(Into::into),
                     None => None,
                 }
             };
             let Some(version) = deletion_winner.as_ref() else {
                 continue;
             };
-            let tx_id = self.version_tx_id(version)?;
+            let tx_id = self.maintained_version_tx_id(version)?;
             if tx_id == *content_tx_id || emitted_versions.contains(&tx_id) {
                 continue;
             }
@@ -1287,15 +1306,15 @@ where
                 maintained_facts.replacement_for(entry_table, *row_uuid);
             let deletion_winner = match retained_deletion_winner {
                 Some(winner) => Some(winner),
-                None if allow_storage_witness_fallback => {
-                    self.storage_backed_maintained_deletion_winner(
+                None if allow_storage_witness_fallback => self
+                    .storage_backed_maintained_deletion_winner(
                         entry_table,
                         *row_uuid,
                         tier,
                         &mut context,
                     )
                     .await?
-                }
+                    .map(Into::into),
                 None => None,
             };
             for (version, missing_witness) in [
@@ -1311,7 +1330,7 @@ where
                 let Some(version) = version else {
                     continue;
                 };
-                let tx_id = self.version_tx_id(version)?;
+                let tx_id = self.maintained_version_tx_id(version)?;
                 if tx_id == *old_tx_id || emitted_versions.contains(&tx_id) {
                     continue;
                 }
@@ -1367,7 +1386,10 @@ where
                         )
                         .await?
                     };
-                tx_versions_cache.insert(tx_id, fallback_versions);
+                tx_versions_cache.insert(
+                    tx_id,
+                    fallback_versions.into_iter().map(Into::into).collect(),
+                );
             }
             let stored_tx = self
                 .query_transaction_memo(tx_id, &mut context)
@@ -1378,7 +1400,14 @@ where
                 && usize::try_from(stored_tx.tx.n_total_writes).ok()
                     != tx_versions_cache.get(&tx_id).map(Vec::len)
             {
-                tx_versions_cache.insert(tx_id, self.query_versions_for_tx(tx_id).await?);
+                tx_versions_cache.insert(
+                    tx_id,
+                    self.query_versions_for_tx(tx_id)
+                        .await?
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                );
             }
             let tx_versions = tx_versions_cache
                 .get(&tx_id)
@@ -1402,7 +1431,7 @@ where
                         .collect()
                 };
             version_bundles.push(
-                self.version_bundle_for_maintained_view_versions_with_tx(
+                self.version_bundle_for_maintained_references_with_tx(
                     &stored_tx,
                     &bundled_versions,
                 )
@@ -1420,10 +1449,41 @@ where
             let Some(wanted_rows) = wanted_add_rows_by_tx.get(&bundle.tx.tx_id) else {
                 continue;
             };
-            bundle.versions.retain(|version| {
-                version.deletion().is_some()
-                    || wanted_rows.contains(&(version.table().to_owned(), version.row_uuid()))
-            });
+            // Selection is expressed in the read schema, but bundle rows
+            // have already been resolved to their authored schema. Comparing
+            // logical names here drops a renamed row (or admits a reused
+            // name). Keep the compiler-bound physical identity end to end.
+            let wanted_physical = wanted_rows
+                .iter()
+                .map(|(table, row)| {
+                    maintained_facts
+                        .physical_tables
+                        .get(&groove::Intern::new(table.clone()))
+                        .copied()
+                        .map(|table| (table, *row))
+                        .ok_or(Error::InvalidStoredValue(
+                            "exclusive scope has no physical table identity",
+                        ))
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let mut selected = Vec::with_capacity(bundle.versions.len());
+            for version in std::mem::take(&mut bundle.versions) {
+                let physical = self
+                    .catalogue
+                    .physical_mappings
+                    .get(&version.schema_version())
+                    .and_then(|mapping| mapping.identities.tables.get(version.table()))
+                    .map(|table| table.id)
+                    .ok_or(Error::InvalidStoredValue(
+                        "exclusive bundle has no authored physical table identity",
+                    ))?;
+                if version.deletion().is_some()
+                    || wanted_physical.contains(&(physical, version.row_uuid()))
+                {
+                    selected.push(version);
+                }
+            }
+            bundle.versions = selected;
             bundle.tx.n_total_writes = bundle
                 .versions
                 .len()
@@ -2598,6 +2658,21 @@ where
             .validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(BTreeMap::new())?;
         Ok((shape, binding))
+    }
+
+    async fn version_bundle_for_maintained_references_with_tx(
+        &mut self,
+        stored_tx: &StoredTransaction,
+        references: &[MaintainedVersion],
+    ) -> Result<VersionBundle, Error> {
+        let mut rows = Vec::with_capacity(references.len());
+        for reference in references {
+            rows.push(self.resolve_maintained_version(reference).await?);
+        }
+        // Resolution already establishes the canonical authored body. Never
+        // reload it via the projected-witness canonicalization path.
+        self.version_bundle_for_exact_storage_maintained_view_versions_with_tx(stored_tx, &rows)
+            .await
     }
 
     pub(super) async fn version_bundle_for_maintained_view_versions_with_tx(

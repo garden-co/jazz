@@ -238,6 +238,16 @@ where
                 .clone()
                 .expect("checked alongside compiler-owned covered input source");
             return Ok(ResolvedSource {
+                native_witness_table: Some(
+                    self.node
+                        .physical_table_id_for_schema(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                        )
+                        .map_err(|_| {
+                            source_resolution_error(request, SourceGap::SchemaProjection)
+                        })?,
+                ),
                 stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
                 graph: input_source.clone(),
@@ -374,6 +384,7 @@ where
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
+                native_witness_table: None,
                 stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
                 graph,
@@ -510,6 +521,7 @@ where
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 return Ok(ResolvedSource {
+                    native_witness_table: None,
                     stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
@@ -664,6 +676,7 @@ where
                 )
                 .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
                 return Ok(ResolvedSource {
+                    native_witness_table: None,
                     stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
@@ -882,6 +895,7 @@ where
                     }
                 };
                 return Ok(ResolvedSource {
+                    native_witness_table: None,
                     stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
@@ -1700,6 +1714,7 @@ where
             graph
         };
         Ok(ResolvedSource {
+            native_witness_table: None,
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
@@ -1800,6 +1815,11 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
+            native_witness_table: Some(
+                self.node
+                    .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?,
+            ),
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
@@ -1962,6 +1982,11 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
+            native_witness_table: Some(
+                self.node
+                    .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?,
+            ),
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
@@ -2042,6 +2067,7 @@ where
         )
         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(ResolvedSource {
+            native_witness_table: None,
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,

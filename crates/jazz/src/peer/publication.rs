@@ -1448,9 +1448,12 @@ impl PeerState {
                     .get_mut(&subscription)
                     .and_then(|state| state.maintained_subscription_view.as_mut())
                 {
-                    deletion_changes = view
-                        .maintained
-                        .replace_selected_deletion_witnesses(witnesses);
+                    deletion_changes = view.maintained.replace_selected_deletion_witnesses(
+                        witnesses
+                            .into_iter()
+                            .map(|(key, row)| (key, row.into()))
+                            .collect(),
+                    );
                 }
             }
         }

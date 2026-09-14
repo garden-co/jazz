@@ -1,6 +1,7 @@
 //! Query result and relation snapshot materialization.
 
 use super::*;
+use crate::node::maintained_version::MaintainedVersion;
 
 #[derive(Clone, Copy)]
 pub(super) struct RelationSnapshotWindow {
@@ -10,7 +11,7 @@ pub(super) struct RelationSnapshotWindow {
 
 #[derive(Default)]
 struct LocalMaintainedMaterializationCache {
-    tx_versions: BTreeMap<TxId, Vec<VersionRow>>,
+    tx_versions: BTreeMap<TxId, Vec<MaintainedVersion>>,
 }
 
 pub(crate) struct LocalMaintainedRelationSnapshot {
@@ -261,8 +262,21 @@ where
                 .entry(version.tx)
                 .or_insert_with(|| local.maintained.versions_by_tx(version.tx));
         }
-        self.preload_tx_versions_for_materialization(tx_ids, &mut cache.tx_versions)
-            .await?;
+        let mut missing = tx_ids
+            .into_iter()
+            .filter(|tx| cache.tx_versions.get(tx).is_none_or(Vec::is_empty))
+            .map(|tx| (tx, Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        self.preload_tx_versions_for_materialization(
+            missing.keys().copied().collect::<Vec<_>>(),
+            &mut missing,
+        )
+        .await?;
+        cache.tx_versions.extend(
+            missing
+                .into_iter()
+                .map(|(tx, rows)| (tx, rows.into_iter().map(Into::into).collect())),
+        );
         Ok(cache)
     }
 
@@ -275,12 +289,16 @@ where
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Option<CurrentRow>, Error> {
         let tx_versions = self.local_maintained_tx_versions(local, tx_id, cache);
-        let Some(version) =
-            local_maintained_view_content_witness(tx_versions, table_name, row_uuid)
-        else {
+        let Some(version) = tx_versions.iter().rev().find(|v| {
+            v.table() == table_name
+                && v.row_uuid() == row_uuid
+                && !v.is_register_record()
+                && v.deletion().is_none()
+        }) else {
             return Ok(None);
         };
         let version = version.clone();
+        let version = self.materialize_maintained_version(&version).await?;
         self.projected_current_row_from_materialized_version_in_read_schema(
             local.result_schema_version,
             &version,
@@ -365,25 +383,21 @@ where
             }
             return Ok(Some(row));
         }
-        let mut tx_versions = local.maintained.versions_by_tx(entry.2);
-        let version = if let Some(version) = self.maintained_witness_for_result_member(
+        let tx_versions = local.maintained.versions_by_tx(entry.2);
+        let version = if let Some(version) = self.maintained_reference_for_result_member(
             &tx_versions,
             local.result_schema_version,
             local.result_table.as_str(),
             entry.1,
         )? {
-            version.clone()
+            self.materialize_maintained_version(version).await?
         } else {
             let (content_winner, _) = local.maintained.replacement_for(entry.0.as_str(), entry.1);
             if let Some(content_winner) = content_winner {
-                if self.version_tx_id(&content_winner)? != entry.2 {
+                if self.maintained_version_tx_id(&content_winner)? != entry.2 {
                     return Ok(None);
                 }
-                tx_versions.push(content_winner);
-                tx_versions
-                    .last()
-                    .ok_or(Error::MissingTransaction(entry.2))?
-                    .clone()
+                self.materialize_maintained_version(&content_winner).await?
             } else {
                 // A client-local maintained graph can lag its remote
                 // authority's source. The authority ViewUpdate has already
@@ -483,13 +497,13 @@ where
         let tx_versions = self
             .local_maintained_tx_versions(local, entry.2, cache)
             .to_vec();
-        let version = if let Some(version) = self.maintained_witness_for_result_member(
+        let version = if let Some(version) = self.maintained_reference_for_result_member(
             &tx_versions,
             local.result_schema_version,
             local.result_table.as_str(),
             entry.1,
         )? {
-            version.clone()
+            self.materialize_maintained_version(version).await?
         } else {
             let tx_versions = if local
                 .maintained
@@ -523,7 +537,7 @@ where
         local: &LocalMaintainedViewSubscription,
         tx_id: TxId,
         cache: &'a mut LocalMaintainedMaterializationCache,
-    ) -> &'a [VersionRow] {
+    ) -> &'a [MaintainedVersion] {
         cache
             .tx_versions
             .entry(tx_id)

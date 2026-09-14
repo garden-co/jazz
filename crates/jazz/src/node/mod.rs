@@ -326,6 +326,7 @@ mod eviction;
 mod global_state;
 mod ingest;
 pub(crate) mod maintained_subscription_view;
+mod maintained_version;
 mod open_tx;
 pub(crate) mod physical;
 mod policy;

@@ -3235,6 +3235,35 @@ fn content_version_witness_graph_from_visible_graph(
     event_kind: &str,
     routing_param_fields: &BTreeSet<String>,
 ) -> CapabilityResult<GraphBuilder> {
+    if source.native_witness_table.is_some() {
+        // A source-shaped authorized relation already carries exact version
+        // coordinates. A flat join can instead expose only row/transaction
+        // keys, without schema/branch metadata. Prove every projected input
+        // is present before bypassing the coordinate-recovery join below.
+        let mut fields = inline_version_witness_fields_for_tagged_rows(source, event_kind)?;
+        fields.extend(routing_param_fields.iter().map(|field| {
+            let mut projected = ProjectField::named(field);
+            projected.expression = groove::ivm::ProjectExpr::Field(FieldRef::stored_name(field));
+            projected
+        }));
+        let complete_coordinates =
+            graph_declared_output_fields(&visible_graph).is_some_and(|available| {
+                fields.iter().all(|field| match &field.expression {
+                    groove::ivm::ProjectExpr::Field(
+                        FieldRef::Name(name) | FieldRef::StoredName(name),
+                    ) => available.contains(name),
+                    groove::ivm::ProjectExpr::Literal(_)
+                    | groove::ivm::ProjectExpr::TypedLiteral { .. }
+                    | groove::ivm::ProjectExpr::Null(_) => true,
+                    _ => false,
+                })
+            });
+        if complete_coordinates {
+            // Preserve bag weights and authority routes: independent role
+            // reducers own positive-presence lifetimes, not this projection.
+            return Ok(visible_graph.project_fields(fields));
+        }
+    }
     // Visibility can be a wide join tuple, not a source-shaped record. Resolve
     // its exact row/version keys back to complete witnesses in both storage
     // and covered-input realizations. Never reopen an unrestricted source as
@@ -3680,6 +3709,32 @@ fn bind_witness_carrier_fields(mut fields: Vec<ProjectField>) -> Vec<ProjectFiel
     fields
 }
 
+fn native_witness_fields(
+    source: &ResolvedSource,
+    mut fields: Vec<ProjectField>,
+) -> Vec<ProjectField> {
+    if source.native_witness_table.is_some() {
+        let branch = version_witness_fields(&source.row_shape)
+            .expect("witness source was validated")
+            .branch_or_prefix_field;
+        fields.retain(|field| {
+            matches!(
+                field.output_name.as_str(),
+                "event_kind"
+                    | "table_name"
+                    | "row_uuid"
+                    | "content_tx_time"
+                    | "content_tx_node_id"
+                    | "tx_time"
+                    | "tx_node_id"
+                    | "schema_version"
+                    | "_deletion"
+            ) || branch.as_ref() == Some(&field.output_name)
+        });
+    }
+    fields
+}
+
 fn prefixed_version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
@@ -3733,7 +3788,9 @@ fn prefixed_version_witness_fields_for_tagged_rows(
             branch_or_prefix,
         ));
     }
-    Ok(bind_witness_carrier_fields(fields))
+    Ok(bind_witness_carrier_fields(native_witness_fields(
+        source, fields,
+    )))
 }
 
 fn inline_version_witness_fields_for_tagged_rows(
@@ -3773,7 +3830,9 @@ fn inline_version_witness_fields_for_tagged_rows(
     if let Some(branch_or_prefix) = version.branch_or_prefix_field {
         fields.push(ProjectField::named(branch_or_prefix));
     }
-    Ok(bind_witness_carrier_fields(fields))
+    Ok(bind_witness_carrier_fields(native_witness_fields(
+        source, fields,
+    )))
 }
 
 fn deletion_witness_fields_for_tagged_rows(
@@ -3814,7 +3873,9 @@ fn deletion_witness_fields_for_tagged_rows(
     {
         fields.push(ProjectField::named(branch_or_prefix));
     }
-    Ok(bind_witness_carrier_fields(fields))
+    Ok(bind_witness_carrier_fields(native_witness_fields(
+        source, fields,
+    )))
 }
 
 fn relation_edge_schema(
@@ -3997,6 +4058,7 @@ fn version_witness_schema(
     version: &VersionWitnessFieldRefs,
 ) -> VersionWitnessSchema {
     VersionWitnessSchema {
+        native_table: source.native_witness_table,
         source: source_id.program_source_id(),
         descriptor: source.row_shape.descriptor,
         identity: VersionIdentityFields {
