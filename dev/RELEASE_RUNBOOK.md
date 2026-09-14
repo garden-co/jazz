@@ -16,6 +16,13 @@ this document or public receipts.
   exact internal dependency versions. Do not infer the next version from a PR title.
 - Explicitly state wire/storage compatibility, required client/server coordination,
   and treatment of existing rows, pending local writes and caches.
+- Classify the release path before scheduling it:
+  - a normal release is wire- and storage-compatible and can use a rolling Cloud
+    deployment;
+  - an intentional alpha wire break may use the coordinated sequence below only
+    when old clients fail loudly and safely and users are explicitly told to update;
+  - a storage break or a transition that could create corrupt or unrecoverable
+    tenants requires a separate, release-specific migration plan.
 - Record the candidate SHA. New code invalidates relevant candidate receipts.
 
 ## 2. Build and test before the release window
@@ -36,10 +43,19 @@ this document or public receipts.
 - Give infra the exact publicly fetchable CLI package/artifact and source SHA.
   Have infra prebuild the server image and report its digest. Do not assume a
   configuration revision proves an image version.
-- Test fresh Cloud preview tenants with the matching image: publish schema and
-  permissions first, configure auth, check authenticated CRUD/reconnect/reopen,
-  then delete disposable tenants. Preview tenants remain version-pinned; use new
-  tenants for a new candidate. Keep tenant credentials in private files.
+- Have infra install that exact image as the sole available `preview` entry in
+  the Jazz Cloud version catalog. This does not change the stable default or any
+  existing tenant. Preview creation must be explicit: use the dashboard's hidden
+  `?preview=true` flow or send `{"preview": true}` to the unclaimed-app generation
+  API. Tenant Manager resolves that request against its own catalog and persists
+  the exact preview version, image and `preview` lifecycle on the new app.
+- Test fresh Cloud preview tenants end to end with the matching image. Confirm the
+  created app reports the expected version and image digest; publish schema and
+  permissions; configure authentication if relevant; check authenticated
+  CRUD/reconnect/persistent reopen, sleep and wake; and exercise both local and
+  cross-region paths. Preview tenants remain permanently pinned and are not
+  migrated to stable, so create a new disposable tenant for every new candidate
+  and delete it after acceptance. Keep tenant credentials in private files.
 - Build docs and Inspector previews. Record exact successful deployment IDs and
   verify routes/assets before planning promotion. Coordinate dashboard separately
   with infra.
@@ -53,7 +69,8 @@ this document or public receipts.
   separate; keep the release draft until the publication checks below pass.
 - Refresh the draft after final changesets. Do not create a source tag against an
   unfinished candidate. The publisher owns the final immutable source tag.
-- Prepare announcement text and infra activation/maintenance changes in advance.
+- Prepare announcement text, infra rollout changes and rollback or roll-forward
+  actions in advance. Creation maintenance is not part of a normal release.
 - Record what can be rolled back (deployment/default image/docs/dist-tags) and what
   cannot (published immutable npm versions). Coordinate wire compatibility before
   any rollback; never overwrite a published version or silently retarget its tag.
@@ -61,8 +78,18 @@ this document or public receipts.
 ## 4. Coordinated publication
 
 - Obtain the release go-ahead. Confirm infra, package publisher and docs owner are
-  ready. For a coordinated Cloud transition, enable app-creation maintenance and
-  verify it before publication. Do not assume existing tenants are upgraded.
+  ready. Record whether the release is a compatible rolling release or an
+  intentional alpha wire break. Do not assume changing the Cloud catalog upgrades
+  existing tenants.
+- For a normal compatible release, require mixed-version acceptance: the current
+  client against the candidate server, the candidate client against the current
+  server, and the candidate pair. The candidate must tolerate the mixed server
+  versions present during a rolling deployment.
+- For an intentional alpha wire break, verify that an old client fails clearly
+  without corrupting data, accepting partial writes or entering a destructive
+  retry loop. Publish the client and docs immediately before Cloud activation so
+  an update is available before existing tenants move. Clearly tell alpha users
+  that they must update their clients.
 - Merge the approved release PR only when ready: the publisher can trigger from
   that merge. Avoid dispatching a duplicate publish run.
 - If manual dispatch is needed, use `publish-jazz-tools-alpha.yml` on the exact
@@ -76,13 +103,20 @@ this document or public receipts.
 - Verify every expected npm package/version, native payload, dependency and dist-tag
   using registry reads and installation. Confirm the source tag matches the exact
   released source. Build artifacts alone are not proof of npm publication.
-- Promote the verified docs and Inspector deployments. Have infra activate the
-  staged stable image/catalogue and matching dashboard, confirming exact version
-  and digest in the status API and both regions.
-- Disable creation maintenance when infra confirms readiness. Create a new ordinary
-  tenant with the real npm release; validate/deploy schema and permissions and run
-  authenticated write/read/update/delete plus reconnect/reopen. Delete test tenants.
-  Check existing sync probes and rollout health with infra.
+- Promote the verified docs and Inspector deployments.
+- Treat Cloud activation as two explicit operations: selecting the new catalog
+  default for newly created apps, and upgrading existing eligible tenants through
+  a controlled fleet rollout. Have infra confirm the exact version and image digest
+  in the status API and both regions. Never include legacy or preview tenants in a
+  stable fleet rollout.
+- Create a new ordinary tenant with the real npm release; validate/deploy schema
+  and permissions and run authenticated write/read/update/delete plus
+  reconnect/reopen. Delete test tenants. Check existing sync probes and rollout
+  health between fleet cohorts with infra.
+- Use app-creation maintenance only as an exceptional, explicitly reviewed safety
+  measure when an intermediate state could create corrupt, incorrectly configured
+  or unrecoverable tenants. A brief, intentional alpha wire mismatch in which old
+  clients fail loudly is not by itself a reason for creation maintenance.
 
 ## 5. Publish the GitHub Release and announcement
 
@@ -98,6 +132,19 @@ this document or public receipts.
 - Close the completed milestone after moving unresolved work to its agreed target.
   Record final package/tag/image/deployment/test links, known limitations and any
   actionable process failures as issues. Monitor early adopter reports.
+
+## Cloud rollback semantics
+
+- A catalog-default rollback affects only tenants created afterward; it does not
+  roll back existing tenants.
+- Record whether the candidate is binary-downgrade-safe, not merely storage-
+  compatible. If the previous server cannot safely read data written by the new
+  server, recover by rolling forward to a fixed image.
+- Roll existing stable tenants only through the same bounded rollout mechanism used
+  for upgrades. Do not change legacy or preview tenants.
+- During an intentional alpha wire break, elevated failures from old clients are
+  expected until adopters update, but corruption signals, partial writes and
+  failures from the candidate client are rollback or roll-forward triggers.
 
 ## Current automation boundaries
 
