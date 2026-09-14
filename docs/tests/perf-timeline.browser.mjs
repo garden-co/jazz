@@ -286,6 +286,13 @@ try {
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
   assert.equal(await page.locator(".chart-point").count(), 2);
   assert.match(await page.locator(".chart").textContent(), /2026-09-10/);
+  assert.match(
+    await page
+      .locator(".chart .axis-text")
+      .allTextContents()
+      .then((labels) => labels.join(" ")),
+    /v2.0.0-alpha.54/,
+  );
   assert.equal(await page.locator('.chart line[opacity="0.8"]').count(), 1);
   assert.equal(await page.locator(".bench-item.active .sparkline line").count(), 1);
   await page.screenshot({

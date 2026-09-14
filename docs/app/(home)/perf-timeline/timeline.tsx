@@ -240,7 +240,8 @@ function Chart({
                   {calendarDay(p.date)}
                 </text>
                 <text x={x(i)} y={height - bottom + 46} textAnchor="middle" className="axis-text">
-                  {p.release ??
+                  {p.backfill?.releaseTag ??
+                    p.release ??
                     (p.pr ? `PR #${p.pr}` : p.stage === "main" ? "main commit" : "commit")}
                 </text>
                 <text x={x(i)} y={height - bottom + 63} textAnchor="middle" className="axis-sha">
@@ -685,10 +686,9 @@ export function Dashboard() {
                         result.{" "}
                       </>
                     )}
-                    Each line follows one branch, PR or historical backfill, ordered by checkpoint
-                    date. Dates are UTC. Historical backfills use release publication dates;
-                    receipts retain actual measurement dates. Min–max is sample range, not a
-                    confidence interval.
+                    Each line follows one branch or PR, ordered by checkpoint date. Dates are UTC.
+                    Historical backfills use release publication dates; receipts retain actual
+                    measurement dates. Min–max is sample range, not a confidence interval.
                   </p>
                 </section>
                 {current && (
