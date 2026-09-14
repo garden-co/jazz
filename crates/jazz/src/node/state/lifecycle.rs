@@ -51,6 +51,7 @@ where
         node_uuid: NodeUuid,
         requested_schema: JazzSchema,
         storage: S,
+        history_complete: bool,
     ) -> Result<Self, Error>
     where
         S: ReopenableStorage + 'static,
@@ -61,50 +62,73 @@ where
             StorageLayout::jazz_class_v1(),
         )
         .await?;
-        let mut genesis = None;
-        let mut schemas = BTreeMap::new();
-        for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[]).await? {
-            let record = raw.record();
-            match codec::CatalogueRecordKind::from_key(
-                record.get_u64(CatalogueRowRecord::FIELD_KIND_IDX)?,
-            )? {
-                codec::CatalogueRecordKind::Genesis => {
-                    if genesis.replace(SchemaVersionId(record.get_uuid(
-                        CatalogueRowRecord::FIELD_ID_IDX,
-                    )?)).is_some() {
-                        return Err(Error::InvalidStoredValue("duplicate catalogue genesis marker"));
-                    }
-                }
-                codec::CatalogueRecordKind::Schema => {
+        let requested_key = [
+            Value::U64(codec::CatalogueRecordKind::Schema.key()),
+            Value::Uuid(requested_schema.version_id().0),
+        ];
+        let schema = if meta_database
+            .primary_key_get_raw("jazz_catalogue", &requested_key)
+            .await?
+            .is_some()
+        {
+            requested_schema
+        } else {
+            let genesis_rows = meta_database
+                .primary_key_scan_raw(
+                    "jazz_catalogue",
+                    &[Value::U64(codec::CatalogueRecordKind::Genesis.key())],
+                )
+                .await?;
+            match genesis_rows.as_slice() {
+                [] => requested_schema,
+                [genesis] => {
+                    let id = SchemaVersionId(
+                        genesis
+                            .record()
+                            .get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?,
+                    );
+                    let raw = meta_database
+                        .primary_key_get_raw(
+                            "jazz_catalogue",
+                            &[
+                                Value::U64(codec::CatalogueRecordKind::Schema.key()),
+                                Value::Uuid(id.0),
+                            ],
+                        )
+                        .await?
+                        .ok_or(Error::InvalidStoredValue(
+                            "durable genesis schema is missing",
+                        ))?;
                     let schema = codec::decode_catalogue_schema(
-                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                        raw.record()
+                            .get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
-                    if schema.id != SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
-                        || schemas.insert(schema.id, schema).is_some()
-                    {
+                    if schema.id != id {
                         return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
                     }
+                    schema.schema
                 }
-                _ => {}
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "duplicate catalogue genesis marker",
+                    ));
+                }
             }
-        }
-        let schema = match genesis {
-            Some(genesis) if !schemas.contains_key(&requested_schema.version_id()) => schemas
-                .remove(&genesis)
-                .ok_or(Error::InvalidStoredValue("durable genesis schema is missing"))?
-                .schema,
-            _ => requested_schema,
         };
-        // Normal recovery remains the authority for all catalogue, lineage,
-        // physical mapping, and pending-write validation.
+        // Ordinary recovery validates every catalogue record and physical mapping.
+        // Discovery adds only a point read on an already-admitted schema open.
         Self::new_with_options_inner(
-            node_uuid, schema, meta_database.into_storage(), false,
+            node_uuid,
+            schema,
+            meta_database.into_storage(),
+            history_complete,
             CatalogueBootstrapState::Ready,
             #[cfg(feature = "testing")]
             None,
             #[cfg(any(test, feature = "testing"))]
             None,
-        ).await
+        )
+        .await
     }
 
     /// Direct-message test peers share one authority catalogue for each fixture
@@ -1761,7 +1785,14 @@ where
     /// must not leave a settled stamp that could satisfy the next usage site.
     fn retire_authority_result_view(&mut self, authority_result_key: AuthorityResultKey) {
         #[cfg(any(test, feature = "testing"))]
-        crate::delivery_diagnostics::record(|| format!("retire_receipt runtime={} binding={:?} generation={}", self.groove_runtime_token(), authority_result_key.binding_view, self.applied_authority_result_generation(&authority_result_key)));
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "retire_receipt runtime={} binding={:?} generation={}",
+                self.groove_runtime_token(),
+                authority_result_key.binding_view,
+                self.applied_authority_result_generation(&authority_result_key)
+            )
+        });
         self.query.authority_results.remove(&authority_result_key);
         self.query
             .retained_root_window_sources

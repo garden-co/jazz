@@ -626,6 +626,7 @@ where
     pub(super) upstream_upload_destination: Option<UpstreamUploadDestination>,
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
+    pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) current_rows: row_availability::SharedCurrentRows,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -1937,6 +1938,20 @@ where
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub async fn tick(&mut self) -> Result<DbTickStats, Error> {
+        let result = self.tick_inner().await;
+        if let Err(error) = &result {
+            if matches!(self.link, ConnectionLink::Upstream(_)) {
+                finish_open_schema_connection(
+                    &self.open_schema_admission,
+                    self.connection_epoch,
+                    Err(error.clone()),
+                );
+            }
+        }
+        result
+    }
+
+    async fn tick_inner(&mut self) -> Result<DbTickStats, Error> {
         if let Some(error) = self.startup_error.take() {
             return Err(error);
         }
@@ -2747,6 +2762,17 @@ where
                                     .await
                                     .apply_trusted_catalogue_snapshot(*snapshot)
                                     .await?;
+                                let requested = self.open_schema_admission.borrow()
+                                    .as_ref().map(|pending| pending.schema);
+                                if let Some(requested) = requested {
+                                    let admitted = self.node.lock().await
+                                        .catalogue_schemas().contains_key(&requested);
+                                    finish_open_schema_connection(
+                                        &self.open_schema_admission,
+                                        self.connection_epoch,
+                                        if admitted { Ok(()) } else { Err(pending_open_schema_error()) },
+                                    );
+                                }
                                 publications.extend(outcome.publications);
                             }
                             SyncMessage::CurrentRowsReceipt(receipt) => {

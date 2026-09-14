@@ -144,12 +144,20 @@ where
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node =
-            NodeState::new_client(config.identity.node, config.schema.clone(), config.storage)
-                .await?;
+        let node = NodeState::new_client(
+            config.identity.node,
+            config.schema.clone(),
+            config.storage,
+            false,
+        )
+        .await?;
         let requires_open_schema_admission =
             !node.catalogue_schemas().contains_key(&schema_version_id);
         let node = Node::new(node);
+        if requires_open_schema_admission {
+            *node.open_schema_admission.borrow_mut() =
+                Some(PendingOpenSchema::new(schema_version_id));
+        }
         node.restore_pending_uploads(config.identity).await?;
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
@@ -272,26 +280,50 @@ where
     /// This mode is intended for server shells and tests that own authoritative
     /// in-memory history rather than a partial client replica.
     pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
+        Self::open_history_complete_inner(config, false).await
+    }
+
+    async fn open_history_complete_inner(
+        config: DbConfig<S>,
+        recover_client: bool,
+    ) -> Result<Self, Error> {
         let schema_version_id = config.schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node = NodeState::new_history_complete(
-            config.identity.node,
-            config.schema.clone(),
-            config.storage,
-        )
-        .await?;
+        let node = if recover_client {
+            NodeState::new_client(
+                config.identity.node,
+                config.schema.clone(),
+                config.storage,
+                true,
+            )
+            .await?
+        } else {
+            NodeState::new_history_complete(
+                config.identity.node,
+                config.schema.clone(),
+                config.storage,
+            )
+            .await?
+        };
+        let requires_open_schema_admission =
+            !node.catalogue_schemas().contains_key(&schema_version_id);
+        let node = Node::new(node);
+        if requires_open_schema_admission {
+            *node.open_schema_admission.borrow_mut() =
+                Some(PendingOpenSchema::new(schema_version_id));
+        }
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
             schema_version_id,
             schema_view_is_fixed: false,
-            requires_open_schema_admission: false,
+            requires_open_schema_admission,
             schema_views,
             identity: config.identity,
-            node: Rc::new(Node::new(node)),
+            node: Rc::new(node),
             row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
@@ -317,7 +349,7 @@ where
     pub async unsafe fn open_history_complete_with_backend_attribution(
         config: DbConfig<S>,
     ) -> Result<Self, Error> {
-        let mut db = Self::open_history_complete(config).await?;
+        let mut db = Self::open_history_complete_inner(config, true).await?;
         db.backend_attribution = true;
         db.node
             .restore_backend_pending_uploads(db.identity.node)
@@ -768,6 +800,7 @@ where
     }
 
     pub(super) fn ensure_mutation_operation_admitted(&self) -> Result<(), Error> {
+        self.ensure_open_schema_admitted()?;
         if self.owner_operation_admitted {
             Ok(())
         } else {

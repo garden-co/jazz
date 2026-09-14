@@ -248,7 +248,20 @@ registration cannot author its lineage until an authority catalogue supplies it.
 An offline or unpublished target therefore cannot silently read using the old
 schema. Closing during this interval preserves the old catalogue, local rows,
 and pending writes. Recovery does not replace the durable genesis or manufacture
-physical mappings from the requested schema. A joiner with no local lineage
+physical mappings from the requested schema. This also applies to persistent
+backend replicas opened with complete-history attribution; strict serving-node
+opens retain their existing recovery contract. A remote read begun during this
+interval waits for the authenticated upstream's first full catalogue snapshot,
+then rejects if the requested schema is still absent. Local reads, retained
+prepared-query reads, point reads, subscriptions, and mutation admission do not
+fall back to the recovered schema. Cancellation releases the read's wait;
+shutdown, upstream failure, and disconnect resolve it with an error. Replacement
+connections own a new admission attempt, so late activity from an older
+connection cannot resolve that wait. Discovery uses a requested-schema point
+lookup, and only a miss needs the genesis-kind prefix and genesis-schema lookup;
+ordinary recovery still validates the entire durable catalogue once.
+
+A joiner with no local lineage
 installs the authority's genesis record, then replays the dense Active/tombstone
 catalogue chain, then applies pointers and data; it never manufactures genesis
 from its preferred client schema.

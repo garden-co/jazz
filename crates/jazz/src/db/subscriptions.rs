@@ -16,6 +16,7 @@ where
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         authorization: SerializedSubscriptionAuthorization,
     ) -> Result<SubscriptionStream, Error> {
+        self.await_open_schema_for_read(&opts).await?;
         let prepared = self
             .prepare_serialized_query_async(query, request_scope)
             .await?;
@@ -165,6 +166,7 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<QueryAttachment, Error> {
+        self.ensure_open_schema_admitted()?;
         ensure_supported_read_view(&opts)?;
         if opts.propagation == Propagation::LocalOnly {
             return Ok(self.local_query_attachment(prepared, &opts));
@@ -211,6 +213,7 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<QueryAttachment, Error> {
+        self.ensure_open_schema_admitted()?;
         ensure_supported_read_view(&opts)?;
         if opts.propagation == Propagation::LocalOnly {
             return Ok(self.local_query_attachment(prepared, &opts));
@@ -310,6 +313,7 @@ where
         open_tx_id: Option<OpenTransactionId>,
         author: Option<AuthorSubject>,
     ) -> Result<QueryAttachment, Error> {
+        self.await_open_schema_for_read(&opts).await?;
         ensure_supported_read_view(&opts)?;
         let mut node = match open_tx_id {
             Some(open_tx_id) => {
@@ -933,6 +937,7 @@ where
         authorization_mode: QueryAuthorizationMode,
         allow_pending_overlay: bool,
     ) -> Result<SubscriptionStream, Error> {
+        self.await_open_schema_for_read(&opts).await?;
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
@@ -1328,6 +1333,7 @@ where
         author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
+        self.await_open_schema_for_read(&opts).await?;
         ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;
