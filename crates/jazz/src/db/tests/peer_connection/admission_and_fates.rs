@@ -5670,6 +5670,52 @@ fn delegated_subscription_binding_survives_backend_raw_claim_refresh() {
     );
 }
 
+// Internal admission boundary shared by subscriptions, body repair and advice:
+// provider metadata must exactly match the immutable server-authenticated scope.
+#[test]
+fn scoped_relay_request_rejects_mismatched_provider_claims() {
+    let schema = owner_read_schema();
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("user".into()),
+    )]);
+    let (_client, transport) = duplex();
+    let subscriber =
+        server
+            .server
+            .accept_scope_isolated_relay_subscriber(transport, author, claims.clone(), 1);
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!()
+    };
+    for requested in [
+        BTreeMap::new(),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("role"),
+            Value::String("admin".into()),
+        )]),
+        claims.clone(),
+    ] {
+        let exact = requested == claims;
+        let admitted = admitted_request_policy_binding(
+            state.ingest_context,
+            &state.peer,
+            None,
+            Some(crate::protocol::DelegatedSessionBinding {
+                identity: author,
+                claims: requested,
+            }),
+        );
+        assert_eq!(
+            admitted.is_some(),
+            exact,
+            "only the exact provider claim snapshot is admitted"
+        );
+    }
+}
+
 // Internal: only host admission can select connection trust. Raw wire claims
 // must not grant request delegation to a session, authority, or admin link.
 #[test]
