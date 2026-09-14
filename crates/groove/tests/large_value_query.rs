@@ -1615,3 +1615,87 @@ async fn nullable_json_projection_stops_after_non_null_root_prefix() {
         "non-null classification must not read the whole JSON value"
     );
 }
+
+/// Resident chunk misses must retain the projection's work budget between
+/// retries; a maintained insertion publishes only after the whole value is classified.
+#[futures_test::test]
+async fn resident_nullable_json_projection_yields_before_publishing() {
+    let source = format!("{}null{}", " ".repeat(4095), "\n".repeat(200_000));
+    let prepared = prepare(LargeValueKind::Json, source.as_bytes()).unwrap();
+    let chunks = prepared
+        .staged_chunks
+        .iter()
+        .map(|chunk| {
+            (
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                Bytes::copy_from_slice(&chunk.encoded),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (provider, control) = TestChunkProvider::controlled(chunks);
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "documents",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new(
+                "payload",
+                groove::large_values::physical_storage_value_type(LargeValueKind::Json).nullable(),
+            ),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let families = schema.column_families();
+    let storage = MemoryStorage::new(&families).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_owned_chunk_provider(OwnedChunkProvider::new_with_budget(
+        Rc::new(provider),
+        4 * 1024 * 1024,
+    ));
+    database
+        .read_large_value_range(&prepared.value_ref, 0..source.len() as u64)
+        .await
+        .unwrap();
+    let reads = control.observed().len();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("documents").project_fields([
+            ProjectField::named("id"),
+            ProjectField::nullable_json("payload", "payload"),
+        ]))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let mut batch = database.open_batch();
+    batch.insert(
+        "documents",
+        vec![
+            Value::U64(1),
+            Value::Nullable(Some(Box::new(Value::Large(Box::new(prepared.value_ref))))),
+        ],
+    );
+    let mut write = Box::pin(database.apply_batch(batch));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(write.as_mut().poll(&mut context).is_pending());
+    assert!(
+        subscription.try_recv().is_err(),
+        "no partial publication at a work-budget yield"
+    );
+    let publication = write.await.unwrap();
+    database
+        .finish_persistence(publication.persist().await)
+        .unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        vec![(
+            vec![
+                Value::U64(1),
+                Value::Nullable(Some(Box::new(Value::Nullable(None)))),
+            ],
+            1
+        )]
+    );
+    assert_eq!(control.observed().len(), reads);
+}

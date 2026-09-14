@@ -43,6 +43,7 @@ pub(super) struct NullableJsonProjectionState {
 
 #[derive(Clone, Debug)]
 struct PendingNullableJsonProjection {
+    bytes_since_yield: usize,
     input: Arc<RecordDeltas>,
     next_delta: usize,
     values: Vec<Value>,
@@ -3154,6 +3155,7 @@ impl TickEvaluator<'_> {
             .is_none_or(|pending| pending.input.as_ref() != input.as_ref())
         {
             state.pending = Some(PendingNullableJsonProjection {
+                bytes_since_yield: 0,
                 input: Arc::clone(&input),
                 next_delta: 0,
                 values: Vec::with_capacity(project.expressions.len()),
@@ -3162,7 +3164,6 @@ impl TickEvaluator<'_> {
             });
         }
         let pending = state.pending.as_mut().expect("initialized projection");
-        let mut consumed = 0usize;
         while pending.next_delta < pending.input.deltas.len() {
             let delta = &pending.input.deltas[pending.next_delta];
             while pending.values.len() < project.expressions.len() {
@@ -3214,6 +3215,13 @@ impl TickEvaluator<'_> {
                         pending.current.as_mut().expect("initialized JSON cursor");
                     let mut classified = None;
                     while let Some(range) = cursor.next_range() {
+                        if pending.bytes_since_yield >= 64 * 1024 {
+                            pending.bytes_since_yield = 0;
+                            self.operator_states
+                                .insert(operator_key, OperatorState::NullableJson(state));
+                            cooperative_operator_yield().await;
+                            unreachable!("yield resumes through saved projection state")
+                        }
                         let inputs = self
                             .evaluation_inputs
                             .as_deref_mut()
@@ -3247,7 +3255,7 @@ impl TickEvaluator<'_> {
                             }
                         }
                         cursor.advance_to(range.end);
-                        consumed += bytes.len();
+                        pending.bytes_since_yield += bytes.len();
                         inputs.release_chunks_owned_by(node);
                         if classified.is_some() {
                             break;
@@ -3255,12 +3263,6 @@ impl TickEvaluator<'_> {
                         if cursor.remaining_bytes() == 0 {
                             classified = Some(*matched == 4);
                             break;
-                        }
-                        if consumed >= 64 * 1024 {
-                            self.operator_states
-                                .insert(operator_key, OperatorState::NullableJson(state));
-                            cooperative_operator_yield().await;
-                            unreachable!("yield resumes through saved projection state")
                         }
                     }
                     let result = classified.unwrap_or(*matched == 4);
