@@ -347,20 +347,72 @@ test("generated fingerprint expectations stay out of Git after fresh release ass
   }
 });
 
+test("Svelte declaration emission and cleanup leave source-only contracts unchanged", () => {
+  const root = mkdtempSync(join(tmpdir(), "jazz-fingerprint-cleanup-"));
+  try {
+    const packageDir = join(root, "packages/jazz-tools");
+    const runtime = join(packageDir, "src/runtime");
+    const contract = join(packageDir, "src/types/native-artifact-fingerprints.d.ts");
+    mkdirSync(runtime, { recursive: true });
+    mkdirSync(join(packageDir, "src/types"));
+    mkdirSync(join(packageDir, "scripts"));
+    writeFileSync(
+      join(packageDir, "scripts/cleanup-generated-src-types.mjs"),
+      readFileSync(
+        join(repositoryRoot, "packages/jazz-tools/scripts/cleanup-generated-src-types.mjs"),
+      ),
+    );
+    const source = readFileSync(
+      join(repositoryRoot, "packages/jazz-tools/src/types/native-artifact-fingerprints.d.ts"),
+    );
+    writeFileSync(contract, source);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["add", "."], { cwd: root });
+    // Svelte emits declarations beside the imported runtime implementations,
+    // overwriting any handwritten contracts at those locations before cleanup.
+    for (const kind of ["napi", "wasm"]) {
+      const base = join(runtime, `native-artifact-fingerprint-${kind}`);
+      writeFileSync(
+        `${base}.ts`,
+        `export const EXPECTED_${kind.toUpperCase()}_ARTIFACT_FINGERPRINT = "${fingerprint}";\n`,
+      );
+      writeFileSync(
+        `${base}.d.ts`,
+        `export declare const EXPECTED_${kind.toUpperCase()}_ARTIFACT_FINGERPRINT: "${fingerprint}";\n`,
+      );
+      writeFileSync(`${base}.d.ts.map`, "{}\n");
+    }
+    execFileSync(process.execPath, [join(packageDir, "scripts/cleanup-generated-src-types.mjs")]);
+    assert.deepEqual(readFileSync(contract), source);
+    for (const kind of ["napi", "wasm"]) {
+      assert.equal(existsSync(join(runtime, `native-artifact-fingerprint-${kind}.d.ts`)), false);
+      assert.equal(
+        existsSync(join(runtime, `native-artifact-fingerprint-${kind}.d.ts.map`)),
+        false,
+      );
+    }
+    execFileSync("git", ["diff", "--exit-code"], { cwd: root });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("source-only fingerprint declarations typecheck without supplying runtime values", () => {
   const root = mkdtempSync(join(tmpdir(), "jazz-source-fingerprints-"));
   try {
     writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
-    for (const file of [
-      "native-artifact-fingerprints.ts",
-      "native-artifact-fingerprint-napi.d.ts",
-      "native-artifact-fingerprint-wasm.d.ts",
-    ]) {
+    for (const file of ["native-artifact-fingerprints.ts"]) {
       writeFileSync(
         join(root, file),
         readFileSync(join(repositoryRoot, "packages/jazz-tools/src/runtime", file)),
       );
     }
+    writeFileSync(
+      join(root, "native-artifact-contracts.d.ts"),
+      readFileSync(
+        join(repositoryRoot, "packages/jazz-tools/src/types/native-artifact-fingerprints.d.ts"),
+      ),
+    );
     execFileSync(
       "pnpm",
       [
@@ -374,6 +426,7 @@ test("source-only fingerprint declarations typecheck without supplying runtime v
         "--outDir",
         join(root, "dist"),
         join(root, "native-artifact-fingerprints.ts"),
+        join(root, "native-artifact-contracts.d.ts"),
       ],
       {
         cwd: repositoryRoot,
@@ -407,6 +460,7 @@ test("source-only fingerprint declarations typecheck without supplying runtime v
         "--outDir",
         join(root, "dist"),
         join(root, "native-artifact-fingerprints.ts"),
+        join(root, "native-artifact-contracts.d.ts"),
       ],
       {
         cwd: repositoryRoot,
@@ -421,6 +475,31 @@ test("source-only fingerprint declarations typecheck without supplying runtime v
     execFileSync(process.execPath, [join(root, "dist/native-artifact-fingerprints.js")], {
       stdio: "pipe",
     });
+    writeFileSync(
+      join(root, "native-artifact-fingerprint-wasm.ts"),
+      "export const WRONG_EXPORT = true;\n",
+    );
+    assert.throws(
+      () =>
+        execFileSync(
+          "pnpm",
+          [
+            "exec",
+            "tsc",
+            "--noEmit",
+            "--module",
+            "nodenext",
+            "--skipLibCheck",
+            join(root, "native-artifact-fingerprints.ts"),
+            join(root, "native-artifact-contracts.d.ts"),
+          ],
+          {
+            cwd: repositoryRoot,
+            stdio: "pipe",
+          },
+        ),
+      (error) => error.stdout.toString().includes("has no exported member"),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
