@@ -1434,3 +1434,184 @@ async fn graph_streaming_checksum_failure_publishes_nothing_and_can_retry() {
     );
     assert_eq!(owned.cache_stats().active_leases, 0);
 }
+
+/// A schema-selected logical projection recognizes the complete JSON null
+/// token across windows, yields cooperatively, and retains no chunk leases
+/// after cancellation or a failed attempt. Stored JSON source remains intact.
+#[futures_test::test]
+async fn nullable_json_projection_streams_root_null_and_retries() {
+    let source = format!("{}null{}", " ".repeat(4095), "\n".repeat(200_000));
+    let prepared = prepare(LargeValueKind::Json, source.as_bytes()).unwrap();
+    let chunks = prepared
+        .staged_chunks
+        .iter()
+        .map(|chunk| {
+            (
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                Bytes::copy_from_slice(&chunk.encoded),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (provider, control) = TestChunkProvider::controlled(chunks);
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+        .await
+        .unwrap();
+    let owned = OwnedChunkProvider::new_with_budget(Rc::new(provider), 4 * 1024 * 1024);
+    database.set_owned_chunk_provider(owned.clone());
+    let descriptor = RecordDescriptor::new([(
+        "payload",
+        groove::large_values::physical_storage_value_type(LargeValueKind::Json).nullable(),
+    )]);
+    let graph = GraphBuilder::values(
+        descriptor,
+        [vec![Value::Nullable(Some(Box::new(Value::Large(
+            Box::new(prepared.value_ref.clone()),
+        ))))]],
+    )
+    .unwrap()
+    .project_fields([groove::ivm::ProjectField::nullable_json(
+        "payload", "payload",
+    )]);
+    control.fail_next(ChunkError::Backend("injected JSON read failure".to_owned()));
+    assert!(database.query_graph(graph.clone()).await.is_err());
+    assert_eq!(owned.cache_stats().active_leases, 0);
+    database
+        .read_large_value_range(&prepared.value_ref, 0..source.len() as u64)
+        .await
+        .unwrap();
+    let reads_after_warmup = control.observed().len();
+    {
+        let mut query = Box::pin(database.query_graph(graph.clone()));
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(query.as_mut().poll(&mut context), Poll::Pending));
+    }
+    assert_eq!(owned.cache_stats().active_leases, 0);
+    assert_eq!(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(
+            vec![Value::Nullable(Some(Box::new(Value::Nullable(None))))],
+            1
+        )]
+    );
+    assert_eq!(control.observed().len(), reads_after_warmup);
+    assert_eq!(owned.cache_stats().active_leases, 0);
+    assert_eq!(
+        database
+            .read_large_value_range(&prepared.value_ref, 0..source.len() as u64)
+            .await
+            .unwrap(),
+        source.as_bytes()
+    );
+}
+
+#[futures_test::test]
+async fn nullable_json_projection_preserves_presence_and_non_null_sources() {
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+        .await
+        .unwrap();
+    let descriptor = RecordDescriptor::new([(
+        "payload",
+        groove::large_values::physical_storage_value_type(LargeValueKind::Json).nullable(),
+    )]);
+    for source in [
+        None,
+        Some("null"),
+        Some(" \nnull\t"),
+        Some("{\"nested\":null}"),
+        Some("[null]"),
+        Some("\"null\""),
+    ] {
+        let input = Value::Nullable(source.map(|source| Box::new(Value::String(source.into()))));
+        let graph = GraphBuilder::values(descriptor, [vec![input]])
+            .unwrap()
+            .project_fields([groove::ivm::ProjectField::nullable_json(
+                "payload", "payload",
+            )]);
+        let expected = Value::Nullable(source.map(|source| {
+            Box::new(Value::Nullable(
+                (source.trim() != "null").then(|| Box::new(Value::String(source.into()))),
+            ))
+        }));
+        assert_eq!(
+            database
+                .query_graph(graph)
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            vec![(vec![expected], 1)]
+        );
+    }
+}
+
+#[futures_test::test]
+async fn nullable_json_projection_stops_after_non_null_root_prefix() {
+    let source = format!("{{\"padding\":\"{}\"}}", "x".repeat(2_000_000));
+    let prepared = prepare(LargeValueKind::Json, source.as_bytes()).unwrap();
+    let reference = prepared.value_ref.clone();
+    let chunks = prepared
+        .staged_chunks
+        .iter()
+        .map(|chunk| {
+            (
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                Bytes::copy_from_slice(&chunk.encoded),
+            )
+        })
+        .collect::<Vec<_>>();
+    let chunk_count = chunks.len();
+    let (provider, control) = TestChunkProvider::controlled(chunks);
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]).unwrap())
+        .await
+        .unwrap();
+    database.set_owned_chunk_provider(OwnedChunkProvider::new_with_budget(
+        Rc::new(provider),
+        128 * 1024,
+    ));
+    let descriptor = RecordDescriptor::new([(
+        "payload",
+        groove::large_values::physical_storage_value_type(LargeValueKind::Json).nullable(),
+    )]);
+    let graph = GraphBuilder::values(
+        descriptor,
+        [vec![Value::Nullable(Some(Box::new(Value::Large(
+            Box::new(reference.clone()),
+        ))))]],
+    )
+    .unwrap()
+    .project_fields([groove::ivm::ProjectField::nullable_json(
+        "payload", "payload",
+    )]);
+    // Keep the source out of the public result: query_graph deliberately hydrates
+    // returned JSON, whereas classification alone must read only its prefix.
+    let graph = graph.project_fields([ProjectField::literal("classified", Value::Bool(true))]);
+    assert_eq!(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(vec![Value::Bool(true)], 1)]
+    );
+    assert!(
+        !control.observed().is_empty(),
+        "projection must classify its input"
+    );
+    assert!(
+        control.observed().len() < chunk_count,
+        "non-null classification must not read the whole JSON value"
+    );
+}

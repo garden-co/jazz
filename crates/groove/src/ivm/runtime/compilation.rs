@@ -1870,6 +1870,7 @@ fn projection_source_ref(expression: &ProjectExpr) -> Option<&FieldRef> {
         ProjectExpr::Field(field)
         | ProjectExpr::Nullable(field)
         | ProjectExpr::NullableFlat(field)
+        | ProjectExpr::NullableJson(field)
         | ProjectExpr::RecordField { source: field, .. }
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
@@ -1882,6 +1883,7 @@ fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldR
         ProjectExpr::Field(field)
         | ProjectExpr::Nullable(field)
         | ProjectExpr::NullableFlat(field)
+        | ProjectExpr::NullableJson(field)
         | ProjectExpr::RecordField { source: field, .. }
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }

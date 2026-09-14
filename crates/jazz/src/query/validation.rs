@@ -1219,11 +1219,44 @@ fn validate_inherits(root: &TableSchema, inherits: &InheritsVia) -> Result<(), Q
     Ok(())
 }
 
+fn nullable_json_null_comparison(table: &TableSchema, column: &Operand, literal: &Operand) -> Option<String> {
+    let Operand::Column(name) = column else { return None; };
+    let column = table.columns.iter().find(|column| column.name == *name)?;
+    if !column.is_nullable_json() { return None; }
+    let Operand::Literal(value) = literal else { return None; };
+    let value = match value { Value::Nullable(Some(value)) => value.as_ref(), value => value };
+    matches!(value, Value::Nullable(None)).then(|| name.clone()).or_else(|| {
+        matches!(value, Value::String(source) if source.trim_matches([' ', '\t', '\r', '\n']) == "null").then(|| name.clone())
+    })
+}
+
 fn validate_predicate(
     table: &TableSchema,
     predicate: &mut Predicate,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
+    // JSON source and column null share a value only for nullable JSON.
+    // Rewrite this schema-aware case before generic operand type validation,
+    // which deliberately cannot infer a type from an untyped null literal.
+    if let Predicate::Eq(left, right) | Predicate::Ne(left, right) = predicate {
+        let null_column = nullable_json_null_comparison(table, left, right)
+            .or_else(|| nullable_json_null_comparison(table, right, left));
+        if let Some(column) = null_column {
+            let null = Predicate::IsNull(Operand::Column(column));
+            *predicate = if matches!(predicate, Predicate::Ne(..)) {
+                Predicate::Not(Box::new(null))
+            } else { null };
+        }
+    }
+    if let Predicate::In(column, options) = predicate {
+        if let Some(name) = options.iter().find_map(|value| nullable_json_null_comparison(table, column, value)) {
+            options.retain(|value| nullable_json_null_comparison(table, column, value).is_none());
+            let null = Predicate::IsNull(Operand::Column(name));
+            *predicate = if options.is_empty() { null } else {
+                Predicate::Any(vec![null, Predicate::In(column.clone(), options.clone())])
+            };
+        }
+    }
     match predicate {
         Predicate::All(predicates) | Predicate::Any(predicates) => predicates
             .iter_mut()

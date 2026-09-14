@@ -3836,17 +3836,25 @@ where
     Ok((graph, descriptor, metadata, routing_fields))
 }
 
+fn logical_current_cell_projection(column: &crate::schema::ColumnSchema) -> ProjectField {
+    let mut field = if column.is_nullable_json() {
+        ProjectField::nullable_json(
+            user_column_field(&column.name),
+            user_column_field(&column.name),
+        )
+    } else {
+        ProjectField::named(user_column_field(&column.name))
+    };
+    field.output_identity = records::FieldIdentity::Name(column.name.clone());
+    field
+}
+
 fn canonical_current_source_fields(
     table: &TableSchema,
     include_version: bool,
 ) -> Vec<ProjectField> {
     let mut fields = std::iter::once(ProjectField::named("row_uuid"))
-        .chain(table.columns.iter().map(|column| {
-            ProjectField::named_with_identity(
-                user_column_field(&column.name),
-                records::FieldIdentity::Name(column.name.clone()),
-            )
-        }))
+        .chain(table.columns.iter().map(logical_current_cell_projection))
         .chain([
             ProjectField::named("$createdBy"),
             ProjectField::named("$createdAt"),
@@ -3881,12 +3889,7 @@ fn storage_to_canonical_current_source_fields(
     include_settle_position: bool,
 ) -> Vec<ProjectField> {
     let mut fields = std::iter::once(ProjectField::named("row_uuid"))
-        .chain(table.columns.iter().map(|column| {
-            ProjectField::named_with_identity(
-                user_column_field(&column.name),
-                records::FieldIdentity::Name(column.name.clone()),
-            )
-        }))
+        .chain(table.columns.iter().map(logical_current_cell_projection))
         .chain([
             ProjectField::renamed("created_by", "$createdBy"),
             ProjectField::renamed("created_at", "$createdAt"),
@@ -3938,10 +3941,7 @@ fn branch_view_storage_source_fields(
                 records::FieldIdentity::Name(column.name.clone()),
             ));
         } else {
-            fields.push(ProjectField::named_with_identity(
-                user_column_field(&column.name),
-                records::FieldIdentity::Name(column.name.clone()),
-            ));
+            fields.push(logical_current_cell_projection(column));
         }
     }
     fields.extend([

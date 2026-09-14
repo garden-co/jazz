@@ -845,6 +845,32 @@ impl ColumnSchema {
             && matches!(self.column_type, GrooveColumnType::Nullable(_))
     }
 
+    pub(crate) fn logical_cell_descriptor_type(&self) -> GrooveColumnType {
+        if self.is_nullable_json() {
+            storage_column_type(self).nullable()
+        } else {
+            self.column_type.clone()
+        }
+    }
+
+    /// Interpret a cell at a logical row boundary; authored records stay raw.
+    pub(crate) fn logical_value(&self, value: Value) -> Value {
+        if !self.is_nullable_json() {
+            return value;
+        }
+        let value = match value {
+            Value::Nullable(None) => return Value::Nullable(None),
+            Value::Nullable(Some(value)) => *value,
+            value => value,
+        };
+        if matches!(&value, Value::String(source) if source.trim_matches([' ', '\t', '\r', '\n']) == "null")
+        {
+            Value::Nullable(None)
+        } else {
+            Value::Nullable(Some(Box::new(value)))
+        }
+    }
+
     /// Lower a newly authored logical cell without changing the published JSON
     /// descriptor. The enclosing version slot still records authored presence.
     pub(crate) fn storage_value(&self, value: Value) -> Value {

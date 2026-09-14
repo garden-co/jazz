@@ -151,6 +151,14 @@ pub(super) fn project_descriptor(
                         .clone();
                     ValueType::Nullable(Box::new(inner))
                 }
+                ProjectExpr::NullableJson(source) => {
+                    resolve_field_ref(input, source)?;
+                    crate::large_values::physical_storage_value_type(
+                        crate::large_values::LargeValueKind::Json,
+                    )
+                    .nullable()
+                    .nullable()
+                }
                 ProjectExpr::NullableFlat(source) => {
                     let source_idx = resolve_field_ref(input, source)?;
                     let inner = input
@@ -694,6 +702,7 @@ pub(super) fn project_field_expr(
         | ProjectExpr::RecordField { source, .. }
         | ProjectExpr::Nullable(source)
         | ProjectExpr::NullableFlat(source)
+        | ProjectExpr::NullableJson(source)
         | ProjectExpr::EnumTagRemap { source, .. }
         | ProjectExpr::EnumRemap { source, .. }
         | ProjectExpr::RecursiveEnumRemap { source, .. } => {
@@ -768,6 +777,7 @@ pub(super) fn project_field_value(
         ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => value.to_value(),
         ProjectExpr::Null(_) => Value::Nullable(None),
         ProjectExpr::Nullable(field) => Value::Nullable(Some(Box::new(resolved(field)?))),
+        ProjectExpr::NullableJson(field) => nullable_json_inline_projection(resolved(field)?)?,
         ProjectExpr::NullableFlat(field) => {
             let value = resolved(field)?;
             if matches!(value, Value::Nullable(_)) {
@@ -1133,7 +1143,8 @@ pub(super) fn raw_projection_fields(
                 ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
                     prepared_constant_field(output_desc, output_idx, value.to_value())
                 }
-                ProjectExpr::EnumTagRemap { .. }
+                ProjectExpr::NullableJson(_)
+                | ProjectExpr::EnumTagRemap { .. }
                 | ProjectExpr::EnumRemap { .. }
                 | ProjectExpr::RecursiveEnumRemap { .. } => RawProjectionField::Evaluate,
             })
@@ -1672,4 +1683,29 @@ pub(super) fn persisted_index_scan_bounds(
             end: wrap_prefix(static_scan_key(end)?),
         },
     })
+}
+
+/// Synchronous receipt for already inline JSON. Indirect classification runs
+/// through the evaluator's bounded input scheduling before it reaches here.
+pub(super) fn nullable_json_inline_projection(value: Value) -> Result<Value, IvmRuntimeError> {
+    let value = match value {
+        Value::Nullable(None) => return Ok(Value::Nullable(None)),
+        Value::Nullable(Some(value)) => *value,
+        value => value,
+    };
+    let value = match value {
+        Value::Nullable(None) => None,
+        Value::Nullable(Some(value)) => Some(*value),
+        value => Some(value),
+    };
+    let value = match value {
+        Some(Value::String(source)) if source.trim_matches([' ', '\t', '\r', '\n']) == "null" => {
+            None
+        }
+        Some(Value::Large(_)) => return Err(IvmRuntimeError::EvaluationBlocked),
+        value => value,
+    };
+    Ok(Value::Nullable(Some(Box::new(Value::Nullable(
+        value.map(Box::new),
+    )))))
 }

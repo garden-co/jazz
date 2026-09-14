@@ -71,7 +71,7 @@ required to bind authorization and lifecycle.
 
 ### Nullable JSON compatibility
 
-Nullable JSON columns have one logical null: column null and a JSON document
+`INV-DATA-27` — Nullable JSON columns have one logical null: column null and a JSON document
 whose root is `null` are equivalent for reads, predicates, and policies. This
 rule is specific to nullable JSON; non-nullable JSON and generic Groove null
 semantics are unchanged. Nested nulls, arrays, and the JSON string `"null"`
@@ -355,7 +355,9 @@ boundary; no caller may publish an unlowered oversized value or handcrafted
 descriptor.
 
 Present nullable scalar cells use the same inline/indirect physical choice
-inside their nullable wrapper. Partial reads and edits preserve that wrapper;
+inside their nullable wrapper, except nullable JSON retains the published
+non-nullable `StoredScalar(Json)` descriptor described in `INV-DATA-27`. Partial
+reads and edits preserve the applicable descriptor;
 exclusive and mergeable transactions share the same lowering seam before
 version publication.
 

@@ -2895,6 +2895,14 @@ fn lower_equality_param_filter_joins(
             .collect::<Result<Vec<_>, _>>()?;
         let mut binding =
             GraphBuilder::binding_source(binding_source_shape.clone(), binding_descriptor);
+        if join.nullable_json && is_claim_param {
+            // Missing/null claims are not an authored JSON document. Preserve
+            // the existing fail-closed claim boundary before JSON root-null
+            // normalization; a present Text("null") claim remains admissible.
+            binding = binding.filter(GroovePredicateExpr::IsNotNull {
+                field: join.param.clone(),
+            });
+        }
         let route_field = if is_claim_param {
             join.param.clone()
         } else {
@@ -2915,13 +2923,19 @@ fn lower_equality_param_filter_joins(
         // conversion. Keep a second, untouched copy of a nullable binding for
         // the policy-arm union and for the downstream result-membership
         // window, then unwrap only the copy used as the equality key.
-        let route_carrier = (join.nullable && route_is_nullable)
+        let route_carrier = (join.nullable_json || join.nullable && route_is_nullable)
             .then(|| format!("__jazz_route_carrier:{}", join.param));
         if let Some(route_carrier) = &route_carrier {
             let mut fields = binding_fields
                 .iter()
                 .cloned()
-                .map(ProjectField::named)
+                .map(|field| {
+                    if join.nullable_json && field == join.param {
+                        ProjectField::nullable_json(field.clone(), field)
+                    } else {
+                        ProjectField::named(field)
+                    }
+                })
                 .collect::<Vec<_>>();
             fields.push(ProjectField::renamed(join.param.clone(), route_carrier));
             binding = binding.project_fields(fields);
@@ -2929,7 +2943,7 @@ fn lower_equality_param_filter_joins(
         let mut projection = project_source_fields_from_prefix_rewrapping_nullable(
             source,
             LEFT_JOIN_PREFIX,
-            join.nullable.then_some(join.field.as_str()),
+            (join.nullable && !join.nullable_json).then_some(join.field.as_str()),
         );
         projection.extend(
             retained_route_fields
@@ -2940,6 +2954,38 @@ fn lower_equality_param_filter_joins(
             right_field(route_carrier.as_deref().unwrap_or(&join.param)),
             route_field.clone(),
         ));
+        if join.nullable_json {
+            // Null equality is a separate disjoint arm: SQL joins deliberately
+            // discard null keys. Keep route identity in its original carrier,
+            // including a nonnullable Text claim whose JSON source is "null".
+            let nulls = policy_join_if_needed(
+                graph.clone().filter(GroovePredicateExpr::IsNull {
+                    field: join.field.clone(),
+                }),
+                binding.clone().filter(GroovePredicateExpr::IsNull {
+                    field: join.param.clone(),
+                }),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+                request,
+            )
+            .project_fields(projection.clone());
+            let present = policy_join_if_needed(
+                graph.filter(GroovePredicateExpr::IsNotNull {
+                    field: join.field.clone(),
+                }),
+                binding.filter(GroovePredicateExpr::IsNotNull {
+                    field: join.param.clone(),
+                }),
+                [join.field],
+                [join.param],
+                request,
+            )
+            .project_fields(projection);
+            graph = GraphBuilder::union([nulls, present]);
+            retained_route_fields.insert(route_field);
+            continue;
+        }
         if join.nullable {
             graph = graph.unwrap_nullable(join.field.clone());
             binding = binding.unwrap_nullable(join.param.clone());
@@ -2961,6 +3007,7 @@ struct EqualityParamJoin {
     pub(super) param: String,
     pub(super) value_type: ValueType,
     pub(super) nullable: bool,
+    nullable_json: bool,
 }
 
 fn equality_param_join(
@@ -2976,6 +3023,10 @@ fn equality_param_join(
     else {
         return Ok(None);
     };
+    let nullable_json = [left, right].iter().any(|value| matches!(value,
+        NormalizedValueRef::SourceField { source: value_source, field }
+            if value_source == source_id && source.table_schema.columns.iter().any(|column| column.name == *field && column.is_nullable_json())
+    ));
     if let (Some((field, value_type, nullable)), NormalizedValueRef::Param(param)) =
         (source_join_field(left, source_id, source)?, right)
     {
@@ -2984,6 +3035,7 @@ fn equality_param_join(
             param: param.clone(),
             value_type,
             nullable,
+            nullable_json,
         }));
     }
     match (left, source_join_field(right, source_id, source)?) {
@@ -2993,6 +3045,7 @@ fn equality_param_join(
                 param: param.clone(),
                 value_type,
                 nullable,
+                nullable_json,
             }))
         }
         _ => Ok(None),
@@ -3553,6 +3606,46 @@ fn lower_not_predicate_inner(
     })
 }
 
+fn missing_nullable_json_claim(
+    operand: &NormalizedValueRef,
+    lowered: &LoweredValueRef,
+    request: &QueryProgramRequest,
+) -> Result<bool, UnsupportedReason> {
+    let LoweredValueRef::Literal(LiteralValue::Nullable(None)) = lowered else {
+        return Ok(false);
+    };
+    Ok(match operand {
+        NormalizedValueRef::Claim(_) => true,
+        NormalizedValueRef::Param(name) => parameter_domain_for_request(request)?
+            .claim_params
+            .contains_key(name),
+        _ => false,
+    })
+}
+
+fn nullable_json_null_literal_field(
+    left: &LoweredValueRef,
+    right: &LoweredValueRef,
+    source: &ResolvedSource,
+) -> Option<String> {
+    let (LoweredValueRef::Field(field), LoweredValueRef::Literal(value)) = (left, right) else {
+        return None;
+    };
+    if !source.table_schema.columns.iter().any(|column| {
+        column.is_nullable_json()
+            && (field == &column.name || field == &user_column_field(&column.name))
+    }) {
+        return None;
+    }
+    let mut value = value;
+    while let LiteralValue::Nullable(Some(inner)) = value {
+        value = inner;
+    }
+    (matches!(value, LiteralValue::Nullable(None))
+        || matches!(value, LiteralValue::String(source) if source.trim_matches([' ', '\t', '\r', '\n']) == "null"))
+        .then(|| field.clone())
+}
+
 fn lower_two_valued_ne(
     left: &NormalizedValueRef,
     right: &NormalizedValueRef,
@@ -3560,6 +3653,13 @@ fn lower_two_valued_ne(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    let lowered_left = lower_value_ref(left, source_id, source, request)?;
+    let lowered_right = lower_value_ref(right, source_id, source, request)?;
+    if let Some(field) = nullable_json_null_literal_field(&lowered_left, &lowered_right, source)
+        .or_else(|| nullable_json_null_literal_field(&lowered_right, &lowered_left, source))
+    {
+        return Ok(GroovePredicateExpr::IsNotNull { field });
+    }
     // Groove comparisons deliberately use SQL-null semantics. Jazz comparison
     // predicates are two-valued, so unequal means either exactly one operand is
     // null or both are non-null and Groove reports inequality.
@@ -3596,8 +3696,25 @@ fn lower_compare(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    let left_operand = left;
+    let right_operand = right;
     let left = lower_value_ref(left, source_id, source, request)?;
     let right = lower_value_ref(right, source_id, source, request)?;
+    if let Some(field) = nullable_json_null_literal_field(&left, &right, source)
+        .or_else(|| nullable_json_null_literal_field(&right, &left, source))
+    {
+        match op {
+            ComparisonOp::Eq
+                if missing_nullable_json_claim(left_operand, &left, request)?
+                    || missing_nullable_json_claim(right_operand, &right, request)? =>
+            {
+                return Ok(constant_predicate(false));
+            }
+            ComparisonOp::Eq => return Ok(GroovePredicateExpr::IsNull { field }),
+            ComparisonOp::Ne => return Ok(GroovePredicateExpr::IsNotNull { field }),
+            _ => {}
+        }
+    }
     let kind = predicate_kind(op);
 
     match (left, right) {

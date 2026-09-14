@@ -511,6 +511,17 @@ pub(super) fn select_current_access_path(
     }
     let mut probes = Vec::new();
     for column in table.global_current_indexed_columns() {
+        // Published JSON indexes contain literal source, whereas this logical
+        // column equates every root-null source with null. Raw probes may
+        // underselect, including index intersections, until an equivalent
+        // candidate access path exists.
+        if table
+            .columns
+            .iter()
+            .any(|candidate| candidate.name == column && candidate.is_nullable_json())
+        {
+            continue;
+        }
         if let Some(value) = equalities.get(&column).cloned() {
             probes.push((
                 column.clone(),

@@ -4426,7 +4426,10 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
     values.push(Value::Uuid(content.row_uuid().0));
     for column in &table.columns {
         values.push(Value::Nullable(
-            cells.get(&column.name).cloned().map(Box::new),
+            cells
+                .get(&column.name)
+                .cloned()
+                .map(|value| Box::new(column.logical_value(value))),
         ));
     }
     values.push(row_author_value(created.created_by())?);
@@ -4454,7 +4457,10 @@ pub(super) fn current_row_from_cells_with_explicit_provenance(
     values.push(Value::Uuid(row_uuid.0));
     for column in &table.columns {
         values.push(Value::Nullable(
-            cells.get(&column.name).cloned().map(Box::new),
+            cells
+                .get(&column.name)
+                .cloned()
+                .map(|value| Box::new(column.logical_value(value))),
         ));
     }
     values.push(row_author_value(provenance.created_by)?);
@@ -4482,9 +4488,10 @@ fn current_row_prefix_and_cells_from_version(
         return Ok(values);
     }
     let borrowed = version.record.borrowed();
-    for (idx, _) in table.columns.iter().enumerate() {
+    for (idx, column) in table.columns.iter().enumerate() {
         values.push(Value::Nullable(
-            nullable_value(borrowed.get_idx(HistoryRowRecord::USER_CELLS + idx)?)?.map(Box::new),
+            nullable_value(borrowed.get_idx(HistoryRowRecord::USER_CELLS + idx)?)?
+                .map(|value| Box::new(column.logical_value(value))),
         ));
     }
     Ok(values)
@@ -4537,7 +4544,7 @@ impl CurrentRowDescriptorCacheEntry {
             columns: table
                 .columns
                 .iter()
-                .map(|column| (column.name.clone(), column.column_type.clone()))
+                .map(|column| (column.name.clone(), column.logical_cell_descriptor_type()))
                 .collect(),
             descriptor,
         }
@@ -4551,7 +4558,7 @@ impl CurrentRowDescriptorCacheEntry {
                 .iter()
                 .zip(&table.columns)
                 .all(|((name, column_type), column)| {
-                    name == &column.name && column_type == &column.column_type
+                    name == &column.name && column_type == &column.logical_cell_descriptor_type()
                 })
     }
 }
@@ -4565,7 +4572,7 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
         .chain(table.columns.iter().map(|column| {
             records::DescriptorField::new(
                 user_column_field(&column.name),
-                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                records::ValueType::Nullable(Box::new(column.logical_cell_descriptor_type())),
             )
             .with_identity(records::FieldIdentity::Name(column.name.clone()))
         }))
@@ -4594,15 +4601,18 @@ pub(super) fn current_row_from_positional_cells(
             table.columns.iter().map(|column| {
                 (
                     column.name.clone(),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                    records::ValueType::Nullable(Box::new(column.logical_cell_descriptor_type())),
                 )
             }),
         ),
     );
     let mut values = vec![Value::Uuid(row_uuid.0)];
-    for (idx, _column) in table.columns.iter().enumerate() {
+    for (idx, column) in table.columns.iter().enumerate() {
         values.push(Value::Nullable(
-            cells.get(idx).and_then(Clone::clone).map(Box::new),
+            cells
+                .get(idx)
+                .and_then(Clone::clone)
+                .map(|value| Box::new(column.logical_value(value))),
         ));
     }
     let raw = descriptor.create(&values)?;
@@ -4671,8 +4681,21 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 }
 
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
+    let null_source;
+    let storage_value = if column.is_nullable_json() {
+        match value {
+            Value::Nullable(None) => {
+                null_source = Value::String("null".to_owned());
+                &null_source
+            }
+            Value::Nullable(Some(value)) => value.as_ref(),
+            value => value,
+        }
+    } else {
+        value
+    };
     records::RecordDescriptor::new([("cell", crate::schema::storage_column_type(column))])
-        .create(&[column.storage_value(value.clone())])?;
+        .create(std::slice::from_ref(storage_value))?;
     Ok(())
 }
 

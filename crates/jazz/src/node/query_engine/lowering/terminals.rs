@@ -3288,6 +3288,7 @@ fn content_version_witness_graph_from_visible_graph(
             ProjectExpr::Field(key)
             | ProjectExpr::Nullable(key)
             | ProjectExpr::NullableFlat(key)
+            | ProjectExpr::NullableJson(key)
             | ProjectExpr::RecordField { source: key, .. }
             | ProjectExpr::EnumTagRemap { source: key, .. }
             | ProjectExpr::EnumRemap { source: key, .. }
@@ -3665,6 +3666,7 @@ fn bind_witness_carrier_fields(mut fields: Vec<ProjectField>) -> Vec<ProjectFiel
             ProjectExpr::Field(source)
             | ProjectExpr::Nullable(source)
             | ProjectExpr::NullableFlat(source)
+            | ProjectExpr::NullableJson(source)
             | ProjectExpr::EnumTagRemap { source, .. }
             | ProjectExpr::EnumRemap { source, .. }
             | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),

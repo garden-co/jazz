@@ -4371,3 +4371,151 @@ fn queued_resident_insert_publishes_subscription_in_one_admission_turn() {
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row.row_uuid(), write.row_uuid());
 }
+
+/// Regression intent from Hussein Raoouf's #2736: insert, populate, clear,
+/// and omit an optional JSON cell through the Db API. Nullable root null is
+/// the same logical null, while nested nulls remain JSON data.
+#[test]
+fn nullable_json_round_trips_null_and_populated_cells() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("name", PublicColumnType::Text)
+                .nullable_column("metadata", PublicColumnType::Json { schema: None }),
+        ),
+    );
+    let db = open_db(0x6d, AuthorSubject::SYSTEM, &schema);
+    let inserted = db
+        .insert(
+            "documents",
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("first".into())),
+                ("metadata".to_owned(), Value::Nullable(None)),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let query = db.prepare_query(&db.table("documents")).unwrap();
+    for source in [
+        None,
+        Some("{\"nested\":null}"),
+        None,
+        Some(" \nnull\t"),
+        Some("[null]"),
+        Some("\"null\""),
+    ] {
+        let authored = source
+            .map(|text| Value::Nullable(Some(Box::new(Value::String(text.into())))))
+            .unwrap_or(Value::Nullable(None));
+        db.update(
+            "documents",
+            inserted,
+            BTreeMap::from([("metadata".to_owned(), authored.clone())]),
+            Default::default(),
+        )
+        .unwrap();
+        // A separate patch omits metadata and must retain its latest value.
+        db.update(
+            "documents",
+            inserted,
+            BTreeMap::from([("name".to_owned(), Value::String("patched".into()))]),
+            Default::default(),
+        )
+        .unwrap();
+        let rows = db.read(&query).unwrap();
+        assert_eq!(rows.len(), 1);
+        let expected = if source.is_none_or(|text| text.trim() == "null") {
+            Value::Nullable(None)
+        } else {
+            authored
+        };
+        assert_eq!(rows[0].cell(&schema.tables[0], "metadata"), Some(expected));
+        for predicate in [
+            crate::query::is_null(crate::query::col("metadata")),
+            crate::query::eq(
+                crate::query::col("metadata"),
+                crate::query::lit(Value::Nullable(None)),
+            ),
+            crate::query::eq(
+                crate::query::col("metadata"),
+                crate::query::lit(" \nnull\t"),
+            ),
+            crate::query::in_list(
+                crate::query::col("metadata"),
+                [
+                    crate::query::lit("null"),
+                    crate::query::lit("{\"absent\":true}"),
+                ],
+            ),
+        ] {
+            let filtered = db
+                .prepare_query(&db.table("documents").filter(predicate.clone()))
+                .unwrap_or_else(|error| panic!("{predicate:?}: {error}"));
+            assert_eq!(
+                db.read(&filtered).unwrap().len(),
+                usize::from(source.is_none_or(|text| text.trim() == "null"))
+            );
+        }
+    }
+}
+
+#[test]
+fn nullable_json_null_policies_allow_both_null_forms_and_reject_objects() {
+    let null_policy = public_literal_eq("metadata", PublicValue::Text(" \nnull\t".to_owned()));
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .nullable_column("metadata", PublicColumnType::Json { schema: None })
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(null_policy.clone())
+                        .with_insert(null_policy.clone())
+                        .with_update(Some(null_policy.clone()), null_policy),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0x6e; 16]);
+    let db = open_db(0x6e, author, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = block_on(db.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    for value in [
+        Value::Nullable(None),
+        Value::Nullable(Some(Box::new(Value::String("null".into())))),
+    ] {
+        let write = db
+            .insert(
+                "documents",
+                BTreeMap::from([("metadata".to_owned(), value)]),
+                Default::default(),
+            )
+            .unwrap();
+        let id = write.row_uuid();
+        db.tick().unwrap();
+        server.tick().unwrap();
+        db.tick().unwrap();
+        block_on(write.wait(DurabilityTier::Global)).unwrap();
+        let denied = db.update(
+            "documents",
+            id,
+            BTreeMap::from([(
+                "metadata".to_owned(),
+                Value::Nullable(Some(Box::new(Value::String("{\"nested\":null}".into())))),
+            )]),
+            Default::default(),
+        );
+        match block_on(denied) {
+            Err(error) => assert_eq!(error.code, ErrorCode::WriteRejected),
+            Ok(write) => assert_authority_rejects_staged_write(&db, &server, &write),
+        }
+    }
+    let query = db.prepare_query(&db.table("documents")).unwrap();
+    let rows = db.read(&query).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.cell(&schema.tables[0], "metadata") == Some(Value::Nullable(None)))
+    );
+}

@@ -1752,6 +1752,14 @@ fn lift_literal_filter_node(
                                 project_source_from_joined_filter_input(&input_output, source)?;
                             Ok(ProjectField::nullable(source, field.output_name.clone()))
                         }
+                        ProjectExpr::NullableJson(source) => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            let mut projected = field.clone();
+                            projected.expression =
+                                ProjectExpr::NullableJson(FieldRef::name(source));
+                            Ok(projected)
+                        }
                         ProjectExpr::NullableFlat(source) => {
                             let source =
                                 project_source_from_joined_filter_input(&input_output, source)?;
@@ -2144,6 +2152,14 @@ fn project_fields_against_rewritten_input(
                 ProjectExpr::Field(field_ref) => (field_ref, None),
                 ProjectExpr::Nullable(field_ref) => (field_ref, Some(false)),
                 ProjectExpr::NullableFlat(field_ref) => (field_ref, Some(true)),
+                ProjectExpr::NullableJson(source) => {
+                    let source =
+                        rewritten_projection_source(&original_output, &rewritten_output, source)?;
+                    let mut projected = field.clone();
+                    projected.expression = ProjectExpr::NullableJson(FieldRef::name(source));
+                    return Ok(projected);
+                }
+
                 ProjectExpr::EnumTagRemap { source, tags } => {
                     let source =
                         rewritten_projection_source(&original_output, &rewritten_output, source)?;

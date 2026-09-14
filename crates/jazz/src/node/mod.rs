@@ -1845,10 +1845,14 @@ impl CurrentRow {
     /// Cell value by application column name using the table schema to resolve position.
     pub fn cell(&self, table: &TableSchema, column: &str) -> Option<Value> {
         let idx = self.application_column_index(table, column)?;
+        let schema = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)?;
         match self.record.borrowed().get_idx(idx).ok()? {
             Value::Nullable(None) => None,
-            Value::Nullable(Some(value)) => Some(*value),
-            value => Some(value),
+            Value::Nullable(Some(value)) => Some(schema.logical_value(*value)),
+            value => Some(schema.logical_value(value)),
         }
     }
 

@@ -3465,3 +3465,103 @@ fn required_nested_nullable_includes_preserve_parent_descriptors() {
         assert!(removed.rows.is_empty());
     }
 }
+
+#[test]
+fn nullable_json_bound_predicates_keep_null_and_non_null_routes_distinct() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .nullable_column("payload", PublicColumnType::Json { schema: None })
+                .nullable_column("baseline", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0x71, AuthorSubject::SYSTEM, &schema);
+    for (index, source) in ["null", " \nnull\t", "{\"nested\":null}", "\"null\""]
+        .into_iter()
+        .enumerate()
+    {
+        db.insert(
+            "documents",
+            BTreeMap::from([
+                ("payload".to_owned(), Value::String(source.into())),
+                (
+                    "baseline".to_owned(),
+                    if source.trim() == "null" {
+                        Value::Nullable(None)
+                    } else {
+                        Value::Nullable(Some(Box::new(Value::String(source.into()))))
+                    },
+                ),
+            ]),
+            InsertOptions {
+                row_id: Some(row(index as u8 + 1)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for (bound, expected) in [
+        ("null", vec![row(1), row(2)]),
+        (" \nnull\t", vec![row(1), row(2)]),
+        ("{\"nested\":null}", vec![row(3)]),
+        ("\"null\"", vec![row(4)]),
+    ] {
+        for predicate in [
+            eq(col("payload"), param("value")),
+            eq(param("value"), col("payload")),
+            crate::query::in_list(col("payload"), [param("value")]),
+        ] {
+            let query = db
+                .prepare_query_bound(
+                    &Query::from("documents").filter(predicate),
+                    BTreeMap::from([(
+                        "value".to_owned(),
+                        Value::Nullable(Some(Box::new(Value::String(bound.into())))),
+                    )]),
+                )
+                .unwrap();
+            let mut actual = row_ids(&db.read(&query).unwrap());
+            actual.sort();
+            assert_eq!(actual, expected, "bound {bound:?}");
+        }
+        for negate_eq in [false, true] {
+            let make_predicate = |column: &str| {
+                if negate_eq {
+                    crate::query::not(eq(col(column), param("value")))
+                } else {
+                    crate::query::ne(col(column), param("value"))
+                }
+            };
+            // Preserve the existing ordinary nullable-string negation behavior.
+            let count = if bound.trim() == "null" {
+                2
+            } else {
+                let baseline = db
+                    .prepare_query_bound(
+                        &Query::from("documents").filter(make_predicate("baseline")),
+                        BTreeMap::from([(
+                            "value".to_owned(),
+                            Value::Nullable(Some(Box::new(Value::String(bound.into())))),
+                        )]),
+                    )
+                    .unwrap();
+                db.read(&baseline).unwrap().len()
+            };
+            let predicate = make_predicate("payload");
+            let query = db
+                .prepare_query_bound(
+                    &Query::from("documents").filter(predicate),
+                    BTreeMap::from([(
+                        "value".to_owned(),
+                        Value::Nullable(Some(Box::new(Value::String(bound.into())))),
+                    )]),
+                )
+                .unwrap();
+            assert_eq!(
+                db.read(&query).unwrap().len(),
+                count,
+                "negated bound {bound:?}"
+            );
+        }
+    }
+}

@@ -2338,3 +2338,72 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
         "removing every physical application family and the engine-owned large-value metadata plane must fail even though transaction records remain"
     );
 }
+
+/// The public Db reads and extends an actual published-alpha.54 store. Raw
+/// history inspection supplements the public assertions because public rows
+/// cannot prove immutable authored bytes survived a logical null projection.
+#[test]
+fn published_alpha54_nullable_json_reopens_and_extends_without_reencoding_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let archive = decode_native_physical_fixture(
+        include_str!("../../../fixtures/published-alpha54-nullable-json-rocksdb.tar.gz.base64"),
+        "40c92628f5ffc921705548d4ff78c1cd556e5cca83559ced1fff35ac281a13ec",
+        "published alpha.54 nullable JSON RocksDB",
+    ).unwrap();
+    let path = unpack_native_rocksdb_archive(directory.path(), &archive).unwrap();
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("documents")
+            .column("name", PublicColumnType::Text)
+            .nullable_column("payload", PublicColumnType::Json { schema: None }),
+    ));
+    let table = &schema.tables[0];
+    let open = || {
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        YieldingStorage::wrap(ImmediateRocksDbStorage::open_with_durability_and_codec_profile(
+            &path, &refs, RocksDurability::FullSync, &epoch_1_storage_codec_profile().unwrap(),
+        ).expect("open published JSON store"))
+    };
+    let history = || {
+        let mut state = crate::db::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
+        state.query_table_versions("documents").unwrap().into_iter()
+            .map(|version| version.record.raw().to_vec()).collect::<BTreeSet<_>>()
+    };
+    let before = history();
+    assert_eq!(before.len(), 9, "eight published rows plus prior object version");
+    let open_db = || crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
+        schema: schema.clone(), storage: open(),
+        identity: crate::db::DbIdentity { node: node(42), author: AuthorSubject::SYSTEM },
+        id_source: None,
+    })).unwrap();
+    let db = open_db();
+    let all = db.prepare_query(&db.table("documents")).unwrap();
+    let rows = db.read(&all).unwrap();
+    assert_eq!(rows.len(), 8);
+    for (index, source) in [
+        None, Some("{\"answer\":43}".to_owned()), None,
+        Some("{\"nested\":null}".to_owned()), Some("[null,1]".to_owned()),
+        Some("\"null\"".to_owned()), Some(format!("{{\"padding\":\"{}\"}}", "x".repeat(70000))), None,
+    ].into_iter().enumerate() {
+        let found = rows.iter().find(|entry| entry.row_uuid() == row(43 + index as u8)).unwrap();
+        let expected = Value::Nullable(source.map(|source| Box::new(Value::String(source))));
+        let actual = found.cell(table, "payload");
+        if index == 0 { assert!(actual.is_none() || actual == Some(expected)); }
+        else { assert_eq!(actual, Some(expected), "published row {index}"); }
+    }
+    let nulls = db.prepare_query(&db.table("documents").filter(crate::query::is_null(crate::query::col("payload")))).unwrap();
+    assert_eq!(db.read(&nulls).unwrap().len(), 3, "omitted and both inline/indirect root nulls");
+    db.update("documents", row(44), BTreeMap::from([("payload".to_owned(), Value::Nullable(None))]), Default::default()).unwrap();
+    db.update("documents", row(44), BTreeMap::from([("name".to_owned(), v("current writer"))]), Default::default()).unwrap();
+    crate::db::block_on(db.close()).unwrap();
+    drop(db);
+    let after = history();
+    assert!(before.is_subset(&after), "all original authored history bytes remain exact");
+    let db = open_db();
+    let all = db.prepare_query(&db.table("documents")).unwrap();
+    let rows = db.read(&all).unwrap();
+    let cleared = rows.iter().find(|entry| entry.row_uuid() == row(44)).unwrap();
+    assert_eq!(cleared.cell(table, "payload"), Some(Value::Nullable(None)));
+    assert_eq!(cleared.cell(table, "name"), Some(v("current writer")));
+    crate::db::block_on(db.close()).unwrap();
+}

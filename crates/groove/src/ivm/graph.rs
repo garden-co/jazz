@@ -1150,6 +1150,18 @@ impl ProjectField {
             output_name,
         }
     }
+    /// Project an optional JSON cell to one logical null while retaining the
+    /// enclosing authored-presence slot. Callers opt in using schema metadata;
+    /// ordinary String and Nullable projections retain their semantics.
+    pub fn nullable_json(source: impl Into<String>, output_name: impl Into<String>) -> Self {
+        let output_name = output_name.into();
+        Self {
+            expression: ProjectExpr::NullableJson(FieldRef::name(source)),
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
+        }
+    }
+
     pub fn named(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -1373,6 +1385,7 @@ impl ProjectField {
             | ProjectExpr::RecordField { source, .. }
             | ProjectExpr::Nullable(source)
             | ProjectExpr::NullableFlat(source)
+            | ProjectExpr::NullableJson(source)
             | ProjectExpr::EnumTagRemap { source, .. }
             | ProjectExpr::EnumRemap { source, .. }
             | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
@@ -1398,6 +1411,7 @@ pub enum ProjectExpr {
     Null(ValueType),
     Nullable(FieldRef),
     NullableFlat(FieldRef),
+    NullableJson(FieldRef),
     EnumTagRemap {
         source: FieldRef,
         tags: Vec<Option<u8>>,

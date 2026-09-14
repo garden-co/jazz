@@ -1,0 +1,52 @@
+{
+  "fixture": "published-alpha54-nullable-json-rocksdb.tar.gz.base64",
+  "archiveSha256": "40c92628f5ffc921705548d4ff78c1cd556e5cca83559ced1fff35ac281a13ec",
+  "packages": [
+    {
+      "name": "jazz-tools",
+      "version": "2.0.0-alpha.54",
+      "filename": "jazz-tools-2.0.0-alpha.54.tgz",
+      "integrity": "sha512-KMU3BQza1RLgYEvsuAuXgE7BDf2GrnfWui1m3+dbt0ZlpFYtApgGaIdkAbPQKMCiY9MkXgFEvdcQRsr0clp4hg==",
+      "shasum": "b6264fce01f020af4e49d419c46c7c3f198ef3d3"
+    },
+    {
+      "name": "jazz-napi",
+      "version": "2.0.0-alpha.54",
+      "filename": "jazz-napi-2.0.0-alpha.54.tgz",
+      "integrity": "sha512-hIil/Tt/TbTTWbVa6ca68s/mZBaN6CTupcwixUYp8h7II1c3dDFXqv0Z90OcvUEqhYc2JFCC+MaWcQyZyvSXsQ==",
+      "shasum": "67f0bb85c9df2150575f9d585dbb57992ce5fa19"
+    }
+  ],
+  "nativeProvenance": {
+    "schema": 1,
+    "kind": "napi",
+    "profile": "release",
+    "git": {
+      "head": "71676612e331d7bc0f554a8e0fcba244d9b786ec",
+      "tree": "6c9a77c20a625fdea93c612a4cac54f5b85e4f33",
+      "dirtyDiff": "0437c0384997d1a071aafea634c6ecb43f0d8a16f372881755e4afaf591f18b1"
+    },
+    "cargoLock": "0ed6792a054ac9d1e7dfa0e59f5890c5346fd19ed4d378f5b03bd774c4847ad5",
+    "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+    "tools": {
+      "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: x86_64-unknown-linux-gnu\nrelease: 1.93.1\nLLVM version: 21.1.8",
+      "wasmPack": "not-applicable",
+      "wasmBindgen": "not-applicable",
+      "wasmOpt": "not-applicable",
+      "napi": "unavailable: napi is not on PATH"
+    },
+    "toolchainInputs": "367390d3201357fb0ba5cb7504e84b01b06e3652c7457af535c01215ed9d4742",
+    "target": "x86_64-unknown-linux-gnu",
+    "features": "default",
+    "packageInputs": "579cb3c5c81916ac87e99dc2efe44c563f76df8463c24c5f2535819ffddc5af8",
+    "artifacts": [
+      {
+        "file": "jazz-napi.linux-x64-gnu.node",
+        "sha256": "d9fb4fae46b4537be15db1a71ecd243d4ceef69112d2bdfac0b76b0dda9fd942"
+      }
+    ],
+    "nativeArtifactFingerprint": "755ce5a60fcafd312a697770532a067f7e9ab934ac524abd1ad71dd53d533ba8"
+  },
+  "producer": "dev/fixtures/produce-alpha54-nullable-json.mjs",
+  "boundary": "Published NAPI typed-cell API with published scalar carrier, registered nullable JSON schema; published high-level optional cell encoding rejects present values."
+}

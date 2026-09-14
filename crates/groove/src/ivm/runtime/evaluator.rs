@@ -1,6 +1,7 @@
 //! Per-tick evaluator state, memoization, arrangements, and recursive execution.
 
 use super::*;
+use std::collections::VecDeque;
 
 fn plan_expr_fields(expressions: &[PlanExpr]) -> BTreeSet<String> {
     expressions
@@ -30,6 +31,23 @@ pub(super) enum OperatorState {
     Recursive(AsOf<RecursiveState, Tick>),
     CollectBy(CollectByIncrementalState),
     StreamingChecksum(Box<StreamingChecksumOperatorState>),
+    NullableJson(Box<NullableJsonProjectionState>),
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct NullableJsonProjectionState {
+    pending: Option<PendingNullableJsonProjection>,
+    // Full immutable descriptors avoid treating a hash as collision-free identity.
+    classifications: VecDeque<(crate::large_values::LargeValueRef, bool)>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingNullableJsonProjection {
+    input: Arc<RecordDeltas>,
+    next_delta: usize,
+    values: Vec<Value>,
+    current: Option<(crate::large_values::LargeValueCursor, usize)>,
+    output: Vec<RecordDelta>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -549,6 +567,14 @@ pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
         OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByIncrementalState::default())),
         OpType::CollectBy(_) => OperatorState::CollectBy(CollectByIncrementalState::default()),
         OpType::StreamingChecksum(_) => OperatorState::StreamingChecksum(Box::default()),
+        OpType::MapProject(project)
+            if project
+                .expressions
+                .iter()
+                .any(|field| matches!(field.expression, ProjectExpr::NullableJson(_))) =>
+        {
+            OperatorState::NullableJson(Box::default())
+        }
         _ => OperatorState::Stateless,
     }
 }
@@ -1264,39 +1290,52 @@ impl TickEvaluator<'_> {
                 }
                 OpType::MapProject(project) => {
                     let input = self.update_unary_input(graph_node, node).await?;
-                    #[cfg(feature = "cold-settle-attribution")]
-                    let projection_started = std::time::Instant::now();
-                    let raw_projection =
-                        self.raw_projection_fields(node, project, &input.descriptor, output_desc)?;
-                    let result = NodeState::update_map_project(
-                        project,
-                        output_desc,
-                        &input,
-                        raw_projection.as_deref(),
-                        false,
-                    );
-                    #[cfg(feature = "cold-settle-attribution")]
-                    if let Ok(output) = &result {
-                        crate::cold_settle_attribution::record_map_node(
-                            node.0,
-                            self.context.eval_mode == EvalMode::Hydrate,
-                            input.deltas.len(),
-                            output.deltas.len(),
-                            projection_started.elapsed().as_nanos() as u64,
-                            || {
-                                format!(
-                                    "inputs={:?} projection={project:?}",
-                                    graph_node.descriptor.inputs
-                                )
-                            },
+                    if project
+                        .expressions
+                        .iter()
+                        .any(|field| matches!(field.expression, ProjectExpr::NullableJson(_)))
+                    {
+                        self.update_nullable_json_projection(node, project, output_desc, input)
+                            .await
+                    } else {
+                        #[cfg(feature = "cold-settle-attribution")]
+                        let projection_started = std::time::Instant::now();
+                        let raw_projection = self.raw_projection_fields(
+                            node,
+                            project,
+                            &input.descriptor,
+                            output_desc,
+                        )?;
+                        let result = NodeState::update_map_project(
+                            project,
+                            output_desc,
+                            &input,
+                            raw_projection.as_deref(),
+                            false,
                         );
-                        crate::cold_settle_attribution::record_map(
-                            self.context.eval_mode == EvalMode::Hydrate,
-                            input.deltas.len(),
-                            output.deltas.len(),
-                        );
+                        #[cfg(feature = "cold-settle-attribution")]
+                        if let Ok(output) = &result {
+                            crate::cold_settle_attribution::record_map_node(
+                                node.0,
+                                self.context.eval_mode == EvalMode::Hydrate,
+                                input.deltas.len(),
+                                output.deltas.len(),
+                                projection_started.elapsed().as_nanos() as u64,
+                                || {
+                                    format!(
+                                        "inputs={:?} projection={project:?}",
+                                        graph_node.descriptor.inputs
+                                    )
+                                },
+                            );
+                            crate::cold_settle_attribution::record_map(
+                                self.context.eval_mode == EvalMode::Hydrate,
+                                input.deltas.len(),
+                                output.deltas.len(),
+                            );
+                        }
+                        result
                     }
-                    result
                 }
                 OpType::StreamingChecksum(checksum) => {
                     let input = self.update_unary_input(graph_node, node).await?;
@@ -3092,6 +3131,168 @@ impl TickEvaluator<'_> {
             .first()
             .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
         self.update_node(input).await
+    }
+
+    async fn update_nullable_json_projection(
+        &mut self,
+        node: NodeId,
+        project: &MapProjectOp,
+        output_desc: RecordDescriptor,
+        input: Arc<RecordDeltas>,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let operator_key = self.operator_key(node)?;
+        let operator = self
+            .operator_states
+            .remove(&operator_key)
+            .unwrap_or_else(|| operator_state_for(&OpType::MapProject(project.clone())));
+        let OperatorState::NullableJson(mut state) = operator else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+        };
+        if state
+            .pending
+            .as_ref()
+            .is_none_or(|pending| pending.input.as_ref() != input.as_ref())
+        {
+            state.pending = Some(PendingNullableJsonProjection {
+                input: Arc::clone(&input),
+                next_delta: 0,
+                values: Vec::with_capacity(project.expressions.len()),
+                current: None,
+                output: Vec::with_capacity(input.deltas.len()),
+            });
+        }
+        let pending = state.pending.as_mut().expect("initialized projection");
+        let mut consumed = 0usize;
+        while pending.next_delta < pending.input.deltas.len() {
+            let delta = &pending.input.deltas[pending.next_delta];
+            while pending.values.len() < project.expressions.len() {
+                let index = pending.values.len();
+                let expression = &project.expressions[index];
+                let ProjectExpr::NullableJson(source) = &expression.expression else {
+                    pending.values.push(project_field_value(
+                        expression,
+                        index,
+                        output_desc,
+                        &pending.input.descriptor,
+                        delta.raw(),
+                    )?);
+                    continue;
+                };
+                let source_index = resolve_field_ref(&pending.input.descriptor, source)?;
+                let value = delta
+                    .borrowed(&pending.input.descriptor)
+                    .get_idx(source_index)?;
+                let mut leaf = &value;
+                while let Value::Nullable(Some(inner)) = leaf {
+                    leaf = inner;
+                }
+                let Value::Large(reference) = leaf else {
+                    pending.values.push(nullable_json_inline_projection(value)?);
+                    continue;
+                };
+                if reference.kind != crate::large_values::LargeValueKind::Json {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                }
+                let cached = state
+                    .classifications
+                    .iter()
+                    .find(|(key, _)| key == reference.as_ref())
+                    .map(|(_, result)| *result);
+                let is_null = if let Some(result) = cached {
+                    result
+                } else {
+                    if pending.current.is_none() {
+                        pending.current = Some((
+                            crate::large_values::LargeValueCursor::new(
+                                reference.as_ref().clone(),
+                                4096,
+                            )?,
+                            0,
+                        ));
+                    }
+                    let (cursor, matched) =
+                        pending.current.as_mut().expect("initialized JSON cursor");
+                    let mut classified = None;
+                    while let Some(range) = cursor.next_range() {
+                        let inputs = self
+                            .evaluation_inputs
+                            .as_deref_mut()
+                            .ok_or(IvmRuntimeError::EvaluationBlocked)?;
+                        inputs.set_chunk_scope(Some(node));
+                        let result = crate::large_values::byte_range_attempt(
+                            cursor.value(),
+                            range.clone(),
+                            inputs,
+                        );
+                        inputs.set_chunk_scope(None);
+                        let bytes = match result {
+                            Ok(bytes) => bytes,
+                            Err(IvmRuntimeError::EvaluationBlocked) => {
+                                self.operator_states
+                                    .insert(operator_key, OperatorState::NullableJson(state));
+                                return Err(IvmRuntimeError::EvaluationBlocked);
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        for byte in &bytes {
+                            let whitespace = matches!(byte, b' ' | b'\t' | b'\r' | b'\n');
+                            if (*matched == 0 || *matched == 4) && whitespace {
+                                continue;
+                            }
+                            if *matched < 4 && *byte == b"null"[*matched] {
+                                *matched += 1;
+                            } else {
+                                classified = Some(false);
+                                break;
+                            }
+                        }
+                        cursor.advance_to(range.end);
+                        consumed += bytes.len();
+                        inputs.release_chunks_owned_by(node);
+                        if classified.is_some() {
+                            break;
+                        }
+                        if cursor.remaining_bytes() == 0 {
+                            classified = Some(*matched == 4);
+                            break;
+                        }
+                        if consumed >= 64 * 1024 {
+                            self.operator_states
+                                .insert(operator_key, OperatorState::NullableJson(state));
+                            cooperative_operator_yield().await;
+                            unreachable!("yield resumes through saved projection state")
+                        }
+                    }
+                    let result = classified.unwrap_or(*matched == 4);
+                    pending.current = None;
+                    if state.classifications.len() == 32 {
+                        state.classifications.pop_front();
+                    }
+                    state
+                        .classifications
+                        .push_back((reference.as_ref().clone(), result));
+                    result
+                };
+                pending
+                    .values
+                    .push(Value::Nullable(Some(Box::new(Value::Nullable(
+                        (!is_null).then(|| Box::new(Value::Large(reference.clone()))),
+                    )))));
+            }
+            pending.output.push(RecordDelta {
+                record: output_desc.create(&pending.values)?.into(),
+                weight: delta.weight,
+            });
+            pending.values.clear();
+            pending.next_delta += 1;
+        }
+        let completed = state.pending.take().expect("completed projection");
+        self.operator_states
+            .insert(operator_key, OperatorState::NullableJson(state));
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas: completed.output,
+        })
     }
 
     async fn update_streaming_checksum(
