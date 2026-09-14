@@ -3063,9 +3063,27 @@ where
         next
     }
 
+    pub(super) fn ensure_open_schema_admitted(&self) -> Result<(), Error> {
+        if self.requires_open_schema_admission
+            && !self
+                .node
+                .node
+                .borrow()
+                .catalogue_schemas()
+                .contains_key(&self.schema_version_id)
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "opened schema is awaiting published catalogue admission; connect to the authority",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn current_write_schema_for_query(
         &self,
     ) -> Result<(JazzSchema, SchemaVersionId), Error> {
+        self.ensure_open_schema_admitted()?;
         if self.schema_view_is_fixed {
             return Ok((self.schema.clone(), self.schema_version_id));
         }

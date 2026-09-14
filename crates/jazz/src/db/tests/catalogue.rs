@@ -2,6 +2,140 @@
 
 use super::*;
 
+/// Alice reopens an offline replica directly at Bob's published next schema.
+/// Bob A -> Alice A -> offline -> Bob A→B -> Alice opens B -> catalogue -> rows.
+/// Uses the binding-facing Db boundary to verify durable recovery independently
+/// of environment startup; full transport authentication belongs to shell tests.
+#[test]
+fn offline_replica_opens_requested_schema_only_after_published_lineage() {
+    let make_schema = |extra: bool| {
+        let builder = PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("items").column("label", PublicColumnType::Text));
+        build_public_db_test_schema(if extra {
+            builder.table(
+                PublicTableSchemaBuilder::new("controls").column("value", PublicColumnType::Text),
+            )
+        } else {
+            builder
+        })
+    };
+    let base = make_schema(false);
+    let target = make_schema(true);
+    let families = target.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, _) = groove::storage::TestStorage::controlled(&refs);
+    let reopen = storage.clone();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xe1; 16]),
+        author: AuthorSubject::SYSTEM,
+    };
+    let alice = block_on(Db::open(DbConfig::new(base.clone(), storage, identity))).unwrap();
+    let bob = open_core(0xe2, AuthorSubject::SYSTEM, &base);
+    let (upstream, downstream) = duplex();
+    let accepted = bob.accept_subscriber_with_trust(
+        downstream,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let connection = block_on(alice.connect_upstream(upstream));
+    for _ in 0..20 {
+        bob.tick().unwrap();
+        alice.tick().unwrap();
+    }
+    block_on(alice.detach_connection_async(&connection)).unwrap();
+    drop(connection);
+    drop(accepted);
+    // A local pending edit must survive both recovery and later catalogue sync.
+    let write = alice
+        .insert(
+            "items",
+            BTreeMap::from([(
+                "label".to_owned(),
+                Value::String("retained pending edit".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+    drop(write);
+    block_on(alice.close()).unwrap();
+    drop(alice);
+
+    let storage = block_on(reopen.clone().reopen(families.clone())).unwrap();
+    let alice = block_on(Db::open(DbConfig::new(target.clone(), storage, identity)))
+        .expect("missing published schema must not prevent opening the sync owner");
+    let unavailable = alice.prepare_query(&Query::from("items")).unwrap_err();
+    assert!(
+        unavailable
+            .to_string()
+            .contains("awaiting published catalogue admission")
+    );
+    assert!(block_on(alice.register_schema_view(target.clone())).is_err());
+    // Closing while offline neither admits B nor destroys A's data.
+    block_on(alice.close()).unwrap();
+    drop(alice);
+    let storage = block_on(reopen.clone().reopen(families.clone())).unwrap();
+    let alice = block_on(Db::open(DbConfig::new(base.clone(), storage, identity))).unwrap();
+    assert_eq!(
+        prepared_all(&alice, &Query::from("items"), ReadOpts::default()).len(),
+        1
+    );
+    block_on(alice.close()).unwrap();
+    drop(alice);
+
+    let lens = MigrationLens::new(
+        base.version_id(),
+        target.version_id(),
+        vec![TableLens {
+            source_table: "items".to_owned(),
+            target_table: "items".to_owned(),
+            ops: vec![],
+        }],
+    )
+    .unwrap();
+    let publication = bob
+        .author_schema_lineage_publication(
+            SchemaVersion::new(target.clone()),
+            lens,
+            vec!["controls".to_owned()],
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    bob.publish_schema_with_lens(1, publication).unwrap();
+    bob.set_current_write_schema(CurrentWriteSchema {
+        revision: 1,
+        schema: target.version_id(),
+    })
+    .unwrap();
+    let storage = block_on(reopen.clone().reopen(families.clone())).unwrap();
+    let alice = block_on(Db::open(DbConfig::new(target.clone(), storage, identity))).unwrap();
+    let (upstream, downstream) = duplex();
+    let accepted = bob.accept_subscriber_with_trust(
+        downstream,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let connection = block_on(alice.connect_upstream(upstream));
+    for _ in 0..30 {
+        bob.tick().unwrap();
+        alice.tick().unwrap();
+    }
+    let rows = prepared_all(&alice, &Query::from("items"), ReadOpts::default());
+    assert_eq!(rows.len(), 1);
+    assert!(prepared_all(&alice, &Query::from("controls"), ReadOpts::default()).is_empty());
+    block_on(alice.detach_connection_async(&connection)).unwrap();
+    drop(connection);
+    drop(accepted);
+    block_on(alice.close()).unwrap();
+    drop(alice);
+    let storage = block_on(reopen.reopen(families)).unwrap();
+    let alice = block_on(Db::open(DbConfig::new(target, storage, identity))).unwrap();
+    assert_eq!(
+        prepared_all(&alice, &Query::from("items"), ReadOpts::default()).len(),
+        1
+    );
+}
+
 #[test]
 fn trusted_snapshot_preserves_offline_enum_rows_and_reopens() {
     assert_snapshot_preserves_offline_enum_rows(false);

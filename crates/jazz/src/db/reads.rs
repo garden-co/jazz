@@ -126,6 +126,16 @@ where
     /// be suspended on storage. The synchronous API requires an idle owner.
     pub async fn prepare_query_async(&self, query: &Query) -> Result<PreparedQuery, Error> {
         let mut node = self.node.node.lock().await;
+        if self.requires_open_schema_admission
+            && !node
+                .catalogue_schemas()
+                .contains_key(&self.schema_version_id)
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "opened schema is awaiting published catalogue admission; connect to the authority",
+            ));
+        }
         let (schema, schema_version) = if self.schema_view_is_fixed {
             (self.schema.clone(), self.schema_version_id)
         } else {

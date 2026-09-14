@@ -1516,6 +1516,7 @@ where
     schema: JazzSchema,
     schema_version_id: SchemaVersionId,
     schema_view_is_fixed: bool,
+    requires_open_schema_admission: bool,
     schema_views: Rc<RefCell<BTreeMap<SchemaViewId, JazzSchema>>>,
     identity: DbIdentity,
     node: Rc<Node<S>>,

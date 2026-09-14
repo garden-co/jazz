@@ -44,6 +44,69 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, false).await
     }
 
+    /// Recover a partial client replica using a schema already admitted by its
+    /// durable catalogue. The caller's requested schema remains a Db view only;
+    /// this path never publishes it or allocates its physical mapping.
+    pub(crate) async fn new_client(
+        node_uuid: NodeUuid,
+        requested_schema: JazzSchema,
+        storage: S,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
+        let meta_database = Database::new_with_storage_layout(
+            JazzSchema::empty().lower_to_groove(),
+            storage,
+            StorageLayout::jazz_class_v1(),
+        )
+        .await?;
+        let mut genesis = None;
+        let mut schemas = BTreeMap::new();
+        for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[]).await? {
+            let record = raw.record();
+            match codec::CatalogueRecordKind::from_key(
+                record.get_u64(CatalogueRowRecord::FIELD_KIND_IDX)?,
+            )? {
+                codec::CatalogueRecordKind::Genesis => {
+                    if genesis.replace(SchemaVersionId(record.get_uuid(
+                        CatalogueRowRecord::FIELD_ID_IDX,
+                    )?)).is_some() {
+                        return Err(Error::InvalidStoredValue("duplicate catalogue genesis marker"));
+                    }
+                }
+                codec::CatalogueRecordKind::Schema => {
+                    let schema = codec::decode_catalogue_schema(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if schema.id != SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                        || schemas.insert(schema.id, schema).is_some()
+                    {
+                        return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let schema = match genesis {
+            Some(genesis) if !schemas.contains_key(&requested_schema.version_id()) => schemas
+                .remove(&genesis)
+                .ok_or(Error::InvalidStoredValue("durable genesis schema is missing"))?
+                .schema,
+            _ => requested_schema,
+        };
+        // Normal recovery remains the authority for all catalogue, lineage,
+        // physical mapping, and pending-write validation.
+        Self::new_with_options_inner(
+            node_uuid, schema, meta_database.into_storage(), false,
+            CatalogueBootstrapState::Ready,
+            #[cfg(feature = "testing")]
+            None,
+            #[cfg(any(test, feature = "testing"))]
+            None,
+        ).await
+    }
+
     /// Direct-message test peers share one authority catalogue for each fixture
     /// schema, just as network peers exchange the catalogue before row versions.
     #[cfg(any(test, feature = "testing"))]

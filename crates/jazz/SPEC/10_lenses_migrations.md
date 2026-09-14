@@ -240,8 +240,15 @@ schema. Catalogue sequence establishes the only permitted projection order;
 receiving a later schema or a terminal cache does not authorize skipping a
 missing predecessor.
 
-Opening an existing database with a caller-supplied schema that disagrees with
-its durable genesis is a hard bootstrap error. A joiner with no local lineage
+Strict node recovery rejects a caller-supplied schema absent from the durable
+catalogue. A partial client replica may first discover an admitted durable schema
+and recover under that schema so its authenticated upstream connection can start.
+The requested application schema remains unadmitted: reads fail closed and view
+registration cannot author its lineage until an authority catalogue supplies it.
+An offline or unpublished target therefore cannot silently read using the old
+schema. Closing during this interval preserves the old catalogue, local rows,
+and pending writes. Recovery does not replace the durable genesis or manufacture
+physical mappings from the requested schema. A joiner with no local lineage
 installs the authority's genesis record, then replays the dense Active/tombstone
 catalogue chain, then applies pointers and data; it never manufactures genesis
 from its preferred client schema.
