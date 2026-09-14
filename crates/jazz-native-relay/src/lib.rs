@@ -7393,10 +7393,24 @@ mod tests {
                 self.accounts.borrow_mut().insert(key, account);
                 account
             };
+            // Match the production React Native account adapter: provider
+            // claims accompany the bearer as local advisory policy metadata.
+            // Omitting them made this fixture disagree with its signed role
+            // claim once the server admitted an exact scope-relay binding.
+            use base64::Engine;
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(bearer.split('.').nth(1).unwrap())
+                .unwrap();
+            let mut claims: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_slice(&payload).unwrap();
+            for registered in ["sub", "exp", "nbf", "iat", "iss", "aud", "jti"] {
+                claims.remove(registered);
+            }
             let request = serde_json::json!({
                 "server_url": server_url, "registry": registry,
                 "app_id": app_id, "env": "test", "account_id": account,
                 "issuer": issuer, "subject": subject, "jwt": bearer,
+                "claims": claims,
             });
             let root = storage_root.to_str().unwrap().as_bytes();
             let request = serde_json::to_vec(&request).expect("private session JSON encodes");
