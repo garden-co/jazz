@@ -235,7 +235,18 @@ where
         F: FnOnce(QueryAttachment),
         E: Fn() -> bool,
     {
-        self.await_open_schema_for_read(&opts).await?;
+        {
+            let admission = self.await_open_schema_for_read(&opts);
+            let mut admission = std::pin::pin!(admission);
+            std::future::poll_fn(|cx| match admission.as_mut().poll(cx) {
+                Poll::Pending if coverage_expired() => Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Timed out waiting for query coverage",
+                ))),
+                outcome => outcome,
+            })
+            .await?;
+        }
         let decoded: Query = crate::wire::decode_postcard_exact(query)
             .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
         let is_relation = decoded.relation.is_some();

@@ -38,6 +38,13 @@ fn offline_catalogue_remote_read<'a>(
 fn offline_catalogue_serialized_read(
     db: &Db<groove::storage::TestStorage>,
 ) -> Pin<Box<dyn Future<Output = Result<SerializedReadResult, Error>> + '_>> {
+    offline_catalogue_serialized_read_with_deadline(db, None)
+}
+
+fn offline_catalogue_serialized_read_with_deadline(
+    db: &Db<groove::storage::TestStorage>,
+    deadline: Option<std::time::Instant>,
+) -> Pin<Box<dyn Future<Output = Result<SerializedReadResult, Error>> + '_>> {
     Box::pin(async move {
         let query = postcard::to_allocvec(&Query::from("items")).unwrap();
         db.all_serialized_query(
@@ -50,7 +57,7 @@ fn offline_catalogue_serialized_read(
             None,
             None,
             false,
-            || false,
+            || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline),
             |_| {},
         )
         .await
@@ -176,6 +183,17 @@ fn assert_offline_replica_schema_bootstrap(backend: bool) {
     assert!(block_on(alice.begin_exclusive(OpenTransactionId::new())).is_err());
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     // Cancellation before the first catalogue must not affect a later waiter.
+    let mut expired = offline_catalogue_serialized_read_with_deadline(
+        &alice,
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(10)),
+    );
+    assert!(expired.as_mut().poll(&mut context).is_pending());
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    match expired.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(Err(error)) => assert_eq!(error.code, ErrorCode::NotObserved),
+        _ => panic!("schema admission must preserve the serialized read deadline"),
+    }
+    drop(expired);
     let mut cancelled = offline_catalogue_remote_read(&alice, &retained_query);
     assert!(cancelled.as_mut().poll(&mut context).is_pending());
     drop(cancelled);
@@ -296,11 +314,36 @@ fn assert_offline_replica_schema_bootstrap(backend: bool) {
         AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
-    let connection = block_on(alice.connect_upstream(upstream));
+    let old_connection = block_on(alice.connect_upstream(upstream));
+    let (replacement_upstream, replacement_downstream) = duplex();
+    let replacement_accepted = bob.accept_subscriber_with_trust(
+        replacement_downstream,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let connection = block_on(alice.connect_upstream(replacement_upstream));
+    assert!(
+        matches!(waiting.as_mut().poll(&mut context), Poll::Ready(Err(_))),
+        "replacement must reject old waiter"
+    );
+    drop(waiting);
+    let mut waiting = offline_catalogue_serialized_read(&alice);
+    assert!(waiting.as_mut().poll(&mut context).is_pending());
     for _ in 0..30 {
         bob.tick().unwrap();
-        alice.tick().unwrap();
+        block_on(old_connection.borrow_mut().tick()).unwrap();
     }
+    assert!(
+        waiting.as_mut().poll(&mut context).is_pending(),
+        "stale catalogue must not resolve new waiter"
+    );
+    for _ in 0..30 {
+        bob.tick().unwrap();
+        block_on(connection.borrow_mut().tick()).unwrap();
+    }
+    block_on(alice.detach_connection_async(&old_connection)).unwrap();
+    drop(old_connection);
+    drop(replacement_accepted);
     assert!(matches!(
         waiting.as_mut().poll(&mut context),
         std::task::Poll::Ready(Ok(_))

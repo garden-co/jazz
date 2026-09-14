@@ -252,7 +252,8 @@ physical mappings from the requested schema. This also applies to persistent
 backend replicas opened with complete-history attribution; strict serving-node
 opens retain their existing recovery contract. A remote read begun during this
 interval waits for the authenticated upstream's first full catalogue snapshot,
-then rejects if the requested schema is still absent. Local reads, retained
+then rejects if the requested schema is still absent. The serialized read's
+existing coverage deadline also bounds this admission wait. Local reads, retained
 prepared-query reads, point reads, subscriptions, and mutation admission do not
 fall back to the recovered schema. Cancellation releases the read's wait;
 shutdown, upstream failure, and disconnect resolve it with an error. Replacement
