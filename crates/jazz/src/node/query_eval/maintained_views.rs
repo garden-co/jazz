@@ -260,6 +260,20 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    #[cfg(test)]
+    pub(crate) fn local_maintained_version_records_for_test(
+        &self,
+        local: &LocalMaintainedViewSubscription,
+        tx_id: TxId,
+    ) -> Result<Vec<crate::protocol::VersionRecord>, Error> {
+        local
+            .maintained
+            .versions_by_tx(tx_id)
+            .iter()
+            .map(|version| self.version_record_from_row(version))
+            .collect()
+    }
+
     #[allow(dead_code)] // Test-only and feature-gated direct view callers keep the no-owner form.
     pub(crate) async fn open_maintained_view_subscription_in_authorization_mode(
         &mut self,
@@ -986,6 +1000,7 @@ where
             &row,
             schema_alias,
             &version.branch_key(),
+            Some(&version),
         )?))
     }
 

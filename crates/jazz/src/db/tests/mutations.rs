@@ -4467,6 +4467,9 @@ fn nullable_json_null_policies_allow_both_null_forms_and_reject_objects() {
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("documents")
                 .nullable_column("metadata", PublicColumnType::Json { schema: None })
+                .column("__jazz_authored_version", PublicColumnType::Text)
+                .column("__jazz_authored_version_schema", PublicColumnType::Text)
+                .column("__jazz_authored_version_branch", PublicColumnType::Text)
                 .policies(
                     PublicTablePolicies::new()
                         .with_select(null_policy.clone())
@@ -4481,19 +4484,37 @@ fn nullable_json_null_policies_allow_both_null_forms_and_reject_objects() {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(db.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut transactions = Vec::new();
+    let mut written_rows = Vec::new();
     for value in [
         Value::Nullable(None),
-        Value::Nullable(Some(Box::new(Value::String("null".into())))),
+        Value::Nullable(Some(Box::new(Value::String(" \nnull\t".into())))),
         Value::String(format!("{}null{}", " ".repeat(4095), "\n".repeat(90_000))),
     ] {
         let write = db
             .insert(
                 "documents",
-                BTreeMap::from([("metadata".to_owned(), value)]),
+                BTreeMap::from([
+                    ("metadata".to_owned(), value),
+                    (
+                        "__jazz_authored_version".to_owned(),
+                        Value::String("ordinary payload".into()),
+                    ),
+                    (
+                        "__jazz_authored_version_schema".to_owned(),
+                        Value::String("ordinary schema".into()),
+                    ),
+                    (
+                        "__jazz_authored_version_branch".to_owned(),
+                        Value::String("ordinary branch".into()),
+                    ),
+                ]),
                 Default::default(),
             )
             .unwrap();
         let id = write.row_uuid();
+        transactions.push(write.mergeable_tx_id());
+        written_rows.push(id);
         // Indirect JSON also transfers its immutable chunk dependencies.
         for _ in 0..32 {
             db.tick().unwrap();
@@ -4522,4 +4543,239 @@ fn nullable_json_null_policies_allow_both_null_forms_and_reject_objects() {
         rows.iter()
             .all(|row| row.cell(&schema.tables[0], "metadata") == Some(Value::Nullable(None)))
     );
+    // The settled receiver re-evaluates the predicate over covered immutable
+    // inputs, including the indirect source whose root null needs chunk reads.
+    let observer = open_db(0x7e, author, &schema);
+    let (observer_transport, server_transport) = duplex();
+    let _observer_upstream = block_on(observer.connect_upstream(observer_transport));
+    let _observer_subscriber = server.accept_subscriber(server_transport, author);
+    let observer_pump = block_on(_observer_upstream.lock()).io_pump();
+    let server_pump = block_on(_observer_subscriber.lock()).io_pump();
+    // Bindings drive auxiliary chunk I/O independently while a semantic call
+    // is suspended. A bare duplex test must service that same boundary: a cold
+    // Text read also cannot finish if it only drives sequential semantic ticks.
+    let tick_observer = || {
+        let mut tick = Box::pin(observer.tick());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..10_000 {
+            if let std::task::Poll::Ready(result) =
+                std::future::Future::poll(tick.as_mut(), &mut cx)
+            {
+                return result.unwrap();
+            }
+            for (source, destination) in [
+                (&observer_pump, &server_pump),
+                (&server_pump, &observer_pump),
+            ] {
+                if let Some(message) = source.take_outbound(64) {
+                    assert!(block_on(destination.route_incoming(message)).is_ok());
+                }
+            }
+            std::thread::yield_now();
+        }
+        panic!("cold receiver tick did not complete with auxiliary chunk progress");
+    };
+    let mut remote = prepared_subscribe(
+        &observer,
+        &Query::from("documents").filter(is_null(col("metadata"))),
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            local_updates: LocalUpdates::Deferred,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
+    for _ in 0..32 {
+        db.tick().unwrap();
+        server.tick().unwrap();
+        tick_observer();
+    }
+    tick_observer();
+    let settled = opened_rows(next_settled_opening(&mut remote));
+    assert_eq!(settled.len(), 3);
+    assert!(
+        settled
+            .iter()
+            .all(|row| { row.cell(&schema.tables[0], "metadata") == Some(Value::Nullable(None)) })
+    );
+    for row in &settled {
+        assert_eq!(
+            row.cell(&schema.tables[0], "__jazz_authored_version"),
+            Some(Value::String("ordinary payload".into()))
+        );
+        assert_eq!(
+            row.cell(&schema.tables[0], "__jazz_authored_version_schema"),
+            Some(Value::String("ordinary schema".into()))
+        );
+        assert_eq!(
+            row.cell(&schema.tables[0], "__jazz_authored_version_branch"),
+            Some(Value::String("ordinary branch".into()))
+        );
+    }
+    // Inspect the receiver's decoded witness terminal, not merely its stored
+    // incoming CommitUnit: logical projection must retain each original body.
+    let assert_terminal_witness = |tx_id| {
+        let SyncMessage::CommitUnit {
+            versions: original, ..
+        } = server.node().borrow_mut().commit_unit_for(tx_id).unwrap()
+        else {
+            panic!("commit unit");
+        };
+        let state = remote._state.borrow();
+        let SubscriptionKind::Prepared {
+            maintained_subscription: Some(maintained),
+            ..
+        } = &state.kind
+        else {
+            panic!("maintained receiver");
+        };
+        let decoded = observer
+            .node
+            .node()
+            .borrow()
+            .local_maintained_version_records_for_test(maintained, tx_id)
+            .unwrap();
+        assert!(
+            decoded == original,
+            "decoded receiver witnesses retain exact authored bytes"
+        );
+    };
+    for tx_id in transactions.iter().copied() {
+        assert_terminal_witness(tx_id);
+    }
+    let mut immediate = prepared_subscribe(
+        &observer,
+        &Query::from("documents").filter(is_null(col("metadata"))),
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            local_updates: LocalUpdates::Immediate,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
+    for _ in 0..32 {
+        tick_observer();
+        server.tick().unwrap();
+    }
+    tick_observer();
+    assert_eq!(opened_rows(next_settled_opening(&mut immediate)).len(), 3);
+    let updated = observer
+        .update(
+            "documents",
+            written_rows[2],
+            BTreeMap::from([
+                ("metadata".to_owned(), Value::String(" \nnull\t".into())),
+                (
+                    "__jazz_authored_version".to_owned(),
+                    Value::String("updated ordinary payload".into()),
+                ),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    let inserted = observer
+        .insert(
+            "documents",
+            BTreeMap::from([
+                ("metadata".to_owned(), Value::String("null".into())),
+                (
+                    "__jazz_authored_version".to_owned(),
+                    Value::String("new ordinary payload".into()),
+                ),
+                (
+                    "__jazz_authored_version_schema".to_owned(),
+                    Value::String("new ordinary schema".into()),
+                ),
+                (
+                    "__jazz_authored_version_branch".to_owned(),
+                    Value::String("new ordinary branch".into()),
+                ),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    // Existing and newly inserted local rows coexist with covered authority
+    // input before settlement; the deferred subscription catches up afterward.
+    let mut immediate_rows = settled
+        .iter()
+        .map(|row| (row.row_uuid(), row.clone()))
+        .collect::<BTreeMap<_, _>>();
+    while let Some(event) = immediate.try_next_event() {
+        if let SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        } = event
+        {
+            for row in added.into_iter().chain(updated) {
+                immediate_rows.insert(row.row_uuid(), row.row);
+            }
+            for id in removed {
+                immediate_rows.remove(&id.row_uuid);
+            }
+        }
+    }
+    assert_eq!(immediate_rows.len(), 4);
+    assert!(immediate_rows.contains_key(&inserted.row_uuid()));
+    assert_eq!(
+        immediate_rows[&written_rows[2]].cell(&schema.tables[0], "__jazz_authored_version"),
+        Some(Value::String("updated ordinary payload".into()))
+    );
+    for _ in 0..32 {
+        tick_observer();
+        server.tick().unwrap();
+        db.tick().unwrap();
+    }
+    tick_observer();
+    block_on(updated.wait(DurabilityTier::Global)).unwrap();
+    block_on(inserted.wait(DurabilityTier::Global)).unwrap();
+    {
+        let state = remote._state.borrow();
+        let SubscriptionKind::Prepared {
+            maintained_subscription: Some(maintained),
+            ..
+        } = &state.kind
+        else {
+            panic!("maintained receiver");
+        };
+        assert!(
+            observer
+                .node
+                .node()
+                .borrow()
+                .local_maintained_version_records_for_test(maintained, transactions[2])
+                .unwrap()
+                .is_empty(),
+            "negative terminal delta releases the previous indirect witness"
+        );
+    }
+    assert_terminal_witness(updated.mergeable_tx_id());
+    assert_terminal_witness(inserted.mergeable_tx_id());
+    transactions.extend([updated.mergeable_tx_id(), inserted.mergeable_tx_id()]);
+    // Public logical rows cannot prove authored byte preservation. Compare the
+    // actual immutable CommitUnit bodies after a fresh receiver's coverage ingest.
+    for tx_id in transactions {
+        let SyncMessage::CommitUnit {
+            versions: original, ..
+        } = server.node().borrow_mut().commit_unit_for(tx_id).unwrap()
+        else {
+            panic!("commit unit");
+        };
+        let SyncMessage::CommitUnit {
+            versions: received, ..
+        } = observer
+            .node
+            .node()
+            .borrow_mut()
+            .commit_unit_for(tx_id)
+            .unwrap()
+        else {
+            panic!("commit unit");
+        };
+        assert_eq!(
+            received, original,
+            "covered forwarding preserves exact authored source bodies"
+        );
+    }
 }

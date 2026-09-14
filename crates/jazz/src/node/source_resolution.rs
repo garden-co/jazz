@@ -809,12 +809,27 @@ where
         Ok(rows)
     }
 
+    #[cfg(test)]
     pub(super) async fn projected_snapshot_current_rows(
         &mut self,
         table: &str,
         read_schema_version: SchemaVersionId,
         snapshot: &Snapshot,
     ) -> Result<Vec<CurrentRow>, Error> {
+        Ok(self
+            .projected_snapshot_current_rows_with_versions(table, read_schema_version, snapshot)
+            .await?
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect())
+    }
+
+    pub(super) async fn projected_snapshot_current_rows_with_versions(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        snapshot: &Snapshot,
+    ) -> Result<Vec<(CurrentRow, VersionRow)>, Error> {
         let read_table = self.table_in_schema(table, read_schema_version)?.clone();
         let mut content = BTreeMap::<RowUuid, VersionRow>::new();
         let mut deletions = BTreeMap::<RowUuid, VersionRow>::new();
@@ -889,13 +904,18 @@ where
                     updated,
                     &cells,
                 ) {
-                    Ok(row) => rows.push(row),
+                    Ok(row) => rows.push((row, content)),
                     Err(error) if is_unrepresentable_enum_projection(&error) => {}
                     Err(error) => return Err(error),
                 }
             }
         }
-        sort_current_rows(&mut rows);
+        rows.sort_by(|(left, _), (right, _)| {
+            left.row_uuid()
+                .to_bytes()
+                .cmp(&right.row_uuid().to_bytes())
+                .then_with(|| left.record.raw().cmp(right.record.raw()))
+        });
         Ok(rows)
     }
 

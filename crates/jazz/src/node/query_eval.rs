@@ -1223,13 +1223,19 @@ where
                 .scope_physical_table(request.reads.primary.read_schema, &occurrence.table)?];
             let mut graph = GraphBuilder::input_source(shared.id, shared.descriptor.clone());
             if shared.descriptor != descriptor {
-                graph = graph.project(
-                    descriptor
-                        .fields()
-                        .iter()
-                        .map(|field| field.name.clone().expect("covered input fields are named")),
-                );
+                graph = graph.project_fields(descriptor.fields().iter().map(|field| {
+                    let name = field.name.as_ref().expect("covered input fields are named");
+                    let mut projection = groove::ivm::ProjectField::named(name);
+                    projection.expression =
+                        groove::ivm::ProjectExpr::Field(groove::ivm::FieldRef::stored_name(name));
+                    projection.output_identity =
+                        field.identity.clone().expect("compiler-owned identity");
+                    projection
+                }));
             }
+            let table =
+                self.table_in_schema(&occurrence.table, request.reads.primary.read_schema)?;
+            graph = read_sources::normalize_current_source_graph(&table, descriptor, graph);
             runtime_sources.insert(occurrence.clone(), graph);
             runtime_source_descriptors.insert(occurrence, descriptor);
         }
@@ -3967,6 +3973,8 @@ where
         // Keep logical source identity unchanged: only the immutable payload
         // coordinate follows the row's authored schema across a table rename.
         let mut witness_table_names = BTreeMap::new();
+        let mut witness_descriptors = BTreeMap::new();
+        let encoded_witness_tables = terminal_schemas.encoded_witness_tables();
         for logical_name in tables.keys() {
             let table_id =
                 self.physical_table_id_for_schema(shape.schema_version(), logical_name)?;
@@ -3975,6 +3983,18 @@ where
                     continue;
                 };
                 for (authored_name, table_mapping) in &mapping.tables {
+                    if table_mapping.table_id == table_id
+                        && encoded_witness_tables.contains(logical_name)
+                    {
+                        let authored_table = self.table_in_schema(authored_name, *schema_id)?;
+                        witness_descriptors.insert(
+                            (logical_name.clone(), *alias),
+                            (
+                                authored_name.clone(),
+                                authored_table.history_storage_table().record_schema(),
+                            ),
+                        );
+                    }
                     if table_mapping.table_id == table_id && authored_name != logical_name {
                         witness_table_names
                             .insert((logical_name.clone(), *alias), authored_name.clone());
@@ -3983,6 +4003,7 @@ where
             }
         }
         maintained.set_witness_table_names(witness_table_names);
+        maintained.set_witness_descriptors(witness_descriptors);
         if storage_backed_result_materialization {
             maintained.enable_storage_backed_result_materialization();
         }

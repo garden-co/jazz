@@ -189,6 +189,12 @@ pub(crate) struct SourceRowShape {
 /// Concrete source metadata fields emitted for one requirement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SourceMetadataFields {
+    /// Exact immutable authored payload, separate from logical query cells.
+    EncodedVersion {
+        payload_field: String,
+        schema_field: String,
+        branch_field: String,
+    },
     /// Version identity fields for payload/replacement witnesses.
     VersionWitnesses {
         /// Schema version field.

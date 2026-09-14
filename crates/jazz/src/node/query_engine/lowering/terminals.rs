@@ -2509,20 +2509,24 @@ fn fact_output_with_terminal(
         ProgramFactKey::VersionWitnesses => {
             let version = version_witness_fields(&source.row_shape)?;
             let witness = version_witness_schema(source_id, source, &version);
+            let mut deletion_witness = witness.clone();
+            deletion_witness.encoded_version = None;
             ProgramFactSchema::VersionWitnesses(VersionWitnessSchemas {
                 role_field: "event_kind".to_owned(),
                 content: Some(witness.clone()),
-                deletion: Some(witness),
+                deletion: Some(deletion_witness),
                 routing_param_fields,
             })
         }
         ProgramFactKey::ReplacementWitnesses => {
             let version = version_witness_fields(&source.row_shape)?;
             let witness = version_witness_schema(source_id, source, &version);
+            let mut deletion_witness = witness.clone();
+            deletion_witness.encoded_version = None;
             ProgramFactSchema::ReplacementWitnesses(VersionWitnessSchemas {
                 role_field: "event_kind".to_owned(),
                 content: Some(witness.clone()),
-                deletion: Some(witness),
+                deletion: Some(deletion_witness),
                 routing_param_fields,
             })
         }
@@ -3763,15 +3767,31 @@ fn inline_version_witness_fields_for_tagged_rows(
         ProjectField::named("updated_at"),
         ProjectField::null_typed("_deletion", ValueType::Nullable(Box::new(ValueType::U8))),
     ];
-    fields.extend(source.table_schema.columns.iter().map(|column| {
-        // CoveredInput sources and ordinary current sources can differ only
-        // in whether a missing authored cell has already been wrapped. Keep
-        // the witness contract identical to the physical-history path above.
-        ProjectField::nullable_flat(
-            user_column_field(&column.name),
-            table_user_column_field(&source.table_schema.name, &column.name),
-        )
-    }));
+    if let Some(SourceMetadataFields::EncodedVersion {
+        payload_field,
+        schema_field,
+        branch_field,
+    }) = source
+        .row_shape
+        .metadata
+        .get(&SourceMetadataRequirement::VersionPayloads)
+    {
+        fields.extend([
+            ProjectField::named(payload_field),
+            ProjectField::named(schema_field),
+            ProjectField::named(branch_field),
+        ]);
+    } else {
+        fields.extend(source.table_schema.columns.iter().map(|column| {
+            // CoveredInput sources and ordinary current sources can differ only
+            // in whether a missing authored cell has already been wrapped. Keep
+            // the witness contract identical to the physical-history path above.
+            ProjectField::nullable_flat(
+                user_column_field(&column.name),
+                table_user_column_field(&source.table_schema.name, &column.name),
+            )
+        }));
+    }
     if let Some(branch_or_prefix) = version.branch_or_prefix_field {
         fields.push(ProjectField::named(branch_or_prefix));
     }
@@ -3999,6 +4019,22 @@ fn version_witness_schema(
     version: &VersionWitnessFieldRefs,
 ) -> VersionWitnessSchema {
     VersionWitnessSchema {
+        encoded_version: match source
+            .row_shape
+            .metadata
+            .get(&SourceMetadataRequirement::VersionPayloads)
+        {
+            Some(SourceMetadataFields::EncodedVersion {
+                payload_field,
+                schema_field,
+                branch_field,
+            }) => Some((
+                payload_field.clone(),
+                schema_field.clone(),
+                branch_field.clone(),
+            )),
+            _ => None,
+        },
         source: source_id.program_source_id(),
         descriptor: source.row_shape.descriptor,
         identity: VersionIdentityFields {
@@ -4101,6 +4137,17 @@ fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
     let mut fields = BTreeSet::new();
     for metadata in row_shape.metadata.values() {
         match metadata {
+            SourceMetadataFields::EncodedVersion {
+                payload_field,
+                schema_field,
+                branch_field,
+            } => {
+                fields.extend([
+                    payload_field.clone(),
+                    schema_field.clone(),
+                    branch_field.clone(),
+                ]);
+            }
             SourceMetadataFields::VersionWitnesses {
                 schema_version_field,
                 tx_time_field,

@@ -3601,6 +3601,7 @@ fn nullable_json_maintained_subscription_keeps_one_logical_layout() {
         "{\"nested\":null}".to_owned(),
         format!("{{\"body\":\"{}\"}}", "x".repeat(100_000)),
         "null".to_owned(),
+        format!("{}null{}", " ".repeat(4095), "\n".repeat(90_000)),
     ] {
         db.update(
             "documents",
@@ -3612,7 +3613,7 @@ fn nullable_json_maintained_subscription_keeps_one_logical_layout() {
         let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
         assert!(added.is_empty() && removed.is_empty());
         assert_eq!(updated.len(), 1);
-        let expected = if source == "null" {
+        let expected = if source.trim() == "null" {
             Value::Nullable(None)
         } else {
             Value::Nullable(Some(Box::new(Value::String(source))))
@@ -3622,4 +3623,57 @@ fn nullable_json_maintained_subscription_keeps_one_logical_layout() {
             Some(expected)
         );
     }
+    db.delete("documents", id, Default::default()).unwrap();
+    let query = db
+        .prepare_query(&db.table("documents").filter(is_null(col("payload"))))
+        .unwrap();
+    let deleted = block_on(db.all(
+        &query,
+        ReadOpts {
+            include_deleted: true,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].row_uuid(), id);
+    assert_eq!(
+        deleted[0].cell(&schema.tables[0], "payload"),
+        Some(Value::Nullable(None))
+    );
+    db.restore("documents", id, None, Default::default())
+        .unwrap();
+    let snapshot_opts = ReadOpts {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: SnapshotRef {
+                    owner: NodeUuid::from_bytes([0x72; 16]),
+                    global_base: GlobalTime(0),
+                    local_base: block_on(db.minted_tx_time_high_water()),
+                    dots: Vec::new(),
+                },
+            },
+        },
+        ..ReadOpts::default()
+    };
+    let mut frozen = prepared_subscribe(
+        &db,
+        &Query::from("documents").filter(is_null(col("payload"))),
+        snapshot_opts,
+    )
+    .unwrap();
+    for _ in 0..32 {
+        db.tick().unwrap();
+    }
+    let frozen_rows = opened_rows(
+        frozen
+            .try_next_event()
+            .expect("snapshot opening after restore"),
+    );
+    assert_eq!(frozen_rows.len(), 1);
+    assert_eq!(frozen_rows[0].row_uuid(), id);
+    assert_eq!(
+        frozen_rows[0].cell(&schema.tables[0], "payload"),
+        Some(Value::Nullable(None))
+    );
 }

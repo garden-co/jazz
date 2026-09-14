@@ -9,6 +9,10 @@ use super::*;
 use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
 use std::{future::Future, pin::Pin};
 
+const ENCODED_VERSION_FIELD: &str = "__jazz_authored_version";
+const ENCODED_VERSION_BRANCH_FIELD: &str = "__jazz_authored_version_branch";
+const ENCODED_VERSION_SCHEMA_FIELD: &str = "__jazz_authored_version_schema";
+
 fn current_row_column_field(
     column: &crate::schema::ColumnSchema,
     value_type: ValueType,
@@ -358,6 +362,15 @@ where
             if request.visibility != RowVisibility::Visible
                 || !matches!(authorization, SourceAuthorizationRequest::System)
             {
+                return Err(source_resolution_error(request, SourceGap::Coverage));
+            }
+            if table.columns.iter().any(|column| column.is_nullable_json())
+                && request
+                    .requirements
+                    .metadata
+                    .contains(&SourceMetadataRequirement::VersionPayloads)
+            {
+                // Candidate-only policy inputs have no admitted authored record.
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
             let schema_version_alias = self
@@ -1092,7 +1105,7 @@ where
             }
             let rows = self
                 .node
-                .projected_snapshot_current_rows(
+                .projected_snapshot_current_rows_with_versions(
                     &request.source.table,
                     self.read_view.read_schema,
                     &snapshot,
@@ -1104,7 +1117,7 @@ where
                 .ensure_schema_version_alias(self.read_view.read_schema)
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-            let (base, descriptor, metadata) = inline_current_graph_with_source_metadata(
+            let (base, descriptor, metadata) = inline_current_graph_with_exact_version_metadata(
                 &table,
                 rows,
                 schema_version_alias,
@@ -1112,16 +1125,18 @@ where
                 &request.requirements,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-            snapshot_content_version = request
-                .requirements
-                .metadata
-                .contains(&SourceMetadataRequirement::VersionPayloads)
-                .then(|| ContentVersionSource {
-                    graph: base
-                        .clone()
-                        .project(maintained_view_history_storage_field_names(&table)),
-                    row_uuid_field: "row_uuid".to_owned(),
-                });
+            snapshot_content_version = (!metadata
+                .contains_key(&SourceMetadataRequirement::VersionPayloads)
+                && request
+                    .requirements
+                    .metadata
+                    .contains(&SourceMetadataRequirement::VersionPayloads))
+            .then(|| ContentVersionSource {
+                graph: base
+                    .clone()
+                    .project(maintained_view_history_storage_field_names(&table)),
+                row_uuid_field: "row_uuid".to_owned(),
+            });
             let graph = match &authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -1635,7 +1650,29 @@ where
         // reaches that same boundary through its variant projection; retain
         // the allocated descriptor for the row shape rather than reconstruct
         // the authored enum occurrence above.
-        let descriptor = covered_input_descriptor.clone().unwrap_or(descriptor);
+        let descriptor = covered_input_descriptor
+            .map(|descriptor| {
+                // This mixed source already obtains exact witnesses from its
+                // physical ContentVersionSource. Keep opaque fallback bytes out
+                // of the app-row union with the pending local arm.
+                RecordDescriptor::new_with_fields(
+                    descriptor
+                        .fields()
+                        .iter()
+                        .filter(|field| {
+                            !matches!(
+                                field.name.as_deref(),
+                                Some(
+                                    ENCODED_VERSION_FIELD
+                                        | ENCODED_VERSION_SCHEMA_FIELD
+                                        | ENCODED_VERSION_BRANCH_FIELD
+                                )
+                            )
+                        })
+                        .cloned(),
+                )
+            })
+            .unwrap_or(descriptor);
         let graph = if let Some(input_source) = covered_input_source {
             // Online remote-if-possible composes the authority closure with the
             // eligible local-current overlay before it enters the same
@@ -1653,7 +1690,15 @@ where
                     request.source,
                 );
             }
-            let covered = input_source;
+            let covered = input_source.project_fields(descriptor.fields().iter().map(|field| {
+                let name = field.name.as_ref().expect("named canonical current field");
+                let mut projection = ProjectField::named(name);
+                projection.expression =
+                    groove::ivm::ProjectExpr::Field(groove::ivm::FieldRef::stored_name(name));
+                projection.output_identity =
+                    field.identity.clone().expect("canonical field identity");
+                projection
+            }));
             let graph = if receiver_local_overlay {
                 // Existing cached rows outside this exact source occurrence
                 // cannot enter merely because they have a pending edit.
@@ -4143,6 +4188,18 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             ValueType::Bool,
         ));
     }
+    if let Some(SourceMetadataFields::EncodedVersion {
+        payload_field,
+        schema_field,
+        branch_field,
+    }) = metadata.get(&SourceMetadataRequirement::VersionPayloads)
+    {
+        fields.extend([
+            records::DescriptorField::new(payload_field, ValueType::Bytes),
+            records::DescriptorField::new(schema_field, ValueType::U64),
+            records::DescriptorField::new(branch_field, ValueType::Bytes),
+        ]);
+    }
     RecordDescriptor::new_with_fields(fields)
 }
 
@@ -4777,14 +4834,13 @@ fn inline_current_record(
     Ok(descriptor.create(&values)?)
 }
 
-// Inline candidates may retain indirect JSON. CurrentRow::cell can normalize
-// inline source immediately; the shared async projector classifies references.
-fn inline_current_records_graph(
+// CurrentRow::cell normalizes inline source immediately. Candidate and covered
+// receiver inputs may retain indirect JSON, which needs the shared async projector.
+pub(super) fn normalize_current_source_graph(
     table: &TableSchema,
     descriptor: RecordDescriptor,
-    records: Vec<Vec<u8>>,
+    graph: GraphBuilder,
 ) -> GraphBuilder {
-    let graph = GraphBuilder::inline_records(descriptor, records);
     let nullable_json = table
         .columns
         .iter()
@@ -4795,11 +4851,16 @@ fn inline_current_records_graph(
         return graph;
     }
     graph.project_fields(descriptor.fields().iter().map(|field| {
-        let name = field.name.as_ref().expect("named inline current field");
+        let name = field.name.as_ref().expect("named current source field");
         let mut projection = if nullable_json.contains(name) {
             ProjectField::nullable_json(name, name)
         } else {
             ProjectField::named(name)
+        };
+        projection.expression = if nullable_json.contains(name) {
+            groove::ivm::ProjectExpr::NullableJson(groove::ivm::FieldRef::stored_name(name))
+        } else {
+            groove::ivm::ProjectExpr::Field(groove::ivm::FieldRef::stored_name(name))
         };
         projection.output_identity = field
             .identity
@@ -4815,7 +4876,11 @@ fn inline_current_graph(table: &TableSchema, rows: Vec<CurrentRow>) -> Result<Gr
         .iter()
         .map(|row| inline_current_record(table, &descriptor, row))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(inline_current_records_graph(table, descriptor, records))
+    Ok(normalize_current_source_graph(
+        table,
+        descriptor,
+        GraphBuilder::inline_records(descriptor, records),
+    ))
 }
 
 fn inline_current_graph_with_source_metadata(
@@ -4901,7 +4966,55 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((
-        inline_current_records_graph(table, descriptor, records),
+        normalize_current_source_graph(
+            table,
+            descriptor,
+            GraphBuilder::inline_records(descriptor, records),
+        ),
+        descriptor,
+        metadata,
+    ))
+}
+
+fn inline_current_graph_with_exact_version_metadata(
+    table: &TableSchema,
+    rows: Vec<(CurrentRow, VersionRow)>,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
+    let metadata = covered_input_source_metadata(requirements, table);
+    let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
+    let records = rows
+        .iter()
+        .map(|(row, original)| {
+            inline_current_record_with_source_metadata_and_deletion(
+                table,
+                &descriptor,
+                row,
+                schema_version_alias,
+                coverage,
+                descriptor
+                    .field_index("supplying_branch_key")
+                    .map(|_| ("supplying_branch_key", original.branch_key())),
+                None,
+                Some(original),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((
+        normalize_current_source_graph(
+            table,
+            descriptor,
+            GraphBuilder::inline_records(descriptor, records),
+        ),
         descriptor,
         metadata,
     ))
@@ -4993,6 +5106,7 @@ fn inline_current_record_with_source_metadata(
         coverage,
         branch_witness,
         None,
+        None,
     )
 }
 
@@ -5002,10 +5116,25 @@ pub(super) fn covered_input_source_metadata(
     requirements: &SourceRequirements,
     table: &TableSchema,
 ) -> BTreeMap<SourceMetadataRequirement, SourceMetadataFields> {
-    inline_source_metadata(
+    let mut metadata = inline_source_metadata(
         requirements,
         (!table.branch_by.is_empty()).then_some("supplying_branch_key"),
-    )
+    );
+    if requirements
+        .metadata
+        .contains(&SourceMetadataRequirement::VersionPayloads)
+        && table.columns.iter().any(|column| column.is_nullable_json())
+    {
+        metadata.insert(
+            SourceMetadataRequirement::VersionPayloads,
+            SourceMetadataFields::EncodedVersion {
+                payload_field: ENCODED_VERSION_FIELD.to_owned(),
+                schema_field: ENCODED_VERSION_SCHEMA_FIELD.to_owned(),
+                branch_field: ENCODED_VERSION_BRANCH_FIELD.to_owned(),
+            },
+        );
+    }
+    metadata
 }
 
 /// Encode one already-authorized current row for a receiver-owned covered
@@ -5017,8 +5146,9 @@ pub(super) fn covered_input_record(
     row: &CurrentRow,
     schema_version_alias: SchemaVersionAlias,
     source_branch: &BranchKey,
+    version: Option<&VersionRow>,
 ) -> Result<Vec<u8>, Error> {
-    inline_current_record_with_source_metadata(
+    inline_current_record_with_source_metadata_and_deletion(
         table,
         descriptor,
         row,
@@ -5027,6 +5157,8 @@ pub(super) fn covered_input_record(
         descriptor
             .field_index("supplying_branch_key")
             .map(|_| ("supplying_branch_key", source_branch)),
+        None,
+        version,
     )
 }
 
@@ -5038,6 +5170,7 @@ fn inline_current_record_with_source_metadata_and_deletion(
     coverage: &str,
     branch_witness: Option<(&str, &BranchKey)>,
     deletion_marker: Option<bool>,
+    original_version: Option<&VersionRow>,
 ) -> Result<Vec<u8>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
@@ -5066,8 +5199,9 @@ fn inline_current_record_with_source_metadata_and_deletion(
         row_author_value(provenance.updated_by)?,
         Value::U64(provenance.updated_at),
     ]);
-    let (tx_time, tx_node_alias) = row
-        .projected_tx_alias()
+    let (tx_time, tx_node_alias) = original_version
+        .map(|version| (version.tx_time(), version.tx_node_alias()))
+        .or_else(|| row.projected_tx_alias())
         .unwrap_or((TxTime(0), NodeAlias(0)));
     values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
     append_author_projection_values(
@@ -5101,6 +5235,18 @@ fn inline_current_record_with_source_metadata_and_deletion(
     if let Some(deleted) = deletion_marker {
         values.push(Value::Bool(deleted));
     }
+    if descriptor
+        .fields()
+        .iter()
+        .any(|field| field.name.as_deref() == Some(ENCODED_VERSION_FIELD))
+    {
+        let original = original_version.ok_or(Error::InvalidStoredValue(
+            "encoded witness requires original authored version",
+        ))?;
+        values.push(Value::Bytes(original.record.raw().to_vec()));
+        values.push(Value::U64(original.schema_version_alias().0));
+        values.push(Value::Bytes(original.branch_key().canonical_bytes()));
+    }
     Ok(descriptor.create(&values)?)
 }
 
@@ -5133,11 +5279,16 @@ fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
                 coverage,
                 None,
                 Some(*deleted),
+                None,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((
-        inline_current_records_graph(table, descriptor, records),
+        normalize_current_source_graph(
+            table,
+            descriptor,
+            GraphBuilder::inline_records(descriptor, records),
+        ),
         descriptor,
         metadata,
     ))
@@ -5219,6 +5370,8 @@ pub(super) fn historical_current_graph_full_scan(
                 ProjectField::renamed("left.tx_node_id", "tx_node_id"),
             ]),
     );
+    let content_current =
+        content_current.project_fields(canonical_current_source_fields(table, false));
     let latest_content = latest_event.clone().filter(PredicateExpr::eq(
         "event_layer",
         Value::String("content".to_owned()),
@@ -5345,20 +5498,9 @@ fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> G
     content_storage_fields.push("tx_time".to_owned());
     content_storage_fields.push("tx_node_id".to_owned());
     let normalize_content_fields = |graph: GraphBuilder| {
-        graph.project_fields(
-            ["row_uuid".to_owned()]
-                .into_iter()
-                .chain(user_fields.iter().cloned())
-                .map(ProjectField::named)
-                .chain([
-                    ProjectField::renamed("created_by", "$createdBy"),
-                    ProjectField::renamed("created_at", "$createdAt"),
-                    ProjectField::renamed("updated_by", "$updatedBy"),
-                    ProjectField::renamed("updated_at", "$updatedAt"),
-                    ProjectField::named("tx_time"),
-                    ProjectField::named("tx_node_id"),
-                ]),
-        )
+        graph.project_fields(storage_to_canonical_current_source_fields(
+            table, false, false,
+        ))
     };
     let edge_visible_ahead = |table_name: String, fields: Vec<String>| {
         GraphBuilder::join(

@@ -69,6 +69,9 @@ pub(crate) struct MaintainedSubscriptionView {
     /// The graph uses read-schema names; immutable payload coordinates use
     /// the name of that same physical table in the authored schema.
     witness_table_names: BTreeMap<(String, SchemaVersionAlias), String>,
+    /// Exact authored descriptors for this compiled physical source scope.
+    witness_descriptors:
+        Option<Arc<BTreeMap<(String, SchemaVersionAlias), (String, RecordDescriptor)>>>,
     result_weights: RetainedResultMap<i64>,
     /// Result memberships already exposed to the subscription consumer. A
     /// result-current terminal can advance before the companion content
@@ -134,6 +137,7 @@ impl Default for MaintainedSubscriptionView {
             edge_availability_owner: None,
             read_view: Default::default(),
             witness_table_names: BTreeMap::new(),
+            witness_descriptors: None,
             result_weights: RetainedResultMap::default(),
             published_result_members: RetainedResultMembers::default(),
             unreconciled_result_members: None,
@@ -550,6 +554,13 @@ impl MaintainedSubscriptionView {
         self.witness_table_names = names;
     }
 
+    pub(crate) fn set_witness_descriptors(
+        &mut self,
+        descriptors: BTreeMap<(String, SchemaVersionAlias), (String, RecordDescriptor)>,
+    ) {
+        self.witness_descriptors = (!descriptors.is_empty()).then(|| Arc::new(descriptors));
+    }
+
     fn supporting_row_for_version(
         &self,
         source: ProgramSourceId,
@@ -631,6 +642,8 @@ impl MaintainedSubscriptionView {
         let mut decode_plan_cache = VersionDecodePlanCache::new();
         let mut payload_plans = std::collections::HashMap::new();
         let read_view = self.read_view;
+        let witness_descriptors = self.witness_descriptors.clone();
+        let no_encoded_witnesses = BTreeMap::new();
         let decoded = deltas.iter().map(|(record, weight)| {
             decode_typed_terminal_record(
                 record,
@@ -640,6 +653,9 @@ impl MaintainedSubscriptionView {
                 &mut decode_plan_cache,
                 &mut payload_plans,
                 read_view,
+                witness_descriptors
+                    .as_deref()
+                    .unwrap_or(&no_encoded_witnesses),
             )
             .map(|event| (event, weight))
         });
@@ -1124,6 +1140,20 @@ impl MaintainedSubscriptionView {
                         + mem::size_of::<SchemaVersionAlias>()
                 })
                 .sum::<usize>();
+        let witness_descriptor_bytes = self.witness_descriptors.as_ref().map_or(0, |descriptors| {
+            btree_map_bytes(descriptors.len())
+                + descriptors
+                    .iter()
+                    .map(|((logical, _), (authored, _))| {
+                        logical.len()
+                            + authored.len()
+                            + mem::size_of::<(
+                                (String, SchemaVersionAlias),
+                                (String, RecordDescriptor),
+                            )>()
+                    })
+                    .sum::<usize>()
+        });
         let structured_app_rows_bytes = self
             .structured_app_rows
             .values()
@@ -1167,7 +1197,8 @@ impl MaintainedSubscriptionView {
                 + versions_bytes
                 + supporting_frontier_bytes
                 + replacements_bytes
-                + witness_table_names_bytes,
+                + witness_table_names_bytes
+                + witness_descriptor_bytes,
         }
     }
 
@@ -1988,6 +2019,22 @@ fn rebind_terminal_value(
 }
 
 impl MaintainedTerminalSchemas {
+    pub(crate) fn encoded_witness_tables(&self) -> BTreeSet<String> {
+        self.sinks
+            .values()
+            .filter_map(|kind| match kind {
+                MaintainedTerminalKind::VersionContent(schema)
+                | MaintainedTerminalKind::ReplacementContent(schema)
+                | MaintainedTerminalKind::SharedContent(schema)
+                    if schema.encoded_version.is_some() =>
+                {
+                    Some(schema.source.table.as_str().to_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(in crate::node) fn current_payload_schema(
         &self,
     ) -> Result<&ResultMembershipSchema, super::Error> {
@@ -2338,6 +2385,7 @@ fn decode_typed_terminal_record(
         super::descriptor_roles::CurrentPayloadEncodePlan,
     >,
     read_view: crate::protocol::ReadViewKey,
+    witness_descriptors: &BTreeMap<(String, SchemaVersionAlias), (String, RecordDescriptor)>,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
         MaintainedTerminalKind::SharedContent(schema)
@@ -2348,11 +2396,16 @@ fn decode_typed_terminal_record(
                 "version_deletion"
             };
             validate_witness_event_kind(record, expected)?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
-                DecodedMaintainedEvent::SharedVersion {
-                    source: schema.source.clone(),
-                    row,
-                }
+            decode_typed_version_witness(
+                record,
+                schema,
+                tables,
+                decode_plan_cache,
+                witness_descriptors,
+            )
+            .map(|row| DecodedMaintainedEvent::SharedVersion {
+                source: schema.source.clone(),
+                row,
             })
         }
         MaintainedTerminalKind::AggregateAppRows(output) => {
@@ -2591,38 +2644,58 @@ fn decode_typed_terminal_record(
         }
         MaintainedTerminalKind::VersionContent(schema) => {
             validate_witness_event_kind(record, "version_content")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
-                DecodedMaintainedEvent::VersionContent {
-                    source: schema.source.clone(),
-                    row,
-                }
+            decode_typed_version_witness(
+                record,
+                schema,
+                tables,
+                decode_plan_cache,
+                witness_descriptors,
+            )
+            .map(|row| DecodedMaintainedEvent::VersionContent {
+                source: schema.source.clone(),
+                row,
             })
         }
         MaintainedTerminalKind::VersionDeletion(schema) => {
             validate_witness_event_kind(record, "version_deletion")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
-                DecodedMaintainedEvent::VersionDeletion {
-                    source: schema.source.clone(),
-                    row,
-                }
+            decode_typed_version_witness(
+                record,
+                schema,
+                tables,
+                decode_plan_cache,
+                witness_descriptors,
+            )
+            .map(|row| DecodedMaintainedEvent::VersionDeletion {
+                source: schema.source.clone(),
+                row,
             })
         }
         MaintainedTerminalKind::ReplacementContent(schema) => {
             validate_witness_event_kind(record, "replacement_content")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
-                DecodedMaintainedEvent::ReplacementContent {
-                    source: schema.source.clone(),
-                    row,
-                }
+            decode_typed_version_witness(
+                record,
+                schema,
+                tables,
+                decode_plan_cache,
+                witness_descriptors,
+            )
+            .map(|row| DecodedMaintainedEvent::ReplacementContent {
+                source: schema.source.clone(),
+                row,
             })
         }
         MaintainedTerminalKind::ReplacementDeletion(schema) => {
             validate_witness_event_kind(record, "replacement_deletion")?;
-            decode_typed_version_witness(record, schema, tables, decode_plan_cache).map(|row| {
-                DecodedMaintainedEvent::ReplacementDeletion {
-                    source: schema.source.clone(),
-                    row,
-                }
+            decode_typed_version_witness(
+                record,
+                schema,
+                tables,
+                decode_plan_cache,
+                witness_descriptors,
+            )
+            .map(|row| DecodedMaintainedEvent::ReplacementDeletion {
+                source: schema.source.clone(),
+                row,
             })
         }
         MaintainedTerminalKind::RelationEdge(schema) => {
@@ -2964,6 +3037,7 @@ fn decode_typed_version_witness(
     schema: &VersionWitnessSchema,
     tables: &TableSchemas,
     decode_plan_cache: &mut VersionDecodePlanCache,
+    witness_descriptors: &BTreeMap<(String, SchemaVersionAlias), (String, RecordDescriptor)>,
 ) -> Result<VersionRow, super::Error> {
     let table_name = match record.get_idx(field_idx(record, &schema.identity.table_field)?)? {
         Value::String(value) => value,
@@ -2973,6 +3047,99 @@ fn decode_typed_version_witness(
             ));
         }
     };
+    if let Some((payload_field, schema_field, branch_field)) = &schema.encoded_version {
+        let alias = SchemaVersionAlias(record_u64(record, schema_field)?);
+        let (authored_table, descriptor) = witness_descriptors
+            .get(&(table_name.clone(), alias))
+            .ok_or(super::Error::InvalidStoredValue(
+                "encoded witness authored schema is outside compiled source scope",
+            ))?;
+        let Value::Bytes(raw) = record.get_idx(field_idx(record, payload_field)?)? else {
+            return Err(super::Error::InvalidStoredValue(
+                "encoded witness payload must be bytes",
+            ));
+        };
+        let Value::Bytes(branch) = record.get_idx(field_idx(record, branch_field)?)? else {
+            return Err(super::Error::InvalidStoredValue(
+                "encoded witness branch must be bytes",
+            ));
+        };
+        let branch_key = BranchKey::from_canonical_bytes(&branch)
+            .map_err(|_| super::Error::InvalidStoredValue("encoded witness branch is invalid"))?;
+        let row = VersionRow {
+            table: groove::Intern::new(authored_table.clone()),
+            branch_key,
+            record: OwnedRecord::new(raw, *descriptor),
+        };
+        // Bytes came from an admitted immutable VersionRow. Validate only
+        // the carrier's selected coordinate, without re-encoding its payload.
+        let raw_branch = row
+            .record
+            .borrowed()
+            .get_bytes(super::codec::HistoryRowRecord::FIELD_BRANCH_KEY_IDX)?;
+        let selected_branch = match &schema.identity.branch_or_prefix_field {
+            Some(field) => match record.get_idx(field_idx(record, field)?)? {
+                Value::Bytes(bytes) => bytes,
+                Value::Nullable(None) => BranchKey::default().canonical_bytes(),
+                Value::Nullable(Some(value)) => match *value {
+                    Value::Bytes(bytes) => bytes,
+                    _ => {
+                        return Err(super::Error::InvalidStoredValue(
+                            "witness branch must be bytes",
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "witness branch must be bytes",
+                    ));
+                }
+            },
+            None => BranchKey::default().canonical_bytes(),
+        };
+        let checks = [
+            (
+                row.row_uuid()
+                    == RowUuid(record.get_uuid(field_idx(record, &schema.identity.row_field)?)?),
+                "encoded witness row differs from selected source row",
+            ),
+            (
+                row.tx_time().0 == record_u64(record, &schema.identity.tx_time_field)?,
+                "encoded witness transaction time differs from selected source version",
+            ),
+            (
+                row.tx_node_alias().0 == record_u64(record, &schema.identity.tx_node_field)?,
+                "encoded witness transaction node differs from selected source version",
+            ),
+            (
+                row.schema_version_alias() == alias,
+                "encoded witness authored schema differs from carrier schema",
+            ),
+            (
+                row.layer() == VersionLayer::Content,
+                "encoded content witness carries a deletion record",
+            ),
+            (
+                row.branch_key().canonical_bytes() == selected_branch,
+                "encoded witness branch differs from selected source branch",
+            ),
+            (
+                raw_branch == selected_branch.as_slice(),
+                "encoded witness stored branch differs from selected source branch",
+            ),
+            (
+                tagged_deletion(record.get_idx(field_idx(record, &schema.deletion_field)?)?)?
+                    .is_none(),
+                "encoded content witness selected deletion layer",
+            ),
+        ];
+        for (matches, context) in checks {
+            if !matches {
+                return Err(super::Error::InvalidStoredValue(context));
+            }
+        }
+        return Ok(row);
+    }
     let table = tables
         .get(&table_name)
         .ok_or(super::Error::InvalidStoredValue(
@@ -4335,6 +4502,7 @@ mod tests {
 
     fn witness_schema() -> VersionWitnessSchema {
         VersionWitnessSchema {
+            encoded_version: None,
             source: ProgramSourceId {
                 table: "todos".to_owned().into(),
                 path: vec![crate::protocol::ProgramSourceRole::Root],

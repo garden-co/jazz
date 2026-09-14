@@ -408,7 +408,11 @@ fn version_witness_public_fields(
         schema.updated_at_field.clone(),
         schema.deletion_field.clone(),
     ];
-    fields.extend(schema.user_fields.values().cloned());
+    if let Some((payload, schema, branch)) = &schema.encoded_version {
+        fields.extend([payload.clone(), schema.clone(), branch.clone()]);
+    } else {
+        fields.extend(schema.user_fields.values().cloned());
+    }
     fields.extend(schema.identity.branch_or_prefix_field.clone());
     fields
 }
@@ -1075,6 +1079,7 @@ mod tests {
             path: vec![crate::protocol::ProgramSourceRole::Root],
         };
         let witness = VersionWitnessSchema {
+            encoded_version: None,
             source: source.clone(),
             descriptor: RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
             identity: VersionIdentityFields {

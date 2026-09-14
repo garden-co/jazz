@@ -86,6 +86,16 @@ root-null sources as null without rewriting their stored source or immutable
 transaction/history bytes. Existing inline and indirect JSON values remain
 readable; no epoch reset, descriptor migration, or fresh database is required.
 
+Payload-bearing witness terminals must retain the exact admitted authored version,
+including its authored schema, independently of the logical read projection. When
+there is no physical history source, compiler-private ephemeral byte fields carry
+the original encoded record and its schema/branch identity through both positive
+and negative IVM deltas. They are not application fields or a wire/storage format.
+Decode uses the exact authored descriptor scoped to the source's physical table;
+unknown schemas or mismatched selected coordinates fail closed. Trusted admitted
+bytes are not re-encoded for validation. Snapshot content identity remains the
+original content version even when a later restore supplies visible provenance.
+
 ### Frozen V1 JSON and chunking boundary
 
 Jazz's JSON columns inherit Groove V1's literal-source contract. A JSON scalar

@@ -402,6 +402,7 @@ fn local_unavailable_inputs_follow_cold_current_edge_receivers() {
                     &current,
                     alias,
                     &BranchKey::default(),
+                    None,
                 )
                 .unwrap(),
             ],
