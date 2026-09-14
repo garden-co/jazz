@@ -131,3 +131,25 @@ account handle.
 
 The normative host design and its implementation ledger live in
 [`crates/jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md).
+
+### Native release payloads
+
+`jazz-rn` owns React Native autolinking and code generation. Its ordinary,
+exact-version dependencies `jazz-rn-ios` and `jazz-rn-android` carry the complete
+XCFramework and all three Android ABI archives. Both dependencies are installed
+on every build host; npm host OS/CPU selectors cannot select a mobile build target.
+
+Native producer scripts stage the matching workspace payload after building.
+Release assembly seals and checks both payload packages, then packs all three
+packages with `node dev/artifacts/rn-packages.mjs pack <directory>`. The extracted
+payloads must match their source, ABI, architecture inventory, and file hashes;
+the wrapper must contain exact-version dependencies and no native archives.
+Publication consumes the exported, hash-checked receipt, publishing payloads
+before the wrapper and skipping versions already present on retry. Preview
+publication binds both dependencies to the same exact commit's pkg.pr.new URLs.
+
+Payloads intentionally retain their producer debug symbols. Each upload has a
+195,000,000-byte compressed budget, with base64 expansion and a 1,000,000-byte
+metadata reserve recorded separately. This is a conservative project budget,
+not a claim about npm's undocumented service limit. CI links the packed Android
+and iOS packages through isolated consuming applications.

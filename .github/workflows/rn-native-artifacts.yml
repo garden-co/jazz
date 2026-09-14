@@ -66,6 +66,9 @@ jobs:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          # The action already installs cmdline-tools; its default also asks for retired SDK "tools".
+          packages: platform-tools
       - run: sdkmanager --install "ndk;27.1.12297006"
       - run: pnpm --filter jazz-rn build:relay:android
         env:
@@ -131,6 +134,9 @@ jobs:
         with:
           rust-toolchain: ""
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          # The action already installs cmdline-tools; its default also asks for retired SDK "tools".
+          packages: platform-tools
       # The host receipt is a separate runner from the archive producer, so
       # provision the NDK that CMake uses to compile the JNI bridge here too.
       - run: sdkmanager --install "ndk;27.1.12297006"
@@ -144,6 +150,8 @@ jobs:
         with:
           name: jazz-rn-relay-android
           path: crates/jazz-rn
+      - name: Stage downloaded android payload package
+        run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" node dev/artifacts/rn-packages.mjs stage android
       - name: Generate the Expo Android host with the staged relay package
         run: pnpm --filter todo-client-localfirst-expo verify:expo:android
       - name: Link the relay through the application AAR
@@ -174,6 +182,8 @@ jobs:
         with:
           name: jazz-rn-relay-ios
           path: crates/jazz-rn
+      - name: Stage downloaded ios payload package
+        run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" node dev/artifacts/rn-packages.mjs stage ios
       - name: Generate the Expo iOS host with the staged relay package
         run: pnpm --filter todo-client-localfirst-expo verify:expo:ios
       - name: Install the staged native pod

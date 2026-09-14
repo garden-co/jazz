@@ -1,4 +1,5 @@
 require "json"
+require "fileutils"
 
 package = JSON.parse(File.read(File.join(__dir__, "package.json")))
 folly_compiler_flags = '-DFOLLY_NO_CONFIG -DFOLLY_MOBILE=1 -DFOLLY_USE_LIBCPP=1 -Wno-comma -Wno-shorten-64-to-32'
@@ -38,11 +39,29 @@ Pod::Spec.new do |s|
   # compile this source with the unavailable-artifact fallback even though the
   # package contains a valid XCFramework.
   relay_header_search_path = "$(PODS_TARGET_SRCROOT)/native/include"
-  relay_framework = File.join(__dir__, "JazzNativeRelay.xcframework")
-  if File.exist?(relay_framework) then
-    s.vendored_frameworks = "JazzNativeRelay.xcframework"
-    s.pod_target_xcconfig = { "HEADER_SEARCH_PATHS" => relay_header_search_path }
+  payload_script = File.join(__dir__, "scripts/resolve-payload.cjs")
+  payload_root = Pod::Executable.execute_command("node", [payload_script, "ios"]).strip
+  relay_framework = File.join(payload_root, "JazzNativeRelay.xcframework")
+  unless File.directory?(relay_framework)
+    raise Pod::Informative, "jazz-rn iOS payload is missing its XCFramework"
   end
+  # CocoaPods only globs paths inside this pod's root. Expose the resolved
+  # dependency through a package-local symlink without copying or modifying its
+  # sealed bytes. Refuse an unmanaged file/directory at this generated path.
+  payload_link_directory = File.join(__dir__, "ios-payload")
+  if File.symlink?(payload_link_directory) || (File.exist?(payload_link_directory) && !File.directory?(payload_link_directory))
+    raise Pod::Informative, "jazz-rn generated iOS payload directory is occupied: #{payload_link_directory}"
+  end
+  FileUtils.mkdir_p(payload_link_directory)
+  payload_link = File.join(payload_link_directory, "JazzNativeRelay.xcframework")
+  if File.symlink?(payload_link)
+    File.unlink(payload_link) if File.readlink(payload_link) != relay_framework
+  elsif File.exist?(payload_link)
+    raise Pod::Informative, "jazz-rn generated iOS payload path is occupied: #{payload_link}"
+  end
+  File.symlink(relay_framework, payload_link) unless File.symlink?(payload_link)
+  s.vendored_frameworks = "ios-payload/JazzNativeRelay.xcframework"
+  s.pod_target_xcconfig = { "HEADER_SEARCH_PATHS" => relay_header_search_path }
   # Use install_modules_dependencies helper to install the dependencies if React Native version >=0.71.0.
   # See https://github.com/facebook/react-native/blob/febf6b7f33fdb4904669f99d795eba4c0f95d7bf/scripts/cocoapods/new_architecture.rb#L79.
   if respond_to?(:install_modules_dependencies, true)

@@ -2,6 +2,7 @@ packages:
   - docs
   - packages/*
   - crates/jazz-rn
+  - crates/jazz-rn/npm/*
   - starters/*
   - examples/*
   - examples/*/apps/*

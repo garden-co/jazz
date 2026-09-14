@@ -1,3 +1,4 @@
+import payloadResolver from "../../../crates/jazz-rn/scripts/resolve-payload.cjs";
 import { verifyAndroidReleaseNetworkPolicy } from "./android-network-policy.mjs";
 import { startCoreObservationControl } from "./core-observation-control.mjs";
 import { startLocalEdgeSessionHarness } from "./edge-session-harness.mjs";
@@ -14,8 +15,7 @@ import { scenariosForAcceptancePhase } from "../src/scenarios.ts";
 const serial = process.env.ANDROID_SERIAL;
 const apk = process.env.JAZZ_DEVICE_APK;
 if (!apk) throw new Error("JAZZ_DEVICE_APK must point to the assembled development-build APK");
-const relayRoot =
-  process.env.JAZZ_DEVICE_RELAY_ROOT ?? resolve(import.meta.dirname, "../../../crates/jazz-rn");
+const relayRoot = process.env.JAZZ_DEVICE_RELAY_ROOT ?? payloadResolver.resolvePayload("android");
 verifyAndroidRelayStage({
   packageRoot: relayRoot,
   sourceRevision: process.env.JAZZ_DEVICE_RELAY_SOURCE_REVISION,

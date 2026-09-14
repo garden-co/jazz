@@ -29,6 +29,30 @@ const npmPackMachineArgs = (...args) => [
   ...args,
 ];
 
+// Prebuild-only tests need package graph fixtures, not a mobile Rust rebuild.
+// Real packed binary integrity and native links are gated separately.
+async function packPrebuildPayloadFixtures(directory) {
+  const result = {};
+  for (const platform of ["android", "ios"]) {
+    const source = join(directory, `payload-${platform}`);
+    await mkdir(source, { recursive: true });
+    await writeFile(
+      join(source, "package.json"),
+      JSON.stringify({ name: `jazz-rn-${platform}`, version: packageJson.version }),
+    );
+    await mkdir(join(source, platform), { recursive: true });
+    await writeFile(join(source, platform, "jazz-native-relay.manifest.json"), "{}\n");
+    const [packed] = JSON.parse(
+      execFileSync("npm", npmPackMachineArgs("--pack-destination", directory), {
+        cwd: source,
+        encoding: "utf8",
+      }),
+    );
+    result[platform] = join(directory, packed.filename);
+  }
+  return result;
+}
+
 function parseMachineJsonWithStructuredInfoPrelude(stdout, label) {
   // Tool commands normally write one JSON document. Expo and Bob can prefix
   // it with structured informational lines, however; accept only that known
@@ -902,6 +926,13 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       "a stale compiled relay entry must fail before the tarball is packed",
     );
     await mkdir(packageDirectory, { recursive: true });
+    const payloadTarballs = await packPrebuildPayloadFixtures(packageDirectory);
+    const copiedManifestPath = join(packageSourceDirectory, "package.json");
+    const copiedManifest = JSON.parse(await readFile(copiedManifestPath, "utf8"));
+    copiedManifest.dependencies = Object.fromEntries(
+      ["android", "ios"].map((platform) => [`jazz-rn-${platform}`, packageJson.version]),
+    );
+    await writeFile(copiedManifestPath, JSON.stringify(copiedManifest));
     const packed = JSON.parse(
       execFileSync("npm", npmPackMachineArgs("--pack-destination", packageDirectory), {
         cwd: packageSourceDirectory,
@@ -919,7 +950,15 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
           name: "jazz-rn-packed-install-receipt",
           version: "0.0.0",
           private: true,
-          dependencies: { "jazz-rn": `file:../package/${packed[0].filename}` },
+          dependencies: {
+            "jazz-rn": `file:../package/${packed[0].filename}`,
+            ...Object.fromEntries(
+              Object.entries(payloadTarballs).map(([platform, path]) => [
+                `jazz-rn-${platform}`,
+                `file:${path}`,
+              ]),
+            ),
+          },
         },
         null,
         2,
@@ -1615,9 +1654,24 @@ test("the packaged Expo consumer fixture materializes catalog specs before isola
   const appDirectory = join(directory, "app");
   try {
     await mkdir(packageDirectory, { recursive: true });
+    const payloadTarballs = await packPrebuildPayloadFixtures(packageDirectory);
+    const wrapperSource = join(directory, "wrapper");
+    await cp(new URL("../../../crates/jazz-rn/", import.meta.url), wrapperSource, {
+      recursive: true,
+      filter: (path) =>
+        !path.includes("node_modules") &&
+        !path.includes("jniLibs") &&
+        !path.includes("xcframework") &&
+        !path.includes("/npm/"),
+    });
+    const wrapperMetadata = JSON.parse(await readFile(join(wrapperSource, "package.json"), "utf8"));
+    wrapperMetadata.dependencies = Object.fromEntries(
+      ["android", "ios"].map((platform) => [`jazz-rn-${platform}`, packageJson.version]),
+    );
+    await writeFile(join(wrapperSource, "package.json"), JSON.stringify(wrapperMetadata, null, 2));
     const packed = JSON.parse(
       execFileSync("npm", npmPackMachineArgs("--pack-destination", packageDirectory), {
-        cwd: new URL("../../../crates/jazz-rn/", import.meta.url),
+        cwd: wrapperSource,
         encoding: "utf8",
       }),
     );
@@ -1640,6 +1694,7 @@ test("the packaged Expo consumer fixture materializes catalog specs before isola
       fixtureSource,
       fixtureDestination: appDirectory,
       tarball,
+      payloadTarballs,
     });
     execFileSync("pnpm", ["install", "--no-frozen-lockfile", "--ignore-scripts"], {
       cwd: appDirectory,
@@ -2244,9 +2299,12 @@ test("relay artifact staging targets every supported Android ABI and iOS framewo
 
   assert.equal(
     packageJson.scripts["build:relay:android"],
-    "bash scripts/build-relay-artifacts.sh android",
+    "bash scripts/build-relay-artifacts.sh android && node ../../dev/artifacts/rn-packages.mjs stage android",
   );
-  assert.equal(packageJson.scripts["build:relay:ios"], "bash scripts/build-relay-artifacts.sh ios");
+  assert.equal(
+    packageJson.scripts["build:relay:ios"],
+    "bash scripts/build-relay-artifacts.sh ios && node ../../dev/artifacts/rn-packages.mjs stage ios",
+  );
   assert.match(script, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(script, /\[armeabi-v7a\]=armv7-linux-androideabi/);
   assert.match(script, /\[x86_64\]=x86_64-linux-android/);
@@ -2264,7 +2322,7 @@ test("relay artifact staging targets every supported Android ABI and iOS framewo
   );
 });
 
-test("a dry package includes every staged native relay artifact class", async () => {
+test("a dry wrapper package retains the header and excludes split native payloads", async () => {
   const directory = await mkdtemp(join(tmpdir(), "jazz-rn-pack-"));
   try {
     const staged = [
@@ -2294,8 +2352,8 @@ test("a dry package includes every staged native relay artifact class", async ()
     const packed = new Set(receipt[0].files.map(({ path }) => path));
     for (const path of staged) {
       assert.ok(
-        packed.has(path),
-        `dry package omitted staged artifact ${path}; packed: ${[...packed].join(", ")}`,
+        packed.has(path) === path.startsWith("native/"),
+        `wrapper payload boundary is incorrect for ${path}; packed: ${[...packed].join(", ")}`,
       );
     }
   } finally {
@@ -2924,7 +2982,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
 
   assert.match(
     previewBuild,
-    /PACKAGES\+=\('\.\/crates\/jazz-rn'\)/,
+    /PACKAGES\+=\('\.\/crates\/jazz-rn\/npm\/android' '\.\/crates\/jazz-rn\/npm\/ios' '\.\/crates\/jazz-rn'\)/,
     "the single preview publication must add jazz-rn only in RN preview mode",
   );
   assert.equal(
@@ -2999,7 +3057,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     assert.ok(rnWorkflow.includes(nativeInput), `native workflow receipt omits ${nativeInput}`);
   }
   assert.match(packageBuild, /cargo-ndk@\$\{\{ env\.JAZZ_RN_CARGO_NDK_VERSION \}\}/);
-  assert.match(packageBuild, /--package-root/);
+  assert.match(packageBuild, /rn-packages\.mjs pack/);
   assert.match(verifier, /relay artifact inventory differs from its manifest/);
 });
 
@@ -3017,7 +3075,7 @@ test("RN preview publishes selected packages once and device acceptance grants K
   for (const includeRn of ["false", "true"]) {
     const output = execFileSync(
       "bash",
-      ["-c", `pnpm() { printf '%s\\n' CALL "$@"; }\n${publishing[0].run}`],
+      ["-c", `pnpm() { printf '%s\\n' CALL "$@"; }\nnode() { :; }\n${publishing[0].run}`],
       {
         encoding: "utf8",
         env: { ...process.env, INCLUDE_RN: includeRn },
