@@ -313,10 +313,13 @@ export class BrowserConnectionManager extends ConnectionManager {
     );
     assertBrowserStorageOwnerUnchanged(this.host.config, nextConfig);
     super.updateAuth(auth);
-    void this.connection?.updateAuth(
-      JSON.stringify(runtimeAuth(nextConfig)),
-      runtimeSessionClaims(nextConfig),
-    );
+    const connection = this.connection;
+    if (!connection) return;
+    void connection
+      .updateAuth(JSON.stringify(runtimeAuth(nextConfig)), runtimeSessionClaims(nextConfig))
+      .catch((error: unknown) => {
+        this.observeConnectionFailure(connection, asError(error));
+      });
   }
 
   async deleteClientStorage(): Promise<void> {
