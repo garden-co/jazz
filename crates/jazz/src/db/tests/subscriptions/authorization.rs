@@ -25,6 +25,105 @@ impl crate::db::Transport for TrustedBackendRelayTransport {
 }
 
 #[test]
+fn local_membership_revocation_refreshes_policy_dependent_subscription() {
+    let schema = membership_scoped_relation_schema();
+    let db = open_db(0xb6, AuthorSubject::SYSTEM, &schema);
+    let reader = AuthorSubject::for_test_bytes([0xa6; 16]);
+    db.set_test_provider_claims(
+        reader,
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::String(reader.test_uuid().to_string()),
+        )]),
+    );
+
+    let chat = row(0x61);
+    let membership = row(0x62);
+    let profile = row(0x63);
+    let message = row(0x64);
+    db.insert(
+        "chats",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("private".to_owned())),
+            ("is_public".to_owned(), Value::Bool(false)),
+            ("created_by".to_owned(), Value::String("owner".to_owned())),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(chat),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "chat_members",
+        BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(chat.0)),
+            (
+                "user_id".to_owned(),
+                Value::String(reader.test_uuid().to_string()),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(membership),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "profiles",
+        BTreeMap::from([
+            (
+                "user_id".to_owned(),
+                Value::String(reader.test_uuid().to_string()),
+            ),
+            ("name".to_owned(), Value::String("reader".to_owned())),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(profile),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "messages",
+        BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(chat.0)),
+            ("sender_id".to_owned(), Value::Uuid(profile.0)),
+            ("text".to_owned(), Value::String("visible".to_owned())),
+            ("created_at".to_owned(), Value::U64(1)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(message),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let prepared = db.prepare_query(&Query::from("messages")).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
+        vec![message],
+        "the membership grants the initial message"
+    );
+
+    db.delete("chat_members", membership, Default::default())
+        .unwrap();
+    let (added, updated, removed) = delta_rows(
+        subscription
+            .try_next_event()
+            .expect("membership-only local write must refresh the dependent subscription"),
+    );
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![message]
+    );
+}
+
+#[test]
 fn maintained_physical_point_subscriptions_keep_policy_scopes_live() {
     let schema = owner_read_schema();
     let db = open_db(0xa0, AuthorSubject::SYSTEM, &schema);
