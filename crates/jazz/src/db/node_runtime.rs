@@ -3927,7 +3927,7 @@ where
                 state_ref
                     .local_subscription_cleanup
                     .set(Some((groove_runtime_token, subscription_id)));
-                state_ref.cold_runtime_replacement = replacement_is_cold;
+                state_ref.pending_initial_local_snapshot = replacement_is_cold;
                 if replacement_is_cold {
                     // Own the replacement before yielding its cold initial batch;
                     // otherwise the next owner turn would retire and reopen it.
@@ -4162,7 +4162,7 @@ where
             retained.push(Rc::downgrade(&state));
             continue;
         }
-        let cold_runtime_replacement_pending = state.borrow().cold_runtime_replacement;
+        let initial_local_snapshot_pending = state.borrow().pending_initial_local_snapshot;
         let (mut snapshot, mut snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut refresh = DetachedSubscriptionRefresh::new(&state);
             #[cfg(test)]
@@ -4254,6 +4254,7 @@ where
                 );
             }
             if authoritative_reset
+                && !initial_local_snapshot_pending
                 && terminal_rows
                 && refresh
                     .maintained
@@ -4306,6 +4307,11 @@ where
                 refresh
                     .local_subscription_cleanup
                     .set(Some((groove_runtime_token, replacement_subscription_id)));
+                if !maintained.initial_snapshot_received() {
+                    state.borrow_mut().pending_initial_local_snapshot = true;
+                    retained.push(Rc::downgrade(&state));
+                    continue;
+                }
                 let settled = subscription_is_settled(
                     &node.borrow(),
                     active_authority_view_receipts,
@@ -4404,7 +4410,7 @@ where
                 {
                     reconciled_authoritative_resets.insert(key.clone(), generation);
                 }
-                if cold_runtime_replacement_pending {
+                if initial_local_snapshot_pending {
                     let replacement_ready = refresh
                         .maintained
                         .as_ref()
@@ -4421,7 +4427,7 @@ where
                     let maintained = refresh
                         .maintained
                         .take()
-                        .expect("cold runtime replacement kept its maintained subscription");
+                        .expect("pending initial snapshot kept its maintained subscription");
                     let materialized = node
                         .lock()
                         .await
@@ -4446,7 +4452,7 @@ where
                     refresh.snapshot_index.terminal_records = refresh
                         .maintained
                         .as_ref()
-                        .expect("cold runtime replacement restored maintained subscription")
+                        .expect("pending initial snapshot restored maintained subscription")
                         .decoded_terminal_records()?;
                     let settled = subscription_is_settled(
                         &node.borrow(),
@@ -4461,7 +4467,7 @@ where
                     );
                     refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                     refresh.settled = settled;
-                    state.borrow_mut().cold_runtime_replacement = false;
+                    state.borrow_mut().pending_initial_local_snapshot = false;
                     let mut event = subscription_delta_event_with_reset(
                         snapshot_tier,
                         settled,
