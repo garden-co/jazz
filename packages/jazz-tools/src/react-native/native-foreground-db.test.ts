@@ -77,9 +77,11 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
   expect("poll" in pendingRows && pendingRows.poll()).toEqual(Uint8Array.of(9));
 
   const subscription = db.subscribe(query, { tier: "local" });
+  const ticksBeforeSubscriptionRead = ticks.mock.calls.length;
   const pendingSubscription = subscription.readAll();
   expect(Array.isArray(pendingSubscription)).toBe(false);
   expect("retryAfterMs" in pendingSubscription && pendingSubscription.retryAfterMs()).toBe(0);
+  expect(ticks).toHaveBeenCalledTimes(ticksBeforeSubscriptionRead);
   expect(subscription.readAll()).toEqual([
     {
       type: "delta",
@@ -89,7 +91,7 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
       delta: Uint8Array.of(7),
     },
   ]);
-  expect(ticks).toHaveBeenCalledTimes(5);
+  expect(ticks).toHaveBeenCalledTimes(ticksBeforeSubscriptionRead);
 
   nativeWake?.("deferred");
   expect(wakes).toEqual(["deferred"]);
@@ -97,6 +99,45 @@ it("drains pending reads and subscriptions, then drops a delayed native wake aft
   nativeWake?.("immediate");
   expect(wakes).toEqual(["deferred"]);
   expect(() => db.all(query, { tier: "local" })).toThrow("runtime is closed");
+});
+
+it("keeps an empty native drain ready for the next native wake", () => {
+  const ticks = vi.fn();
+  const execute = vi.fn((command: Uint8Array) => command);
+  const db = new NativeForegroundDb(
+    {
+      execute,
+      tick: ticks,
+      close: vi.fn(() => true),
+      setTickScheduler: vi.fn(),
+    },
+    {
+      encodeNativeForegroundCommand(command: unknown) {
+        const type =
+          typeof command === "object" && command !== null
+            ? (command as { type?: unknown }).type
+            : command;
+        if (type === "subscribe") return Uint8Array.of(2);
+        if (type === "drainSubscription") return Uint8Array.of(3);
+        if (type === "close") return Uint8Array.of(5);
+        throw new Error("unexpected foreground fixture command");
+      },
+      decodeNativeForegroundResponse(bytes: Uint8Array) {
+        if (bytes[0] === 2) return { type: "subscribed", subscription: 12 };
+        if (bytes[0] === 3) return { type: "subscriptionEvents", events: [] };
+        if (bytes[0] === 5) return { type: "closed", closed: true };
+        throw new Error("unexpected foreground fixture response");
+      },
+      installNativeForegroundRuntime: () => {
+        throw new Error("not used");
+      },
+    } as never,
+  );
+
+  const subscription = db.subscribe(Uint8Array.of(1), { tier: "local" });
+  expect(ticks).toHaveBeenCalledTimes(1);
+  expect(subscription.readAll()).toEqual([]);
+  expect(ticks).toHaveBeenCalledTimes(1);
 });
 
 // Unknown transaction handles must fail before any ordinary read is issued.
