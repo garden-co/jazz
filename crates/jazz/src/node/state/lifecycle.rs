@@ -53,18 +53,31 @@ where
         schema: JazzSchema,
         storage: S,
     ) -> Result<Self, Error>
-    where S: ReopenableStorage + 'static,
+    where
+        S: ReopenableStorage + 'static,
     {
-        static CATALOGUES: std::sync::OnceLock<std::sync::Mutex<BTreeMap<SchemaVersionId, PhysicalIdentityManifest>>> = std::sync::OnceLock::new();
+        static CATALOGUES: std::sync::OnceLock<
+            std::sync::Mutex<BTreeMap<SchemaVersionId, PhysicalIdentityManifest>>,
+        > = std::sync::OnceLock::new();
         let schema_id = schema.version_id();
-        let identities = CATALOGUES.get_or_init(Default::default).lock().unwrap()
-            .entry(schema_id).or_insert_with(|| PhysicalIdentityManifest::allocate(&schema)).clone();
+        let identities = CATALOGUES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .entry(schema_id)
+            .or_insert_with(|| PhysicalIdentityManifest::allocate(&schema))
+            .clone();
         Self::new_with_options_inner(
-            node_uuid, schema, storage, false, CatalogueBootstrapState::Ready,
+            node_uuid,
+            schema,
+            storage,
+            false,
+            CatalogueBootstrapState::Ready,
             #[cfg(feature = "testing")]
             None,
             Some(identities),
-        ).await
+        )
+        .await
     }
 
     /// Open an edge-local runtime before it has received an authenticated
@@ -495,10 +508,13 @@ where
             current_write_schema,
             catalogue_bootstrap_marker,
         } = Self::open_catalogue_stage(
-            schema.clone(), storage, catalogue_bootstrap_state,
+            schema.clone(),
+            storage,
+            catalogue_bootstrap_state,
             #[cfg(any(test, feature = "testing"))]
             genesis_identities,
-        ).await?;
+        )
+        .await?;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.catalogue_open = started.elapsed();
@@ -669,6 +685,7 @@ where
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
+            absent_node_alias: None,
             ahead_current_keys: FxHashSet::default(),
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
@@ -714,18 +731,8 @@ where
         node.recover_from_storage().await?;
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
-        node.recover_known_state_facts().await?;
+        node.discard_legacy_subscription_scopes().await?;
         node.recover_local_availability_records().await?;
-        if !node.history_complete {
-            let recovered_authority_cut = node
-                .query
-                .authority_results
-                .values()
-                .filter_map(|state| state.settled_through)
-                .max()
-                .unwrap_or_default();
-            node.record_authoritative_settled_through(recovered_authority_cut);
-        }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.recover_known_state = started.elapsed();
@@ -858,7 +865,8 @@ where
     pub(crate) fn set_relay_authority_session_owner_for_test(&mut self) {
         // SAFETY: direct node tests model the host-admitted scope with a fixed
         // synthetic owner; production code has no toggle-shaped API.
-        let scope = crate::db::ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
+        let scope =
+            crate::db::ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
         self.configure_scope_isolated_client_relay(scope)
             .expect("test scope is stable");
     }
@@ -1198,25 +1206,23 @@ where
         kind: groove::large_values::LargeValueKind,
         chunks: Vec<groove::large_values::StagedChunk>,
     ) -> Result<(), Error> {
-        let encoded_bytes = chunks.iter().try_fold(0_u64, |total, chunk| {
-            total.checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
-                Error::InvalidStoredValue("large-value chunk size exceeds u64")
-            })?)
-            .ok_or(Error::InvalidStoredValue(
-                "large-value chunk batch accounting overflow",
-            ))
-        })?;
+        let encoded_bytes =
+            chunks.iter().try_fold(0_u64, |total, chunk| {
+                total
+                    .checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
+                        Error::InvalidStoredValue("large-value chunk size exceeds u64")
+                    })?)
+                    .ok_or(Error::InvalidStoredValue(
+                        "large-value chunk batch accounting overflow",
+                    ))
+            })?;
         if !self.admit_large_value_ingress(encoded_bytes) {
             self.database.evict_staged_large_value(upload_id).await?;
             return Err(Error::LargeValueIngressRateLimited);
         }
         let staged = self
             .database
-            .stage_large_value_chunk_batch_if_current(
-                upload_id,
-                kind,
-                chunks,
-            )
+            .stage_large_value_chunk_batch_if_current(upload_id, kind, chunks)
             .await?;
         if !staged {
             return Err(Error::LargeValueStageExpired);
@@ -1256,10 +1262,7 @@ where
         // journal, but wall-clock age alone cannot reject an active upload.
         let Some(staged) = self
             .database
-            .finalize_large_value_upload_if_current(
-                upload_id,
-                value_ref,
-            )
+            .finalize_large_value_upload_if_current(upload_id, value_ref)
             .await?
         else {
             return Err(Error::LargeValueStageExpired);
@@ -1283,9 +1286,10 @@ where
             .await?;
         self.enforce_large_value_staging_policy(&staged).await?;
         let column = column.into();
-        commit
-            .cells
-            .insert(column.clone(), Value::Large(Box::new(staged.value_ref.clone())));
+        commit.cells.insert(
+            column.clone(),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        );
         commit.prepared_large_columns.insert(column);
         commit.staged_large_values.push(staged.id);
         Ok((commit, staged.value_ref))
@@ -1442,7 +1446,8 @@ where
             ));
         }
         for (value, field) in values.iter_mut().zip(descriptor.fields()) {
-            self.hydrate_value_for_binding(value, &field.value_type).await?;
+            self.hydrate_value_for_binding(value, &field.value_type)
+                .await?;
         }
         Ok(())
     }
@@ -1459,9 +1464,10 @@ where
                 // JSON remains string-shaped to callers, but query collectors
                 // retain its distinct storage codec through the binding boundary.
                 ValueType::Internal(_)
-                    if *value_type == groove::large_values::physical_storage_value_type(
-                        groove::large_values::LargeValueKind::Json,
-                    ) =>
+                    if *value_type
+                        == groove::large_values::physical_storage_value_type(
+                            groove::large_values::LargeValueKind::Json,
+                        ) =>
                 {
                     match value {
                         Value::String(_) => Ok(()),
@@ -1483,7 +1489,8 @@ where
                             value_ref.kind,
                             groove::large_values::LargeValueKind::String
                                 | groove::large_values::LargeValueKind::Json
-                        ) => {
+                        ) =>
+                    {
                         *value = self.materialize_large_value(value_ref).await?;
                         Ok(())
                     }
@@ -1555,13 +1562,11 @@ where
                             ));
                         }
                         let mut values = enum_value.record().to_values()?;
-                        self.hydrate_record_values(&mut values, &case.payload).await?;
+                        self.hydrate_record_values(&mut values, &case.payload)
+                            .await?;
                         *enum_value = records::EnumValue::new(
                             tag,
-                            OwnedRecord::new(
-                                case.payload.create(&values)?,
-                                case.payload,
-                            ),
+                            OwnedRecord::new(case.payload.create(&values)?, case.payload),
                         );
                         Ok(())
                     }
@@ -1585,7 +1590,9 @@ where
                 },
                 ValueType::EnumTag(schema) => match value {
                     Value::EnumTag(value) => schema.variant(*value).map(|_| ()).map_err(Into::into),
-                    Value::String(value) => schema.discriminant(value).map(|_| ()).map_err(Into::into),
+                    Value::String(value) => {
+                        schema.discriminant(value).map(|_| ()).map_err(Into::into)
+                    }
                     _ => Err(Error::InvalidStoredValue(
                         "binding enum tag value does not match its descriptor",
                     )),
@@ -1608,10 +1615,11 @@ where
         match value_ref.kind {
             groove::large_values::LargeValueKind::Bytes => Ok(Value::Bytes(bytes)),
             groove::large_values::LargeValueKind::String
-            | groove::large_values::LargeValueKind::Json => Ok(Value::String(
-                String::from_utf8(bytes)
-                    .map_err(|_| Error::InvalidStoredValue("large text is not valid UTF-8"))?,
-            )),
+            | groove::large_values::LargeValueKind::Json => {
+                Ok(Value::String(String::from_utf8(bytes).map_err(|_| {
+                    Error::InvalidStoredValue("large text is not valid UTF-8")
+                })?))
+            }
         }
     }
 
@@ -1661,8 +1669,7 @@ where
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
-        self.query.authority_results.clear();
-        self.query.retained_root_window_sources.clear();
+        self.invalidate_subscription_scopes();
     }
 
     fn clear_settled_result_view(&mut self, authority_result_key: AuthorityResultKey) {
@@ -1673,8 +1680,7 @@ where
         // second reset restart its generation at one and let one scoped reset
         // erase another stream's progress through the binding-only facade.
         if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
-            state.settled_program_facts.clear();
-            state.covered_input_sources.clear();
+            state.supporting_revision = None;
             state.covered_input_versions.clear();
             state.source_closure = crate::node::AuthoritySourceClosure::Pending;
             state.source_incrementals.clear();
@@ -1691,6 +1697,8 @@ where
     /// generation, whereas an unsubscribe or ownerless-recovery invalidation
     /// must not leave a settled stamp that could satisfy the next usage site.
     fn retire_authority_result_view(&mut self, authority_result_key: AuthorityResultKey) {
+        #[cfg(any(test, feature = "testing"))]
+        crate::delivery_diagnostics::record(|| format!("retire_receipt runtime={} binding={:?} generation={}", self.groove_runtime_token(), authority_result_key.binding_view, self.applied_authority_result_generation(&authority_result_key)));
         self.query.authority_results.remove(&authority_result_key);
         self.query
             .retained_root_window_sources
@@ -1846,12 +1854,16 @@ where
         // the exact durable endpoints before it becomes resident catalogue
         // state.
         for lens in catalogue_lenses.values() {
-            let source = catalogue_schemas.get(&lens.source).ok_or(
-                Error::InvalidStoredValue("catalogue lens source schema is missing"),
-            )?;
-            let target = catalogue_schemas.get(&lens.target).ok_or(
-                Error::InvalidStoredValue("catalogue lens target schema is missing"),
-            )?;
+            let source = catalogue_schemas
+                .get(&lens.source)
+                .ok_or(Error::InvalidStoredValue(
+                    "catalogue lens source schema is missing",
+                ))?;
+            let target = catalogue_schemas
+                .get(&lens.target)
+                .ok_or(Error::InvalidStoredValue(
+                    "catalogue lens target schema is missing",
+                ))?;
             Self::validate_migration_lens_between(lens, source, target).map_err(|_| {
                 Error::InvalidStoredValue("catalogue lens violates trusted semantic invariants")
             })?;
@@ -2041,7 +2053,8 @@ where
                     &schema,
                     {
                         #[cfg(any(test, feature = "testing"))]
-                        let identities = genesis_identities.unwrap_or_else(|| PhysicalIdentityManifest::allocate(&schema));
+                        let identities = genesis_identities
+                            .unwrap_or_else(|| PhysicalIdentityManifest::allocate(&schema));
                         #[cfg(not(any(test, feature = "testing")))]
                         let identities = PhysicalIdentityManifest::allocate(&schema);
                         identities
@@ -2080,7 +2093,9 @@ where
                         vec![
                             Value::U64(codec::CatalogueRecordKind::Schema.key()),
                             Value::Uuid(current_schema_version_id.0),
-                            Value::Bytes(codec::encode_catalogue_schema(&SchemaVersion::new(schema.clone()))?),
+                            Value::Bytes(codec::encode_catalogue_schema(&SchemaVersion::new(
+                                schema.clone(),
+                            ))?),
                         ],
                     );
                 }
@@ -2208,7 +2223,9 @@ where
             mapping
                 .identities
                 .validate_for_schema(&schema.schema)
-                .map_err(|_| Error::InvalidStoredValue("durable physical identity manifest is invalid"))?;
+                .map_err(|_| {
+                    Error::InvalidStoredValue("durable physical identity manifest is invalid")
+                })?;
         }
         let mut published = BTreeMap::<SchemaVersionId, &SchemaLineagePublication>::new();
         for lineage in active.values().chain(staged.values()) {
@@ -2250,10 +2267,16 @@ where
                            omit: crate::ids::SchemaLineagePublicationId| {
             let mut parents = BTreeMap::new();
             for lineage in active.values().chain(staged.values()) {
-                parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+                parents.insert(
+                    lineage.publication.schema.id,
+                    lineage.publication.lens.source,
+                );
             }
             for lineage in pending.values() {
-                parents.insert(lineage.publication.schema.id, lineage.publication.lens.source);
+                parents.insert(
+                    lineage.publication.schema.id,
+                    lineage.publication.lens.source,
+                );
             }
             let is_descendant = |schema: SchemaVersionId| {
                 let mut cursor = schema;
@@ -2271,18 +2294,26 @@ where
             };
             mappings
                 .iter()
-                .filter(|(schema, _)| {
-                    **schema != candidate && !is_descendant(**schema)
-                })
+                .filter(|(schema, _)| **schema != candidate && !is_descendant(**schema))
                 .map(|(_, mapping)| mapping.identities.clone())
-                .chain(staged.values().filter(|lineage| {
-                    lineage.publication.id != omit
-                        && !is_descendant(lineage.publication.schema.id)
-                }).map(|lineage| lineage.publication.physical_identities.clone()))
-                .chain(pending.values().filter(|lineage| {
-                    lineage.publication.id != omit
-                        && !is_descendant(lineage.publication.schema.id)
-                }).map(|lineage| lineage.publication.physical_identities.clone()))
+                .chain(
+                    staged
+                        .values()
+                        .filter(|lineage| {
+                            lineage.publication.id != omit
+                                && !is_descendant(lineage.publication.schema.id)
+                        })
+                        .map(|lineage| lineage.publication.physical_identities.clone()),
+                )
+                .chain(
+                    pending
+                        .values()
+                        .filter(|lineage| {
+                            lineage.publication.id != omit
+                                && !is_descendant(lineage.publication.schema.id)
+                        })
+                        .map(|lineage| lineage.publication.physical_identities.clone()),
+                )
                 .collect::<Vec<_>>()
         };
         for (schema_id, mapping) in mappings {
@@ -2297,12 +2328,17 @@ where
                     "durable mapping identities disagree with authority publication",
                 ));
             }
-            let source = schemas.get(&publication.lens.source).ok_or(Error::InvalidStoredValue(
-                "durable identity publication source schema is missing",
-            ))?;
-            let source_mapping = mappings.get(&publication.lens.source).ok_or(
-                Error::InvalidStoredValue("durable identity publication source mapping is missing"),
-            )?;
+            let source = schemas
+                .get(&publication.lens.source)
+                .ok_or(Error::InvalidStoredValue(
+                    "durable identity publication source schema is missing",
+                ))?;
+            let source_mapping =
+                mappings
+                    .get(&publication.lens.source)
+                    .ok_or(Error::InvalidStoredValue(
+                        "durable identity publication source mapping is missing",
+                    ))?;
             source_mapping
                 .identities
                 .validate_evolution_to_with_history(
@@ -2312,7 +2348,9 @@ where
                     &publication.lens,
                     history_for(publication.schema.id, publication.id),
                 )
-                .map_err(|_| Error::InvalidStoredValue("durable identity publication evolution is invalid"))?;
+                .map_err(|_| {
+                    Error::InvalidStoredValue("durable identity publication evolution is invalid")
+                })?;
         }
         for lineage in pending.values() {
             // A pending lineage may be durably parked ahead of the publication
@@ -2330,9 +2368,12 @@ where
             let Some(source) = schemas.get(&lineage.publication.lens.source) else {
                 continue;
             };
-            let source_mapping = mappings.get(&lineage.publication.lens.source).ok_or(
-                Error::InvalidStoredValue("pending identity publication source mapping is missing"),
-            )?;
+            let source_mapping =
+                mappings
+                    .get(&lineage.publication.lens.source)
+                    .ok_or(Error::InvalidStoredValue(
+                        "pending identity publication source mapping is missing",
+                    ))?;
             source_mapping
                 .identities
                 .validate_evolution_to_with_history(
@@ -2342,7 +2383,9 @@ where
                     &lineage.publication.lens,
                     history_for(lineage.publication.schema.id, lineage.publication.id),
                 )
-                .map_err(|_| Error::InvalidStoredValue("pending identity publication evolution is invalid"))?;
+                .map_err(|_| {
+                    Error::InvalidStoredValue("pending identity publication evolution is invalid")
+                })?;
         }
         Ok(())
     }

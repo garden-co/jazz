@@ -487,3 +487,8 @@ pub mod tools;
 pub mod tx;
 /// Versioned transport frames around the semantic sync protocol.
 pub mod wire;
+
+/// Bounded metadata-only delivery diagnostics for native acceptance failures.
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+pub mod delivery_diagnostics;

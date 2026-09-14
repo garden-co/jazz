@@ -81,6 +81,7 @@ fn main() {
         let expected_bundles = rows - known_count;
         assert_eq!(emitted_bundles, expected_bundles);
         let result_members = supporting_rows
+            .added_rows()
             .iter()
             .map(|input| {
                 jazz::protocol::ResultMemberEntry::from((

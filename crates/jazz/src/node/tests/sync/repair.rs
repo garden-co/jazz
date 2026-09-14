@@ -810,7 +810,7 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         panic!("expected view update");
     };
     version_carriers.clear();
-    assert!(program_fact_adds.iter().any(|fact| {
+    assert!(program_fact_adds.added_rows().iter().any(|fact| {
         matches!(fact, input
             if input.version_table.as_str() == "todos"
                 && input.row == row_uuid
@@ -970,7 +970,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         panic!("expected view update");
     };
     assert!(
-        program_fact_adds.iter().any(|fact| matches!(
+        program_fact_adds.added_rows().iter().any(|fact| matches!(
             fact,
             input
                 if input.version_table.as_str() == "todos"
@@ -1245,7 +1245,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
             durability: DurabilityTier::Global,
         })],
         peer_payload_inventory: Default::default(),
-        supporting_rows: vec![crate::protocol::SupportingRow {
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(vec![crate::protocol::SupportingRow {
                 physical_table: receiver.local_availability_table_id(reintroduced.version_id(), "tasks").unwrap(),
                 version_table: "tasks".to_owned().into(),
                 row: task_row,
@@ -1257,7 +1257,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
                     branch_or_prefix: None,
                     row_digest: None,
                 },
-            }],
+            }]),
     });
     assert_eq!(
         receiver
@@ -1290,10 +1290,10 @@ fn supporting_snapshot_repairs_missing_same_transaction_deletion_layer() {
     let mut update = system_authority_reset(&mut core, &shape, &binding, subscription);
     let SyncMessage::ViewUpdate(payload) = &mut update else { panic!("expected supporting snapshot") };
     // A complete input set may retain both independently stored layers.
-    let content = payload.supporting_rows.iter().find(|row| row.version.tx == tx_id).unwrap().clone();
+    let content = payload.supporting_rows.added_rows().iter().find(|row| row.version.tx == tx_id).unwrap().clone();
     let mut restore = content.clone();
     restore.version.layer = crate::protocol::ResultRowLayer::Deletion;
-    payload.supporting_rows = vec![restore];
+    payload.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(vec![restore]);
     let mut bundles = crate::protocol::expand_version_carriers(&payload.version_carriers).unwrap();
     for bundle in &mut bundles {
         bundle.scope = crate::protocol::VersionBundleScope::ViewScoped;
@@ -1317,7 +1317,7 @@ fn supporting_snapshot_repairs_missing_same_transaction_deletion_layer() {
     assert!(reader.missing_known_state_row_version_refs(&update).unwrap().is_empty());
     let mut both_layers = update.clone();
     let SyncMessage::ViewUpdate(payload) = &mut both_layers else { unreachable!() };
-    payload.supporting_rows.push(content);
+    payload.supporting_rows.added_rows_mut().push(content);
     reader.apply_sync_message_settled(update).unwrap();
     reader.apply_sync_message_settled(both_layers).expect("content and deletion are independent supporting versions");
     assert_eq!(reader.current_rows("todos", DurabilityTier::Local).unwrap().len(), 1);

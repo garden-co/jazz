@@ -327,20 +327,20 @@
       "profile": "jazz-root",
       "spec": {
         "path": "crates/jazz/SPEC/16_maintained_subscription_views.md",
-        "anchor": "#### Durable source closure facts"
+        "anchor": "#### Volatile subscription scope and retired cache stores"
       },
       "semantic_fixture": {
         "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-        "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
+        "anchor": "legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/codec.rs",
-        "anchor": "source_closure_storage_rejects_unknown_tags_and_malformed_bytes"
+        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+        "anchor": "retired_scope_payloads_never_restore_authority"
       },
       "evidence": [
         {
           "path": "crates/jazz/src/node/tests/sync/known_state.rs",
-          "anchor": "settled_program_fact_add_remove_rewrite_and_reopen_use_one_durable_key_codec"
+          "anchor": "scope_updates_are_volatile_while_native_rows_survive_reopen"
         }
       ]
     },

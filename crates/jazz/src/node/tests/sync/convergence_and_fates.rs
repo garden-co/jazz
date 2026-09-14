@@ -15,7 +15,7 @@ fn view_updates_drop_unknown_usage_site_bindings() {
                 settled_through: GlobalTime(0),
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: Vec::new(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
             },
         ))
         .unwrap();
@@ -62,7 +62,7 @@ fn covered_input_receiver_fixture() -> (
     let SyncMessage::ViewUpdate(empty_payload) = &empty else {
         panic!("expected snapshot")
     };
-    assert!(empty_payload.supporting_rows.is_empty());
+    assert!(empty_payload.supporting_rows.added_rows().is_empty());
     assert!(!empty_payload.peer_payload_inventory.opening_pending);
     receiver.apply_sync_message_settled(empty).unwrap();
     assert!(
@@ -82,11 +82,11 @@ fn covered_input_receiver_fixture() -> (
     )
     .unwrap();
     assert_eq!(
-        initial.supporting_rows.len(),
+        initial.supporting_rows.added_rows().len(),
         1,
         "repeated table roles share one native version"
     );
-    let initial_input = initial.supporting_rows[0].clone();
+    let initial_input = initial.supporting_rows.added_rows()[0].clone();
     assert_eq!(initial_input.row, row_uuid);
     receiver
         .apply_sync_message_settled(initial.into_view_update())
@@ -102,13 +102,19 @@ fn covered_input_receiver_fixture() -> (
         authority.query_update(&mut core, &shape, &binding).unwrap(),
     )
     .unwrap();
-    assert_eq!(successor.supporting_rows.len(), 1);
+    assert_eq!(successor.supporting_rows.added_rows().len(), 1);
     assert_eq!(
-        successor.supporting_rows[0].physical_table,
+        successor.supporting_rows.added_rows()[0].physical_table,
         initial_input.physical_table
     );
-    assert_eq!(successor.supporting_rows[0].row, initial_input.row);
-    assert_ne!(successor.supporting_rows[0].version, initial_input.version);
+    assert_eq!(
+        successor.supporting_rows.added_rows()[0].row,
+        initial_input.row
+    );
+    assert_ne!(
+        successor.supporting_rows.added_rows()[0].version,
+        initial_input.version
+    );
     (
         receiver_dir,
         receiver,
@@ -154,8 +160,6 @@ fn payload_view_update_parts(
         opening_pending: payload.peer_payload_inventory.opening_pending,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
     }
 }
 
@@ -165,6 +169,7 @@ fn covered_input_tx_for_row(message: &SyncMessage, row_uuid: RowUuid) -> TxId {
     };
     update
         .supporting_rows
+        .added_rows()
         .iter()
         .find(|input| input.row == row_uuid)
         .unwrap()
@@ -176,7 +181,7 @@ fn covered_input_tx_for_row(message: &SyncMessage, row_uuid: RowUuid) -> TxId {
 fn authority_supporting_snapshot_rejects_unknown_physical_table_atomically() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    successor.supporting_rows[0].physical_table =
+    successor.supporting_rows.added_rows_mut()[0].physical_table =
         crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([0x7a; 16]));
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
@@ -185,7 +190,7 @@ fn authority_supporting_snapshot_rejects_unknown_physical_table_atomically() {
 fn authority_supporting_snapshot_rejects_wrong_native_table_atomically() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    successor.supporting_rows[0].version_table = "unknown_table".to_owned().into();
+    successor.supporting_rows.added_rows_mut()[0].version_table = "unknown_table".to_owned().into();
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
@@ -202,7 +207,7 @@ fn authority_covered_input_rejects_missing_carrier_before_settlement() {
 fn authority_supporting_snapshot_rejects_conflicting_native_versions_atomically() {
     let (_dir, mut receiver, authority_result, initial, mut successor) =
         covered_input_receiver_fixture();
-    successor.supporting_rows.push(initial);
+    successor.supporting_rows.added_rows_mut().push(initial);
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
@@ -210,9 +215,8 @@ fn authority_supporting_snapshot_rejects_conflicting_native_versions_atomically(
 fn authority_supporting_snapshot_rejects_duplicate_coordinate_atomically() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    successor
-        .supporting_rows
-        .push(successor.supporting_rows[0].clone());
+    let duplicate = successor.supporting_rows.added_rows()[0].clone();
+    successor.supporting_rows.added_rows_mut().push(duplicate);
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
@@ -220,7 +224,7 @@ fn authority_supporting_snapshot_rejects_duplicate_coordinate_atomically() {
 fn authority_supporting_snapshot_rejects_missing_version_atomically() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
-    successor.supporting_rows[0].version.tx = TxId::new(TxTime(0x7a), node(0x7a));
+    successor.supporting_rows.added_rows_mut()[0].version.tx = TxId::new(TxTime(0x7a), node(0x7a));
     assert_covered_input_rejected_atomically(&mut receiver, &authority_result, successor);
 }
 
@@ -231,9 +235,8 @@ fn authority_batch_rejects_later_malformed_closure_without_advancing_receipt() {
     let subscription = successor.subscription;
     let generation = receiver.applied_authority_result_generation(&authority_result);
     let mut malformed = successor.clone();
-    malformed
-        .supporting_rows
-        .push(malformed.supporting_rows[0].clone());
+    let duplicate = malformed.supporting_rows.added_rows()[0].clone();
+    malformed.supporting_rows.added_rows_mut().push(duplicate);
     let error = crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
         payload_view_update_parts(successor),
         payload_view_update_parts(malformed),
@@ -253,7 +256,7 @@ fn authority_complete_empty_snapshot_replaces_prior_inputs() {
     let (_dir, mut receiver, authority_result, _initial, mut successor) =
         covered_input_receiver_fixture();
     let generation = receiver.applied_authority_result_generation(&authority_result);
-    successor.supporting_rows.clear();
+    successor.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(Vec::new());
     successor.version_carriers.clear();
     receiver
         .apply_sync_message_settled(successor.into_view_update())
@@ -267,20 +270,23 @@ fn authority_complete_empty_snapshot_replaces_prior_inputs() {
         receiver
             .scalar_authority_input_rows(&authority_result, "todos")
             .is_empty(),
-        "empty snapshot clears both self-join scan inputs"
+        "empty snapshot clears the input shared by both self-join scans"
     );
 }
 
 #[test]
 fn authority_same_batch_snapshots_compare_each_successor_and_replay() {
     // Internal ingress is required to put several complete snapshots for the
-    // same authority into exactly one receive batch and inspect both compiler
-    // self-join roles. Public transport scheduling does not expose that control.
-    let (_dir, mut receiver, authority_result, initial, successor) =
+    // same authority into exactly one receive batch and inspect the physical
+    // input shared by both roles. Public transport scheduling does not expose
+    // that control. The replacement deliberately removes role-sized state.
+    let (_dir, mut receiver, authority_result, initial, mut successor) =
         covered_input_receiver_fixture();
-    let expected = successor.supporting_rows[0].clone();
+    let expected = successor.supporting_rows.added_rows()[0].clone();
+    successor.supporting_rows =
+        crate::protocol::SupportingRowsUpdate::snapshot(vec![expected.clone()]);
     let mut empty = successor.clone();
-    empty.supporting_rows.clear();
+    empty.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(Vec::new());
     empty.version_carriers.clear();
     crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
         payload_view_update_parts(successor.clone()),
@@ -291,20 +297,22 @@ fn authority_same_batch_snapshots_compare_each_successor_and_replay() {
     .expect("replacement, empty, refill and replay compare adjacent snapshots");
 
     let state = &receiver.query.authority_results[&authority_result];
-    assert_eq!(state.covered_input_sources.len(), 2);
-    assert_eq!(state.covered_input_versions.len(), 2);
+    assert_eq!(
+        state.compiled_covered_input_sources.as_ref().unwrap().len(),
+        1
+    );
+    assert_eq!(state.covered_input_versions.len(), 1);
     for input in state.covered_input_versions.values() {
-        assert_eq!(input.source_row, expected.row);
+        assert_eq!(input.row, expected.row);
         assert_eq!(input.version, expected.version);
         assert_ne!(input.version, initial.version);
     }
-    let facts = state.settled_program_facts.clone();
+    let facts = state.covered_input_versions.clone();
     receiver
         .apply_sync_message_settled(successor.into_view_update())
         .expect("replay also compares against retained rather than batch-local facts");
     assert_eq!(
-        receiver.query.authority_results[&authority_result].settled_program_facts,
-        facts,
+        receiver.query.authority_results[&authority_result].covered_input_versions, facts,
         "replay leaves the exact retained set unchanged"
     );
 }
@@ -366,14 +374,10 @@ fn successor_authority_closure_replaces_covered_input_and_detach_retires_it() {
         .expect("receive successor covered closure");
 
     let covered_versions = receiver.query.authority_results[&authority_result]
-        .settled_program_facts
-        .iter()
-        .filter_map(|fact| match fact {
-            crate::protocol::ProgramFactEntry::CoveredInput(input) if input.source_row == row_uuid => {
-                Some(input.version.tx)
-            }
-            _ => None,
-        })
+        .covered_input_versions
+        .values()
+        .filter(|input| input.row == row_uuid)
+        .map(|input| input.version.tx)
         .collect::<BTreeSet<_>>();
     assert!(
         covered_versions.contains(&successor_covered_tx),
@@ -577,12 +581,14 @@ fn reopened_core_continues_sync_after_restart() {
         .1;
     {
         let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
-        let mut core = NodeState::new_with_shared_test_catalogue(node(9), schema.clone(), storage).unwrap();
+        let mut core =
+            NodeState::new_with_shared_test_catalogue(node(9), schema.clone(), storage).unwrap();
         core.apply_sync_message_settled(first_unit).unwrap();
     }
 
     let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
-    let mut reopened_core = NodeState::new_with_shared_test_catalogue(node(9), schema, storage).unwrap();
+    let mut reopened_core =
+        NodeState::new_with_shared_test_catalogue(node(9), schema, storage).unwrap();
     let second_unit = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(2), 11).cells(title_cells("after")),
@@ -923,7 +929,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     opening_pending: true,
                     ..Default::default()
                 },
-                supporting_rows: Vec::new(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
             },
         ))
         .unwrap();
@@ -962,7 +968,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     opening_pending: false,
                     ..Default::default()
                 },
-                supporting_rows: Vec::new(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
             },
         ))
     }));
@@ -986,7 +992,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
 
                 version_carriers: Vec::new(),
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                supporting_rows: Vec::new(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
             },
         ))
         .unwrap();
@@ -1026,4 +1032,45 @@ fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
         .resolve()
     }));
     assert!(result.is_err());
+}
+
+// Receipt sequencing is internal: a public reader cannot suspend catalogue
+// activation between capturing its delivery generation and receiving refresh.
+#[test]
+fn fresh_delivery_generation_advances_after_catalogue_runtime_rebuild() {
+    let (_temp_dir, mut receiver) = open_node();
+    register_whole_table_receiver(&mut receiver, "todos");
+    let subscription = receiver.whole_table_subscription_key("todos").unwrap();
+    let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription,
+        settled_through: GlobalTime(1),
+        version_carriers: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
+    });
+    receiver.apply_sync_message_settled(update.clone()).unwrap();
+    let key = receiver
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let required_after = receiver.applied_authority_result_generation(&key);
+    assert!(required_after > 0);
+    assert!(receiver.has_settled_authority_result(&key));
+    futures::executor::block_on(receiver.rebuild_database_slot()).unwrap();
+    assert!(
+        !receiver.has_settled_authority_result(&key),
+        "rebuild must discard authority proof"
+    );
+    assert!(
+        receiver.applied_authority_result_generation(&key) <= required_after,
+        "rebuild alone is not a fresh delivery"
+    );
+    if let Some(state) = receiver.query.authority_results.get(&key) {
+        assert_authority_proof_cleared(state);
+    }
+    receiver.apply_sync_message_settled(update).unwrap();
+    assert!(receiver.has_settled_authority_result(&key));
+    assert!(
+        receiver.applied_authority_result_generation(&key) > required_after,
+        "a fresh delivery must release the read waiting across the rebuild"
+    );
 }

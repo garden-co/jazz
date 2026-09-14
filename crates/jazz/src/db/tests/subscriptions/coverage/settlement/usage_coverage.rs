@@ -660,7 +660,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             // of row cardinality. This fixture isolates the intentionally
             // malformed version carrier below rather than relying on an
             // obsolete empty-fact authority result path.
-            supporting_rows: Vec::new(),
+            supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
         })
     };
     authority_transport

@@ -207,6 +207,8 @@ where
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
     pub(super) active_authority_view_receipts: ActiveAuthorityViewReceipts,
     pub(super) coverage_refresh_generations: CoverageRefreshGenerations,
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) trace_query_coverage: Cell<bool>,
     pub(super) query_coverage_registrations: QueryCoverageRegistrations,
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
     pub(super) relay_upstream_subscription_owners: RelayUpstreamSubscriptionOwners,
@@ -342,6 +344,8 @@ where
             awaiting_initial_authority_coverage: Rc::new(RefCell::new(BTreeSet::new())),
             active_authority_view_receipts: Rc::new(RefCell::new(None)),
             coverage_refresh_generations: Rc::new(RefCell::new(BTreeMap::new())),
+            #[cfg(any(test, feature = "testing"))]
+            trace_query_coverage: Cell::new(false),
             query_coverage_registrations: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             relay_upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
@@ -2261,6 +2265,8 @@ where
                     pending,
                     upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                     announced_shapes: BTreeSet::new(),
+                    sent_subscriptions: BTreeMap::new(),
+                    awaiting_support_snapshots: BTreeMap::new(),
                     sent_session_claim_revisions: BTreeMap::new(),
                     outbox: Rc::clone(&self.outbox),
                     uploaded: BTreeSet::new(),

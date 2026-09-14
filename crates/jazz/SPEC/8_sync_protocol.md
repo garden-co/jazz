@@ -15,7 +15,7 @@ Invariant digest:
 - `INV-SYNC-7`: A query update MUST identify supporting physical row versions individually, never imply query membership from whole-transaction possession. Result members, query-source roles and program facts are receiver-local bookkeeping, not fields in the base peer read protocol.
 - `INV-SYNC-8`: A view server MUST use `peer_payload_inventory.complete_tx_payloads` only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-scoped, not subscription-scoped, and partial bundles MUST remain eligible for later payload emission until complete-tx payload coverage is established.
 - `INV-SYNC-9`: A receiver MUST NOT install a complete supporting set until its referenced transaction metadata and exact native bodies are available and valid for the selected authority usage.
-- `INV-SYNC-10`: Every non-pending `ViewUpdate` MUST replace the subscription’s complete supporting-row set atomically. There is no wire reset flag; application resets and deltas are derived locally.
+- `INV-SYNC-10`: Each v2 ViewUpdate MUST atomically install either an initial/recovery physical supporting Snapshot or a Delta naming the exact installed predecessor. A delta MUST NOT reset unchanged receiver inputs.
 - `INV-SYNC-11`: Complete supporting-set replacement and subscription detach MUST preserve per-peer payload dedup while peer state survives.
 - `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
 - `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, or complete tx payload refs.
@@ -29,10 +29,10 @@ Invariant digest:
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
 - `INV-SYNC-22`: An edge MUST share upstream permission-scope subscriptions whenever one settled subscription can satisfy every dependent acceptance gate.
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with `SyncMessage::SubscribeRejected` addressed to the requested `SubscriptionKey`; the rejected subscription MUST NOT become active, `Unsubscribe` for it is a no-op, and the connection MUST keep serving other subscriptions.
-- `INV-SYNC-24`: Known-state payload dedup MUST omit only native bodies, preserving the complete supporting-row set and inventory references. Fast declarations may omit only versions settled at or before their declared position; not-yet-fated versions MUST be shipped.
+- `INV-SYNC-24`: Known-state payload dedup may omit only native bodies, never required physical snapshot membership or delta additions/removals. Fresh subscriptions and recovery require a full snapshot; retained transport revisions are not durable coverage receipts.
 - `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
 - `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
-- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
+- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams in the current process; eviction invalidates its in-memory cursor, and restart never recovers a declaration.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may affect native-body dedup only when its server-stamped progress matches the serving peer’s current token for that reader and binding view. It MUST NOT replace the complete supporting set or the fresh selected-authority confirmation.
 - `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
 - `INV-SYNC-28`: The pre-reconstruction terminal carrier is historical scaffolding and is retired by `INV-SYNC-36`; it is not an authority-output compatibility contract.
@@ -57,10 +57,10 @@ Invariant digest:
 - `INV-SYNC-42`: An authorized deletion MUST retain native content and deletion witnesses and includeDeleted semantics; deletion-only evidence MUST NOT certify a complete Readable coordinate or override confirmed access loss.
 - `INV-SYNC-43`: Validated receipt application MUST be owned through durable and runtime source updates to completion or fail closed; caller cancellation MUST NOT leave normal queries using a source state inconsistent with persisted availability evidence.
 
-- `INV-SYNC-44`: Every non-pending query update MUST describe one complete supporting physical row/version set, including the empty set. The wire MUST NOT assign query-input roles or carry separate source-completeness facts. Receivers MUST validate and install the set atomically before deriving results locally. Encoding, validating and comparing a complete set may scale with its size, including ordered-index lookup costs. Local query maintenance after comparison MUST still apply only the changed inputs; receiving a complete set does not authorize rebuilding every local result.
+- `INV-SYNC-44`: The sole v2 read format is physical supporting Snapshot/Delta, with no compiler roles or separate completeness facts on the wire. Initial/recovery snapshots establish a complete authorized set; ordinary updates carry only physical membership changes against the exact predecessor. Receivers validate changed inputs and install atomically before deriving results locally.
 - `INV-SYNC-45`: Native supporting rows MUST follow the authority catalogue that identifies them, including permission-advice hydration. Repair MUST check exact content/deletion layers and branches and use the live usage’s admitted policy binding. Authorized deletion witnesses remain repairable under includeDeleted semantics; retired usages MUST NOT initiate repair.
 
-- `INV-SYNC-46`: A delayed native-version repair MUST NOT reinstall a supporting snapshot superseded by a later complete snapshot for the same subscription. This ordering state is receiver-local and MUST NOT require query-input labels or a new wire field. A receiver yielding to fetch missing bodies MUST first finish applying complete updates already consumed in that receive batch; a later repair must never discard another subscription’s received update or an admitted publication.
+- `INV-SYNC-46`: Missing-body repair MUST preserve dependent supporting deltas in order. A later independent snapshot may supersede earlier pending updates, but a delayed repair MUST never reinstall a superseded snapshot. Retired or nonselected authority usages cannot advance a revision.
 
 ## Encoder trust, bounded decoding, and failure containment
 
@@ -151,12 +151,12 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
-**Decision, 2026-08-28 — the sole wire protocol is v1.** `ViewUpdate` carries
+**Experiment, 2026-09-13 — the sole wire protocol is v2 (#2913 / #2954).** `ViewUpdate` carries
 settled version payloads only through `version_carriers`; the transitional
 duplicate `version_bundles` field is absent. Every endpoint advertises exactly
-wire-protocol v1 and requires every peer Hello to advertise exactly
-`min_protocol_version=1, max_protocol_version=1`; ranges such as `0..=1`,
-`1..=2`, and `1..=15` reject before payload decoding. There are no compatibility
+wire-protocol v2 and requires every peer Hello to advertise exactly
+`min_protocol_version=2, max_protocol_version=2`; v1 and ranges such as `0..=2`,
+`1..=2`, and `2..=15` reject before payload decoding. There are no compatibility
 aliases, migration paths, or old wire decoders. `VersionBundle` remains the semantic unit produced when a
 carrier is expanded and remains the direct payload of `RowVersionPayloads`
 repair responses.
@@ -169,8 +169,8 @@ Accountless reader sessions remain distinct from non-null row authors. Large sca
 internal enum/record encoding rather than the former private tagged/postcard
 payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol
-data. The wire-v1 golden fixture set is the only supported message layout.
-Wire-protocol v1 is independent of other formats that are also labelled v1,
+data. The wire-v2 golden fixture set is the only supported message layout.
+Wire-protocol v2 is independent of other formats that are also labelled v1,
 including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
 `MigrationLens` payloads in that fixture set are
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
@@ -199,7 +199,7 @@ evaluate policy. `SYSTEM` is never a relay transport identity or delegated
 subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
 there is no old-shape decoder or compatibility path.
 
-### 8.1.1 Frozen wire-protocol v1 byte contract
+### 8.1.1 Frozen wire-protocol v2 byte contract
 
 `WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
 value**. A conformant decoder MUST reject a valid prefix followed by any
@@ -229,7 +229,7 @@ endpoint byte as a suffix is malformed framing, not version compatibility. A
 length other than exactly `16` MUST be rejected even when the declared byte
 sequence and the remaining Hello fields are otherwise well formed.
 
-Postcard enum ordinals are wire data. The wire-protocol v1 baseline freezes these permanent
+Postcard enum ordinals are wire data. The wire-protocol v2 baseline freezes these permanent
 discriminants (decimal):
 
 | enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -243,7 +243,7 @@ discriminants (decimal):
 Future variants MUST append after these values; existing variants, fields, and
 their field order MUST NOT be reordered, inserted before, reused, or decoded
 through a migration path. A new optional semantic variant additionally needs a
-new negotiated feature bit. Wire-protocol v1 intentionally provides neither
+new negotiated feature bit. Wire-protocol v2 intentionally provides neither
 old-version decoding nor migration.
 
 `AuthorityPublication` has the postcard field order `tx_id`, `commits`. `tx_id`
@@ -295,7 +295,7 @@ its accepted mask is converted to a narrower runtime type. The feature mask
 and authority epoch remain `bigint` through wire decoding, so canonical values
 through `2^64-1` are representable without a JavaScript number conversion. Exactly
 one compression bit may be active on an envelope; when both codecs are
-negotiated, an outbound wire-protocol v1 sender selects LZ4 and emits only its bit. A
+negotiated, an outbound wire-protocol v2 sender selects LZ4 and emits only its bit. A
 receiver rejects an envelope declaring both codecs, a codec change within one
 connection, corrupt compressed bytes, or a decompressed payload exceeding the
 logical-message budget. Compression is applied before fragmentation and removed
@@ -323,7 +323,7 @@ new durable storage encoding or compatibility fallback.
 inline/indirect records. Rust checks exact bytes, decoded values, roundtrips,
 and rejection of the old descriptor before storage.
 
-The wire-protocol v1 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
+The wire-protocol v2 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
 `crates/jazz/fixtures/wire_hello_frames.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently
@@ -476,11 +476,11 @@ monotone `GlobalTime` that advances the allocator and watermark (ch. 3,
 
 ### 8.4 Downstream: query-driven supporting rows
 
-A subscription sends a query and receives the current physical row versions
-needed to evaluate it. Every non-pending `ViewUpdate` contains one complete
-`supporting_rows` set for that subscription, including the empty set. A later
-set replaces the previous set. An opening-pending response is a lifecycle
-notification and carries no supporting rows; it is not a partial dataset.
+A subscription receives physical versions needed to evaluate its query. Its
+first non-pending update is a complete supporting snapshot. Ordinary successors
+carry physical additions/removals and an exact predecessor revision; they do not
+resend the complete scope. An independent recovery snapshot can replace a lost
+chain. Opening-pending is a lifecycle notification, not an empty dataset.
 
 Each supporting row identifies its permanent physical table UUID, authored
 record table name, row UUID, transaction, concrete content or deletion layer,
@@ -505,21 +505,16 @@ to serve them to that reader (`INV-SYNC-12..14`, `INV-SYNC-41`).
 
 ### 8.4.1 Reconstructing results and repairing native bodies
 
-The receiver evaluates the query with its own IVM. A complete supporting set
-may replace tasks A and B with B and C, but the receiver compares the sets and
-applies only the changed local inputs. The application sees A removed and C
-added, without a reset of B. Initial attachment may publish a local reset;
-subsequent complete wire sets do not require repeated application resets.
-Complete sets require references proportional to their size; constructing and
-looking up ordered indexes may add O(n log n) processing. That does not justify
-rebuilding all local query results.
+The receiver evaluates the query with its own IVM. For example, snapshot
+revision R contains A and B. Delta R→S removes A and adds C; B is untouched.
+Only the changed physical versions feed shared per-table receiver inputs in
+one atomic Groove batch; aliases remain local operators. No full predecessor clone,
+manifest reconstruction or retained-scope comparison is required on this path.
 
-Native body dedup is separate from supporting-set membership. Complete
-transaction inventory may suppress already-retained native payloads, but MUST
-NOT remove their references from the complete supporting set. A partial
-transaction bundle establishes only its explicit payload coverage, never
-complete-transaction inventory merely because cardinalities happen to match
-(`INV-SYNC-8..9`, `INV-SYNC-24..26`).
+Native body dedup remains separate from membership. Transaction inventory may
+suppress an already-retained added body, not the addition/removal itself. A
+partial bundle establishes only its explicit payload coverage, never whole
+transaction possession merely because cardinalities match.
 
 A receiver lacking an exact referenced body requests repair before installing
 the set. Content and deletion are independent layers: retaining content for a
@@ -758,8 +753,9 @@ A subscriber declares its known state per usage-site query in one of two forms:
   global position `p`, and none of it has been locally evicted." In the current
   implementation `p` is the exact `settled_through` stamp previously emitted by
   the serving node for the same canonical binding view. The client records and
-  persists this cursor when applying `ViewUpdate`s and echoes it on resubscribe.
-  Any local eviction touching stored row-version bodies invalidates persisted
+  retains this cursor in memory when applying `ViewUpdate`s and echoes it on
+  in-process resubscribe. Restart requires a fresh scope snapshot.
+  Any local eviction touching stored row-version bodies invalidates in-memory
   fast facts before another declaration can be made (`INV-SYNC-27`).
 - **Slow declaration** — an explicit set of row-version identities
   `(row_uuid, tx_time, tx_node_id)`: used when no valid fast fact exists
@@ -822,9 +818,9 @@ time that can affect the served view, including authorization and revocation
 effects. It does not claim that the receiver possesses unrelated transactions,
 and neither density nor numerical adjacency is required: the authority may
 advance one binding directly across arbitrarily many irrelevant commits. It may
-be persisted and reused across reconnects
+be reused within one process across reconnects
 or edges serving the same authoritative database lineage for known-state payload
-dedup and repair. It is not an active-connection receipt: a subscription is
+dedup and repair, but is never persisted or recovered. It is not an active-connection receipt: a subscription is
 settled, and a usage-site one-shot attachment is remotely covered, only after
 the selected continuously live upstream connection has sent a fresh confirming
 `ViewUpdate`. A fresh `Edge`/`Global` one-shot requires that confirmation for
@@ -904,10 +900,9 @@ known-state coverage grows.
 _Further invariants._ `INV-SYNC-24` — fast and slow declarations omit only
 eligible version bodies; `INV-SYNC-25` — dedup + repairs converge to the
 undeduped stream; `INV-SYNC-26` — repair requests are exact and policy-checked;
-`INV-SYNC-27` — persisted fast declarations require contiguous application and
-no eviction; eviction invalidates the persisted fact. Persisting slow exact
-declarations is intentionally not part of v1; they are derived from the
-receiver's current local store when needed.
+`INV-SYNC-27` — process-local fast declarations require contiguous application
+and no eviction; eviction invalidates the in-memory fact. Neither fast cursors
+nor slow exact declarations are persisted; restart restores native data only.
 
 ### 8.13 Subsumed sync and wire notes
 
@@ -1110,7 +1105,7 @@ selected scope's deletion witnesses and changes only with its source receipt.
 ### Mandatory current-row availability messages
 
 `CurrentRowsRequest`, `CurrentRowsReceipt`, and `CurrentRowsCancel` are mandatory
-wire-protocol v1 semantic messages. They require no optional feature bit and use
+wire-protocol v2 semantic messages. They require no optional feature bit and use
 the existing named postcard control codec and native `VersionCarrier` encoding;
 the byte corpus pins all three variants. Ordinary version validation and
 authenticated link admission still apply. No compatibility with peers lacking
@@ -1120,30 +1115,44 @@ current-row availability contract for authorization and receipt validation.
 
 ### Atomic supporting-row view payload
 
-`ViewUpdatePayload.supporting_rows` is the complete supporting physical
-row/version set for one subscription. There are no per-query source IDs, role
-labels, completeness facts, result members, or input-delta fields on the wire.
-A row reference names its permanent physical table UUID, row UUID and exact
-native version; the authored table name remains lookup metadata required by the
-existing native version-repair API, never a query occurrence identity.
+`ViewUpdatePayload.supporting_rows` is `SupportingRowsUpdate`:
 
-Every non-opening-pending payload is a replacement snapshot, including an empty
-set. The receiver installs it atomically only after all referenced versions are
-available and validated, then evaluates its ordinary local query over that
-physical dataset. Repeated scans of a table consume the same local dataset.
-Compiled source slots and graph bookkeeping are receiver-local implementation
-details; they are not authority claims transported by the peer. An established
-listener still receives ordinary local result deltas: replacing the supporting
-snapshot does not reopen the listener or force an application-level reset.
-Permission-advice hydration obeys the same catalogue-before-row ordering as an
-ordinary subscription. Opening-pending markers contain no supporting rows and
-must not initiate missing-version repair. Repair may retain immutable bytes
-from an older update, but must not reinstall its supporting set after a later
-complete set for the same subscription has arrived. The existing
-subscription, authenticated authority, cut, epoch and ordering boundaries remain.
-CurrentRows is the separate current/unavailable reconciliation exchange; query
-exclusion alone is not global unavailability. This transport simplification does
-not claim complete negative-query evidence or add shallow aggregate transport.
+- `Snapshot { revision: [u8;16], rows: Vec<SupportingRow> }`.
+- `Delta { predecessor: [u8;16], revision: [u8;16], adds: Vec<SupportingRow>, removes: Vec<SupportingRow> }`.
+
+The named semantic encoding is postcard in the version-2 WireEnvelope. Enum
+discriminants are respectively 0 and 1, followed by fields in declaration order.
+Revisions are exactly 16 raw array bytes (no length prefix). Vectors use postcard
+lengths and the existing exact SupportingRow field encoding. Populated snapshots
+and deltas are pinned in wire_message_frames.json; the empty forms, truncation
+and v1 negotiation rejection have explicit Rust byte-level tests. There is no
+v1 compatibility decoder. Storage/catalogue/binding encodings are unchanged.
+
+Revisions are non-nil opaque identifiers, not authority capabilities or history
+timestamps. A delta must name the exact installed predecessor under the admitted
+authority/result usage, or the immediately preceding validated update in the
+same batch. Disjoint additions/removals are physical set transitions, not weighted
+compiler facts. Duplicate entries, absent removals, duplicate additions, unknown
+tables, ambiguous layers and invalid native bodies reject before installation.
+An empty confirmation may use the same predecessor and successor; a nonempty
+self-successor is invalid. A broken chain fails closed and requires a fresh
+subscription snapshot; history cursors cannot repair a missing transport proof.
+
+All added bodies must be available before atomic input installation and result
+publication. A successor waiting behind native-body repair must retain its
+predecessor; it cannot use the old complete-snapshot supersession rule. A new
+independent snapshot may supersede the chain, while active repair correlation
+is preserved and delayed replies cannot reinstall retired sets. Already-ready
+updates for other subscriptions are applied before yielding for repair.
+
+Only physical supporting versions cross the wire. Source roles, completeness
+facts, query programs and output operations remain receiver-local. Multiple
+roles referencing one version retain independent local weights; only physical
+0→1 and 1→0 presence changes cross the link. Scope removal does not delete cached
+bytes or assert global access loss. Existing exact reader/policy, catalogue,
+content/deletion layer, branch and selected-authority boundaries still govern
+disclosure and repair. Reopen never restores transport revision authority from
+persisted facts. This does not add negative-query evidence or shallow aggregates.
 
 Native row-version carriers are unchanged. The named postcard semantic codec
 and byte corpus pin this mandatory pre-release layout; old layouts are unsupported.

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use groove::ivm::{
@@ -24,10 +25,12 @@ use super::query_engine::{
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{NodeAlias, NodeUuid, RowAuthor, RowUuid, SchemaVersionAlias};
 use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
+#[cfg(test)]
+use crate::protocol::CoveredInputEntry;
 use crate::protocol::{
-    BranchKey, CoveredInputEntry, ProgramFactEntry, ProgramSourceId, RealRowMemberEntry,
-    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer,
-    RowVersionRefEntry, SyntheticReplacementToken,
+    BranchKey, ProgramFactEntry, ProgramSourceId, RealRowMemberEntry, RelationEdgeEntry,
+    ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SupportingRow,
+    SyntheticReplacementToken,
 };
 use crate::schema::{RuntimeSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
@@ -36,66 +39,6 @@ use crate::tx::TxId;
 
 type TableSchemas = BTreeMap<String, TableSchema>;
 type VersionDecodePlanCache = BTreeMap<(String, VersionLayer), VersionDecodePlan>;
-
-/// Coalesce source-closure changes emitted by independently drained terminals.
-///
-/// The first observation supplies the state before this drain, and each later
-/// observation replaces only the final state. This keeps peer output a set
-/// delta even when one drain removes and re-adds the same covered input.
-fn record_peer_source_fact_change(
-    changes: &mut BTreeMap<ProgramFactEntry, (bool, bool)>,
-    fact: ProgramFactEntry,
-    is_present: bool,
-) {
-    changes
-        .entry(fact)
-        .and_modify(|(_, final_state)| *final_state = is_present)
-        .or_insert((!is_present, is_present));
-}
-
-fn append_net_peer_source_fact_changes(
-    transitions: &mut ResultTransitions,
-    changes: BTreeMap<ProgramFactEntry, (bool, bool)>,
-) {
-    for (fact, (was_present, is_present)) in changes {
-        if was_present == is_present {
-            continue;
-        }
-        if is_present {
-            transitions.program_fact_adds.push(fact);
-        } else {
-            transitions.program_fact_removes.push(fact);
-        }
-    }
-}
-
-fn record_source_fact_transition(
-    transitions: &mut ResultTransitions,
-    fact: ProgramFactEntry,
-    is_present: bool,
-) {
-    if fact.is_peer_source_closure_fact() {
-        transitions
-            .source_fact_presence_changes
-            .push((fact.clone(), is_present));
-    }
-    if is_present {
-        transitions.program_fact_adds.push(fact);
-    } else {
-        transitions.program_fact_removes.push(fact);
-    }
-}
-
-/// Distinguishes independent maintained terminals that can witness the same
-/// peer source fact. Their union, rather than a summed terminal refcount, is
-/// the exact receiver closure: a replacement witness disappearing must not
-/// retract a still-live version witness (or vice versa).
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum SourceFactOrigin {
-    Version,
-    Replacement,
-    ProgramFact,
-}
 
 #[derive(Clone, Debug)]
 struct VersionDecodePlan {
@@ -126,16 +69,22 @@ pub(crate) struct MaintainedSubscriptionView {
     /// The graph uses read-schema names; immutable payload coordinates use
     /// the name of that same physical table in the authored schema.
     witness_table_names: BTreeMap<(String, SchemaVersionAlias), String>,
-    result_weights: BTreeMap<ResultMemberEntry, i64>,
+    result_weights: RetainedResultMap<i64>,
     /// Result memberships already exposed to the subscription consumer. A
     /// result-current terminal can advance before the companion content
     /// witness terminal, so raw membership alone is not publishable.
-    published_result_members: BTreeSet<ResultMemberEntry>,
-    result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+    published_result_members: RetainedResultMembers,
+    /// After a complete storage-backed baseline, only changed result weights
+    /// can affect publishability. Keep candidates across partial/failed drains;
+    /// `None` requires a full reconcile (also used by witness-gated views).
+    unreconciled_result_members: Option<RetainedResultMembers>,
+    #[cfg(test)]
+    result_member_reconcile_visits: usize,
+    result_payloads: RetainedResultMap<ResultMemberPayloadEntry>,
     /// Payloads paired with memberships already exposed to a consumer. Keep
     /// this separate from `result_payloads`: the latter records the raw
     /// result-terminal state while a membership waits for its content witness.
-    published_result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+    published_result_payloads: RetainedResultMap<ResultMemberPayloadEntry>,
     /// Incrementally maintained collector output, keyed by the opaque Groove
     /// terminal key and then encoded tree. A public root UUID is not a
     /// sufficient identity: one flat relation can contain several occurrences
@@ -167,17 +116,14 @@ pub(crate) struct MaintainedSubscriptionView {
     /// version identity. They do not emit a live Stream-B witness when a head
     /// deletion or rejection exposes the inherited member.
     inline_content_branch_keys: BTreeSet<Vec<u8>>,
-    /// Exact active source-closure facts, independent of the transient
-    /// multisink batches used to reach the current graph state. Peer
-    /// publication diffs this set against its acknowledged predecessor so a
-    /// +/− pair observed in one drain is never serialized as an ambiguous
-    /// ordered operation.
-    source_fact_weights: BTreeMap<ProgramFactEntry, [i64; 3]>,
-    /// Enabled only by peer publication after recording a complete predecessor.
-    /// Retain candidates across failed/cancelled drains and bundle construction;
-    /// only successful publication may acknowledge them.
-    unpublished_source_facts: Option<BTreeSet<ProgramFactEntry>>,
-    selected_deletion_witnesses: BTreeMap<ProgramFactEntry, VersionRow>,
+    /// Evaluator-local proof/output facts. Physical input membership is owned
+    /// solely by `supporting`; these facts are never a transport frontier.
+    program_fact_weights: BTreeMap<ProgramFactEntry, i64>,
+    pub(super) supporting: super::supporting_frontier::SupportingFrontier,
+    pub(super) physical_tables: BTreeMap<groove::Intern<String>, crate::ids::GlobalPhysicalTableId>,
+    /// Native deletion bodies retained for the frontier's selected-deletion
+    /// contributions; this map is payload ownership, not another published set.
+    selected_deletion_witnesses: BTreeMap<SupportingRow, VersionRow>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -188,10 +134,13 @@ impl Default for MaintainedSubscriptionView {
             edge_availability_owner: None,
             read_view: Default::default(),
             witness_table_names: BTreeMap::new(),
-            result_weights: BTreeMap::new(),
-            published_result_members: BTreeSet::new(),
-            result_payloads: BTreeMap::new(),
-            published_result_payloads: BTreeMap::new(),
+            result_weights: RetainedResultMap::default(),
+            published_result_members: RetainedResultMembers::default(),
+            unreconciled_result_members: None,
+            #[cfg(test)]
+            result_member_reconcile_visits: 0,
+            result_payloads: RetainedResultMap::default(),
+            published_result_payloads: RetainedResultMap::default(),
             structured_app_rows: BTreeMap::new(),
             structured_terminal_records: BTreeMap::new(),
             structured_root_keys: BTreeMap::new(),
@@ -202,8 +151,9 @@ impl Default for MaintainedSubscriptionView {
             retains_structured_app_rows: true,
             storage_backed_result_materialization: false,
             inline_content_branch_keys: BTreeSet::new(),
-            source_fact_weights: BTreeMap::new(),
-            unpublished_source_facts: None,
+            program_fact_weights: BTreeMap::new(),
+            supporting: Default::default(),
+            physical_tables: BTreeMap::new(),
             selected_deletion_witnesses: BTreeMap::new(),
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),
@@ -224,14 +174,148 @@ pub(crate) struct MaintainedSubscriptionViewFootprint {
     pub(crate) result_payloads_bytes: usize,
     pub(crate) structured_app_rows_bytes: usize,
     pub(crate) versions_bytes: usize,
+    pub(crate) supporting_frontier_bytes: usize,
     pub(crate) replacements_bytes: usize,
     pub(crate) total_heap_bytes: usize,
 }
 
+/// Read-only map access keeps every mutation paired with the exact existing
+/// referenced-byte model. No allocator sampling or delayed metric refresh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RetainedResultMap<V> {
+    entries: BTreeMap<ResultMemberEntry, V>,
+    entry_bytes: usize,
+    positive_count: usize,
+}
+
+impl<V> Default for RetainedResultMap<V> {
+    fn default() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            entry_bytes: 0,
+            positive_count: 0,
+        }
+    }
+}
+
+impl<V> std::ops::Deref for RetainedResultMap<V> {
+    type Target = BTreeMap<ResultMemberEntry, V>;
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+trait RetainedResultValue {
+    fn retained_bytes(&self) -> usize;
+    fn positive_count(&self) -> usize {
+        0
+    }
+}
+
+impl RetainedResultValue for i64 {
+    fn retained_bytes(&self) -> usize {
+        mem::size_of::<Self>()
+    }
+    fn positive_count(&self) -> usize {
+        usize::from(*self > 0)
+    }
+}
+
+impl RetainedResultValue for ResultMemberPayloadEntry {
+    fn retained_bytes(&self) -> usize {
+        result_member_payload_entry_bytes(self)
+    }
+}
+
+impl<V: RetainedResultValue> RetainedResultMap<V> {
+    fn insert(&mut self, member: ResultMemberEntry, value: V) -> Option<V> {
+        let key_bytes = result_member_entry_bytes(&member);
+        let value_bytes = value.retained_bytes();
+        let positive = value.positive_count();
+        let old = self.entries.insert(member, value);
+        if let Some(old) = &old {
+            self.entry_bytes -= old.retained_bytes();
+            self.positive_count -= old.positive_count();
+        } else {
+            // Equal keys have equal modeled sizes: the model uses lengths,
+            // not vector capacities or allocation addresses.
+            self.entry_bytes += key_bytes;
+        }
+        self.entry_bytes += value_bytes;
+        self.positive_count += positive;
+        old
+    }
+
+    fn remove(&mut self, member: &ResultMemberEntry) -> Option<V> {
+        let (key, value) = self.entries.remove_entry(member)?;
+        self.entry_bytes -= result_member_entry_bytes(&key) + value.retained_bytes();
+        self.positive_count -= value.positive_count();
+        Some(value)
+    }
+
+    fn footprint_bytes(&self) -> usize {
+        btree_map_bytes(self.entries.len()) + self.entry_bytes
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RetainedResultMembers {
+    entries: BTreeSet<ResultMemberEntry>,
+    entry_bytes: usize,
+}
+
+impl std::ops::Deref for RetainedResultMembers {
+    type Target = BTreeSet<ResultMemberEntry>;
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl From<BTreeSet<ResultMemberEntry>> for RetainedResultMembers {
+    fn from(entries: BTreeSet<ResultMemberEntry>) -> Self {
+        let entry_bytes = entries.iter().map(result_member_entry_bytes).sum();
+        Self {
+            entries,
+            entry_bytes,
+        }
+    }
+}
+
+impl IntoIterator for RetainedResultMembers {
+    type Item = ResultMemberEntry;
+    type IntoIter = std::collections::btree_set::IntoIter<ResultMemberEntry>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl RetainedResultMembers {
+    fn insert(&mut self, member: ResultMemberEntry) -> bool {
+        let bytes = result_member_entry_bytes(&member);
+        let inserted = self.entries.insert(member);
+        if inserted {
+            self.entry_bytes += bytes;
+        }
+        inserted
+    }
+
+    fn remove(&mut self, member: &ResultMemberEntry) -> bool {
+        let removed = self.entries.remove(member);
+        if removed {
+            self.entry_bytes -= result_member_entry_bytes(member);
+        }
+        removed
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct WeightedVersionIndex {
-    by_identity: BTreeMap<VersionIdentity, WeightedVersion>,
-    by_tx: BTreeMap<TxId, BTreeMap<VersionSortKey, BTreeSet<VersionIdentity>>>,
+    // The sort key contains the complete version identity. Transaction and
+    // row UUID are derived from that same immutable record, so a second global
+    // identity map and singleton identity sets add no distinguishing power.
+    by_tx: BTreeMap<TxId, BTreeMap<VersionSortKey, WeightedVersion>>,
+    entry_count: usize,
+    entry_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -279,6 +363,9 @@ impl VersionPayload {
 struct ReplacementIndex {
     content_by_key: BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
     deletion_by_key: BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
+    entry_count: usize,
+    entry_bytes: usize,
+    key_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -321,7 +408,7 @@ pub(crate) struct ResultTransitions {
     /// Ordered source-closure presence transitions observed while evaluating
     /// one terminal. `apply_multisink_deltas` uses this private stream to
     /// retain the real terminal order while coalescing one complete drain.
-    pub(crate) source_fact_presence_changes: Vec<(ProgramFactEntry, bool)>,
+    pub(crate) supporting_changed: bool,
     /// Groove terminal patches are local binding output. They never enter a
     /// peer `ViewUpdate`, whose contract is the covered input closure only.
     pub(crate) terminal_operations: Vec<TerminalOperation>,
@@ -410,27 +497,33 @@ enum MaintainedTerminalKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum EventIdentity {
-    Result(ResultMemberEntry),
+    Result(Rc<ResultMemberEntry>),
     Version(ProgramSourceId, VersionIdentity),
     Replacement(ProgramSourceId, ReplacementKey, VersionIdentity),
     SharedVersion(ProgramSourceId, VersionIdentity),
-    ProgramFact(ProgramFactEntry),
+    ProgramFact(Rc<ProgramFactEntry>),
     StructuredAppRow(RowUuid, Vec<u8>),
 }
 
 #[derive(Clone, Debug)]
+struct AggregateNetEvent {
+    member: Rc<ResultMemberEntry>,
+    payload: ResultMemberPayloadEntry,
+    synthetic: super::query_engine::SyntheticResultMembershipSchema,
+    value_fields: Vec<String>,
+}
+
+// These temporary, thread-local entries share large identities with their
+// tree keys. Ordinary version witnesses do not reserve the large inline space
+// of result/proof alternatives; consuming the key releases its shared owner.
+#[derive(Clone, Debug)]
 enum NetEvent {
-    Result(ResultMemberEntry, ResultMemberPayloadEntry),
-    AggregateResult(
-        ResultMemberEntry,
-        ResultMemberPayloadEntry,
-        super::query_engine::SyntheticResultMembershipSchema,
-        Vec<String>,
-    ),
+    Result(Box<(Rc<ResultMemberEntry>, ResultMemberPayloadEntry)>),
+    AggregateResult(Box<AggregateNetEvent>),
     Version(ProgramSourceId, VersionIdentity, VersionRow),
     Replacement(ProgramSourceId, ReplacementKey, VersionIdentity, VersionRow),
     SharedVersion(ProgramSourceId, VersionIdentity, VersionRow),
-    ProgramFact(ProgramFactEntry),
+    ProgramFact(Rc<ProgramFactEntry>),
     StructuredAppRow(RowUuid, OwnedRecord),
 }
 
@@ -457,20 +550,47 @@ impl MaintainedSubscriptionView {
         self.witness_table_names = names;
     }
 
-    fn covered_input_for_version(
+    fn supporting_row_for_version(
         &self,
         source: ProgramSourceId,
         row: &VersionRow,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-    ) -> Result<CoveredInputEntry, super::Error> {
-        let mut input = covered_input_for_version(source, row, node_aliases)?;
-        if let Some(authored_name) = self
+    ) -> Result<SupportingRow, super::Error> {
+        let physical_table =
+            *self
+                .physical_tables
+                .get(&source.table)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "support terminal has no physical table identity",
+                ))?;
+        let tx = version_tx_id_from_aliases(row, node_aliases).ok_or(
+            super::Error::InvalidStoredValue("support input tx node alias must exist"),
+        )?;
+        let branch = row.branch_key().canonical_bytes();
+        let version_table = self
             .witness_table_names
             .get(&(row.table().to_owned(), row.schema_version_alias()))
-        {
-            input.version_table = authored_name.clone().into();
-        }
-        Ok(input)
+            .map(String::as_str)
+            .unwrap_or(row.table())
+            .to_owned()
+            .into();
+        Ok(SupportingRow {
+            physical_table,
+            version_table,
+            row: row.row_uuid(),
+            version: RowVersionRefEntry {
+                tx,
+                schema_version: None,
+                layer: if row.layer() == VersionLayer::Content {
+                    ResultRowLayer::Content
+                } else {
+                    ResultRowLayer::Deletion
+                },
+                batch: Some(tx),
+                branch_or_prefix: (!branch.is_empty()).then_some(branch),
+                row_digest: None,
+            },
+        })
     }
     pub(crate) fn uses_storage_backed_result_materialization(&self) -> bool {
         self.storage_backed_result_materialization
@@ -478,6 +598,7 @@ impl MaintainedSubscriptionView {
 
     pub(crate) fn enable_storage_backed_result_materialization(&mut self) {
         self.storage_backed_result_materialization = true;
+        self.unreconciled_result_members = None;
     }
 
     pub(crate) fn enable_inline_content_branch_key(&mut self, branch_key: &BranchKey) {
@@ -549,7 +670,6 @@ impl MaintainedSubscriptionView {
         // This is deliberately proportional to changed facts: cloning the
         // whole active closure here would turn every incremental tick into a
         // snapshot-sized operation.
-        let mut peer_source_fact_changes = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         for (sink, terminal) in deltas.terminal_sinks {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
                 && !terminal.operations.is_empty()
@@ -655,21 +775,15 @@ impl MaintainedSubscriptionView {
             }
             let delta_transitions =
                 self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
+            transitions.supporting_changed |= delta_transitions.supporting_changed;
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
-            for (fact, is_present) in delta_transitions.source_fact_presence_changes {
-                record_peer_source_fact_change(&mut peer_source_fact_changes, fact, is_present);
-            }
-            for fact in delta_transitions.program_fact_adds {
-                if !fact.is_peer_source_closure_fact() {
-                    transitions.program_fact_adds.push(fact);
-                }
-            }
-            for fact in delta_transitions.program_fact_removes {
-                if !fact.is_peer_source_closure_fact() {
-                    transitions.program_fact_removes.push(fact);
-                }
-            }
+            transitions
+                .program_fact_adds
+                .extend(delta_transitions.program_fact_adds);
+            transitions
+                .program_fact_removes
+                .extend(delta_transitions.program_fact_removes);
             transitions
                 .result_payload_adds
                 .extend(delta_transitions.result_payload_adds);
@@ -681,7 +795,6 @@ impl MaintainedSubscriptionView {
             transitions.requires_authoritative_membership_reconcile |=
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
-        append_net_peer_source_fact_changes(&mut transitions, peer_source_fact_changes);
         self.finalize_multisink_transitions(&mut transitions, node_aliases);
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
             && (!transitions.adds.is_empty()
@@ -753,14 +866,19 @@ impl MaintainedSubscriptionView {
             let (event, weight) = row?;
             let net_event = match event {
                 DecodedMaintainedEvent::ResultCurrent { member, payload } => {
-                    NetEvent::Result(member, payload)
+                    NetEvent::Result(Box::new((Rc::new(member), payload)))
                 }
                 DecodedMaintainedEvent::AggregateResult {
                     member,
                     payload,
                     synthetic,
                     value_fields,
-                } => NetEvent::AggregateResult(member, payload, synthetic, value_fields),
+                } => NetEvent::AggregateResult(Box::new(AggregateNetEvent {
+                    member: Rc::new(member),
+                    payload,
+                    synthetic,
+                    value_fields,
+                })),
                 DecodedMaintainedEvent::VersionContent { source, row }
                 | DecodedMaintainedEvent::VersionDeletion { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
@@ -780,11 +898,11 @@ impl MaintainedSubscriptionView {
                     let identity = VersionIdentity::for_row(&row);
                     NetEvent::SharedVersion(source, identity, row)
                 }
-                DecodedMaintainedEvent::ProgramSourceCoverage(coverage) => {
-                    NetEvent::ProgramFact(ProgramFactEntry::ProgramSourceCoverage(coverage))
-                }
+                DecodedMaintainedEvent::ProgramSourceCoverage(coverage) => NetEvent::ProgramFact(
+                    Rc::new(ProgramFactEntry::ProgramSourceCoverage(coverage)),
+                ),
                 DecodedMaintainedEvent::RelationEdge(edge) => {
-                    NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
+                    NetEvent::ProgramFact(Rc::new(ProgramFactEntry::RelationEdge(edge)))
                 }
                 DecodedMaintainedEvent::StructuredAppRow { root, record } => {
                     NetEvent::StructuredAppRow(root, record)
@@ -801,7 +919,8 @@ impl MaintainedSubscriptionView {
         #[cfg(feature = "cold-settle-attribution")]
         let _apply_span = tracing::trace_span!("cold.phase.terminal_apply").entered();
         let mut transitions = ResultTransitions::default();
-        for (_, (event, weight)) in net {
+        for (identity, (event, weight)) in net {
+            drop(identity);
             if weight == 0 {
                 continue;
             }
@@ -811,10 +930,19 @@ impl MaintainedSubscriptionView {
                 );
             }
             match event {
-                NetEvent::Result(entry, payload) => {
+                NetEvent::Result(result) => {
+                    let (member, payload) = *result;
+                    let entry = Rc::unwrap_or_clone(member);
                     self.apply_result_delta(entry, payload, weight, &mut transitions);
                 }
-                NetEvent::AggregateResult(member, payload, synthetic, value_fields) => {
+                NetEvent::AggregateResult(result) => {
+                    let AggregateNetEvent {
+                        member,
+                        payload,
+                        synthetic,
+                        value_fields,
+                    } = *result;
+                    let member = Rc::unwrap_or_clone(member);
                     self.apply_aggregate_result_delta(
                         member,
                         payload,
@@ -826,64 +954,44 @@ impl MaintainedSubscriptionView {
                 }
                 NetEvent::Version(source, identity, row) => {
                     let covered_input =
-                        self.covered_input_for_version(source, &row, node_aliases)?;
+                        self.supporting_row_for_version(source, &row, node_aliases)?;
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
-                    self.versions.apply_delta(identity, payload, weight);
-                    if let Some(is_present) = self.apply_source_fact_delta(
-                        SourceFactOrigin::Version,
-                        ProgramFactEntry::CoveredInput(covered_input.clone()),
-                        weight,
-                    ) {
-                        record_source_fact_transition(
-                            &mut transitions,
-                            ProgramFactEntry::CoveredInput(covered_input),
-                            is_present,
-                        );
-                    }
+                    self.versions.apply_delta(payload, weight);
+                    self.supporting.apply(0, covered_input, weight);
+                    transitions.supporting_changed = true;
                 }
                 NetEvent::Replacement(source, key, identity, row) => {
                     let covered_input =
-                        self.covered_input_for_version(source, &row, node_aliases)?;
+                        self.supporting_row_for_version(source, &row, node_aliases)?;
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
                     self.replacements
                         .apply_delta(key, identity, payload, weight);
-                    if let Some(is_present) = self.apply_source_fact_delta(
-                        SourceFactOrigin::Replacement,
-                        ProgramFactEntry::CoveredInput(covered_input.clone()),
-                        weight,
-                    ) {
-                        record_source_fact_transition(
-                            &mut transitions,
-                            ProgramFactEntry::CoveredInput(covered_input),
-                            is_present,
-                        );
-                    }
+                    self.supporting.apply(1, covered_input, weight);
+                    transitions.supporting_changed = true;
                 }
                 NetEvent::SharedVersion(source, identity, row) => {
                     let covered_input =
-                        self.covered_input_for_version(source, &row, node_aliases)?;
+                        self.supporting_row_for_version(source, &row, node_aliases)?;
                     let key = ReplacementKey::for_row(&row, identity.layer);
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
-                    self.versions
-                        .apply_delta(identity.clone(), Arc::clone(&payload), weight);
+                    self.versions.apply_delta(Arc::clone(&payload), weight);
                     self.replacements
                         .apply_delta(key, identity, payload, weight);
-                    for origin in [SourceFactOrigin::Version, SourceFactOrigin::Replacement] {
-                        let fact = ProgramFactEntry::CoveredInput(covered_input.clone());
-                        if let Some(is_present) =
-                            self.apply_source_fact_delta(origin, fact.clone(), weight)
-                        {
-                            record_source_fact_transition(&mut transitions, fact, is_present);
-                        }
-                    }
+                    self.supporting.apply(0, covered_input.clone(), weight);
+                    self.supporting.apply(1, covered_input, weight);
+                    transitions.supporting_changed = true;
                 }
                 NetEvent::ProgramFact(fact) => {
-                    if let Some(is_present) = self.apply_source_fact_delta(
-                        SourceFactOrigin::ProgramFact,
-                        fact.clone(),
-                        weight,
-                    ) {
-                        record_source_fact_transition(&mut transitions, fact, is_present)
+                    let fact = Rc::unwrap_or_clone(fact);
+                    if matches!(fact, ProgramFactEntry::ProgramSourceCoverage(_)) {
+                        continue;
+                    }
+                    if let Some(is_present) = self.apply_program_fact_delta(fact.clone(), weight) {
+                        if is_present {
+                            transitions.program_fact_adds.push(fact);
+                        } else {
+                            transitions.program_fact_removes.push(fact);
+                        }
                     }
                 }
                 NetEvent::StructuredAppRow(root, record) => {
@@ -908,141 +1016,70 @@ impl MaintainedSubscriptionView {
     pub(crate) fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
         let mut versions = self.versions.versions_by_tx(tx_id);
         for (fact, version) in &self.selected_deletion_witnesses {
-            if matches!(fact, ProgramFactEntry::CoveredInput(input) if input.version.tx == tx_id)
-                && !versions.contains(version)
-            {
+            if (fact.version.tx == tx_id) && !versions.contains(version) {
                 versions.push(version.clone());
             }
         }
         versions
     }
 
-    /// The final peer-safe source closure after every drained terminal batch.
-    /// This intentionally exposes neither rendered result rows nor internal
-    /// proof/relationship facts.
-    pub(crate) fn active_peer_source_closure_facts(&self) -> BTreeSet<ProgramFactEntry> {
-        self.active_peer_source_closure_fact_refs()
-            .cloned()
-            .collect()
+    pub(crate) fn acknowledged_supporting_rows(&self) -> impl Iterator<Item = &SupportingRow> {
+        self.supporting.acknowledged_rows()
     }
 
-    /// Borrow peer-safe facts without allocating an intermediate owned set.
-    /// A selected deletion witness may also be present in the weighted facts:
-    /// consumers must deduplicate in their own identity domain. In particular,
-    /// the wire manifest deduplicates physical rows, not query source roles.
-    pub(crate) fn active_peer_source_closure_fact_refs(
-        &self,
-    ) -> impl Iterator<Item = &ProgramFactEntry> {
-        #[cfg(test)]
-        SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(count.get() + 1));
-        self.source_fact_weights
-            .iter()
-            .filter(|(fact, weights)| {
-                weights.iter().any(|weight| *weight > 0) && fact.is_peer_source_closure_fact()
-            })
-            .map(|(fact, _)| fact)
-            .chain(self.selected_deletion_witnesses.keys())
+    pub(crate) fn supporting_rows(&self) -> impl Iterator<Item = &SupportingRow> {
+        self.supporting.rows()
     }
 
-    /// Compare only touched identities with the last successful publication.
-    /// An untracked/reopened view requires one complete baseline comparison.
-    pub(crate) fn unpublished_peer_source_delta(
+    pub(crate) fn unpublished_supporting_delta(
         &self,
-        previous: &BTreeSet<ProgramFactEntry>,
-    ) -> Option<(Vec<ProgramFactEntry>, Vec<ProgramFactEntry>)> {
-        let candidates = self.unpublished_source_facts.as_ref()?;
-        let mut adds = Vec::new();
-        let mut removes = Vec::new();
-        for fact in candidates {
-            #[cfg(test)]
-            SOURCE_CLOSURE_POINT_LOOKUPS.with(|count| count.set(count.get() + 1));
-            let present = self.selected_deletion_witnesses.contains_key(fact)
-                || self
-                    .source_fact_weights
-                    .get(fact)
-                    .is_some_and(|weights| weights.iter().any(|weight| *weight > 0));
-            match (previous.contains(fact), present) {
-                (false, true) => adds.push(fact.clone()),
-                (true, false) => removes.push(fact.clone()),
-                _ => {}
-            }
-        }
-        Some((adds, removes))
+    ) -> Option<(Vec<SupportingRow>, Vec<SupportingRow>)> {
+        self.supporting.delta()
     }
 
     pub(crate) fn forget_peer_source_closure_baseline(&mut self) {
-        self.unpublished_source_facts = None;
+        self.supporting.forget_predecessor();
     }
-
     pub(crate) fn acknowledge_peer_source_closure(&mut self) {
-        self.unpublished_source_facts
-            .get_or_insert_with(BTreeSet::new)
-            .clear();
+        self.supporting.acknowledge();
     }
 
-    /// Exact selected-scope tombstones carry provenance but no app input tuple.
+    /// Selected-scope tombstones are another contributor to the same physical
+    /// frontier. Their native bodies are retained for relaying, not membership.
     pub(crate) fn replace_selected_deletion_witnesses(
         &mut self,
-        witnesses: BTreeMap<ProgramFactEntry, VersionRow>,
-    ) -> (Vec<ProgramFactEntry>, Vec<ProgramFactEntry>) {
-        let adds: Vec<_> = witnesses
-            .keys()
-            .filter(|fact| !self.selected_deletion_witnesses.contains_key(*fact))
-            .cloned()
-            .collect();
-        let removes: Vec<_> = self
+        witnesses: BTreeMap<SupportingRow, VersionRow>,
+    ) -> bool {
+        let mut changed = false;
+        for row in self
             .selected_deletion_witnesses
             .keys()
-            .filter(|fact| !witnesses.contains_key(*fact))
-            .cloned()
-            .collect();
-        if let Some(changes) = &mut self.unpublished_source_facts {
-            changes.extend(adds.iter().chain(&removes).cloned());
+            .filter(|row| !witnesses.contains_key(*row))
+        {
+            self.supporting.apply(3, row.clone(), -1);
+            changed = true;
+        }
+        for row in witnesses
+            .keys()
+            .filter(|row| !self.selected_deletion_witnesses.contains_key(*row))
+        {
+            self.supporting.apply(3, row.clone(), 1);
+            changed = true;
         }
         self.selected_deletion_witnesses = witnesses;
-        (adds, removes)
+        changed
     }
 
-    /// Apply one terminal's reference delta to a peer source fact. The wire
-    /// closure is a set, so only the aggregate 0→1 / 1→0 presence changes
-    /// may become peer additions/removals; independent source occurrences
-    /// commonly reference the same exact fact.
-    fn apply_source_fact_delta(
-        &mut self,
-        origin: SourceFactOrigin,
-        fact: ProgramFactEntry,
-        weight: i64,
-    ) -> Option<bool> {
-        if fact.is_peer_source_closure_fact()
-            && let Some(changes) = &mut self.unpublished_source_facts
-        {
-            changes.insert(fact.clone());
+    /// Local proof/output facts are independent of the physical sync frontier.
+    fn apply_program_fact_delta(&mut self, fact: ProgramFactEntry, weight: i64) -> Option<bool> {
+        let retained = self.program_fact_weights.entry(fact.clone()).or_default();
+        let before = *retained > 0;
+        *retained += weight;
+        let after = *retained > 0;
+        if *retained == 0 {
+            self.program_fact_weights.remove(&fact);
         }
-        let slot = match origin {
-            SourceFactOrigin::Version => 0,
-            SourceFactOrigin::Replacement => 1,
-            SourceFactOrigin::ProgramFact => 2,
-        };
-        match self.source_fact_weights.entry(fact) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                if weight != 0 {
-                    let mut weights = [0; 3];
-                    weights[slot] = weight;
-                    entry.insert(weights);
-                }
-                (weight > 0).then_some(true)
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                let weights = entry.get_mut();
-                let was_present = weights.iter().any(|weight| *weight > 0);
-                weights[slot] += weight;
-                let is_present = weights.iter().any(|weight| *weight > 0);
-                if weights.iter().all(|weight| *weight == 0) {
-                    entry.remove();
-                }
-                (was_present != is_present).then_some(is_present)
-            }
-        }
+        (before != after).then_some(after)
     }
 
     pub(crate) fn replacement_for(
@@ -1054,39 +1091,21 @@ impl MaintainedSubscriptionView {
     }
 
     pub(crate) fn footprint(&self) -> MaintainedSubscriptionViewFootprint {
-        let result_weights_bytes = btree_map_bytes(self.result_weights.len())
+        let result_weights_bytes = self.result_weights.footprint_bytes()
             + self
-                .result_weights
-                .keys()
-                .map(|member| result_member_entry_bytes(member) + mem::size_of::<i64>())
-                .sum::<usize>()
+                .unreconciled_result_members
+                .as_ref()
+                .map_or(0, |members| {
+                    btree_set_bytes(members.len()) + members.entry_bytes
+                })
             + btree_map_bytes(self.published_result_members.len())
-            + self
-                .published_result_members
-                .iter()
-                .map(result_member_entry_bytes)
-                .sum::<usize>();
-        let result_payloads_bytes = btree_map_bytes(self.result_payloads.len())
-            + self
-                .result_payloads
-                .iter()
-                .map(|(member, payload)| {
-                    result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
-                })
-                .sum::<usize>()
-            + btree_map_bytes(self.published_result_payloads.len())
-            + self
-                .published_result_payloads
-                .iter()
-                .map(|(member, payload)| {
-                    result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
-                })
-                .sum::<usize>();
-        let journal_bytes = self.unpublished_source_facts.as_ref().map_or(0, |facts| {
-            btree_set_bytes(facts.len()) + facts.iter().map(peer_source_fact_bytes).sum::<usize>()
-        });
-        let versions_bytes = journal_bytes
-            + self.versions.footprint_bytes()
+            + self.published_result_members.entry_bytes;
+        let result_payloads_bytes = self.result_payloads.footprint_bytes()
+            + self.published_result_payloads.footprint_bytes();
+        #[cfg(test)]
+        self.assert_incremental_footprint_matches_full_scan();
+        let supporting_frontier_bytes = self.supporting.retained_bytes();
+        let versions_bytes = self.versions.footprint_bytes()
             + btree_map_bytes(self.selected_deletion_witnesses.len())
             + self
                 .selected_deletion_witnesses
@@ -1124,11 +1143,7 @@ impl MaintainedSubscriptionView {
                 .map(|record| record.retained_bytes())
                 .sum::<usize>();
         MaintainedSubscriptionViewFootprint {
-            result_rows: self
-                .result_weights
-                .values()
-                .filter(|weight| **weight > 0)
-                .count(),
+            result_rows: self.result_weights.positive_count,
             result_weights: self.result_weights.len(),
             result_payloads: self.result_payloads.len(),
             structured_app_rows: self
@@ -1137,28 +1152,55 @@ impl MaintainedSubscriptionView {
                 .map(|records| records.values().filter(|weight| **weight > 0).count())
                 .sum::<usize>()
                 + self.structured_terminal_records.len(),
-            version_identities: self.versions.by_identity.len()
-                + self.selected_deletion_witnesses.len(),
-            version_tx_entries: self
-                .versions
-                .by_tx
-                .values()
-                .flat_map(|by_sort_key| by_sort_key.values())
-                .map(BTreeSet::len)
-                .sum(),
+            version_identities: self.versions.entry_count + self.selected_deletion_witnesses.len(),
+            version_tx_entries: self.versions.entry_count,
             replacement_entries: self.replacements.entry_count(),
             result_weights_bytes,
             result_payloads_bytes,
             structured_app_rows_bytes,
             versions_bytes,
+            supporting_frontier_bytes,
             replacements_bytes,
             total_heap_bytes: result_weights_bytes
                 + result_payloads_bytes
                 + structured_app_rows_bytes
                 + versions_bytes
+                + supporting_frontier_bytes
                 + replacements_bytes
                 + witness_table_names_bytes,
         }
+    }
+
+    // Accounting is not observable from row/query APIs. Keep the old full-scan
+    // model as a test-only oracle at every exercised footprint refresh.
+    #[cfg(test)]
+    fn assert_incremental_footprint_matches_full_scan(&self) {
+        fn check_map<V: RetainedResultValue>(map: &RetainedResultMap<V>) {
+            assert_eq!(
+                map.entry_bytes,
+                map.iter()
+                    .map(|(key, value)| { result_member_entry_bytes(key) + value.retained_bytes() })
+                    .sum::<usize>()
+            );
+            assert_eq!(
+                map.positive_count,
+                map.values()
+                    .map(RetainedResultValue::positive_count)
+                    .sum::<usize>()
+            );
+        }
+        check_map(&self.result_weights);
+        check_map(&self.result_payloads);
+        check_map(&self.published_result_payloads);
+        for members in std::iter::once(&self.published_result_members)
+            .chain(self.unreconciled_result_members.as_ref())
+        {
+            assert_eq!(
+                members.entry_bytes,
+                members.iter().map(result_member_entry_bytes).sum::<usize>()
+            );
+        }
+        self.replacements.assert_footprint_matches_full_scan();
     }
 
     /// Current positive result memberships, including unchanged members during
@@ -1468,26 +1510,63 @@ impl MaintainedSubscriptionView {
         Vec<(ResultMemberEntry, ResultMemberPayloadEntry)>,
         Vec<ResultMemberEntry>,
     ) {
-        let publishable = self
-            .result_weights
-            .iter()
-            .filter(|(member, weight)| {
-                **weight > 0
-                    && (self.storage_backed_result_materialization
-                        || self.result_member_has_inline_content_source(member)
-                        || self.result_member_has_bundle_witness(member, node_aliases))
-            })
-            .map(|(member, _)| member.clone())
-            .collect::<BTreeSet<_>>();
-        let adds = publishable
-            .difference(&self.published_result_members)
-            .cloned()
-            .collect::<Vec<_>>();
-        let removes = self
-            .published_result_members
-            .difference(&publishable)
-            .cloned()
-            .collect::<Vec<_>>();
+        let (adds, removes) = if let Some(candidates) = self.unreconciled_result_members.take() {
+            debug_assert!(self.storage_backed_result_materialization);
+            #[cfg(test)]
+            {
+                self.result_member_reconcile_visits += candidates.len();
+            }
+            let mut adds = Vec::new();
+            let mut removes = Vec::new();
+            for member in candidates {
+                let present = self
+                    .result_weights
+                    .get(&member)
+                    .is_some_and(|weight| *weight > 0);
+                match (self.published_result_members.contains(&member), present) {
+                    (false, true) => {
+                        self.published_result_members.insert(member.clone());
+                        adds.push(member);
+                    }
+                    (true, false) => {
+                        self.published_result_members.remove(&member);
+                        removes.push(member);
+                    }
+                    _ => {}
+                }
+            }
+            (adds, removes)
+        } else {
+            #[cfg(test)]
+            {
+                self.result_member_reconcile_visits += self.result_weights.len();
+            }
+            let publishable = self
+                .result_weights
+                .iter()
+                .filter(|(member, weight)| {
+                    **weight > 0
+                        && (self.storage_backed_result_materialization
+                            || self.result_member_has_inline_content_source(member)
+                            || self.result_member_has_bundle_witness(member, node_aliases))
+                })
+                .map(|(member, _)| member.clone())
+                .collect::<BTreeSet<_>>();
+            let adds = publishable
+                .difference(&self.published_result_members)
+                .cloned()
+                .collect::<Vec<_>>();
+            let removes = self
+                .published_result_members
+                .difference(&publishable)
+                .cloned()
+                .collect::<Vec<_>>();
+            self.published_result_members = publishable.into();
+            (adds, removes)
+        };
+        self.unreconciled_result_members = self
+            .storage_backed_result_materialization
+            .then(RetainedResultMembers::default);
         let payload_removes = removes
             .iter()
             .filter(|member| self.published_result_payloads.contains_key(*member))
@@ -1502,7 +1581,6 @@ impl MaintainedSubscriptionView {
                     .map(|payload| (member.clone(), payload))
             })
             .collect::<Vec<_>>();
-        self.published_result_members = publishable;
         for member in &payload_removes {
             self.published_result_payloads.remove(member);
         }
@@ -1523,16 +1601,26 @@ impl MaintainedSubscriptionView {
             // fact, so it has no Stream B history-row witness.
             return true;
         };
-        self.versions_by_tx(tx_id).iter().any(|version| {
-            version.table() == table.as_str()
-                && version.row_uuid() == row_uuid
-                && version.deletion().is_none()
-        }) || self
-            .replacement_for(table.as_str(), row_uuid)
-            .0
-            .is_some_and(|version| {
-                version_tx_id_from_aliases(&version, node_aliases) == Some(tx_id)
+        // Existence does not require owning or deduplicating the transaction's
+        // rows. Keep selected deletion witnesses in the same candidate union.
+        self.versions
+            .rows_by_tx(tx_id)
+            .chain(
+                self.selected_deletion_witnesses
+                    .iter()
+                    .filter_map(|(fact, version)| (fact.version.tx == tx_id).then_some(version)),
+            )
+            .any(|version| {
+                version.table() == table.as_str()
+                    && version.row_uuid() == row_uuid
+                    && version.deletion().is_none()
             })
+            || self
+                .replacement_for(table.as_str(), row_uuid)
+                .0
+                .is_some_and(|version| {
+                    version_tx_id_from_aliases(&version, node_aliases) == Some(tx_id)
+                })
     }
 
     fn result_member_has_inline_content_source(&self, member: &ResultMemberEntry) -> bool {
@@ -1549,6 +1637,7 @@ impl MaintainedSubscriptionView {
         weight: i64,
         transitions: &mut ResultTransitions,
     ) {
+        self.mark_result_member_changed(&entry);
         let old = self.result_weights.get(&entry).copied().unwrap_or(0);
         let new = old + weight;
         if old <= 0 && new > 0 {
@@ -1584,6 +1673,7 @@ impl MaintainedSubscriptionView {
         weight: i64,
         transitions: &mut ResultTransitions,
     ) -> Result<(), super::Error> {
+        self.mark_result_member_changed(&member);
         let (old_member, old_payload) = self.aggregate_payload_for_stable_member(&member);
         if weight < 0 {
             // Groove's aggregate operator emits complete before/after group
@@ -1605,6 +1695,7 @@ impl MaintainedSubscriptionView {
         if let Some(old_member) = old_member
             && old_member != member
         {
+            self.mark_result_member_changed(&old_member);
             transitions.removes.push(old_member.clone());
             self.result_weights.remove(&old_member);
             if let Some(existing) = self.result_payloads.remove(&old_member).or(old_payload) {
@@ -1626,6 +1717,12 @@ impl MaintainedSubscriptionView {
         self.result_payloads.insert(member.clone(), payload);
         self.result_weights.insert(member, 1);
         Ok(())
+    }
+
+    fn mark_result_member_changed(&mut self, member: &ResultMemberEntry) {
+        if let Some(changed) = &mut self.unreconciled_result_members {
+            changed.insert(member.clone());
+        }
     }
 
     fn aggregate_payload_for_stable_member(
@@ -1656,6 +1753,7 @@ impl MaintainedSubscriptionView {
 /// advance. This intentionally names input rows rather than collector output:
 /// a retained result member can change because a nested child, a sort key, or
 /// a deletion-register witness advanced while the output membership did not.
+#[cfg(test)]
 fn covered_input_for_version(
     source: ProgramSourceId,
     row: &VersionRow,
@@ -3141,100 +3239,68 @@ fn field_idx_in_descriptor(
 
 impl WeightedVersionIndex {
     fn footprint_bytes(&self) -> usize {
-        btree_map_bytes(self.by_identity.len())
-            + self
-                .by_identity
-                .iter()
-                .map(|(identity, version)| {
-                    version_identity_bytes(identity) + weighted_version_bytes(version)
-                })
-                .sum::<usize>()
-            + btree_map_bytes(self.by_tx.len())
-            + self
-                .by_tx
-                .values()
-                .map(|by_sort_key| {
-                    btree_map_bytes(by_sort_key.len())
-                        + by_sort_key
-                            .iter()
-                            .map(|(sort_key, identities)| {
-                                version_sort_key_bytes(sort_key)
-                                    + btree_set_bytes(identities.len())
-                                    + identities.iter().map(version_identity_bytes).sum::<usize>()
-                            })
-                            .sum::<usize>()
-                })
-                .sum::<usize>()
+        btree_map_bytes(self.by_tx.len()) + btree_map_bytes(self.entry_count) + self.entry_bytes
     }
 
-    fn apply_delta(
-        &mut self,
-        identity: VersionIdentity,
-        payload: Arc<VersionPayload>,
-        weight: i64,
-    ) {
-        let old = self
-            .by_identity
-            .get(&identity)
-            .map(|version| version.weight)
-            .unwrap_or(0);
+    fn apply_delta(&mut self, payload: Arc<VersionPayload>, weight: i64) {
+        use std::collections::btree_map::Entry;
+
         let tx_id = payload.tx_id;
-        let new = old + weight;
+        let rows = match self.by_tx.entry(tx_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) if weight > 0 => entry.insert(BTreeMap::new()),
+            Entry::Vacant(_) => return,
+        };
+        match rows.entry(payload.sort_key.clone()) {
+            Entry::Occupied(mut entry) => {
+                let new = entry.get().weight + weight;
+                self.entry_bytes -= weighted_version_bytes(entry.get());
+                if new > 0 {
+                    let version = WeightedVersion {
+                        payload,
+                        weight: new,
+                    };
+                    self.entry_bytes += weighted_version_bytes(&version);
+                    entry.insert(version);
+                } else {
+                    self.entry_bytes -= version_sort_key_bytes(entry.key());
+                    self.entry_count -= 1;
+                    entry.remove();
+                }
+            }
+            Entry::Vacant(entry) if weight > 0 => {
+                let version = WeightedVersion { payload, weight };
+                self.entry_bytes +=
+                    version_sort_key_bytes(entry.key()) + weighted_version_bytes(&version);
+                self.entry_count += 1;
+                entry.insert(version);
+            }
+            Entry::Vacant(_) => {}
+        }
+        if rows.is_empty() {
+            self.by_tx.remove(&tx_id);
+        }
+    }
 
-        if old <= 0 && new > 0 {
-            self.by_tx
-                .entry(tx_id)
-                .or_default()
-                .entry(payload.sort_key.clone())
-                .or_default()
-                .insert(identity.clone());
-        }
-        if old > 0
-            && new <= 0
-            && let Some(existing) = self.by_identity.get(&identity)
-        {
-            remove_tx_identity(
-                &mut self.by_tx,
-                existing.tx_id,
-                &existing.sort_key,
-                &identity,
-            );
-        }
-
-        if new > 0 {
-            self.by_identity.insert(
-                identity,
-                WeightedVersion {
-                    payload,
-                    weight: new,
-                },
-            );
-        } else {
-            self.by_identity.remove(&identity);
-        }
+    fn rows_by_tx(&self, tx_id: TxId) -> impl Iterator<Item = &VersionRow> {
+        self.by_tx
+            .get(&tx_id)
+            .into_iter()
+            .flat_map(|rows| rows.values())
+            .map(|version| &version.row)
     }
 
     fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
-        let Some(by_sort_key) = self.by_tx.get(&tx_id) else {
-            return Vec::new();
-        };
-        by_sort_key
-            .values()
-            .flat_map(|identities| {
-                identities.iter().filter_map(|identity| {
-                    self.by_identity
-                        .get(identity)
-                        .filter(|version| version.weight > 0)
-                        .map(|version| version.row.clone())
-                })
-            })
-            .collect()
+        self.rows_by_tx(tx_id).cloned().collect()
     }
 }
 
 impl ReplacementIndex {
     fn footprint_bytes(&self) -> usize {
-        replacement_map_bytes(&self.content_by_key) + replacement_map_bytes(&self.deletion_by_key)
+        btree_map_bytes(self.content_by_key.len() + self.deletion_by_key.len())
+            + btree_map_bytes(self.entry_count)
+            + self.key_bytes
+            + self.entry_bytes
     }
 
     fn apply_delta(
@@ -3249,21 +3315,38 @@ impl ReplacementIndex {
             VersionLayer::Deletion => &mut self.deletion_by_key,
         };
         let row_versions = by_key.entry(key.clone()).or_default();
-        let old = row_versions
-            .get(&identity)
-            .map(|version| version.weight)
-            .unwrap_or(0);
-        let new = old + weight;
-        if new > 0 {
-            row_versions.insert(
-                identity,
-                WeightedVersion {
-                    payload,
-                    weight: new,
-                },
-            );
-        } else {
-            row_versions.remove(&identity);
+        let was_empty = row_versions.is_empty();
+        use std::collections::btree_map::Entry;
+        match row_versions.entry(identity) {
+            Entry::Occupied(mut entry) => {
+                let new = entry.get().weight + weight;
+                self.entry_bytes -= weighted_version_bytes(entry.get());
+                if new > 0 {
+                    let version = WeightedVersion {
+                        payload,
+                        weight: new,
+                    };
+                    self.entry_bytes += weighted_version_bytes(&version);
+                    entry.insert(version);
+                } else {
+                    self.entry_bytes -= version_identity_bytes(entry.key());
+                    self.entry_count -= 1;
+                    entry.remove();
+                }
+            }
+            Entry::Vacant(entry) if weight > 0 => {
+                let version = WeightedVersion { payload, weight };
+                self.entry_bytes +=
+                    version_identity_bytes(entry.key()) + weighted_version_bytes(&version);
+                self.entry_count += 1;
+                entry.insert(version);
+            }
+            Entry::Vacant(_) => {}
+        }
+        if was_empty && !row_versions.is_empty() {
+            self.key_bytes += replacement_key_bytes(&key);
+        } else if !was_empty && row_versions.is_empty() {
+            self.key_bytes -= replacement_key_bytes(&key);
         }
         if row_versions.is_empty() {
             by_key.remove(&key);
@@ -3290,14 +3373,28 @@ impl ReplacementIndex {
     }
 
     fn entry_count(&self) -> usize {
-        self.content_by_key
-            .values()
-            .chain(self.deletion_by_key.values())
-            .map(BTreeMap::len)
-            .sum()
+        self.entry_count
+    }
+
+    #[cfg(test)]
+    fn assert_footprint_matches_full_scan(&self) {
+        assert_eq!(
+            self.footprint_bytes(),
+            replacement_map_bytes(&self.content_by_key)
+                + replacement_map_bytes(&self.deletion_by_key)
+        );
+        assert_eq!(
+            self.entry_count,
+            self.content_by_key
+                .values()
+                .chain(self.deletion_by_key.values())
+                .map(BTreeMap::len)
+                .sum::<usize>()
+        );
     }
 }
 
+#[cfg(test)]
 fn replacement_map_bytes(
     by_key: &BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
 ) -> usize {
@@ -3335,42 +3432,6 @@ fn vec_bytes<T>(value: &[T]) -> usize {
 
 fn option_vec_bytes<T>(value: &Option<Vec<T>>) -> usize {
     value.as_deref().map(vec_bytes).unwrap_or_default()
-}
-
-// Count the journal's owned copies, not allocations shared through interned
-// table handles. Inline fields are counted once; Vec/String capacities include
-// their owned buffers. Peer source facts contain no shared record payloads.
-fn peer_source_fact_bytes(fact: &ProgramFactEntry) -> usize {
-    use crate::protocol::ProgramSourceRole;
-
-    let (source, version_buffers) = match fact {
-        ProgramFactEntry::ProgramSourceCoverage(coverage) => (&coverage.source, 0),
-        ProgramFactEntry::CoveredInput(input) => (
-            &input.source,
-            input
-                .version
-                .branch_or_prefix
-                .as_ref()
-                .map_or(0, Vec::capacity)
-                + input.version.row_digest.as_ref().map_or(0, Vec::capacity),
-        ),
-        _ => return mem::size_of_val(fact),
-    };
-    mem::size_of_val(fact)
-        + source.path.capacity() * mem::size_of::<ProgramSourceRole>()
-        + source
-            .path
-            .iter()
-            .map(|role| match role {
-                ProgramSourceRole::Root => 0,
-                ProgramSourceRole::Alias(name)
-                | ProgramSourceRole::RecursiveSeed(name)
-                | ProgramSourceRole::RecursiveStep(name)
-                | ProgramSourceRole::CorrelatedChild(name)
-                | ProgramSourceRole::Policy(name) => name.capacity(),
-            })
-            .sum::<usize>()
-        + version_buffers
 }
 
 fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
@@ -3467,8 +3528,8 @@ impl ReplacementKey {
 impl NetEvent {
     fn identity(&self) -> EventIdentity {
         match self {
-            Self::Result(entry, _) => EventIdentity::Result(entry.clone()),
-            Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
+            Self::Result(result) => EventIdentity::Result(Rc::clone(&result.0)),
+            Self::AggregateResult(result) => EventIdentity::Result(Rc::clone(&result.member)),
             Self::Version(source, identity, _) => {
                 EventIdentity::Version(source.clone(), identity.clone())
             }
@@ -3486,26 +3547,6 @@ impl NetEvent {
     }
 }
 
-fn remove_tx_identity(
-    by_tx: &mut BTreeMap<TxId, BTreeMap<VersionSortKey, BTreeSet<VersionIdentity>>>,
-    tx_id: TxId,
-    sort_key: &VersionSortKey,
-    identity: &VersionIdentity,
-) {
-    let Some(by_sort_key) = by_tx.get_mut(&tx_id) else {
-        return;
-    };
-    if let Some(identities) = by_sort_key.get_mut(sort_key) {
-        identities.remove(identity);
-        if identities.is_empty() {
-            by_sort_key.remove(sort_key);
-        }
-    }
-    if by_sort_key.is_empty() {
-        by_tx.remove(&tx_id);
-    }
-}
-
 fn replacement_winner(
     versions: Option<&BTreeMap<VersionIdentity, WeightedVersion>>,
 ) -> Option<VersionRow> {
@@ -3519,6 +3560,29 @@ fn replacement_winner(
 
 #[cfg(test)]
 mod tests {
+    use crate::node::supporting_frontier::{
+        SOURCE_CLOSURE_POINT_LOOKUPS, SOURCE_CLOSURE_TRAVERSALS,
+    };
+    use crate::protocol::CoveredInputEntry;
+
+    fn test_maintained() -> MaintainedSubscriptionView {
+        let mut view = MaintainedSubscriptionView::default();
+        view.physical_tables.insert(
+            "todos".to_owned().into(),
+            crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(1)),
+        );
+        view
+    }
+
+    fn physical_input(input: CoveredInputEntry) -> SupportingRow {
+        SupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(1)),
+            version_table: input.version_table,
+            row: input.source_row,
+            version: input.version,
+        }
+    }
+
     use std::collections::{BTreeMap, BTreeSet};
 
     use groove::ivm::RecordDelta;
@@ -3734,7 +3798,7 @@ mod tests {
         );
 
         let fact = ProgramFactEntry::RelationEdge(edge);
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
         let reset = maintained
             .apply_decoded_deltas(
                 [(
@@ -3900,7 +3964,7 @@ mod tests {
         let descriptor = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
         let root = row(0x82);
         let value = descriptor.create(&[Value::Uuid(root.0)]).unwrap();
-        let mut view = MaintainedSubscriptionView::default();
+        let mut view = test_maintained();
         let insert = |i: u64, index| {
             let key = i.to_be_bytes().to_vec();
             TerminalOperation {
@@ -3960,7 +4024,7 @@ mod tests {
             path: Vec::new(),
             edit: TerminalEdit::Update { key, value },
         };
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         // These indices are the already-lowered CollectBy order (for example
         // a query's custom sort after offset/limit), not map-key order.
@@ -4398,9 +4462,9 @@ mod tests {
     #[test]
     fn unpublished_source_delta_is_bounded_and_retained_until_acknowledged() {
         for size in [10, 1500] {
-            let mut maintained = MaintainedSubscriptionView::default();
+            let mut maintained = test_maintained();
             for time in 1..=size {
-                let fact = ProgramFactEntry::CoveredInput(
+                let fact = physical_input(
                     covered_input_for_version(
                         test_source(),
                         &version(
@@ -4412,37 +4476,36 @@ mod tests {
                     )
                     .unwrap(),
                 );
-                maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact, 1);
+                maintained.supporting.apply(0, fact, 1);
             }
-            let previous = maintained.active_peer_source_closure_facts();
-            assert!(
-                maintained
-                    .unpublished_peer_source_delta(&previous)
-                    .is_none()
-            );
+            let previous = maintained
+                .supporting_rows()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert!(maintained.unpublished_supporting_delta().is_none());
             maintained.acknowledge_peer_source_closure();
             let fact = previous.iter().next().unwrap().clone();
-            maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1);
+            maintained.supporting.apply(0, fact.clone(), -1);
             SOURCE_CLOSURE_POINT_LOOKUPS.with(|count| count.set(0));
             SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(0));
-            let delta = maintained.unpublished_peer_source_delta(&previous).unwrap();
+            let delta = maintained.unpublished_supporting_delta().unwrap();
             assert_eq!(delta, (Vec::new(), vec![fact.clone()]));
             assert_eq!(SOURCE_CLOSURE_POINT_LOOKUPS.with(|count| count.get()), 1);
             assert_eq!(SOURCE_CLOSURE_TRAVERSALS.with(|count| count.get()), 0);
             // A failed/cancelled caller does not acknowledge. A fresh drain
             // with no events must still expose the same pending removal.
-            assert_eq!(
-                maintained.unpublished_peer_source_delta(&previous).unwrap(),
-                delta
-            );
-            let current = maintained.active_peer_source_closure_facts();
+            assert_eq!(maintained.unpublished_supporting_delta().unwrap(), delta);
+            let current = maintained
+                .supporting_rows()
+                .cloned()
+                .collect::<BTreeSet<_>>();
             assert_eq!(
                 previous.difference(&current).cloned().collect::<Vec<_>>(),
                 delta.1
             );
             maintained.acknowledge_peer_source_closure();
             assert_eq!(
-                maintained.unpublished_peer_source_delta(&current),
+                maintained.unpublished_supporting_delta(),
                 Some((vec![], vec![]))
             );
         }
@@ -4453,104 +4516,162 @@ mod tests {
     #[test]
     fn unpublished_source_delta_coalesces_origins_and_selected_witnesses() {
         let version = deletion(row(1), 1);
-        let fact = ProgramFactEntry::CoveredInput(
-            covered_input_for_version(test_source(), &version, &aliases()).unwrap(),
-        );
-        let mut maintained = MaintainedSubscriptionView::default();
+        let fact =
+            physical_input(covered_input_for_version(test_source(), &version, &aliases()).unwrap());
+        let mut maintained = test_maintained();
         maintained.acknowledge_peer_source_closure();
-        let empty = BTreeSet::new();
         // Selected witnesses can change without any companion terminal event.
         maintained
             .replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.clone())]));
         assert_eq!(
-            maintained.unpublished_peer_source_delta(&empty),
+            maintained.unpublished_supporting_delta(),
             Some((vec![fact.clone()], vec![]))
         );
         maintained.acknowledge_peer_source_closure();
         maintained.replace_selected_deletion_witnesses(BTreeMap::new());
         assert_eq!(
-            maintained.unpublished_peer_source_delta(&BTreeSet::from([fact.clone()])),
+            maintained.unpublished_supporting_delta(),
             Some((vec![], vec![fact.clone()]))
         );
         maintained.acknowledge_peer_source_closure();
 
-        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1);
-        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1);
+        maintained.supporting.apply(0, fact.clone(), 1);
+        maintained.supporting.apply(0, fact.clone(), -1);
         assert_eq!(
-            maintained.unpublished_peer_source_delta(&empty),
+            maintained.unpublished_supporting_delta(),
             Some((vec![], vec![]))
         );
-        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1);
+        maintained.supporting.apply(0, fact.clone(), 1);
         assert_eq!(
-            maintained.unpublished_peer_source_delta(&empty),
+            maintained.unpublished_supporting_delta(),
             Some((vec![fact.clone()], vec![]))
         );
-        let previous = BTreeSet::from([fact.clone()]);
         maintained.acknowledge_peer_source_closure();
-        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1);
-        maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), 1);
+        maintained.supporting.apply(0, fact.clone(), -1);
+        maintained.supporting.apply(1, fact.clone(), 1);
         assert_eq!(
-            maintained.unpublished_peer_source_delta(&previous),
+            maintained.unpublished_supporting_delta(),
             Some((vec![], vec![]))
         );
         maintained.replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version)]));
-        maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), -1);
+        maintained.supporting.apply(1, fact.clone(), -1);
         assert_eq!(
-            maintained.unpublished_peer_source_delta(&previous),
+            maintained.unpublished_supporting_delta(),
             Some((vec![], vec![]))
         );
         maintained.acknowledge_peer_source_closure();
         maintained.replace_selected_deletion_witnesses(BTreeMap::new());
         assert_eq!(
-            maintained.unpublished_peer_source_delta(&previous),
+            maintained.unpublished_supporting_delta(),
             Some((vec![], vec![fact.clone()]))
         );
-        maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), -1);
-        maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1);
+        maintained.supporting.apply(2, fact.clone(), -1);
+        maintained.supporting.apply(0, fact.clone(), 1);
         assert_eq!(
-            maintained.unpublished_peer_source_delta(&previous),
+            maintained.unpublished_supporting_delta(),
             Some((vec![], vec![]))
         );
+    }
+
+    // Internal layout receipt: public values cannot reveal unused enum
+    // alternatives inflating every transient tree key/value allocation.
+    #[test]
+    fn event_map_layout_has_no_inline_large_result_or_fact_variants() {
+        let key_bytes = mem::size_of::<EventIdentity>();
+        let event_bytes = mem::size_of::<NetEvent>();
+        eprintln!("temporary event layout: key={key_bytes} event={event_bytes}");
+        assert!(key_bytes <= 128 && event_bytes <= 192);
+    }
+
+    // Internal identity ownership cannot be observed through public rows.
+    // It must share allocations without changing value-based equality/order,
+    // and consuming the map key must permit moving the event value back out.
+    #[test]
+    fn temporary_event_keys_share_values_and_release_them_before_application() {
+        let member = ResultMemberEntry::from(result(row(1), 10));
+        let DecodedMaintainedEvent::ResultCurrent { payload, .. } = result_current(member.clone())
+        else {
+            unreachable!();
+        };
+        let event = NetEvent::Result(Box::new((Rc::new(member.clone()), payload)));
+        let key = event.identity();
+        let NetEvent::Result(result) = &event else {
+            unreachable!();
+        };
+        let EventIdentity::Result(shared) = &key else {
+            unreachable!();
+        };
+        assert!(Rc::ptr_eq(&result.0, shared));
+        assert_eq!(Rc::strong_count(shared), 2);
+        let independently_owned_key = EventIdentity::Result(Rc::new(member.clone()));
+        assert_eq!(key, independently_owned_key);
+        assert_eq!(key.cmp(&independently_owned_key), std::cmp::Ordering::Equal);
+        drop(key);
+        let NetEvent::Result(result) = event else {
+            unreachable!();
+        };
+        assert_eq!(Rc::strong_count(&result.0), 1);
+        assert_eq!(Rc::try_unwrap(result.0).unwrap(), member);
+
+        let fact = ProgramFactEntry::CoveredInput(
+            covered_input_for_version(
+                test_source(),
+                &version(row(2), 20, "shared identity"),
+                &aliases(),
+            )
+            .unwrap(),
+        );
+        let event = NetEvent::ProgramFact(Rc::new(fact.clone()));
+        let key = event.identity();
+        let NetEvent::ProgramFact(shared) = &event else {
+            unreachable!();
+        };
+        let EventIdentity::ProgramFact(key_fact) = &key else {
+            unreachable!();
+        };
+        assert!(Rc::ptr_eq(shared, key_fact));
+        assert_eq!(key, EventIdentity::ProgramFact(Rc::new(fact.clone())));
+        let mut map = BTreeMap::from([(key, (event, 1i64))]);
+        // Equal values at distinct addresses still coalesce into the first
+        // event; pointer identity is never a comparison or ordering key.
+        let duplicate = NetEvent::ProgramFact(Rc::new(fact.clone()));
+        map.entry(duplicate.identity())
+            .and_modify(|(_, weight)| *weight += 1)
+            .or_insert((duplicate, 1));
+        assert_eq!(map.len(), 1);
+        let (key, (event, weight)) = map.into_iter().next().unwrap();
+        assert_eq!(weight, 2);
+        drop(key);
+        let NetEvent::ProgramFact(shared) = event else {
+            unreachable!();
+        };
+        assert_eq!(Rc::strong_count(&shared), 1);
+        assert_eq!(Rc::try_unwrap(shared).unwrap(), fact);
     }
 
     #[test]
     fn shared_covered_input_publishes_only_first_add_and_final_remove() {
         let aliases = aliases();
         let row = version(row(0x51), 10, "shared source");
-        let fact = ProgramFactEntry::CoveredInput(
+        let fact = physical_input(
             covered_input_for_version(test_source(), &row, &aliases)
                 .expect("test version has a registered node alias"),
         );
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         // Two independent terminals can reach the same exact source version.
         // The peer closure is a set: the second witness is not a second add,
         // and removing either witness must retain the other.
+        assert_eq!(maintained.supporting.apply(0, fact.clone(), 1), Some(true));
+        assert_eq!(maintained.supporting.apply(1, fact.clone(), 1), None);
+        assert_eq!(maintained.supporting.apply(2, fact.clone(), 1), None);
+        assert_eq!(maintained.supporting.apply(0, fact.clone(), -1), None);
+        assert_eq!(maintained.supporting.apply(1, fact.clone(), -1), None);
         assert_eq!(
-            maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), 1),
-            Some(true)
-        );
-        assert_eq!(
-            maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), 1),
-            None
-        );
-        assert_eq!(
-            maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), 1),
-            None
-        );
-        assert_eq!(
-            maintained.apply_source_fact_delta(SourceFactOrigin::Version, fact.clone(), -1),
-            None
-        );
-        assert_eq!(
-            maintained.apply_source_fact_delta(SourceFactOrigin::Replacement, fact.clone(), -1),
-            None
-        );
-        assert_eq!(
-            maintained.apply_source_fact_delta(SourceFactOrigin::ProgramFact, fact.clone(), -1),
+            maintained.supporting.apply(2, fact.clone(), -1),
             Some(false)
         );
-        assert!(maintained.source_fact_weights.is_empty());
+        assert!(maintained.supporting.is_empty());
     }
 
     // Internal: signed terminal weights can temporarily be negative, and
@@ -4558,64 +4679,60 @@ mod tests {
     #[test]
     fn signed_source_weights_do_not_cancel_another_origins_presence() {
         let row = version(row(0x53), 12, "signed source");
-        let fact = ProgramFactEntry::CoveredInput(
-            covered_input_for_version(test_source(), &row, &aliases()).unwrap(),
-        );
-        let mut maintained = MaintainedSubscriptionView::default();
+        let fact =
+            physical_input(covered_input_for_version(test_source(), &row, &aliases()).unwrap());
+        let mut maintained = test_maintained();
         for (origin, weight, transition, visible) in [
-            (SourceFactOrigin::Version, 1, Some(true), true),
-            (SourceFactOrigin::Replacement, -1, None, true),
-            (SourceFactOrigin::Version, -1, Some(false), false),
-            (SourceFactOrigin::Replacement, 1, None, false),
-            (SourceFactOrigin::ProgramFact, 2, Some(true), true),
-            (SourceFactOrigin::Version, -2, None, true),
-            (SourceFactOrigin::ProgramFact, -2, Some(false), false),
-            (SourceFactOrigin::Version, 2, None, false),
+            (0usize, 1, Some(true), true),
+            (1usize, -1, None, true),
+            (0usize, -1, Some(false), false),
+            (1usize, 1, None, false),
+            (2usize, 2, Some(true), true),
+            (0usize, -2, None, true),
+            (2usize, -2, Some(false), false),
+            (0usize, 2, None, false),
         ] {
             assert_eq!(
-                maintained.apply_source_fact_delta(origin, fact.clone(), weight),
+                maintained.supporting.apply(origin, fact.clone(), weight),
                 transition,
             );
             assert_eq!(
                 maintained
-                    .active_peer_source_closure_facts()
+                    .supporting_rows()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
                     .contains(&fact),
                 visible
             );
         }
-        assert!(maintained.source_fact_weights.is_empty());
+        assert!(maintained.supporting.is_empty());
     }
 
     #[test]
     fn source_fact_changes_coalesce_remove_readd_within_one_drain() {
-        let aliases = aliases();
-        let fact = ProgramFactEntry::CoveredInput(
+        let fact = physical_input(
             covered_input_for_version(
                 test_source(),
                 &version(row(0x52), 11, "coalesced"),
-                &aliases,
+                &aliases(),
             )
-            .expect("test version has a registered node alias"),
+            .unwrap(),
         );
-        let mut changes = BTreeMap::new();
-
-        // A sink can retract a source while another sink in the same drain
-        // re-establishes it. Neither ordering leaks an overlapping wire
-        // remove/add pair because the peer sees only the drain's net closure.
-        record_peer_source_fact_change(&mut changes, fact.clone(), false);
-        record_peer_source_fact_change(&mut changes, fact.clone(), true);
-        let mut transitions = ResultTransitions::default();
-        append_net_peer_source_fact_changes(&mut transitions, changes);
-        assert!(transitions.program_fact_adds.is_empty());
-        assert!(transitions.program_fact_removes.is_empty());
-
-        let mut changes = BTreeMap::new();
-        record_peer_source_fact_change(&mut changes, fact.clone(), true);
-        record_peer_source_fact_change(&mut changes, fact.clone(), false);
-        let mut transitions = ResultTransitions::default();
-        append_net_peer_source_fact_changes(&mut transitions, changes);
-        assert!(transitions.program_fact_adds.is_empty());
-        assert!(transitions.program_fact_removes.is_empty());
+        let mut maintained = test_maintained();
+        maintained.supporting.apply(0, fact.clone(), 1);
+        maintained.acknowledge_peer_source_closure();
+        maintained.supporting.apply(0, fact.clone(), -1);
+        maintained.supporting.apply(0, fact.clone(), 1);
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![], vec![]))
+        );
+        maintained.supporting.apply(0, fact.clone(), 1);
+        maintained.supporting.apply(0, fact, -1);
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![], vec![]))
+        );
     }
 
     // Internal: source replacement must release exact wire witnesses even
@@ -4626,161 +4743,106 @@ mod tests {
         let aliases = BTreeMap::from([(NodeUuid(uuid::Uuid::from_u128(10)), NodeAlias(10))]);
         let input = covered_input_for_version(test_source(), &version, &aliases).unwrap();
         let tx = input.version.tx;
-        let fact = ProgramFactEntry::CoveredInput(input);
-        let mut maintained = MaintainedSubscriptionView::default();
-        let (adds, removes) = maintained
-            .replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.clone())]));
-        assert_eq!(adds, vec![fact.clone()]);
-        assert!(removes.is_empty());
+        let fact = physical_input(input);
+        let mut maintained = test_maintained();
+        maintained.acknowledge_peer_source_closure();
+        assert!(
+            maintained.replace_selected_deletion_witnesses(BTreeMap::from([(
+                fact.clone(),
+                version.clone()
+            )]))
+        );
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![fact.clone()], vec![]))
+        );
+        maintained.acknowledge_peer_source_closure();
         assert_eq!(maintained.versions_by_tx(tx), vec![version]);
         assert!(
             maintained
-                .active_peer_source_closure_facts()
+                .supporting_rows()
+                .cloned()
+                .collect::<BTreeSet<_>>()
                 .contains(&fact)
         );
-        let (adds, removes) = maintained.replace_selected_deletion_witnesses(BTreeMap::new());
-        assert!(adds.is_empty());
-        assert_eq!(removes, vec![fact]);
+        assert!(maintained.replace_selected_deletion_witnesses(BTreeMap::new()));
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![], vec![fact]))
+        );
         assert!(maintained.versions_by_tx(tx).is_empty());
-        assert!(maintained.active_peer_source_closure_facts().is_empty());
+        assert!(
+            maintained
+                .supporting_rows()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .is_empty()
+        );
     }
 
     #[test]
     fn multisink_shared_source_fact_retracts_only_after_its_last_terminal() {
-        let descriptor = RecordDescriptor::new([("complete", ValueType::Bool)]);
-        let source = test_source();
-        let coverage_schema = super::super::query_engine::ProgramSourceCoverageSchema {
-            source: source.clone(),
-            complete: true,
-            routing_param_fields: BTreeSet::new(),
+        // The obsolete coverage-fact identity is gone. Two distinct query
+        // occurrences now contribute to the same physical row frontier.
+        let record = version(row(0x51), 10, "shared");
+        let first = version_content(record.clone());
+        let second = DecodedMaintainedEvent::VersionContent {
+            source: ProgramSourceId {
+                table: "todos".to_owned().into(),
+                path: vec![crate::protocol::ProgramSourceRole::Alias("peer".to_owned())],
+            },
+            row: record.clone(),
         };
-        let schemas = MaintainedTerminalSchemas {
-            sinks: BTreeMap::from([
-                (
-                    "source-a".to_owned(),
-                    MaintainedTerminalKind::ProgramSourceCoverage(coverage_schema.clone()),
-                ),
-                (
-                    "source-b".to_owned(),
-                    MaintainedTerminalKind::ProgramSourceCoverage(coverage_schema),
-                ),
-            ]),
-        };
-        let tables = BTreeMap::new();
-        let deltas = |weight| RecordDeltas {
-            descriptor,
-            deltas: vec![RecordDelta {
-                record: descriptor.create(&[Value::Bool(true)]).unwrap().into(),
-                weight,
-            }],
-        };
-        let fact =
-            ProgramFactEntry::ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry {
-                source,
-                complete: true,
-            });
-        let mut maintained = MaintainedSubscriptionView::default();
-
-        let initial = maintained
-            .apply_multisink_deltas(
-                MultisinkDeltas {
-                    sinks: BTreeMap::from([
-                        ("source-a".to_owned(), deltas(1)),
-                        ("source-b".to_owned(), deltas(1)),
-                    ]),
-                    terminal_sinks: BTreeMap::new(),
-                },
-                &schemas,
-                &tables,
-                &aliases(),
-            )
+        let input =
+            physical_input(covered_input_for_version(test_source(), &record, &aliases()).unwrap());
+        let mut maintained = test_maintained();
+        maintained.acknowledge_peer_source_closure();
+        maintained
+            .apply_decoded_deltas([(first.clone(), 1), (second.clone(), 1)], &aliases())
             .unwrap();
-        assert_eq!(initial.program_fact_adds, vec![fact.clone()]);
-        assert!(initial.program_fact_removes.is_empty());
-
-        let retain = maintained
-            .apply_multisink_deltas(
-                MultisinkDeltas {
-                    sinks: BTreeMap::from([("source-a".to_owned(), deltas(-1))]),
-                    terminal_sinks: BTreeMap::new(),
-                },
-                &schemas,
-                &tables,
-                &aliases(),
-            )
-            .unwrap();
-        assert!(retain.program_fact_adds.is_empty());
-        assert!(retain.program_fact_removes.is_empty());
-        assert!(
-            maintained
-                .active_peer_source_closure_facts()
-                .contains(&fact)
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![input.clone()], vec![]))
         );
-
-        let retract = maintained
-            .apply_multisink_deltas(
-                MultisinkDeltas {
-                    sinks: BTreeMap::from([("source-b".to_owned(), deltas(-1))]),
-                    terminal_sinks: BTreeMap::new(),
-                },
-                &schemas,
-                &tables,
-                &aliases(),
-            )
+        maintained.acknowledge_peer_source_closure();
+        maintained
+            .apply_decoded_deltas([(first.clone(), -1)], &aliases())
             .unwrap();
-        assert!(retract.program_fact_adds.is_empty());
-        assert_eq!(retract.program_fact_removes, vec![fact.clone()]);
-
-        let readd = maintained
-            .apply_multisink_deltas(
-                MultisinkDeltas {
-                    sinks: BTreeMap::from([("source-a".to_owned(), deltas(1))]),
-                    terminal_sinks: BTreeMap::new(),
-                },
-                &schemas,
-                &tables,
-                &aliases(),
-            )
-            .unwrap();
-        assert_eq!(readd.program_fact_adds, vec![fact.clone()]);
-
-        // This is one real multisink drain: source-a leaves while source-b
-        // takes over the same exact fact. The peer must receive neither an
-        // ordered remove/add pair nor a spurious reset.
-        let handoff = maintained
-            .apply_multisink_deltas(
-                MultisinkDeltas {
-                    sinks: BTreeMap::from([
-                        ("source-a".to_owned(), deltas(-1)),
-                        ("source-b".to_owned(), deltas(1)),
-                    ]),
-                    terminal_sinks: BTreeMap::new(),
-                },
-                &schemas,
-                &tables,
-                &aliases(),
-            )
-            .unwrap();
-        assert!(handoff.program_fact_adds.is_empty());
-        assert!(handoff.program_fact_removes.is_empty());
-        assert!(
-            maintained
-                .active_peer_source_closure_facts()
-                .contains(&fact)
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![], vec![]))
         );
-
-        let final_retract = maintained
-            .apply_multisink_deltas(
-                MultisinkDeltas {
-                    sinks: BTreeMap::from([("source-b".to_owned(), deltas(-1))]),
-                    terminal_sinks: BTreeMap::new(),
-                },
-                &schemas,
-                &tables,
-                &aliases(),
-            )
+        maintained
+            .apply_decoded_deltas([(second.clone(), -1)], &aliases())
             .unwrap();
-        assert_eq!(final_retract.program_fact_removes, vec![fact]);
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![], vec![input.clone()]))
+        );
+        maintained.acknowledge_peer_source_closure();
+        maintained
+            .apply_decoded_deltas([(first.clone(), 1)], &aliases())
+            .unwrap();
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![input.clone()], vec![]))
+        );
+        maintained.acknowledge_peer_source_closure();
+        maintained
+            .apply_decoded_deltas([(first, -1), (second.clone(), 1)], &aliases())
+            .unwrap();
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![], vec![]))
+        );
+        assert_eq!(maintained.supporting_rows().count(), 1);
+        maintained
+            .apply_decoded_deltas([(second, -1)], &aliases())
+            .unwrap();
+        assert_eq!(
+            maintained.unpublished_supporting_delta(),
+            Some((vec![], vec![input]))
+        );
     }
 
     fn replacement_content(row: VersionRow) -> DecodedMaintainedEvent {
@@ -4795,7 +4857,7 @@ mod tests {
     #[test]
     fn shared_witness_payload_retains_independent_role_lifetimes() {
         for is_deletion in [false, true] {
-            let mut maintained = MaintainedSubscriptionView::default();
+            let mut maintained = test_maintained();
             let record = if is_deletion {
                 deletion(row(1), 100)
             } else {
@@ -4803,6 +4865,8 @@ mod tests {
             };
             let identity = VersionIdentity::for_row(&record);
             let key = ReplacementKey::for_row(&record, identity.layer);
+            let sort_key = VersionSortKey::for_row(&record, &identity);
+            let tx_id = version_tx_id_from_aliases(&record, &aliases()).unwrap();
             let shared = DecodedMaintainedEvent::SharedVersion {
                 source: test_source(),
                 row: record.clone(),
@@ -4810,19 +4874,18 @@ mod tests {
             let first = maintained
                 .apply_decoded_deltas([(shared.clone(), 1)], &aliases())
                 .unwrap();
-            assert_eq!(first.program_fact_adds.len(), 1);
+            assert!(first.supporting_changed);
+            assert_eq!(maintained.supporting_rows().count(), 1);
             let replacements = if is_deletion {
                 &maintained.replacements.deletion_by_key
             } else {
                 &maintained.replacements.content_by_key
             };
-            let version_payload = &maintained.versions.by_identity[&identity].payload;
+            let version_payload = &maintained.versions.by_tx[&tx_id][&sort_key].payload;
             let replacement_payload = &replacements[&key][&identity].payload;
             assert!(Arc::ptr_eq(version_payload, replacement_payload));
             assert!(Arc::ptr_eq(
-                &maintained
-                    .versions
-                    .by_identity
+                &maintained.versions.by_tx[&tx_id]
                     .keys()
                     .next()
                     .unwrap()
@@ -4843,7 +4906,7 @@ mod tests {
                 .apply_decoded_deltas([(replacement_event.clone(), -1)], &aliases())
                 .unwrap();
             assert!(withdrew.program_fact_removes.is_empty());
-            assert_eq!(maintained.versions.by_identity[&identity].weight, 1);
+            assert_eq!(maintained.versions.by_tx[&tx_id][&sort_key].weight, 1);
             assert_eq!(maintained.replacements.entry_count(), 0);
             maintained
                 .apply_decoded_deltas(
@@ -4851,20 +4914,33 @@ mod tests {
                     &aliases(),
                 )
                 .unwrap();
-            assert_eq!(maintained.active_peer_source_closure_facts().len(), 1);
-            assert!(maintained.versions.by_identity.is_empty());
+            assert_eq!(
+                maintained
+                    .supporting_rows()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                1
+            );
+            assert!(maintained.versions.by_tx.is_empty());
             assert_eq!(maintained.replacements.entry_count(), 1);
             let removed = maintained
                 .apply_decoded_deltas([(replacement_event, -1)], &aliases())
                 .unwrap();
-            assert_eq!(removed.program_fact_removes.len(), 1);
-            assert!(maintained.active_peer_source_closure_facts().is_empty());
+            assert!(removed.supporting_changed);
+            assert!(
+                maintained
+                    .supporting_rows()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .is_empty()
+            );
             let cancelled = maintained
                 .apply_decoded_deltas([(shared.clone(), 1), (shared, -1)], &aliases())
                 .unwrap();
             assert!(cancelled.program_fact_adds.is_empty());
             assert!(cancelled.program_fact_removes.is_empty());
-            assert!(maintained.versions.by_identity.is_empty());
+            assert!(maintained.versions.by_tx.is_empty());
             assert_eq!(maintained.replacements.entry_count(), 0);
         }
     }
@@ -4892,7 +4968,7 @@ mod tests {
         let aliases = aliases();
         let entry = result(row(1), 10);
         let member = ResultMemberEntry::from(entry);
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         let first = maintained
             .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases)
@@ -4916,7 +4992,7 @@ mod tests {
         // would make the wire builder fail closed for the missing bundle.
         let aliases = aliases();
         let member = ResultMemberEntry::from(result(row(1), 10));
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         let mut first = maintained
             .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases)
@@ -4952,6 +5028,123 @@ mod tests {
         assert!(third.result_payload_removes.is_empty());
     }
 
+    // Internal: the journal must survive discarded intermediate transitions,
+    // and public rows cannot expose how many retained members were revisited.
+    // Compare exact publication deltas/state with the existing full algorithm.
+    #[test]
+    fn storage_backed_membership_reconciles_only_retained_touched_candidates() {
+        for count in [8, 1024] {
+            let members = (0..=count)
+                .map(|index| {
+                    let member = RealRowMemberEntry::current_content(result(
+                        RowUuid(uuid::Uuid::from_u128(index as u128 + 1)),
+                        10,
+                    ));
+                    ResultMemberEntry::from(if index % 2 == 0 {
+                        member.with_row_digest(vec![0xd1, 0x6e])
+                    } else {
+                        member
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut incremental = test_maintained();
+            incremental.enable_storage_backed_result_materialization();
+            incremental
+                .apply_decoded_deltas(
+                    members[..count]
+                        .iter()
+                        .cloned()
+                        .map(|member| (result_current(member), 1)),
+                    &aliases(),
+                )
+                .unwrap();
+            let initial = incremental.reconcile_publishable_result_members(&aliases());
+            assert_eq!(initial.0.len(), count);
+            assert_eq!(incremental.result_member_reconcile_visits, count);
+            let mut reference = incremental.clone();
+
+            for changes in [
+                vec![(0, -1), (1, 1), (count, 1)],
+                vec![(0, 1), (1, -1), (count, -1)],
+                vec![(2, -2)],
+                vec![(2, 1)],
+                vec![(2, 1)],
+                vec![(3, -1), (3, 1)],
+                vec![],
+            ] {
+                for view in [&mut incremental, &mut reference] {
+                    for &(index, weight) in &changes {
+                        // A caller can drop a transition before completing a
+                        // later drain. The view, not that return value, owns
+                        // every candidate until reconciliation succeeds.
+                        drop(
+                            view.apply_decoded_deltas(
+                                [(result_current(members[index].clone()), weight)],
+                                &aliases(),
+                            )
+                            .unwrap(),
+                        );
+                    }
+                }
+                let touched = changes
+                    .iter()
+                    .map(|(index, _)| *index)
+                    .collect::<BTreeSet<_>>();
+                incremental.result_member_reconcile_visits = 0;
+                reference.unreconciled_result_members = None;
+                let expected = reference.reconcile_publishable_result_members(&aliases());
+                let actual = incremental.reconcile_publishable_result_members(&aliases());
+                assert_eq!(actual, expected);
+                assert_eq!(incremental.result_member_reconcile_visits, touched.len());
+                assert_eq!(incremental.result_weights, reference.result_weights);
+                assert_eq!(
+                    incremental.published_result_members,
+                    reference.published_result_members
+                );
+                assert_eq!(
+                    incremental.published_result_payloads,
+                    reference.published_result_payloads
+                );
+                assert!(
+                    incremental
+                        .unreconciled_result_members
+                        .as_ref()
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+
+        // Switching an already-populated witness-gated view must establish a
+        // full baseline, promoting a previously withheld membership even when
+        // the switching call carries no new member delta.
+        let member = ResultMemberEntry::from(result(row(1), 10));
+        let mut switched = test_maintained();
+        switched
+            .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases())
+            .unwrap();
+        assert!(
+            switched
+                .reconcile_publishable_result_members(&aliases())
+                .0
+                .is_empty()
+        );
+        assert!(switched.unreconciled_result_members.is_none());
+        switched.enable_storage_backed_result_materialization();
+        assert_eq!(
+            switched.reconcile_publishable_result_members(&aliases()).0,
+            vec![member]
+        );
+        switched.result_member_reconcile_visits = 0;
+        assert!(
+            switched
+                .reconcile_publishable_result_members(&aliases())
+                .0
+                .is_empty()
+        );
+        assert_eq!(switched.result_member_reconcile_visits, 0);
+    }
+
     #[test]
     fn storage_backed_membership_publishes_without_bundle_witness() {
         // This must remain an internal receipt: public test routes cannot
@@ -4960,7 +5153,7 @@ mod tests {
         // row, tx)` from node storage at materialization time.
         let aliases = aliases();
         let member = ResultMemberEntry::from(result(row(2), 20));
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
         maintained.enable_storage_backed_result_materialization();
 
         let mut transitions = maintained
@@ -4984,7 +5177,7 @@ mod tests {
             descriptor: vec![0x01],
             record: vec![0x02],
         };
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         // The raw result terminal carries both Stream-A fields, but neither
         // may be published before Stream B proves the content row.
@@ -5119,7 +5312,7 @@ mod tests {
                 1,
             )
         };
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
         let result = maintained.apply_decoded_delta_results(
             [
                 Ok(event()),
@@ -5156,7 +5349,7 @@ mod tests {
                 .unwrap(),
             descriptor,
         );
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         maintained.discard_structured_app_rows();
         maintained
@@ -5228,7 +5421,7 @@ mod tests {
                 weight,
             }],
         };
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
         let direct = maintained
             .apply_typed_deltas(
                 "maintained.result_current",
@@ -5270,7 +5463,7 @@ mod tests {
         assert_eq!(removed.removes, [direct]);
         assert_eq!(maintained.result_weights.get(&inherited), Some(&1));
 
-        let mut reopened = MaintainedSubscriptionView::default();
+        let mut reopened = test_maintained();
         let rehydrated = reopened
             .apply_typed_deltas(
                 "maintained.result_current",
@@ -5289,7 +5482,7 @@ mod tests {
         let aliases = aliases();
         let entry = result(row(1), 10);
         let member = ResultMemberEntry::from(entry);
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         let transitions = maintained
             .apply_decoded_deltas(
@@ -5312,7 +5505,7 @@ mod tests {
         let aliases = aliases();
         let entry = result(row(1), 10);
         let member = ResultMemberEntry::from(entry);
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         let active = maintained
             .apply_decoded_deltas([(result_current(member.clone()), 2)], &aliases)
@@ -5328,6 +5521,272 @@ mod tests {
         assert!(maintained.result_weights.is_empty());
     }
 
+    // Internal accounting oracle: public queries cannot inspect retained byte
+    // totals. Exercise the same mutation wrappers used by reconciliation,
+    // including signed weights, resized payloads, journal resets, and clones.
+    #[test]
+    fn retained_result_accounting_matches_full_scans_through_mutations() {
+        let mut maintained = test_maintained();
+        let members = (0..32)
+            .map(|i| {
+                ResultMemberEntry::from(
+                    RealRowMemberEntry::current_content(result(row(i + 1), 10))
+                        .with_row_digest(vec![i; usize::from(i) + 1]),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut seed = 29_u64;
+        for step in 0..600 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let member = members[(seed >> 32) as usize % members.len()].clone();
+            let old = maintained.result_weights.get(&member).copied().unwrap_or(0);
+            let new = old + [1, -2, 0, 3, -4][step % 5];
+            let payload = ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: vec![1; step % 41],
+                record: vec![2; step % 137],
+            };
+            if new == 0 {
+                maintained.result_weights.remove(&member);
+            } else {
+                maintained.result_weights.insert(member.clone(), new);
+            }
+            if new > 0 {
+                maintained
+                    .result_payloads
+                    .insert(member.clone(), payload.clone());
+                maintained
+                    .published_result_payloads
+                    .insert(member.clone(), payload);
+                maintained.published_result_members.insert(member.clone());
+            } else {
+                maintained.result_payloads.remove(&member);
+                maintained.published_result_payloads.remove(&member);
+                maintained.published_result_members.remove(&member);
+            }
+            maintained
+                .unreconciled_result_members
+                .get_or_insert_with(Default::default)
+                .insert(member);
+            maintained.assert_incremental_footprint_matches_full_scan();
+            if step % 17 == 0 {
+                let retained = maintained.clone();
+                let retained_footprint = retained.footprint();
+                // Both taking a completed journal and the full-reconcile
+                // replacement path must install independent fresh counters.
+                maintained.unreconciled_result_members.take();
+                maintained.published_result_members = maintained
+                    .published_result_members
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into();
+                maintained.assert_incremental_footprint_matches_full_scan();
+                assert_eq!(retained.footprint(), retained_footprint);
+            }
+        }
+        let retained = maintained.clone();
+        for member in &members {
+            maintained.result_weights.remove(member);
+            maintained.result_payloads.remove(member);
+            maintained.published_result_payloads.remove(member);
+            maintained.published_result_members.remove(member);
+        }
+        maintained.unreconciled_result_members = None;
+        assert_eq!(maintained.footprint().result_weights_bytes, 0);
+        assert_eq!(maintained.footprint().result_payloads_bytes, 0);
+        assert_eq!(maintained.footprint().result_rows, 0);
+        retained.assert_incremental_footprint_matches_full_scan();
+        assert!(!retained.result_weights.is_empty());
+    }
+
+    // Internal differential/accounting oracle: public rows cannot verify
+    // replacement weights, exact modeled bytes, or payload ownership.
+    #[test]
+    fn replacement_accounting_matches_signed_mutation_oracle() {
+        let aliases = aliases();
+        let payloads = (0..32)
+            .map(|i| {
+                let record = if i % 2 == 0 {
+                    version(row(i % 4 + 1), u64::from(10 + i / 4), "content")
+                } else {
+                    deletion(row(i % 4 + 1), u64::from(10 + i / 4))
+                };
+                VersionPayload::prepare(
+                    record.clone(),
+                    &VersionIdentity::for_row(&record),
+                    &aliases,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut index = ReplacementIndex::default();
+        let mut oracle = BTreeMap::<VersionIdentity, WeightedVersion>::new();
+        let mut seed = 41_u64;
+        for step in 0..600 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let payload = Arc::clone(&payloads[(seed >> 32) as usize % payloads.len()]);
+            let identity = VersionIdentity::for_row(&payload.row);
+            let key = ReplacementKey::for_row(&payload.row, payload.row.layer());
+            let weight = [1, -1, 0, -4, 2, 3, -2][step % 7];
+            let new = oracle.get(&identity).map_or(0, |version| version.weight) + weight;
+            if new > 0 {
+                oracle.insert(
+                    identity.clone(),
+                    WeightedVersion {
+                        payload: Arc::clone(&payload),
+                        weight: new,
+                    },
+                );
+            } else {
+                oracle.remove(&identity);
+            }
+            index.apply_delta(key, identity, payload, weight);
+            index.assert_footprint_matches_full_scan();
+            assert_eq!(index.entry_count(), oracle.len());
+            for rows in index
+                .content_by_key
+                .values()
+                .chain(index.deletion_by_key.values())
+            {
+                assert!(!rows.is_empty());
+                for (identity, actual) in rows {
+                    assert_eq!(actual.weight, oracle[identity].weight);
+                    assert!(Arc::ptr_eq(&actual.payload, &oracle[identity].payload));
+                }
+            }
+        }
+        let retained = index.clone();
+        let retained_bytes = retained.footprint_bytes();
+        for (identity, version) in &oracle {
+            index.apply_delta(
+                ReplacementKey::for_row(&version.row, version.row.layer()),
+                identity.clone(),
+                Arc::clone(&version.payload),
+                -version.weight - 1,
+            );
+            index.assert_footprint_matches_full_scan();
+        }
+        assert_eq!(index.entry_count(), 0);
+        assert_eq!(index.footprint_bytes(), 0);
+        assert_eq!(retained.footprint_bytes(), retained_bytes);
+        retained.assert_footprint_matches_full_scan();
+        let payload = Arc::clone(&payloads[0]);
+        index.apply_delta(
+            ReplacementKey::for_row(&payload.row, payload.row.layer()),
+            VersionIdentity::for_row(&payload.row),
+            payload,
+            1,
+        );
+        assert_eq!(index.entry_count(), 1);
+        index.assert_footprint_matches_full_scan();
+    }
+
+    #[test]
+    // Internal differential/accounting oracle: public row equality cannot
+    // establish exact private footprint counters or retained index ownership.
+    fn transaction_version_index_matches_identity_oracle_and_footprint() {
+        let aliases = aliases();
+        let mut records = (0..32)
+            .map(|i| {
+                let row_uuid = row(i % 4 + 1);
+                let time = u64::from(10 + i / 8);
+                if i % 8 < 4 {
+                    version(row_uuid, time, "content")
+                } else {
+                    deletion(row_uuid, time)
+                }
+            })
+            .collect::<Vec<_>>();
+        // Same row/transaction/layer, distinct encoded identity.
+        records.push(version(row(1), 10, "other content"));
+        let payloads = records
+            .iter()
+            .map(|record| {
+                VersionPayload::prepare(record.clone(), &VersionIdentity::for_row(record), &aliases)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut index = WeightedVersionIndex::default();
+        let mut oracle = BTreeMap::<VersionIdentity, WeightedVersion>::new();
+        let mut seed = 17_u64;
+        for step in 0..600 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let payload = Arc::clone(&payloads[(seed >> 32) as usize % payloads.len()]);
+            let weight = [1, 2, -1, -4, 0, 3, -2][step % 7];
+            let identity = VersionIdentity::for_row(&payload.row);
+            let new = oracle.get(&identity).map_or(0, |version| version.weight) + weight;
+            if new > 0 {
+                oracle.insert(
+                    identity,
+                    WeightedVersion {
+                        payload: Arc::clone(&payload),
+                        weight: new,
+                    },
+                );
+            } else {
+                oracle.remove(&identity);
+            }
+            index.apply_delta(payload, weight);
+
+            assert_eq!(index.entry_count, oracle.len(), "step {step}");
+            assert!(index.by_tx.values().all(|rows| !rows.is_empty()));
+            let entry_bytes = index
+                .by_tx
+                .values()
+                .flat_map(|rows| rows.iter())
+                .map(|(key, value)| version_sort_key_bytes(key) + weighted_version_bytes(value))
+                .sum::<usize>();
+            assert_eq!(index.entry_bytes, entry_bytes, "step {step}");
+            assert_eq!(
+                index.footprint_bytes(),
+                btree_map_bytes(index.by_tx.len()) + btree_map_bytes(oracle.len()) + entry_bytes
+            );
+            for time in 10..=14 {
+                let tx_id = tx(1, time);
+                let mut expected = oracle
+                    .values()
+                    .filter(|version| version.tx_id == tx_id)
+                    .collect::<Vec<_>>();
+                expected.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
+                assert_eq!(
+                    index.versions_by_tx(tx_id),
+                    expected
+                        .iter()
+                        .map(|version| version.row.clone())
+                        .collect::<Vec<_>>()
+                );
+                for version in expected {
+                    let actual = &index.by_tx[&tx_id][&version.sort_key];
+                    assert_eq!(actual.weight, version.weight);
+                    assert!(Arc::ptr_eq(&actual.payload, &version.payload));
+                }
+            }
+        }
+        // Removing the current view must not mutate a retained clone. A later
+        // positive weight revives from zero, not from a discarded negative.
+        let retained = index.clone();
+        for version in oracle.values() {
+            index.apply_delta(Arc::clone(&version.payload), -version.weight - 1);
+        }
+        assert!(index.by_tx.is_empty());
+        assert_eq!(index.entry_count, 0);
+        assert_eq!(index.footprint_bytes(), 0);
+        assert_eq!(retained.entry_count, oracle.len());
+        for version in oracle.values() {
+            assert_eq!(
+                retained.by_tx[&version.tx_id][&version.sort_key].weight,
+                version.weight
+            );
+        }
+        index.apply_delta(Arc::clone(&payloads[0]), 1);
+        assert_eq!(index.entry_count, 1);
+        assert_eq!(
+            index.by_tx[&payloads[0].tx_id][&payloads[0].sort_key].weight,
+            1
+        );
+    }
+
     #[test]
     fn versions_by_tx_contains_distinct_identities_sorted_and_prunes_retracted_one() {
         let aliases = aliases();
@@ -5336,7 +5795,7 @@ mod tests {
         let row_a = row(1);
         let version_b = version(row_b, 10, "b");
         let version_a = version(row_a, 10, "a");
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         maintained
             .apply_decoded_deltas(
@@ -5384,7 +5843,7 @@ mod tests {
         let old = version(row_uuid, 10, "old");
         let new = version(row_uuid, 11, "new");
         let deletion = deletion(row_uuid, 12);
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         maintained
             .apply_decoded_deltas([(replacement_content(old.clone()), 1)], &aliases)
@@ -5422,7 +5881,7 @@ mod tests {
         let aliases = aliases();
         let tx_id = tx(1, 10);
         let version = deletion(row(1), 10);
-        let mut maintained = MaintainedSubscriptionView::default();
+        let mut maintained = test_maintained();
 
         maintained
             .apply_decoded_deltas([(version_deletion(version.clone()), 1)], &aliases)

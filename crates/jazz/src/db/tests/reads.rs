@@ -2012,6 +2012,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     };
     assert_eq!(served, subscription);
     let mut tables = program_fact_adds
+        .added_rows()
         .iter()
         .map(|input| input.version_table.as_str())
         .collect::<Vec<_>>();
@@ -2050,6 +2051,7 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
     };
     assert_eq!(served, subscription);
     let mut tables = program_fact_adds
+        .added_rows()
         .iter()
         .map(|input| input.version_table.as_str())
         .collect::<Vec<_>>();

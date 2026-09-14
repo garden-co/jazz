@@ -1876,6 +1876,8 @@ impl ClientDbInner {
     ) -> Result<Option<ConnectedNativeTransport>> {
         let wake = scheduler.wake_handle();
         let admission = config.connector.connect(NativeTransportRequest {
+            requested_link:
+                crate::tools::native_transport_connector::NativeTransportLink::OrdinarySession,
             server_url: config.server_url,
             app_id: config.app_id,
             peer_identity: identity.author,

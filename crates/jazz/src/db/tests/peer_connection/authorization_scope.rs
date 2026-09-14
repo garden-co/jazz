@@ -568,7 +568,11 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
                         "never-accepted version carriers must not leak after policy revocation"
                     );
                     assert!(
-                        !update.supporting_rows.iter().any(|fact| matches!(fact, _)),
+                        !update
+                            .supporting_rows
+                            .added_rows()
+                            .iter()
+                            .any(|fact| matches!(fact, _)),
                         "forbidden CoveredInput additions must not survive in the saved envelope"
                     );
                     self.after_revocation.borrow_mut().push(message.clone());
@@ -644,7 +648,11 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
             "blocked publication must contain sensitive row bytes"
         );
         assert!(
-            update.supporting_rows.iter().any(|fact| matches!(fact, _)),
+            update
+                .supporting_rows
+                .added_rows()
+                .iter()
+                .any(|fact| matches!(fact, _)),
             "blocked publication must contain an authorized input fact"
         );
     }
@@ -703,7 +711,7 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
             .is_empty()
     );
     assert!(after_revocation.borrow().iter().any(|message| matches!(message,
-        SyncMessage::ViewUpdate(update) if !update.peer_payload_inventory.opening_pending && update.supporting_rows.is_empty())),
+        SyncMessage::ViewUpdate(update) if !update.peer_payload_inventory.opening_pending && update.supporting_rows.added_rows().is_empty())),
         "replacement must carry a truthful empty snapshot");
     foreground.detach_query(attachment);
 }
@@ -1130,7 +1138,11 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
             for message in inbound.borrow().iter() {
                 if let SyncMessage::ViewUpdate(payload) = message
                     && !payload.peer_payload_inventory.opening_pending
-                    && payload.supporting_rows.iter().any(|fact| matches!(fact, _))
+                    && payload
+                        .supporting_rows
+                        .added_rows()
+                        .iter()
+                        .any(|fact| matches!(fact, _))
                 {
                     opening = Some(payload.clone());
                 }
@@ -1143,9 +1155,8 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
         let failure = if malformed_closure {
             // A complete snapshot cannot name the same physical row version
             // twice. The relay must reject it and expose that error below.
-            opening
-                .supporting_rows
-                .push(opening.supporting_rows[0].clone());
+            let duplicate = opening.supporting_rows.added_rows()[0].clone();
+            opening.supporting_rows.added_rows_mut().push(duplicate);
             SyncMessage::ViewUpdate(opening)
         } else {
             SyncMessage::SubscribeRejected {
@@ -1354,11 +1365,14 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
     assert!(!peer_payload_inventory.opening_pending);
     assert_eq!(peer_payload_inventory.authorization_progress, Some(2));
     assert_eq!(
-        covered_input_rows(program_fact_adds).len(),
+        covered_input_rows(program_fact_adds.added_rows()).len(),
         usize::from(replacement_row)
     );
     if let Some(fresh) = fresh {
-        assert_eq!(covered_input_rows(program_fact_adds), vec![fresh]);
+        assert_eq!(
+            covered_input_rows(program_fact_adds.added_rows()),
+            vec![fresh]
+        );
     }
 
     upstream.borrow_mut().tick().unwrap();
@@ -2097,9 +2111,9 @@ fn subscriber_cannot_spoof_authority_view_updates() {
                 ..Default::default()
             },
             supporting_rows: if opening_pending {
-                Vec::new()
+                crate::protocol::SupportingRowsUpdate::snapshot(Vec::new())
             } else {
-                Vec::new()
+                crate::protocol::SupportingRowsUpdate::snapshot(Vec::new())
             },
         })
     };
@@ -2165,6 +2179,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         payload.peer_payload_inventory.opening_pending = true;
         payload
             .supporting_rows
+            .added_rows_mut()
             .push(crate::protocol::SupportingRow {
                 physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(1)),
                 version_table: "todos".to_owned().into(),
@@ -2533,7 +2548,10 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
             1,
             "refresh has one shared successor, not one per listener"
         );
-        assert_eq!(covered_input_rows(&updates[0].supporting_rows), vec![fresh]);
+        assert_eq!(
+            covered_input_rows(updates[0].supporting_rows.added_rows()),
+            vec![fresh]
+        );
     }
     client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&refresh));
@@ -2569,7 +2587,7 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::ViewUpdate(update) => {
-                Some(!covered_input_rows(&update.supporting_rows).contains(&fresh))
+                Some(!covered_input_rows(update.supporting_rows.added_rows()).contains(&fresh))
             }
             _ => None,
         })
@@ -3094,8 +3112,11 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         );
         let (update_index, update) = updates[0];
         assert!(update_index < rejection_index);
-        assert_eq!(covered_input_rows(&update.supporting_rows), vec![fresh]);
-        assert!(!covered_input_rows(&update.supporting_rows).contains(&stale));
+        assert_eq!(
+            covered_input_rows(update.supporting_rows.added_rows()),
+            vec![fresh]
+        );
+        assert!(!covered_input_rows(update.supporting_rows.added_rows()).contains(&stale));
         sibling_authorization_progress.push(update.peer_payload_inventory.authorization_progress);
     }
     assert_eq!(
@@ -3313,4 +3334,55 @@ fn review_multiclause_cleanup(mode: u8) {
         0,
         "cancelled whole proof must retire earlier successful clause owners"
     );
+}
+
+// This scheduling boundary is internal: invalidate the accepted owner answer
+// before the waiting foreground polls it, while retaining its receipt counter.
+#[test]
+fn invalidated_owner_delivery_cannot_cover_a_waiting_local_read() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc5; 16]);
+    let relay = open_db(0x74, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let foreground = open_db(0x75, author, &schema);
+    foreground.set_non_durable_client();
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let query = prepared(&foreground, &Query::from("todos"));
+    let local = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let waiting = foreground
+        .attach_query_with_opts(&query, local.clone())
+        .unwrap();
+    for _ in 0..16 {
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&waiting));
+    foreground
+        .node
+        .node
+        .borrow_mut()
+        .invalidate_subscription_scopes();
+    assert!(
+        !foreground.query_attachment_is_covered(&waiting),
+        "the counter alone must not revive an invalidated owner answer"
+    );
+    let refreshed = foreground.attach_query_with_opts(&query, local).unwrap();
+    assert!(!foreground.query_attachment_is_covered(&refreshed));
+    for _ in 0..16 {
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(
+        foreground.query_attachment_is_covered(&waiting),
+        "fresh owner delivery releases the older read without upstream authority"
+    );
+    assert!(foreground.query_attachment_is_covered(&refreshed));
+    foreground.detach_query(waiting);
+    foreground.detach_query(refreshed);
 }

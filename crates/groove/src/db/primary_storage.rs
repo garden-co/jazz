@@ -1,6 +1,28 @@
 use super::*;
 
 impl Database {
+    /// Whether this physical table contains any stored record in the current
+    /// applied resident state. This does not evaluate a query or permissions.
+    /// Unapplied writes in an open batch are not visible. At most one logical
+    /// storage entry is requested; record values are not decoded.
+    pub async fn table_has_stored_rows(&self, table: &str) -> Result<bool, Error> {
+        self.table(table)?;
+        let resident = self.resident_storage();
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
+        let mut cursor = storage
+            .scan(
+                crate::storage::ScanRequest::prefix(table.to_owned(), Vec::new()).with_max_items(1),
+            )
+            .await?;
+        // Backends may return an empty batch without having reached EOF.
+        while let Some(rows) = cursor.next_batch().await? {
+            if !rows.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Return decoded records whose explicit schema index exactly matches the
     /// supplied index-column key.
     ///

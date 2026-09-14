@@ -206,7 +206,7 @@ mod tests {
                 durability: DurabilityTier::Global,
             })],
             peer_payload_inventory: PeerPayloadInventory::default(),
-            supporting_rows: Vec::new(),
+            supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
         });
         let nested_bytes = view_update_bytes(&nested);
         let nested_floor = bytes_floor(&nested);

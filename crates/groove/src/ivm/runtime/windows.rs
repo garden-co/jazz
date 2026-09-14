@@ -568,9 +568,11 @@ fn update_collect_by_root_terminal_state(
     if !emit {
         state.groups.clear();
         state.roots.clear();
-        state.emitted_root_order.clear();
-        state.emitted_root_keys.clear();
+        state.emitted_root_order = Rc::default();
+        state.emitted_root_keys = Rc::default();
     }
+    let unique_group_sort = collect_by_sort_identifies_group(input_desc, collect_by);
+    let order_key = |group: &CollectByGroup| collect_by_root_order_key(group, unique_group_sort);
     let mut before = BTreeMap::<Vec<u8>, Option<Bytes>>::new();
     let mut before_order = BTreeMap::<Vec<u8>, Option<CollectByOrderKey>>::new();
     for delta in deltas {
@@ -589,10 +591,7 @@ fn update_collect_by_root_terminal_state(
         if !before_order.contains_key(&group_key) {
             before_order.insert(
                 group_key.clone(),
-                state
-                    .groups
-                    .get(&group_key)
-                    .and_then(collect_by_root_order_key),
+                state.groups.get(&group_key).and_then(order_key),
             );
         }
         let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
@@ -606,6 +605,17 @@ fn update_collect_by_root_terminal_state(
         .remove_empty_touched_groups(before.keys().cloned());
     if !emit {
         return Ok(Vec::new());
+    }
+
+    // If every touched group retains exactly the same total order key, no
+    // public position can change. Keep both public indexes shared with the
+    // previous staged state and render only the affected payloads. Comparing
+    // mere declared sort fields would be unsound when raw bytes break ties.
+    if before_order
+        .iter()
+        .all(|(root_key, before_key)| *before_key == state.groups.get(root_key).and_then(order_key))
+    {
+        return collect_by_root_payload_updates(input_desc, output_desc, collect_by, state, before);
     }
 
     // Capture the actual public sequence once before replacing changed sort
@@ -625,15 +635,15 @@ fn update_collect_by_root_terminal_state(
         if !state.emitted_root_keys.contains(root_key) {
             continue;
         }
-        if let Some(before_key) = before_key {
-            state.emitted_root_order.remove(before_key);
-        }
-        if let Some(after_key) = state
-            .groups
-            .get(root_key)
-            .and_then(collect_by_root_order_key)
-        {
-            state.emitted_root_order.insert(after_key, root_key.clone());
+        let after_key = state.groups.get(root_key).and_then(order_key);
+        if *before_key != after_key {
+            let order = Rc::make_mut(&mut state.emitted_root_order);
+            if let Some(before_key) = before_key {
+                order.remove(before_key);
+            }
+            if let Some(after_key) = after_key {
+                order.insert(after_key, root_key.clone());
+            }
         }
     }
 
@@ -647,11 +657,7 @@ fn update_collect_by_root_terminal_state(
     // non-empty.
     for root_key in before_order.keys() {
         if state.emitted_root_keys.contains(root_key)
-            && state
-                .groups
-                .get(root_key)
-                .and_then(collect_by_root_order_key)
-                .is_none()
+            && state.groups.get(root_key).and_then(order_key).is_none()
         {
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
@@ -661,7 +667,7 @@ fn update_collect_by_root_terminal_state(
                     key: root_key.clone(),
                 },
             });
-            state.emitted_root_keys.remove(root_key);
+            Rc::make_mut(&mut state.emitted_root_keys).remove(root_key);
             public_sequence.retain(|key| key != root_key);
         }
     }
@@ -695,11 +701,7 @@ fn update_collect_by_root_terminal_state(
         {
             continue;
         }
-        let Some(after_key) = state
-            .groups
-            .get(root_key)
-            .and_then(collect_by_root_order_key)
-        else {
+        let Some(after_key) = state.groups.get(root_key).and_then(order_key) else {
             continue;
         };
         if *before_key != after_key {
@@ -736,11 +738,7 @@ fn update_collect_by_root_terminal_state(
         if before_key.is_some() {
             continue;
         }
-        let Some(order_key) = state
-            .groups
-            .get(root_key)
-            .and_then(collect_by_root_order_key)
-        else {
+        let Some(order_key) = state.groups.get(root_key).and_then(order_key) else {
             // Retractions can reach a freshly reset collector before its
             // replacement hydration. Keep their negative maintenance state,
             // but do not manufacture a public occurrence without a positive
@@ -774,8 +772,8 @@ fn update_collect_by_root_terminal_state(
         // before this one because `inserts` is ordered by the same total key.
         let index = retained_final_order.partition_point(|(candidate, _)| candidate < &order_key)
             + new_roots_before;
-        state.emitted_root_order.insert(order_key, root_key.clone());
-        state.emitted_root_keys.insert(root_key.clone());
+        Rc::make_mut(&mut state.emitted_root_order).insert(order_key, root_key.clone());
+        Rc::make_mut(&mut state.emitted_root_keys).insert(root_key.clone());
         public_sequence.insert(index, root_key.clone());
         operations.push(TerminalOperation {
             root_descriptor: output_desc,
@@ -789,6 +787,24 @@ fn update_collect_by_root_terminal_state(
         });
     }
 
+    operations.extend(collect_by_root_payload_updates(
+        input_desc,
+        output_desc,
+        collect_by,
+        state,
+        before,
+    )?);
+    Ok(operations)
+}
+
+fn collect_by_root_payload_updates(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    state: &CollectByIncrementalState,
+    before: BTreeMap<Vec<u8>, Option<Bytes>>,
+) -> Result<Vec<TerminalOperation>, IvmRuntimeError> {
+    let mut operations = Vec::new();
     for (root_key, before_record) in before {
         // A new root already emitted its Insert above. With no previous row,
         // this pass cannot emit an Update, so do not render it a second time.
@@ -829,11 +845,46 @@ fn update_collect_by_root_terminal_state(
     Ok(operations)
 }
 
-fn collect_by_root_order_key(group: &CollectByGroup) -> Option<CollectByOrderKey> {
+fn collect_by_sort_identifies_group(
+    input_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+) -> bool {
+    collect_by.group_field_indices.iter().all(|group_field| {
+        // Only fields actually consumed by the zipped sort-key builder count.
+        // These non-null scalar encodings distinguish every possible identity;
+        // in particular, do not extend this proof to canonicalized float zeros.
+        collect_by
+            .sort_field_indices
+            .iter()
+            .zip(&collect_by.sort_directions)
+            .any(|(sort_field, _)| sort_field == group_field)
+            && input_desc
+                .fields()
+                .get(*group_field)
+                .is_some_and(|field| matches!(field.value_type, ValueType::Uuid | ValueType::U64))
+    })
+}
+
+fn collect_by_root_order_key(
+    group: &CollectByGroup,
+    unique_group_sort: bool,
+) -> Option<CollectByOrderKey> {
     group
         .iter()
         .find(|(_, weight)| **weight > 0)
-        .map(|(order_key, _)| order_key.clone())
+        .map(|((sort_key, record), _)| {
+            // Per-group winner selection still uses the complete record bytes.
+            // Only the public index can omit them once distinct group identities
+            // necessarily have distinct sort prefixes.
+            (
+                sort_key.clone(),
+                if unique_group_sort {
+                    Bytes::new()
+                } else {
+                    record.clone()
+                },
+            )
+        })
 }
 
 pub(super) fn collect_by_root_from_records(
@@ -1621,6 +1672,226 @@ mod root_terminal_tests {
         apply_root_operations(&mut roots, &operations);
         assert_eq!(roots.len(), 100);
         assert!(roots.iter().all(|(_, rank)| rank == "new"));
+    }
+
+    // Internal ownership proof: public terminal edits cannot reveal whether
+    // untouched order indexes were copied, or a prepared tick mutated its
+    // predecessor. Observable ordering is covered by the multisink tests too.
+    #[test]
+    fn payload_only_root_updates_share_order_indexes_and_preserve_staged_state() {
+        let input = record_descriptor();
+        let mut collect_by = collector();
+        collect_by.sort_field_indices = vec![0, 1];
+        collect_by.sort_directions = vec![TopByDirection::Asc; 2];
+        assert!(collect_by_sort_identifies_group(input, &collect_by));
+        for count in [8, 200] {
+            let mut live = CollectByIncrementalState::default();
+            let initial = (1..=count)
+                .map(|id| delta(id, id, "before", 1))
+                .collect::<Vec<_>>();
+            let opened = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut live,
+                &initial,
+                true,
+            )
+            .unwrap();
+            let mut roots = Vec::new();
+            apply_root_operations(&mut roots, &opened);
+            let mut prepared = live.clone();
+            let updates = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut prepared,
+                &[delta(3, 3, "before", -1), delta(3, 3, "after", 1)],
+                true,
+            )
+            .unwrap();
+            assert!(matches!(
+                updates.as_slice(),
+                [TerminalOperation {
+                    edit: TerminalEdit::Update { .. },
+                    ..
+                }]
+            ));
+            assert!(Rc::ptr_eq(
+                &live.emitted_root_order,
+                &prepared.emitted_root_order
+            ));
+            assert!(Rc::ptr_eq(
+                &live.emitted_root_keys,
+                &prepared.emitted_root_keys
+            ));
+            apply_root_operations(&mut roots, &updates);
+            assert_eq!(roots[2], (root_key(3, 3), "after".to_owned()));
+            let old_group = live.groups.get(&root_key(3, 3)).unwrap();
+            assert_eq!(
+                collect_by_root_order_key(old_group, false).unwrap().1,
+                record(3, 3, "before")
+            );
+
+            // A real removal must detach both indexes; the old public state
+            // remains available if this prepared tick is discarded.
+            let removed = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut prepared,
+                &[delta(3, 3, "after", -2)],
+                true,
+            )
+            .unwrap();
+            assert!(matches!(
+                removed.as_slice(),
+                [TerminalOperation {
+                    edit: TerminalEdit::Remove { .. },
+                    ..
+                }]
+            ));
+            assert!(!Rc::ptr_eq(
+                &live.emitted_root_order,
+                &prepared.emitted_root_order
+            ));
+            assert!(!Rc::ptr_eq(
+                &live.emitted_root_keys,
+                &prepared.emitted_root_keys
+            ));
+            assert_eq!(live.emitted_root_order.len(), count as usize);
+            apply_root_operations(&mut roots, &removed);
+            let neutral = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut prepared,
+                &[delta(3, 3, "after", 1)],
+                true,
+            )
+            .unwrap();
+            assert!(neutral.is_empty());
+            let revived = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut prepared,
+                &[delta(3, 3, "after", 1)],
+                true,
+            )
+            .unwrap();
+            assert!(matches!(
+                revived.as_slice(),
+                [TerminalOperation {
+                    edit: TerminalEdit::Insert { index: 2, .. },
+                    ..
+                }]
+            ));
+            apply_root_operations(&mut roots, &revived);
+            assert_eq!(roots.len(), count as usize);
+            assert_eq!(roots[2], (root_key(3, 3), "after".to_owned()));
+        }
+    }
+
+    // Internal compiler-proof boundary: malformed/unsupported operator shapes
+    // must not accidentally erase a record-byte tie-break in a retained index.
+    #[test]
+    fn root_order_identity_proof_requires_injective_effective_sort_fields() {
+        let mut collect_by = collector();
+        assert!(collect_by_sort_identifies_group(
+            record_descriptor(),
+            &collect_by
+        ));
+        collect_by.sort_directions.truncate(2);
+        assert!(!collect_by_sort_identifies_group(
+            record_descriptor(),
+            &collect_by
+        ));
+        collect_by = collector();
+        collect_by.sort_field_indices = vec![2];
+        assert!(!collect_by_sort_identifies_group(
+            record_descriptor(),
+            &collect_by
+        ));
+        collect_by.group_field_indices = vec![0];
+        collect_by.sort_field_indices = vec![0];
+        for value_type in [
+            ValueType::F64,
+            ValueType::Nullable(Box::new(ValueType::Uuid)),
+            ValueType::String,
+        ] {
+            let desc = RecordDescriptor::new([("id", value_type)]);
+            assert!(!collect_by_sort_identifies_group(desc, &collect_by));
+        }
+        assert!(collect_by_sort_identifies_group(
+            RecordDescriptor::new([("id", ValueType::U64)]),
+            &collect_by
+        ));
+
+        // Without a unique declared prefix, the entire representative remains
+        // in the public key even when the declared sort value is unchanged.
+        let mut group = CollectByGroup::default();
+        group.set((Vec::new(), record(1, 1, "before")), 1);
+        assert_eq!(
+            collect_by_root_order_key(&group, false).unwrap().1,
+            record(1, 1, "before")
+        );
+        assert!(
+            collect_by_root_order_key(&group, true)
+                .unwrap()
+                .1
+                .is_empty()
+        );
+
+        // The fallback must replace its full-byte public key after a payload
+        // edit, even if this particular edit happens not to change the rank.
+        let mut collect_by = collector();
+        collect_by.sort_field_indices.clear();
+        collect_by.sort_directions.clear();
+        let input = record_descriptor();
+        let mut live = CollectByIncrementalState::default();
+        update_collect_by_root_terminal_state(
+            input,
+            input,
+            &collect_by,
+            &mut live,
+            &[delta(1, 1, "before", 1), delta(2, 2, "before", 1)],
+            true,
+        )
+        .unwrap();
+        let mut prepared = live.clone();
+        let edits = update_collect_by_root_terminal_state(
+            input,
+            input,
+            &collect_by,
+            &mut prepared,
+            &[delta(1, 1, "before", -1), delta(1, 1, "after", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            edits.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Update { .. },
+                ..
+            }]
+        ));
+        assert!(!Rc::ptr_eq(
+            &live.emitted_root_order,
+            &prepared.emitted_root_order
+        ));
+        assert!(
+            prepared
+                .emitted_root_order
+                .keys()
+                .any(|(_, bytes)| *bytes == record(1, 1, "after"))
+        );
+        assert!(
+            !prepared
+                .emitted_root_order
+                .keys()
+                .any(|(_, bytes)| *bytes == record(1, 1, "before"))
+        );
     }
 
     #[test]

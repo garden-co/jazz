@@ -18,6 +18,71 @@ use groove::schema::{
 use groove::storage::MemoryStorage;
 
 #[futures_test::test]
+async fn shared_hydration_roots_keep_mixed_inline_and_indirect_rows_across_resume() {
+    let logical = "resumed body ".repeat(10_000);
+    let prepared = prepare(LargeValueKind::String, logical.as_bytes()).unwrap();
+    let chunks = prepared
+        .staged_chunks
+        .iter()
+        .map(|chunk| {
+            (
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                Bytes::copy_from_slice(&chunk.encoded),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (provider, control) = TestChunkProvider::controlled(chunks);
+    control.pause();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
+    database.set_chunk_provider(Rc::new(provider));
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("body", ValueType::String)]);
+    let graph = GraphBuilder::values(
+        descriptor,
+        [
+            vec![Value::U64(1), Value::String("before".into())],
+            vec![Value::U64(2), Value::Large(Box::new(prepared.value_ref))],
+            vec![Value::U64(3), Value::String("after".into())],
+        ],
+    )
+    .unwrap()
+    .project(["id", "body"]);
+    let subscription = database
+        .subscribe([("left", graph.clone()), ("right", graph)])
+        .unwrap();
+    let mut next = Box::pin(database.next_multisink_subscription(&subscription));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    for _ in 0..3 {
+        assert!(matches!(
+            Pin::new(&mut next).poll(&mut context),
+            Poll::Pending
+        ));
+    }
+    assert!(!control.observed().is_empty());
+    control.resume();
+    let result = next.await.unwrap();
+    drop(subscription);
+    drop(database);
+    let expected = vec![
+        (vec![Value::U64(1), Value::String("before".into())], 1),
+        (vec![Value::U64(2), Value::String(logical)], 1),
+        (vec![Value::U64(3), Value::String("after".into())], 1),
+    ];
+    assert_eq!(result.sinks.len(), 2);
+    for sink in result.sinks.values() {
+        assert_eq!(sink.to_values().unwrap(), expected);
+    }
+}
+
+#[futures_test::test]
 async fn count_star_does_not_fetch_an_unused_indirect_column() {
     let prepared = prepare(LargeValueKind::String, &vec![b'x'; 800_000]).unwrap();
     let chunks = prepared

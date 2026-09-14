@@ -347,9 +347,81 @@ pub struct ViewUpdatePayload {
     pub version_carriers: Vec<VersionCarrier>,
     /// Per-peer payload coverage and authorization progress.
     pub peer_payload_inventory: PeerPayloadInventory,
-    /// Complete authorized supporting physical row/version set for this subscription.
-    /// Install atomically after every referenced native version is available.
-    pub supporting_rows: Vec<SupportingRow>,
+    /// Atomic physical supporting-set snapshot or exact-predecessor successor.
+    /// Native bodies for additions must be available before installation.
+    pub supporting_rows: SupportingRowsUpdate,
+}
+
+/// Wire v2 supporting-set transition. Revisions are opaque 16-byte identities,
+/// scoped to the admitted subscription/authority, never history timestamps.
+/// Postcard discriminants are pinned: Snapshot = 0, Delta = 1; field order is
+/// declaration order. There is no v1 complete-manifest compatibility decoder.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum SupportingRowsUpdate {
+    /// Initial or recovery complete set; supersedes pending predecessors.
+    Snapshot {
+        /// Fresh opaque revision, not an authorization token.
+        revision: [u8; 16],
+        /// Complete exact physical supporting versions.
+        rows: Vec<SupportingRow>,
+    },
+    /// Atomic change against one exact retained predecessor.
+    Delta {
+        /// Revision that must already be installed or queued in this usage.
+        predecessor: [u8; 16],
+        /// Successor revision. An empty confirmation may repeat its predecessor.
+        revision: [u8; 16],
+        /// Physical memberships entering the supporting set.
+        adds: Vec<SupportingRow>,
+        /// Physical memberships leaving this set, not globally deleted bytes.
+        removes: Vec<SupportingRow>,
+    },
+}
+
+impl SupportingRowsUpdate {
+    /// Construct a complete initial/recovery snapshot with a fresh revision.
+    pub fn snapshot(rows: Vec<SupportingRow>) -> Self {
+        Self::Snapshot {
+            revision: *uuid::Uuid::new_v4().as_bytes(),
+            rows,
+        }
+    }
+
+    /// Exact successor identity.
+    pub fn revision(&self) -> [u8; 16] {
+        match self {
+            Self::Snapshot { revision, .. } | Self::Delta { revision, .. } => *revision,
+        }
+    }
+
+    /// Native bodies needed by this message: all snapshot rows or delta adds.
+    pub fn added_rows(&self) -> &[SupportingRow] {
+        match self {
+            Self::Snapshot { rows, .. } => rows,
+            Self::Delta { adds, .. } => adds,
+        }
+    }
+
+    /// Physical memberships removed by this message.
+    pub fn removed_rows(&self) -> &[SupportingRow] {
+        match self {
+            Self::Snapshot { .. } => &[],
+            Self::Delta { removes, .. } => removes,
+        }
+    }
+
+    /// Whether this update establishes an independent complete predecessor.
+    pub fn is_snapshot(&self) -> bool {
+        matches!(self, Self::Snapshot { .. })
+    }
+
+    /// Mutably access rows whose bodies this message supplies or references.
+    pub fn added_rows_mut(&mut self) -> &mut Vec<SupportingRow> {
+        match self {
+            Self::Snapshot { rows, .. } => rows,
+            Self::Delta { adds, .. } => adds,
+        }
+    }
 }
 
 impl ViewUpdatePayload {
@@ -736,8 +808,19 @@ impl SyncMessage {
         let Some(view) = self.carried_view_update() else {
             return Ok(());
         };
+        if view.supporting_rows.revision() == [0; 16]
+            || matches!(&view.supporting_rows, SupportingRowsUpdate::Delta { predecessor, revision, adds, removes }
+                if *predecessor == [0; 16] || (predecessor == revision && (!adds.is_empty() || !removes.is_empty())))
+        {
+            return Err(WireContractError::InvalidSupportingRevision);
+        }
         let mut identities = std::collections::BTreeSet::new();
-        for row in &view.supporting_rows {
+        for row in view
+            .supporting_rows
+            .added_rows()
+            .iter()
+            .chain(view.supporting_rows.removed_rows())
+        {
             if !row.is_wire_valid() {
                 return Err(WireContractError::InvalidSupportingRow);
             }
@@ -759,6 +842,8 @@ impl SyncMessage {
 /// A semantic value violates the frozen peer-wire contract.
 #[derive(Debug)]
 pub enum WireContractError {
+    /// A transition has a nil revision or a nonempty self-successor.
+    InvalidSupportingRevision,
     /// A version carrier is structurally malformed.
     VersionCarrier(VersionBundleRunError),
     /// A supporting native row reference is malformed.
@@ -770,6 +855,9 @@ pub enum WireContractError {
 impl std::fmt::Display for WireContractError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidSupportingRevision => {
+                write!(f, "supporting transition revision is invalid")
+            }
             Self::VersionCarrier(error) => error.fmt(f),
             Self::InvalidSupportingRow => write!(f, "supporting row reference is invalid"),
             Self::DuplicateSupportingRow => write!(
@@ -4030,6 +4118,7 @@ pub struct SupportingRow {
     pub physical_table: crate::ids::GlobalPhysicalTableId,
     /// Authored native-record table name used by the existing exact version repair API.
     /// This is lookup metadata, not a query-source label; physical identity is authoritative.
+    #[serde(deserialize_with = "supporting_table_name::deserialize")]
     pub version_table: groove::Intern<String>,
     /// Physical row identity.
     pub row: RowUuid,
@@ -4041,6 +4130,91 @@ impl SupportingRow {
     /// Validate the native reference before catalogue-dependent receiver admission.
     pub fn is_wire_valid(&self) -> bool {
         !self.version_table.is_empty() && self.version.layer != ResultRowLayer::ContentOrDeletion
+    }
+}
+
+mod supporting_table_name {
+    use std::{borrow::Cow, cell::Cell, fmt};
+
+    use groove::Intern;
+    use serde::de::{Error, Unexpected, Visitor};
+
+    thread_local! {
+        // Intern handles own permanent pool entries, never input-buffer references.
+        // Exact string equality makes this independent of schema/authority lifetimes.
+        static LAST: Cell<Option<Intern<String>>> = const { Cell::new(None) };
+        #[cfg(test)]
+        pub(super) static LOOKUPS: Cell<usize> = const { Cell::new(0) };
+        #[cfg(test)]
+        pub(super) static OWNED_VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn intern(name: Cow<'_, str>) -> Intern<String> {
+        LAST.with(|last| {
+            if let Some(found) = last.get().filter(|old| old.as_str() == name.as_ref()) {
+                return found;
+            }
+            #[cfg(test)]
+            LOOKUPS.set(LOOKUPS.get() + 1);
+            let found = match name {
+                Cow::Borrowed(name) => Intern::from_ref(name),
+                Cow::Owned(name) => Intern::new(name),
+            };
+            last.set(Some(found));
+            found
+        })
+    }
+
+    struct TableName;
+
+    impl<'de> Visitor<'de> for TableName {
+        type Value = Intern<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(intern(Cow::Borrowed(value)))
+        }
+
+        fn visit_string<E: Error>(self, value: String) -> Result<Self::Value, E> {
+            #[cfg(test)]
+            OWNED_VISITS.set(OWNED_VISITS.get() + 1);
+            Ok(intern(Cow::Owned(value)))
+        }
+
+        fn visit_bytes<E: Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+            match std::str::from_utf8(value) {
+                Ok(value) => self.visit_str(value),
+                Err(_) => Err(E::invalid_value(Unexpected::Bytes(value), &self)),
+            }
+        }
+
+        fn visit_byte_buf<E: Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+            match String::from_utf8(value) {
+                Ok(value) => self.visit_string(value),
+                Err(error) => Err(E::invalid_value(
+                    Unexpected::Bytes(&error.into_bytes()),
+                    &self,
+                )),
+            }
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Intern<String>, D::Error> {
+        // Serialization stays the existing string representation. Request borrowing
+        // during decode instead of String::deserialize's allocate-before-intern path.
+        deserializer.deserialize_str(TableName)
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset() {
+        LAST.set(None);
+        LOOKUPS.set(0);
+        OWNED_VISITS.set(0);
     }
 }
 
@@ -6076,6 +6250,152 @@ mod tests {
     use crate::tx::TxKind;
     use groove::schema::{ColumnSchema, ColumnType};
 
+    // Internal wire corpus: byte compatibility and interning work cannot be
+    // observed through row queries. Public sync suites still gate visible behavior.
+    #[test]
+    fn supporting_table_borrowing_preserves_existing_wire_bytes_and_validation() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct PreviousSupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId,
+            version_table: groove::Intern<String>,
+            row: RowUuid,
+            version: RowVersionRefEntry,
+        }
+        for name in ["", "todos", "résumé/倉庫", &"long_label".repeat(100)] {
+            for populated in [false, true] {
+                let old = PreviousSupportingRow {
+                    physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                        [3; 16],
+                    )),
+                    version_table: groove::Intern::from_ref(name),
+                    row: RowUuid::from_bytes([4; 16]),
+                    version: RowVersionRefEntry {
+                        tx: TxId::new(TxTime(987654), NodeUuid::from_bytes([5; 16])),
+                        schema_version: populated.then(|| SchemaVersionId::from_bytes([6; 16])),
+                        layer: ResultRowLayer::Content,
+                        batch: populated
+                            .then(|| TxId::new(TxTime(1234), NodeUuid::from_bytes([7; 16]))),
+                        branch_or_prefix: populated.then(|| vec![0, 1, 254, 255]),
+                        row_digest: populated.then(|| vec![42; 32]),
+                    },
+                };
+                let bytes = postcard::to_allocvec(&old).unwrap();
+                let row: SupportingRow = postcard::from_bytes(&bytes).unwrap();
+                assert_eq!(row.physical_table, old.physical_table);
+                assert_eq!(row.version_table, old.version_table);
+                assert_eq!(row.row, old.row);
+                assert_eq!(row.version, old.version);
+                assert_eq!(row.is_wire_valid(), !name.is_empty());
+                assert_eq!(postcard::to_allocvec(&row).unwrap(), bytes);
+                let old_again: PreviousSupportingRow =
+                    postcard::from_bytes(&postcard::to_allocvec(&row).unwrap()).unwrap();
+                assert_eq!(old_again.version_table, old.version_table);
+                let json = serde_json::to_vec(&old).unwrap();
+                assert_eq!(serde_json::from_slice::<SupportingRow>(&json).unwrap(), row);
+                assert_eq!(serde_json::to_vec(&row).unwrap(), json);
+                // Match existing postcard acceptance at every truncated boundary,
+                // including optional/default field semantics, rather than assuming it.
+                for end in 0..bytes.len() {
+                    assert_eq!(
+                        postcard::from_bytes::<SupportingRow>(&bytes[..end]).is_ok(),
+                        postcard::from_bytes::<PreviousSupportingRow>(&bytes[..end]).is_ok()
+                    );
+                }
+                let mut trailing = bytes.clone();
+                trailing.push(0);
+                let (_, new_tail) = postcard::take_from_bytes::<SupportingRow>(&trailing).unwrap();
+                let (_, old_tail) =
+                    postcard::take_from_bytes::<PreviousSupportingRow>(&trailing).unwrap();
+                assert_eq!(new_tail, old_tail);
+                assert_eq!(new_tail, &[0]);
+            }
+        }
+
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Name(
+            #[serde(deserialize_with = "supporting_table_name::deserialize")]
+            groove::Intern<String>,
+        );
+        // Existing postcard string grammar: unsigned length varint, then UTF-8.
+        const GOLDEN: &[u8] = &[5, b't', b'o', b'd', b'o', b's'];
+        assert_eq!(
+            postcard::from_bytes::<Name>(GOLDEN).unwrap().0.as_str(),
+            "todos"
+        );
+        assert_eq!(
+            postcard::to_allocvec(&Name("todos".to_owned().into())).unwrap(),
+            GOLDEN
+        );
+        for invalid in [&[1, 255][..], &[2, 0xc0, 0x80], &[2, b'x']] {
+            assert!(postcard::from_bytes::<Name>(invalid).is_err());
+            assert!(postcard::from_bytes::<groove::Intern<String>>(invalid).is_err());
+        }
+        use serde::de::value::{BytesDeserializer, Error, StringDeserializer};
+        assert!(
+            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(&[255])).is_err()
+        );
+        assert_eq!(
+            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(b"valid"))
+                .unwrap()
+                .as_str(),
+            "valid"
+        );
+        assert_eq!(
+            supporting_table_name::deserialize(StringDeserializer::<Error>::new("owned".into()))
+                .unwrap()
+                .as_str(),
+            "owned"
+        );
+    }
+
+    #[test]
+    fn supporting_table_borrowing_uses_one_bounded_cache_entry_without_input_ownership() {
+        #[derive(serde::Deserialize)]
+        struct Name(
+            #[serde(deserialize_with = "supporting_table_name::deserialize")]
+            groove::Intern<String>,
+        );
+        let first = groove::Intern::<String>::from_ref("table_name_cache_first");
+        let second = groove::Intern::<String>::from_ref("table_name_cache_second");
+        let bytes = postcard::to_allocvec(&first).unwrap();
+        supporting_table_name::reset();
+        for _ in 0..1000 {
+            assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+        }
+        assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
+        assert_eq!(supporting_table_name::OWNED_VISITS.get(), 0);
+        assert_eq!(
+            postcard::from_bytes::<Name>(&postcard::to_allocvec(&second).unwrap())
+                .unwrap()
+                .0,
+            second
+        );
+        assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+        assert_eq!(
+            supporting_table_name::LOOKUPS.get(),
+            3,
+            "one entry, not an unbounded local interner"
+        );
+        drop(bytes);
+        assert_eq!(first.as_str(), "table_name_cache_first");
+        let independent = std::thread::spawn(move || {
+            supporting_table_name::reset();
+            let decoded = postcard::from_bytes::<Name>(&postcard::to_allocvec(&first).unwrap())
+                .unwrap()
+                .0;
+            assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
+            decoded
+        })
+        .join()
+        .unwrap();
+        assert_eq!(independent, first);
+        assert_eq!(
+            supporting_table_name::LOOKUPS.get(),
+            3,
+            "other thread cannot alter this cache"
+        );
+    }
+
     #[test]
     fn peer_view_rejects_duplicate_exact_supporting_row() {
         let row = SupportingRow {
@@ -6103,7 +6423,7 @@ mod tests {
             settled_through: GlobalTime(0),
             version_carriers: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory::default(),
-            supporting_rows: vec![row.clone(), row],
+            supporting_rows: SupportingRowsUpdate::snapshot(vec![row.clone(), row]),
         });
         assert!(matches!(
             message.validate_wire_contract(),
@@ -7511,3 +7831,5 @@ mod tests {
         assert_ne!(lens.content_id(), changed.content_id());
     }
 }
+#[cfg(test)]
+pub(crate) mod supporting_set_test_oracle;

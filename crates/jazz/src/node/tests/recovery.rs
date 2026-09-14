@@ -2690,6 +2690,156 @@ fn transaction_metadata_round_trips_through_recovery() {
 
 
 #[test]
+fn known_node_alias_transaction_misses_do_not_rescan_catalogue() {
+    // Internal storage-read instrumentation proves that a missing transaction
+    // remains a point lookup. Public row equality alone cannot detect the
+    // redundant alias scan or deliberately exercise resident alias discovery.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&temp_dir, schema());
+    let pending_id = TxId::new(TxTime::from(100), node(1));
+
+    core.reset_storage_read_metrics();
+    for _ in 0..16 {
+        assert!(core.transaction_state_settled(pending_id).is_none());
+        assert!(core.query_transaction(pending_id).unwrap().is_none());
+    }
+    let reads = core.take_storage_read_metrics();
+    assert_eq!(reads.transactions_rows.reads, 32, "{reads:?}");
+    assert_eq!(reads.other.reads, 0, "known aliases require no catalogue reads");
+    assert_eq!(reads.other.ranges, 0, "known aliases require no catalogue scans");
+
+    // A miss is not an absence cache. The exact previously missing identity
+    // becomes visible as soon as its transaction is applied.
+    let tx_id = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(9), 100).cells(title_cells("arrived after miss")),
+        )
+        .unwrap();
+    assert_eq!(tx_id, pending_id);
+    assert!(core.transaction_state_settled(tx_id).is_some());
+    assert!(core.query_transaction(tx_id).unwrap().is_some());
+
+    // Unknown UUIDs still use durable discovery; no fabricated alias is saved.
+    let unknown = TxId::new(TxTime::from(100), node(0x72));
+    assert!(core.query_transaction(unknown).unwrap().is_none());
+    assert!(!core.node_aliases.contains_key(&unknown.node));
+
+    // Losing a resident mapping must still recover the existing durable one.
+    let alias = core.node_aliases.remove(&tx_id.node).unwrap();
+    core.reset_storage_read_metrics();
+    assert!(core.query_transaction(tx_id).unwrap().is_some());
+    assert_eq!(core.node_aliases.get(&tx_id.node), Some(&alias));
+    assert!(core.take_storage_read_metrics().other.reads > 0);
+
+    drop(core);
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema());
+    let missing = TxId::new(TxTime::from(101), node(1));
+    reopened.reset_storage_read_metrics();
+    assert!(reopened.query_transaction(missing).unwrap().is_none());
+    let reads = reopened.take_storage_read_metrics();
+    assert_eq!(reads.transactions_rows.reads, 1, "{reads:?}");
+    assert_eq!(reads.other.reads, 0);
+    assert_eq!(reads.other.ranges, 0);
+    assert!(reopened.query_transaction(tx_id).unwrap().is_some());
+}
+
+#[test]
+fn absent_node_discovery_is_bounded_and_arriving_transactions_remain_visible() {
+    // Internal read counters and an intentionally evicted alias mapping are
+    // needed to distinguish cached catalogue absence from cached transaction
+    // absence. Public row equality alone cannot prove this work bound.
+    let (_dir, mut core) = open_node_with_uuid(node(9));
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let absent = TxId::new(TxTime::from(10), node(1));
+    assert!(core.query_transaction(absent).unwrap().is_none());
+    assert_eq!(core.absent_node_alias, Some(absent.node));
+    core.reset_storage_read_metrics();
+    for time in 10..42 {
+        let id = TxId::new(TxTime::from(time), absent.node);
+        assert!(core.query_transaction(id).unwrap().is_none());
+        assert!(core.transaction_state_settled(id).is_none());
+    }
+    let reads = core.take_storage_read_metrics();
+    assert_eq!(reads.other.reads, 0, "{reads:?}");
+    assert_eq!(reads.other.ranges, 0, "{reads:?}");
+    assert_eq!(reads.transactions_rows.reads, 0, "{reads:?}");
+
+    let (arriving, unit) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row(7), 10).cells(title_cells("arrived")),
+    ).unwrap();
+    assert_eq!(arriving, absent);
+    let SyncMessage::CommitUnit { tx, versions } = unit else { panic!("expected commit unit"); };
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS).unwrap();
+    assert!(core.query_transaction(arriving).unwrap().is_some());
+    assert_eq!(core.current_rows("todos", DurabilityTier::Local).unwrap().into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(7), title_cells("arrived"))]));
+
+    // Discovering an existing alias must not depend on the queried timestamp
+    // having a transaction. Subsequent missing transactions remain point reads.
+    let alias = core.node_aliases.remove(&arriving.node).unwrap();
+    let future = TxId::new(TxTime::from(999), arriving.node);
+    assert!(core.query_transaction(future).unwrap().is_none());
+    assert_eq!(core.node_aliases.get(&arriving.node), Some(&alias));
+    core.reset_storage_read_metrics();
+    assert!(core.query_transaction(future).unwrap().is_none());
+    let reads = core.take_storage_read_metrics();
+    assert_eq!(reads.transactions_rows.reads, 1, "{reads:?}");
+    assert_eq!(reads.other.ranges, 0, "{reads:?}");
+    assert_eq!(reads.other.reads, 0, "{reads:?}");
+
+    let retained_aliases = core.node_aliases.len();
+    for byte in 80..120 {
+        let id = TxId::new(TxTime::from(1), node(byte));
+        assert!(core.query_transaction(id).unwrap().is_none());
+        assert_eq!(core.absent_node_alias, Some(id.node));
+        assert_eq!(core.node_aliases.len(), retained_aliases);
+    }
+}
+
+#[test]
+fn cancelled_alias_discovery_invalidates_absence_before_suspension() {
+    // Internal cancellation point: public ingest cannot expose the instant
+    // between an alias scan and publishing its resident/durable prerequisite.
+    use std::future::Future;
+    let node_schema = schema();
+    let cfs = node_schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = YieldingStorage::wrap(MemoryStorage::new(&refs).unwrap());
+    let control = storage.control();
+    let mut core = NodeState::new(node(9), node_schema, storage.clone()).unwrap();
+    let absent = TxId::new(TxTime::from(10), node(1));
+    assert!(core.query_transaction(absent).unwrap().is_none());
+    assert_eq!(core.absent_node_alias, Some(absent.node));
+    storage.evict_all();
+    control.pause();
+    let mut future = Box::pin(core.ensure_node_alias(absent.node));
+    let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    drop(future);
+    assert_eq!(core.absent_node_alias, None);
+    control.resume();
+    let alias = crate::db::block_on(core.ensure_node_alias(absent.node)).unwrap();
+    assert_eq!(core.node_aliases.get(&absent.node), Some(&alias));
+    assert!(core.query_transaction(absent).unwrap().is_none());
+}
+
+#[test]
+fn cached_absent_alias_does_not_hide_a_poisoned_database() {
+    // Internal fault injection verifies the read gate even when no storage
+    // lookup is necessary; a public query cannot plant this cached proof.
+    let (mut core, storage) = fail_write_many_node();
+    let absent = TxId::new(TxTime::from(10), node(1));
+    assert!(core.query_transaction(absent).unwrap().is_none());
+    storage.fail_nth_following_write_many(1);
+    assert!(core.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(7), 10).cells(title_cells("fails")),
+    ).is_err());
+    assert_eq!(core.absent_node_alias, Some(absent.node));
+    assert!(matches!(crate::db::block_on(core.query_transaction(absent)),
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))));
+}
+
+#[test]
 fn transaction_status_projects_state_without_decoding_payloads() {
     // Internal coverage is required to plant semantically invalid durable
     // payloads and measure decoder work: neither is exposed by public APIs.

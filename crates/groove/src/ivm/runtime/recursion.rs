@@ -1839,8 +1839,8 @@ impl HydrationEvaluator<'_> {
                         &left_on,
                         &right_on,
                         join.comparison,
-                        &left.deltas,
-                        &right.deltas,
+                        super::join::JoinInput::deltas(&left.deltas),
+                        super::join::JoinInput::deltas(&right.deltas),
                         SubTick {
                             tick: 0,
                             sub_tick: 0,
@@ -1898,8 +1898,8 @@ impl HydrationEvaluator<'_> {
                         &plan_expr_names(&join.left_key),
                         &plan_expr_names(&join.right_key),
                         join.comparison,
-                        &left.deltas,
-                        &right.deltas,
+                        super::join::JoinInput::deltas(&left.deltas),
+                        super::join::JoinInput::deltas(&right.deltas),
                         SubTick {
                             tick: 0,
                             sub_tick: 0,

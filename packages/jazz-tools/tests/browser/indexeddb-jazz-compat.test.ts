@@ -306,8 +306,36 @@ describe("browser Jazz storage compatibility corpus", () => {
       rawWhileReopened,
       rawAfterReadOnlyInspection,
     );
-    expect(normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)).toEqual(
-      normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection),
+    // The approved JPFK -> JSIR upgrade discards only derived scope caches and
+    // resume cursors. That first open intentionally changes B-tree pages; the
+    // storage manifest and native row semantics above must remain intact.
+    expect(
+      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)[INDEXEDDB_STORAGE_MANIFEST_STORE],
+    ).toEqual(
+      normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection)[INDEXEDDB_STORAGE_MANIFEST_STORE],
+    );
+    expect(rawAfterReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE]).not.toEqual(
+      rawBeforeReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE],
+    );
+
+    // Once the disposable cache generation is gone, a second read-only open
+    // must preserve the complete raw receipt, not merely decoded query rows.
+    db = await pinnedPhase("post-upgrade-readonly-open", () =>
+      openPersistentDb(config, "pinned-post-upgrade-readonly"),
+    );
+    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" })).toEqual(
+      reopenedMain,
+    );
+    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" })).toEqual(
+      reopenedDraft,
+    );
+    await pinnedPhase("post-upgrade-readonly-shutdown", () =>
+      shutdownTrackedDb(db, "pinned-post-upgrade-readonly"),
+    );
+    openDbs.splice(openDbs.indexOf(db), 1);
+    await pinnedPhase("post-upgrade-readonly-settle", () => sleep(100));
+    expect(normalizeRuntimeLeaseRecords(await rawRecords(physicalDbName))).toEqual(
+      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
     );
 
     // This planted high-water regression must remain visible through the raw

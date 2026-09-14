@@ -109,11 +109,13 @@ impl PeerState {
         match self.role {
             PeerRole::Relay => true,
             PeerRole::ClientLink { .. } => {
-                self.publication_states.get(&subscription).is_some_and(|state| {
-                    state.has_served_authorization_progress
-                        && fast_authorization_progress(known_state)
-                            == Some(state.authorization_progress)
-                })
+                self.publication_states
+                    .get(&subscription)
+                    .is_some_and(|state| {
+                        state.has_served_authorization_progress
+                            && fast_authorization_progress(known_state)
+                                == Some(state.authorization_progress)
+                    })
             }
         }
     }
@@ -241,9 +243,7 @@ impl PeerState {
     /// admission. This stays on the transport capability rather than in the
     /// connection's mutable session-claims slot: raw `SessionClaims` frames
     /// and host-side refresh helpers must not replace it mid-connection.
-    pub(crate) fn admitted_scope_relay_binding(
-        &self,
-    ) -> Option<&DelegatedSessionBinding> {
+    pub(crate) fn admitted_scope_relay_binding(&self) -> Option<&DelegatedSessionBinding> {
         match &self.transport_capability {
             RelayTransportCapability::ScopeIsolatedClientRelay { binding, .. } => Some(binding),
             RelayTransportCapability::OrdinarySession
@@ -499,11 +499,15 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         let current_token = node.groove_runtime_token();
-        if self.publication_states.get(&subscription).is_some_and(|state| {
-            state
-                .groove_runtime_token
-                .is_some_and(|token| token != current_token)
-        }) {
+        if self
+            .publication_states
+            .get(&subscription)
+            .is_some_and(|state| {
+                state
+                    .groove_runtime_token
+                    .is_some_and(|token| token != current_token)
+            })
+        {
             if let Some(state) = self.publication_states.get_mut(&subscription) {
                 state.clear_groove_runtime_handles();
             }
@@ -672,8 +676,7 @@ impl PeerState {
             .and_then(|state| state.prepared_query.as_ref())
             .is_none_or(|prepared| !prepared.has_runtime_plan());
         if needs_prepare {
-            let plan =
-                node.mark_peer_maintained_query_shape_cache(&shape, &binding, opts.tier);
+            let plan = node.mark_peer_maintained_query_shape_cache(&shape, &binding, opts.tier);
             let cached = CachedPeerQueryPlan::with_plan(&opts, plan);
             let state = self.publication_states.entry(subscription).or_default();
             state.prepared_query = Some(cached);
@@ -705,26 +708,27 @@ impl PeerState {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .is_none()
         {
-            if let Some(update) = self.rehydrate_query_maintained_subscription_view(
-                node,
-                MaintainedRehydrateRequest {
-                    shape: &shape,
-                    binding: &binding,
-                    subscription,
-                    previous_member_result_set: &previous_member_result_set,
-                    // The first receiver closure is a complete successor,
-                    // not a result-member delta.  Its reset bit claims the
-                    // exact ProgramSourceCoverage manifest so a client can
-                    // atomically install and settle its local source graph.
-                    reset_input_set: true,
-                    result_table_filter: Some(table),
-                    tier,
-                    read_view: &read_view,
-                    purpose: RehydratePurpose::Query,
-                },
-                None,
-            )
-            .await?
+            if let Some(update) = self
+                .rehydrate_query_maintained_subscription_view(
+                    node,
+                    MaintainedRehydrateRequest {
+                        shape: &shape,
+                        binding: &binding,
+                        subscription,
+                        previous_member_result_set: &previous_member_result_set,
+                        // The first receiver closure is a complete successor,
+                        // not a result-member delta.  Its reset bit claims the
+                        // exact ProgramSourceCoverage manifest so a client can
+                        // atomically install and settle its local source graph.
+                        reset_input_set: true,
+                        result_table_filter: Some(table),
+                        tier,
+                        read_view: &read_view,
+                        purpose: RehydratePurpose::Query,
+                    },
+                    None,
+                )
+                .await?
             {
                 return Ok(update);
             }
@@ -736,15 +740,16 @@ impl PeerState {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .is_some()
         {
-            if let Some(update) = self.query_update_maintained_subscription_view(
-                node,
-                &shape,
-                &binding,
-                subscription,
-                Some(table),
-                None,
-            )
-            .await?
+            if let Some(update) = self
+                .query_update_maintained_subscription_view(
+                    node,
+                    &shape,
+                    &binding,
+                    subscription,
+                    Some(table),
+                    None,
+                )
+                .await?
             {
                 return Ok(update);
             }
@@ -760,8 +765,8 @@ impl PeerState {
                 )
                 .await?
                 .ok_or(Error::InvalidStoredValue(
-                "maintained hydration ended without an initial publication",
-            ));
+                    "maintained hydration ended without an initial publication",
+                ));
         }
         unreachable!("maintained subscription view state is either absent or present")
     }
@@ -956,11 +961,14 @@ impl PeerState {
         // Its replacement is necessarily a complete successor closure: an
         // incremental add list cannot retract source facts that belonged to
         // the retired runtime.
-        let runtime_was_stale = self.publication_states.get(&subscription).is_some_and(|state| {
-            state
-                .groove_runtime_token
-                .is_some_and(|token| token != node.groove_runtime_token())
-        });
+        let runtime_was_stale = self
+            .publication_states
+            .get(&subscription)
+            .is_some_and(|state| {
+                state
+                    .groove_runtime_token
+                    .is_some_and(|token| token != node.groove_runtime_token())
+            });
         self.clear_stale_groove_runtime_handles(node, subscription);
         let policy_binding = self.served_subscription_policy_binding(subscription)?;
         self.ensure_query_subscription_registered(
@@ -979,7 +987,7 @@ impl PeerState {
                     settled_through: self.maintained_publication_cut(node, subscription),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    supporting_rows: Vec::new(),
+                    supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
                 }),
                 allow_storage_witness_fallback: false,
             }));
@@ -994,15 +1002,16 @@ impl PeerState {
             .get(&subscription)
             .is_some_and(|state| state.maintained_subscription_view.is_some())
         {
-            return self.query_update_maintained_subscription_view_with_metadata(
-                node,
-                shape,
-                binding,
-                subscription,
-                None,
-                progress_waker,
-            )
-            .await;
+            return self
+                .query_update_maintained_subscription_view_with_metadata(
+                    node,
+                    shape,
+                    binding,
+                    subscription,
+                    None,
+                    progress_waker,
+                )
+                .await;
         }
         let previous_member_result_set = self
             .publication_states
@@ -1017,7 +1026,10 @@ impl PeerState {
         let ((tier, read_view), has_runtime_plan) = if let Some(context) = cached_context {
             context
         } else {
-            ((opts.tier, std::sync::Arc::new(opts.read_view.clone())), false)
+            (
+                (opts.tier, std::sync::Arc::new(opts.read_view.clone())),
+                false,
+            )
         };
         if !has_runtime_plan {
             let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, tier);
@@ -1141,7 +1153,7 @@ impl PeerState {
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
             terminal_operations: _,
-            source_fact_presence_changes: _,
+            supporting_changed,
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -1159,6 +1171,7 @@ impl PeerState {
         // full closure in an incremental frame, repeating its coverage
         // manifest and previously acknowledged content.
         if public_result_is_silent
+            && !supporting_changed
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
             && (requires_authoritative_membership_reconcile || observed_result_delta_batches > 0)
@@ -1223,48 +1236,43 @@ impl PeerState {
                 "maintained subscription view is missing source closure state",
             ))?
             .maintained;
-        let mut complete_program_fact_set = None;
-        let (program_fact_adds, program_fact_removes) = if initial_snapshot_completed {
-            let current = maintained.active_peer_source_closure_facts();
-            let adds = current.iter().cloned().collect();
-            complete_program_fact_set = Some(current);
-            (adds, Vec::new())
-        } else if let Some(delta) =
-            maintained.unpublished_peer_source_delta(&state.program_fact_set)
+        let supporting_rows = if !initial_snapshot_completed
+            && state.supporting_revision.is_some()
+            && let Some((adds, removes)) = maintained.unpublished_supporting_delta()
         {
-            delta
+            let predecessor = state.supporting_revision.expect("checked predecessor");
+            let revision = if adds.is_empty() && removes.is_empty() {
+                predecessor
+            } else {
+                *uuid::Uuid::new_v4().as_bytes()
+            };
+            crate::protocol::SupportingRowsUpdate::Delta {
+                predecessor,
+                revision,
+                adds,
+                removes,
+            }
         } else {
-            let current = maintained.active_peer_source_closure_facts();
-            let delta = canonical_set_delta(&state.program_fact_set, &current);
-            complete_program_fact_set = Some(current);
-            delta
+            crate::protocol::SupportingRowsUpdate::snapshot(
+                maintained.supporting_rows().cloned().collect(),
+            )
         };
-        let published_fact_adds = program_fact_adds.clone();
-        let published_fact_removes = program_fact_removes.clone();
-        let fact_add_count = program_fact_adds.len();
-        let fact_remove_count = program_fact_removes.len();
-        if maintained_view_update_is_empty(
-            &result_member_adds,
-            &result_member_removes,
-            &program_fact_adds,
-            &program_fact_removes,
-        ) {
-            let supporting_rows = node.supporting_rows_for_facts(
-                shape.schema_version(),
-                maintained.active_peer_source_closure_fact_refs(),
-            )?;
-            // Even a cancelled-out drain is acknowledged only after its
-            // supporting manifest has been constructed successfully.
+        let fact_add_count = supporting_rows.added_rows().len();
+        let fact_remove_count = supporting_rows.removed_rows().len();
+        if result_member_adds.is_empty()
+            && result_member_removes.is_empty()
+            && fact_add_count == 0
+            && fact_remove_count == 0
+        {
+            let changed = initial_snapshot_completed || supporting_rows.is_snapshot();
             if let Some(state) = self.publication_states.get_mut(&subscription) {
-                if let Some(current) = complete_program_fact_set {
-                    state.program_fact_set = current;
-                }
+                state.supporting_revision = Some(supporting_rows.revision());
                 if let Some(view) = &mut state.maintained_subscription_view {
                     view.maintained.acknowledge_peer_source_closure();
                 }
             }
             return Ok(Some(MaintainedCanonicalUpdate {
-                changed: initial_snapshot_completed,
+                changed,
                 update: SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: self.maintained_publication_cut(node, subscription),
@@ -1310,6 +1318,7 @@ impl PeerState {
             scoped
                 .view_update_for_maintained_result_members(
                     crate::node::MaintainedViewBundleInputs {
+                        supporting_update: Some(supporting_rows.clone()),
                         shape,
                         has_default_read_view: read_view.is_default(),
                         allow_authoritative_scalar_exit_refresh: !self
@@ -1323,8 +1332,6 @@ impl PeerState {
                         previous_result_set: previous_result_tx_ids,
                         result_member_adds,
                         result_member_removes,
-                        program_fact_adds,
-                        program_fact_removes,
                         identity: policy_identity,
                         tier,
                         maintained_facts: maintained,
@@ -1373,14 +1380,7 @@ impl PeerState {
                 .publication_states
                 .entry(view.subscription)
                 .or_default();
-            if let Some(current) = complete_program_fact_set {
-                state.program_fact_set = current;
-            } else {
-                for fact in published_fact_removes {
-                    state.program_fact_set.remove(&fact);
-                }
-                state.program_fact_set.extend(published_fact_adds);
-            }
+            state.supporting_revision = Some(supporting_rows.revision());
             if let Some(view) = &mut state.maintained_subscription_view {
                 view.maintained.acknowledge_peer_source_closure();
             }
@@ -1409,7 +1409,7 @@ impl PeerState {
         // exact selected authority closure. Do not let the generic
         // trusted-serving drain observe an authority output or a stale source
         // frontier.
-        let mut deletion_changes = (Vec::new(), Vec::new());
+        let mut deletion_changes = false;
         let receiver_install = self
             .publication_states
             .get_mut(&subscription)
@@ -1440,10 +1440,17 @@ impl PeerState {
                 return Ok(ResultTransitions::default());
             }
             if due {
-                let witnesses = node.selected_deletion_witnesses(&source, schema_version).await?;
-                if let Some(view) = self.publication_states.get_mut(&subscription)
-                    .and_then(|state| state.maintained_subscription_view.as_mut()) {
-                    deletion_changes = view.maintained.replace_selected_deletion_witnesses(witnesses);
+                let witnesses = node
+                    .selected_deletion_witnesses(&source, schema_version)
+                    .await?;
+                if let Some(view) = self
+                    .publication_states
+                    .get_mut(&subscription)
+                    .and_then(|state| state.maintained_subscription_view.as_mut())
+                {
+                    deletion_changes = view
+                        .maintained
+                        .replace_selected_deletion_witnesses(witnesses);
                 }
             }
         }
@@ -1480,7 +1487,8 @@ impl PeerState {
                 .read_policy
                 .is_some();
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
-        let (mut program_fact_adds, mut program_fact_removes) = deletion_changes;
+        let (mut program_fact_adds, mut program_fact_removes) = (Vec::new(), Vec::new());
+        let mut supporting_changed = deletion_changes;
         let allow_storage_witness_fallback = false;
         let mut observed_result_delta_batches = 0_usize;
         let mut requires_authoritative_membership_reconcile = false;
@@ -1519,6 +1527,7 @@ impl PeerState {
                             initial_deletion_witness |=
                                 transitions.requires_authoritative_membership_reconcile;
                         } else {
+                            supporting_changed |= transitions.supporting_changed;
                             observed_result_delta_batches +=
                                 transitions.observed_result_delta_batches;
                             requires_authoritative_membership_reconcile |=
@@ -1628,7 +1637,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
-            source_fact_presence_changes: Vec::new(),
+            supporting_changed,
         })
     }
 
@@ -1685,91 +1694,95 @@ impl PeerState {
         } else {
             None
         };
-        let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
+        let (policy_identity, policy_claims) =
+            self.served_subscription_policy_binding(subscription)?;
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=rehydrate peer={:p} owner={} subscription={subscription:?} identity={policy_identity:?} source={source_authority_result_key:?} purpose={purpose:?}",
-                self,
-                self.publication_owner,
+                self, self.publication_owner,
             );
         }
         let opened = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
             match purpose {
-            // A relay's selected Edge child is the browser half of a durable
-            // worker authority receipt. Every strict Edge child consumes the
-            // same authority-selected membership, including unbounded
-            // filtered queries whose supporting rows are absent locally.
-            RehydratePurpose::Query if relay_edge_requires_authority_source => {
-                scoped.open_seeded_relay_edge_subscription_view_with_waker(
-                    shape,
-                    binding,
-                    policy_identity,
-                    read_view,
-                    subscription.read_view,
-                    source_authority_result_key
-                        .clone()
-                        .expect("strict relay source resolved above"),
-                    progress_waker,
-                )
+                // A relay's selected Edge child is the browser half of a durable
+                // worker authority receipt. Every strict Edge child consumes the
+                // same authority-selected membership, including unbounded
+                // filtered queries whose supporting rows are absent locally.
+                RehydratePurpose::Query if relay_edge_requires_authority_source => scoped
+                    .open_seeded_relay_edge_subscription_view_with_waker(
+                        shape,
+                        binding,
+                        policy_identity,
+                        read_view,
+                        subscription.read_view,
+                        source_authority_result_key
+                            .clone()
+                            .expect("strict relay source resolved above"),
+                        progress_waker,
+                    )
                     .await
-                    .map(|(receiver, maintained, schemas, transitions, tables, received, inputs)| {
-                        (
-                            receiver,
-                            maintained,
-                            schemas,
-                            transitions,
-                            tables,
-                            received,
-                            Some(inputs),
-                        )
-                    })
-            }
-            RehydratePurpose::Query => {
-                scoped.open_seeded_maintained_subscription_view_with_waker(
-                    shape,
-                    binding,
-                    policy_identity,
-                    tier,
-                    read_view,
-                    subscription.read_view,
-                    progress_waker,
-                )
-                .await
-                .map(|(receiver, maintained, schemas, transitions, tables, received)| {
-                    (
-                        receiver,
-                        maintained,
-                        schemas,
-                        transitions,
-                        tables,
-                        received,
-                        None,
+                    .map(
+                        |(receiver, maintained, schemas, transitions, tables, received, inputs)| {
+                            (
+                                receiver,
+                                maintained,
+                                schemas,
+                                transitions,
+                                tables,
+                                received,
+                                Some(inputs),
+                            )
+                        },
+                    ),
+                RehydratePurpose::Query => scoped
+                    .open_seeded_maintained_subscription_view_with_waker(
+                        shape,
+                        binding,
+                        policy_identity,
+                        tier,
+                        read_view,
+                        subscription.read_view,
+                        progress_waker,
                     )
-                })
-            }
-            RehydratePurpose::AuthorizationSupport => scoped
-                .open_seeded_authorization_support_subscription_view_with_waker(
-                    shape,
-                    binding,
-                    policy_identity,
-                    tier,
-                    read_view,
-                    subscription.read_view,
-                    progress_waker,
-                )
-                .await
-                .map(|(receiver, maintained, schemas, transitions, tables, received)| {
-                    (
-                        receiver,
-                        maintained,
-                        schemas,
-                        transitions,
-                        tables,
-                        received,
-                        None,
+                    .await
+                    .map(
+                        |(receiver, maintained, schemas, transitions, tables, received)| {
+                            (
+                                receiver,
+                                maintained,
+                                schemas,
+                                transitions,
+                                tables,
+                                received,
+                                None,
+                            )
+                        },
+                    ),
+                RehydratePurpose::AuthorizationSupport => scoped
+                    .open_seeded_authorization_support_subscription_view_with_waker(
+                        shape,
+                        binding,
+                        policy_identity,
+                        tier,
+                        read_view,
+                        subscription.read_view,
+                        progress_waker,
                     )
-                }),
+                    .await
+                    .map(
+                        |(receiver, maintained, schemas, transitions, tables, received)| {
+                            (
+                                receiver,
+                                maintained,
+                                schemas,
+                                transitions,
+                                tables,
+                                received,
+                                None,
+                            )
+                        },
+                    ),
             }
         };
         let (
@@ -1780,8 +1793,7 @@ impl PeerState {
             tables,
             initial_received,
             covered_input_receiver,
-        ) =
-            match opened {
+        ) = match opened {
             Ok(opened) => opened,
             Err(error @ Error::AuthorizationSupportMissingClaim(_))
                 if purpose == RehydratePurpose::AuthorizationSupport =>
@@ -1797,9 +1809,9 @@ impl PeerState {
                     settled_through: self.maintained_publication_cut(node, subscription),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    supporting_rows: Vec::new(),
+                    supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
                 });
-                self.record_outgoing_view_update(&update);
+                self.record_outgoing_view_update(node, shape.schema_version(), &update)?;
                 self.publication_states
                     .entry(subscription)
                     .or_default()
@@ -1807,7 +1819,7 @@ impl PeerState {
                 return Ok(Some(update));
             }
             Err(error) => return Err(error),
-            };
+        };
         // `open_seeded_relay_edge_subscription_view_with_waker` has already
         // installed the exact source closure, driven the receiver graph, and
         // folded the same terminal batch it returns here. Repeating that work
@@ -1816,9 +1828,7 @@ impl PeerState {
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=rehydrate_opened owner={} subscription={subscription:?} identity={policy_identity:?} initial={initial_received} adds={:?} facts={:?}",
-                self.publication_owner,
-                transitions.adds,
-                transitions.program_fact_adds,
+                self.publication_owner, transitions.adds, transitions.program_fact_adds,
             );
         }
         if !terminal_schemas.has_root_collector() {
@@ -1835,11 +1845,7 @@ impl PeerState {
                 source_authority_result: source_authority_result_key.clone(),
                 initial_received: false,
             };
-            self.replace_maintained_subscription_view(
-                node,
-                subscription,
-                maintained_subscription,
-            );
+            self.replace_maintained_subscription_view(node, subscription, maintained_subscription);
             return Ok(None);
         }
         let open_elapsed = open_start.elapsed();
@@ -1906,7 +1912,7 @@ impl PeerState {
                     &current_member_result_set,
                 )
             });
-        let (program_fact_adds, program_fact_removes, reset_input_set) = if reset_input_set
+        let reset_input_set = if reset_input_set
             && simple_membership_delta
             && !cursor_membership_mismatch
             && let Some(position) = known_membership_position
@@ -1915,7 +1921,7 @@ impl PeerState {
         {
             result_member_adds.clear();
             result_member_removes.clear();
-            (Vec::new(), Vec::new(), false)
+            false
         } else if reset_input_set
             && !cursor_membership_mismatch
             && simple_membership_delta
@@ -1928,13 +1934,9 @@ impl PeerState {
                 member_settle_position(member).is_none_or(|settled| settled > position)
             });
             result_member_removes.clear();
-            (Vec::new(), Vec::new(), false)
+            false
         } else {
-            (
-                transitions.program_fact_adds,
-                transitions.program_fact_removes,
-                reset_input_set,
-            )
+            reset_input_set
         };
         let bundle_known_state = if cursor_membership_mismatch {
             None
@@ -1956,32 +1958,34 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let (policy_identity, policy_claims) = self.served_subscription_policy_binding(subscription)?;
+        let (policy_identity, policy_claims) =
+            self.served_subscription_policy_binding(subscription)?;
         let update = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);
-            scoped.view_update_for_maintained_result_members(
-            crate::node::MaintainedViewBundleInputs {
-                    shape,
-                    has_default_read_view: read_view.is_default(),
-                    allow_authoritative_scalar_exit_refresh: !self
-                        .subscription_awaits_selected_authority_source(subscription),
-                subscription,
-                settled_through: watermark,
-                peer_complete_tx_payloads,
-                known_state: bundle_known_state,
-                complete_exclusive_payloads: self.ship_complete_exclusive_payloads
-                    && self.role == PeerRole::Relay,
-                previous_result_set: BTreeSet::new(),
-                result_member_adds,
-                result_member_removes,
-                program_fact_adds,
-                program_fact_removes,
-                identity: policy_identity,
-                tier,
-                maintained_facts: &maintained,
-                allow_storage_witness_fallback: false,
-            },
-            ).await
+            scoped
+                .view_update_for_maintained_result_members(
+                    crate::node::MaintainedViewBundleInputs {
+                        supporting_update: None,
+                        shape,
+                        has_default_read_view: read_view.is_default(),
+                        allow_authoritative_scalar_exit_refresh: !self
+                            .subscription_awaits_selected_authority_source(subscription),
+                        subscription,
+                        settled_through: watermark,
+                        peer_complete_tx_payloads,
+                        known_state: bundle_known_state,
+                        complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                            && self.role == PeerRole::Relay,
+                        previous_result_set: BTreeSet::new(),
+                        result_member_adds,
+                        result_member_removes,
+                        identity: policy_identity,
+                        tier,
+                        maintained_facts: &maintained,
+                        allow_storage_witness_fallback: false,
+                    },
+                )
+                .await
         };
         let update = match update {
             Ok(update) => update,
@@ -2037,7 +2041,7 @@ impl PeerState {
             initial_received: true,
         };
         self.replace_maintained_subscription_view(node, subscription, maintained_subscription);
-        self.record_outgoing_view_update(&update);
+        self.record_outgoing_view_update(node, shape.schema_version(), &update)?;
         self.publication_states
             .entry(subscription)
             .or_default()
@@ -2183,11 +2187,6 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        let previous_program_fact_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::program_fact_set)
-            .unwrap_or_default();
         let previous_member_index = self
             .publication_states
             .get(&subscription)
@@ -2199,11 +2198,14 @@ impl PeerState {
             .map(|state| state.local_authority.clone())
             .unwrap_or_default();
         let known_state = self.downstream_known_states.get(&subscription).cloned();
-        let retained_authorization = self.publication_states.get(&subscription).and_then(|state| {
-            state
-                .has_served_authorization_progress
-                .then_some(state.authorization_progress)
-        });
+        let retained_authorization = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| {
+                state
+                    .has_served_authorization_progress
+                    .then_some(state.authorization_progress)
+            });
         // `forget_subscription_with_node` below retires the old maintained
         // runtime, but the relay's exact upstream receipt is immutable
         // lifecycle metadata for this usage site. Carry it through the
@@ -2242,7 +2244,6 @@ impl PeerState {
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
         state.result_member_set = previous_member_result_set.clone();
-        state.program_fact_set = previous_program_fact_set;
         state.member_index = previous_member_index;
         state.local_authority = previous_local_authority;
         state.policy_binding = Some(policy_binding);
@@ -2375,14 +2376,15 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         self.clear_stale_groove_runtime_handles(node, maintained_subscription);
-        let source_transitions = self.drain_maintained_subscription_view_changes(
-            node,
-            shape,
-            maintained_subscription,
-            None,
-            progress_waker,
-        )
-        .await?;
+        let source_transitions = self
+            .drain_maintained_subscription_view_changes(
+                node,
+                shape,
+                maintained_subscription,
+                None,
+                progress_waker,
+            )
+            .await?;
         if !self
             .publication_states
             .get(&maintained_subscription)
@@ -2404,7 +2406,7 @@ impl PeerState {
             observed_result_delta_batches: _,
             requires_authoritative_membership_reconcile: _,
             terminal_operations: _,
-            source_fact_presence_changes: _,
+            supporting_changed,
         } = source_transitions;
         let known_state = self
             .downstream_known_states
@@ -2415,8 +2417,9 @@ impl PeerState {
             self.fast_cursor_authorization_matches(maintained_subscription, &known_state);
         let removed_members_are_ordinary =
             source_removes.iter().all(ordinary_current_content_member);
-        let source_had_program_fact_transitions =
-            !source_program_fact_adds.is_empty() || !source_program_fact_removes.is_empty();
+        let source_had_program_fact_transitions = supporting_changed
+            || !source_program_fact_adds.is_empty()
+            || !source_program_fact_removes.is_empty();
         let client_link = self.role != PeerRole::Relay;
         let flat_row_removes = (client_link
             && authorization_matches
@@ -2425,18 +2428,21 @@ impl PeerState {
                 == RegisterShapeOptions::default().read_view_key()
             && !source_had_program_fact_transitions
             && self.publication_states[&maintained_subscription]
-                .program_fact_set
-                .is_empty())
+                .supporting_rows()
+                .next()
+                .is_none())
         .then(|| source_removes.clone());
-        if !source_adds.is_empty()
+        if supporting_changed
+            || !source_adds.is_empty()
             || !source_removes.is_empty()
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty()
         {
             self.apply_outgoing_view_delta(
-                maintained_subscription, false,
-                &source_adds, &source_removes,
-                &source_program_fact_adds, &source_program_fact_removes,
+                maintained_subscription,
+                false,
+                &source_adds,
+                &source_removes,
             );
         }
         let canonical_state = self
@@ -2446,19 +2452,21 @@ impl PeerState {
                 "coverage group subscription is missing peer state",
             ))?;
         let current_result_member_set = &canonical_state.result_member_set;
-        let current_program_fact_set = canonical_state.program_fact_set.clone();
+        let current_program_fact_set = canonical_state
+            .supporting_rows()
+            .cloned()
+            .collect::<Vec<_>>();
         let can_forward_flat_removals = client_link
             && ordinary_flat_row_duplicate_view(
                 shape,
                 &current_result_member_set,
                 removed_members_are_ordinary,
                 maintained_subscription.read_view,
-                canonical_state.program_fact_set.is_empty(),
+                canonical_state.supporting_rows().next().is_none(),
                 source_had_program_fact_transitions,
             );
-        let authorization_mismatch = client_link
-            && known_membership_position.is_some()
-            && !authorization_matches;
+        let authorization_mismatch =
+            client_link && known_membership_position.is_some() && !authorization_matches;
         let target_result_member_removes = if can_forward_flat_removals && authorization_matches {
             flat_row_removes.unwrap_or_default()
         } else {
@@ -2478,7 +2486,8 @@ impl PeerState {
             && let Some(position) = known_membership_position
             && self
                 .canonical_subscription_settlement_time(node, maintained_subscription)
-                .0 > 0
+                .0
+                > 0
             && position
                 >= self.canonical_subscription_settlement_time(node, maintained_subscription)
         {
@@ -2513,43 +2522,65 @@ impl PeerState {
                     "coverage group subscription is missing maintained state",
                 ))?
                 .maintained;
-            scoped.view_update_for_maintained_result_members(
-                crate::node::MaintainedViewBundleInputs {
-                    shape,
-                    has_default_read_view: read_view.is_default(),
-                    allow_authoritative_scalar_exit_refresh: !self
-                        .subscription_awaits_selected_authority_source(maintained_subscription),
-                    subscription: target_subscription,
-                    settled_through,
-                    peer_complete_tx_payloads,
-                    known_state: (!authorization_mismatch)
-                        .then_some(known_state)
-                        .flatten(),
-                    complete_exclusive_payloads: self.ship_complete_exclusive_payloads
-                        && self.role == PeerRole::Relay,
-                    previous_result_set: BTreeSet::new(),
-                    result_member_adds,
-                    result_member_removes: target_result_member_removes,
-                    // A newly attached usage site starts with no
-                    // subscription-scoped facts even when it shares the
-                    // canonical evaluator. Rehydrate the evaluator's complete
-                    // current fact closure; forwarding only future deltas
-                    // leaves array/join dependencies absent after a one-shot
-                    // attachment races their first update.
-                    program_fact_adds: current_program_fact_set.iter().cloned().collect(),
-                    program_fact_removes: Vec::new(),
-                    identity: policy_identity,
-                    tier,
-                    maintained_facts: maintained,
-                    allow_storage_witness_fallback: source_allow_storage_witness_fallback,
-                },
-            ).await
+            scoped
+                .view_update_for_maintained_result_members(
+                    crate::node::MaintainedViewBundleInputs {
+                        supporting_update: None,
+                        shape,
+                        has_default_read_view: read_view.is_default(),
+                        allow_authoritative_scalar_exit_refresh: !self
+                            .subscription_awaits_selected_authority_source(maintained_subscription),
+                        subscription: target_subscription,
+                        settled_through,
+                        peer_complete_tx_payloads,
+                        known_state: (!authorization_mismatch).then_some(known_state).flatten(),
+                        complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                            && self.role == PeerRole::Relay,
+                        previous_result_set: BTreeSet::new(),
+                        result_member_adds,
+                        result_member_removes: target_result_member_removes,
+                        // A newly attached usage site starts with no
+                        // subscription-scoped facts even when it shares the
+                        // canonical evaluator. Rehydrate the evaluator's complete
+                        // current fact closure; forwarding only future deltas
+                        // leaves array/join dependencies absent after a one-shot
+                        // attachment races their first update.
+                        identity: policy_identity,
+                        tier,
+                        maintained_facts: maintained,
+                        allow_storage_witness_fallback: source_allow_storage_witness_fallback,
+                    },
+                )
+                .await
         };
-        let update = update?;
+        let mut update = update?;
+        if let SyncMessage::ViewUpdate(view) = &mut update {
+            self.bind_cloned_supporting_revision(maintained_subscription, view);
+        }
         self.record_outgoing_view_update_metadata(&update);
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(maintained_subscription);
         Ok(Some(update))
+    }
+
+    // A late usage gets the same physical state as the canonical publisher.
+    // Its snapshot must establish that publisher's cursor, because future
+    // deltas are shared/fanned out from that canonical stream.
+    fn bind_cloned_supporting_revision(
+        &self,
+        source: SubscriptionKey,
+        view: &mut crate::protocol::ViewUpdatePayload,
+    ) {
+        if let Some(revision) = self
+            .publication_states
+            .get(&source)
+            .and_then(|state| state.supporting_revision)
+            && let crate::protocol::SupportingRowsUpdate::Snapshot {
+                revision: target, ..
+            } = &mut view.supporting_rows
+        {
+            *target = revision;
+        }
     }
 
     /// Consume canonical maintained-view work and return its publishable
@@ -2634,8 +2665,9 @@ impl PeerState {
                 == RegisterShapeOptions::default().read_view_key()
             && !source_had_program_fact_transitions
             && self.publication_states[&maintained_subscription]
-                .program_fact_set
-                .is_empty())
+                .supporting_rows()
+                .next()
+                .is_none())
         .then(|| source_removes.clone());
 
         let canonical_state = self
@@ -2645,19 +2677,21 @@ impl PeerState {
                 "coverage group subscription is missing peer state",
             ))?;
         let current_result_member_set = &canonical_state.result_member_set;
-        let current_program_fact_set = canonical_state.program_fact_set.clone();
+        let current_program_fact_set = canonical_state
+            .supporting_rows()
+            .cloned()
+            .collect::<Vec<_>>();
         let can_forward_flat_removals = client_link
             && ordinary_flat_row_duplicate_view(
                 shape,
                 &current_result_member_set,
                 removed_members_are_ordinary,
                 maintained_subscription.read_view,
-                canonical_state.program_fact_set.is_empty(),
+                canonical_state.supporting_rows().next().is_none(),
                 source_had_program_fact_transitions,
             );
-        let authorization_mismatch = client_link
-            && known_membership_position.is_some()
-            && !authorization_matches;
+        let authorization_mismatch =
+            client_link && known_membership_position.is_some() && !authorization_matches;
         let target_result_member_removes = if can_forward_flat_removals && authorization_matches {
             flat_row_removes.unwrap_or_default()
         } else {
@@ -2677,7 +2711,8 @@ impl PeerState {
             && let Some(position) = known_membership_position
             && self
                 .canonical_subscription_settlement_time(node, maintained_subscription)
-                .0 > 0
+                .0
+                > 0
             && position
                 >= self.canonical_subscription_settlement_time(node, maintained_subscription)
         {
@@ -2712,45 +2747,46 @@ impl PeerState {
                     "coverage group subscription is missing maintained state",
                 ))?
                 .maintained;
-            scoped.view_update_for_maintained_result_members(
-                crate::node::MaintainedViewBundleInputs {
-                    shape,
-                    has_default_read_view: read_view.is_default(),
-                    allow_authoritative_scalar_exit_refresh: !self
-                        .subscription_awaits_selected_authority_source(maintained_subscription),
-                    subscription: target_subscription,
-                    settled_through,
-                    peer_complete_tx_payloads,
-                    known_state: (!authorization_mismatch)
-                        .then_some(known_state)
-                        .flatten(),
-                    complete_exclusive_payloads: self.ship_complete_exclusive_payloads
-                        && self.role == PeerRole::Relay,
-                    previous_result_set: BTreeSet::new(),
-                    result_member_adds,
-                    result_member_removes: target_result_member_removes,
-                    // A newly attached usage site starts with no
-                    // subscription-scoped facts even when it shares the
-                    // canonical evaluator. Rehydrate the evaluator's complete
-                    // current fact closure; forwarding only future deltas
-                    // leaves array/join dependencies absent after a one-shot
-                    // attachment races their first update.
-                    program_fact_adds: current_program_fact_set.iter().cloned().collect(),
-                    program_fact_removes: Vec::new(),
-                    identity: policy_identity,
-                    tier,
-                    maintained_facts: maintained,
-                    allow_storage_witness_fallback,
-                },
-            ).await
+            scoped
+                .view_update_for_maintained_result_members(
+                    crate::node::MaintainedViewBundleInputs {
+                        supporting_update: None,
+                        shape,
+                        has_default_read_view: read_view.is_default(),
+                        allow_authoritative_scalar_exit_refresh: !self
+                            .subscription_awaits_selected_authority_source(maintained_subscription),
+                        subscription: target_subscription,
+                        settled_through,
+                        peer_complete_tx_payloads,
+                        known_state: (!authorization_mismatch).then_some(known_state).flatten(),
+                        complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                            && self.role == PeerRole::Relay,
+                        previous_result_set: BTreeSet::new(),
+                        result_member_adds,
+                        result_member_removes: target_result_member_removes,
+                        // A newly attached usage site starts with no
+                        // subscription-scoped facts even when it shares the
+                        // canonical evaluator. Rehydrate the evaluator's complete
+                        // current fact closure; forwarding only future deltas
+                        // leaves array/join dependencies absent after a one-shot
+                        // attachment races their first update.
+                        identity: policy_identity,
+                        tier,
+                        maintained_facts: maintained,
+                        allow_storage_witness_fallback,
+                    },
+                )
+                .await
         };
-        let target_reset = target_reset?;
+        let mut target_reset = target_reset?;
+        if let SyncMessage::ViewUpdate(view) = &mut target_reset {
+            self.bind_cloned_supporting_revision(maintained_subscription, view);
+        }
         self.record_outgoing_view_update_metadata(&target_reset);
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(maintained_subscription);
         Ok(target_reset)
     }
-
 }
 
 #[cfg(test)]

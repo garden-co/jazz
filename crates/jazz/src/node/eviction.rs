@@ -207,10 +207,9 @@ where
         evictable.sort_by_key(|candidate| candidate.tx_id);
         if !evictable.is_empty() {
             // INV-SYNC-27: once local row-version bodies may be removed, no
-            // persisted or in-memory fast known-state cursor may survive.
-            // Clear these facts before publishing any body deletion so a
-            // clearing failure leaves every candidate body intact.
-            self.clear_all_known_state_facts().await?;
+            // in-memory fast known-state cursor may survive. Scope and cursor
+            // invalidation is infallible and precedes any body deletion.
+            self.invalidate_subscription_scopes();
         }
 
         if low_water_bytes.is_none() {

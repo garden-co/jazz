@@ -1693,6 +1693,7 @@ fn observed_shape_tx_ids(update: &SyncMessage, read_tier: DurabilityTier) -> Vec
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             supporting_rows, ..
         }) => supporting_rows
+            .added_rows()
             .iter()
             .filter(|input| input.version_table.as_str() == SHAPES)
             .map(|input| input.version.tx)
@@ -2724,6 +2725,7 @@ fn result_output_count(update: &SyncMessage, table: &str) -> usize {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             supporting_rows, ..
         }) => supporting_rows
+            .added_rows()
             .iter()
             .filter(|input| input.version_table.as_str() == table)
             .map(|input| input.row)

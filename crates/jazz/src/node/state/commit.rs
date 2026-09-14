@@ -651,10 +651,13 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "pending edge parent alias must exist after allocation",
                 ))?;
-            batch.insert(
-                "jazz_pending_edges",
-                pending_edge_values(tx_node_alias, tx_id, parent_alias, parent, &coordinate)?,
-            );
+            self.stage_pending_parent_constraint(
+                &mut batch,
+                (tx_node_alias, tx_id),
+                (parent_alias, parent),
+                &coordinate,
+                false,
+            )?;
         }
         let pending_child_edges = {
             let mut edges = Vec::new();

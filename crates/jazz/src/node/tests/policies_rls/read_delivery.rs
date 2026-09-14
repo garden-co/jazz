@@ -284,6 +284,7 @@ fn read_policy_compares_indirect_text_by_its_logical_value() {
 
 #[test]
 fn camel_case_message_read_policy_incrementally_adds_member_message() {
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let alice = user(0xa1);
     let bob = user(0xb2);
     let chat = row(0x18);
@@ -407,9 +408,10 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let mut alice_peer = PeerState::client_link(alice);
-    alice_peer
+    let initial = alice_peer
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
+    wire_membership.observe(&initial);
 
     let bob_membership_tx = accept_global(
         &mut core,
@@ -434,8 +436,9 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     let update = alice_peer
         .query_update(&mut core, &shape, &binding)
         .unwrap();
+    let update = wire_membership.observe(&update);
     let SyncMessage::ViewUpdate(payload) = &update else { panic!("expected snapshot"); };
-    assert_eq!(payload.supporting_rows.iter().map(|input| input.row).collect::<BTreeSet<_>>(),
+    assert_eq!(payload.supporting_rows.added_rows().iter().map(|input| input.row).collect::<BTreeSet<_>>(),
         BTreeSet::from([chat, alice_message, alice_profile, bob_message, bob_profile]));
     assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
     assert!(

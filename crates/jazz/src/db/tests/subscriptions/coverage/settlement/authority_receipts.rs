@@ -16,7 +16,7 @@ fn settled_todos_source_closure(
 
         version_carriers: Vec::new(),
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        supporting_rows: Vec::new(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
     })
 }
 

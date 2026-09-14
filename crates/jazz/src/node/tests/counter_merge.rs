@@ -30,7 +30,7 @@ fn core_creates_merge_versions_for_concurrent_heads() {
         panic!("expected view update");
     };
     let covered_rows = program_fact_adds
-        .iter()
+        .added_rows().iter()
         .map(|input| (input.version_table.clone(), input.row, input.version.tx))
         .collect::<Vec<_>>();
     assert_eq!(covered_rows.len(), 1);

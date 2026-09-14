@@ -20,8 +20,8 @@ use super::super::node::{
     CoveredInputReceiver, LocalAuthorityReconciliation, PreparedQueryPlanHandle,
 };
 use super::super::protocol::{
-    AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry,
-    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
+    AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ReadViewSpec,
+    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
 };
 use super::super::query::{Binding, ValidatedQuery};
 use super::super::schema::TableSchema;
@@ -136,7 +136,7 @@ pub(super) struct PeerSubscriptionState {
     /// retain a D source without awaiting an upstream handoff.
     pub(super) awaiting_selected_authority_source: bool,
     pub(super) result_member_set: BTreeSet<ResultMemberEntry>,
-    pub(super) program_fact_set: BTreeSet<ProgramFactEntry>,
+    pub(super) supporting_revision: Option<[u8; 16]>,
     /// Shared Local-plus-authority provenance. Receiver/materialization state
     /// remains peer-owned; exact-source reconciliation is shared with the DB
     /// facade rather than reimplemented at this transport boundary.
@@ -151,6 +151,7 @@ pub(super) struct PeerSubscriptionState {
 
 impl PeerSubscriptionState {
     pub(super) fn clear_groove_runtime_handles(&mut self) {
+        self.supporting_revision = None;
         self.maintained_subscription_view = None;
         if let Some(prepared_query) = &mut self.prepared_query {
             // The compiled plan belongs to one runtime, but its semantic
@@ -164,22 +165,20 @@ impl PeerSubscriptionState {
         self.result_member_set.clone()
     }
 
-    pub(super) fn program_fact_set(&self) -> BTreeSet<ProgramFactEntry> {
-        self.program_fact_set.clone()
+    pub(super) fn supporting_rows(&self) -> impl Iterator<Item = &crate::protocol::SupportingRow> {
+        self.maintained_subscription_view
+            .iter()
+            .flat_map(|view| view.maintained.supporting_rows())
     }
 
     pub(super) fn previous_tx_ids(&self) -> BTreeSet<TxId> {
-        // A peer's resumable knowledge is the exact source closure it has
-        // received, not the authority's locally rendered output.  A join or
-        // filter can need inputs that do not themselves occur in the public
-        // terminal; carrying only result-member transaction ids would let a
-        // fast cursor suppress a required CoveredInput on the next receipt.
-        self.program_fact_set
+        if self.supporting_revision.is_none() {
+            return BTreeSet::new();
+        }
+        self.maintained_subscription_view
             .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::CoveredInput(input) => Some(input.version.tx),
-                _ => None,
-            })
+            .flat_map(|view| view.maintained.acknowledged_supporting_rows())
+            .map(|row| row.version.tx)
             .collect()
     }
 }

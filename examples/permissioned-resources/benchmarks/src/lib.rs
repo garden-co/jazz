@@ -961,9 +961,10 @@ impl SyncCapture {
     fn record(&mut self, message: &SyncMessage) {
         use std::io::Write;
         let (carriers, supporting) = match message {
-            SyncMessage::ViewUpdate(view) | SyncMessage::AuthorizationScopeView { view, .. } => {
-                (&view.version_carriers, view.supporting_rows.len())
-            }
+            SyncMessage::ViewUpdate(view) | SyncMessage::AuthorizationScopeView { view, .. } => (
+                &view.version_carriers,
+                view.supporting_rows.added_rows().len() + view.supporting_rows.removed_rows().len(),
+            ),
             SyncMessage::CurrentRowsReceipt(receipt) => (&receipt.version_carriers, 0),
             SyncMessage::CommitUnit { .. } | SyncMessage::AuthorityPublication(_) => panic!(
                 "extend SQL capture for non-view version delivery before comparing this fixture"
@@ -1183,8 +1184,9 @@ impl Transport for DuplexTransport {
                     ..ViewUpdateSummary::default()
                 });
             entry.messages += 1;
-            entry.supporting_snapshots += 1;
-            entry.supporting_rows += supporting_rows.len() as u64;
+            entry.supporting_snapshots += u64::from(supporting_rows.is_snapshot());
+            entry.supporting_rows +=
+                (supporting_rows.added_rows().len() + supporting_rows.removed_rows().len()) as u64;
             let bundles = version_bundle_refs(version_carriers).count() as u64;
             entry.bundles += bundles;
         }
@@ -1949,6 +1951,9 @@ fn run_connect_and_subscribe(
         jazz_sim::phase_attribution::reset();
         jazz::cold_settle_attribution::reset();
         jazz::groove::cold_settle_attribution::reset();
+        if std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_some() {
+            eprintln!("ARRANGEMENT_CAPTURE_BEGIN\t{label}");
+        }
     }
     work_budget::start();
     alloc_metrics::reset_and_start();
@@ -2125,6 +2130,10 @@ fn run_connect_and_subscribe(
         ticks += 1;
     }
     let settle_ms = settle_start.elapsed().as_millis();
+    #[cfg(feature = "cold-settle-attribution")]
+    if std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_some() {
+        eprintln!("ARRANGEMENT_CAPTURE_END\t{label}");
+    }
     if !config.diagnostics {
         let rows_materialized = subscriptions.iter().map(|s| s.rows.len()).sum();
         let expected_rows = expected.values().sum();

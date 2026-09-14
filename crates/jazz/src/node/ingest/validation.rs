@@ -8,6 +8,26 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// All constraint inserts/updates pass here so the conservative absence
+    /// proof includes staged rows before any later read or suspension.
+    pub(super) fn stage_pending_parent_constraint(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        child: (NodeAlias, TxId),
+        parent: (NodeAlias, TxId),
+        coordinate: &ParentCoordinate,
+        replace: bool,
+    ) -> Result<(), Error> {
+        let values = pending_edge_values(child.0, child.1, parent.0, parent.1, coordinate)?;
+        self.rejections.pending_parent_time_bound.observe(parent.1.time);
+        if replace {
+            batch.update("jazz_pending_edges", values);
+        } else {
+            batch.insert("jazz_pending_edges", values);
+        }
+        Ok(())
+    }
+
     /// Validate a TxId parent in the only coordinate where it has row-version
     /// meaning. A missing transaction remains a constrained pending edge; a
     /// known transaction without this exact version is malformed, never a
@@ -137,19 +157,37 @@ where
     /// their edge so ordinary post-ingest fate propagation can accept or
     /// reject them; an accepted child is immutable, so a contradictory parent
     /// is a typed protocol conflict rather than a retroactive fate rewrite.
-    async fn preflight_complete_parent_constraints(
+    pub(super) async fn preflight_complete_parent_constraints(
         &mut self,
         batch: &mut DatabaseBatch,
         parent: TxId,
         complete_versions: &[VersionRecord],
     ) -> Result<(), Error> {
+        if self.rejections.pending_parent_time_bound.excludes(parent.time) {
+            self.database.ensure_usable()?;
+            return Ok(());
+        }
         let raw_constraints = self
             .database
             .primary_key_scan_raw_in_batch(batch, "jazz_pending_edges", &[])
-            .await?;
+            .await?
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
+        self.preflight_complete_parent_records(batch, parent, complete_versions, raw_constraints)
+            .await
+    }
+
+    async fn preflight_complete_parent_records(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        parent: TxId,
+        complete_versions: &[VersionRecord],
+        raw_constraints: Vec<OwnedRecord>,
+    ) -> Result<(), Error> {
         let mut constraints = Vec::with_capacity(raw_constraints.len());
         for raw in raw_constraints {
-            let record = raw.record();
+            let record = raw.borrowed();
             let parent_alias = NodeAlias(
                 record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?,
             );
@@ -219,9 +257,42 @@ where
         batch: &mut DatabaseBatch,
         complete_parents: &[(TxId, Vec<VersionRecord>)],
     ) -> Result<(), Error> {
+        if complete_parents.is_empty() {
+            return Ok(());
+        }
+        let raw_constraints = self
+            .database
+            .primary_key_scan_raw_in_batch(batch, "jazz_pending_edges", &[])
+            .await?;
+        if raw_constraints.is_empty() {
+            return Ok(());
+        }
+        let parents = complete_parents.iter().map(|(parent, _)| *parent).collect::<BTreeSet<_>>();
+        let mut by_parent = BTreeMap::<TxId, Vec<OwnedRecord>>::new();
+        for raw in raw_constraints {
+            let record = raw.record();
+            let alias = NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
+            let parent = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
+                self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
+                    "pending edge parent alias must exist",
+                ))?,
+            );
+            if parents.contains(&parent) {
+                by_parent.entry(parent).or_default().push(raw.owned_record());
+            }
+        }
+        // This boundary only reads constraints and stages matching deletes;
+        // no parent/child transaction or new constraint is published between
+        // groups. Retain the caller's parent order and defer child/coordinate
+        // decoding until that parent's turn. A repeated parent has no new work:
+        // its Accepted constraints were deleted, and Pending children were left
+        // unchanged for post-persistence settlement.
         for (parent, versions) in complete_parents {
-            self.preflight_complete_parent_constraints(batch, *parent, versions)
-                .await?;
+            if let Some(records) = by_parent.remove(parent) {
+                self.preflight_complete_parent_records(batch, *parent, versions, records)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -257,6 +328,12 @@ where
         parents: &BTreeSet<TxId>,
     ) -> Result<(), Error> {
         if parents.is_empty() {
+            return Ok(());
+        }
+        if parents.iter().all(|parent| {
+            self.rejections.pending_parent_time_bound.excludes(parent.time)
+        }) {
+            self.database.ensure_usable()?;
             return Ok(());
         }
         // Discover the constraints once for the entire admitted batch. Most
@@ -751,18 +828,13 @@ where
             let parent_alias = self.node_aliases.get(&parent.node).copied().ok_or(
                 Error::InvalidStoredValue("pending edge parent alias must exist"),
             )?;
-            let values = pending_edge_values(
-                tx_node_alias,
-                tx.tx_id,
-                parent_alias,
-                *parent,
+            self.stage_pending_parent_constraint(
+                batch,
+                (tx_node_alias, tx.tx_id),
+                (parent_alias, *parent),
                 coordinate,
+                tx_already_known,
             )?;
-            if tx_already_known {
-                batch.update("jazz_pending_edges", values);
-            } else {
-                batch.insert("jazz_pending_edges", values);
-            }
         }
         if matches!(fate, Fate::Accepted) {
             self.rejections.child_txs_by_parent.remove(&tx.tx_id);

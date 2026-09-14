@@ -46,7 +46,7 @@ struct EvaluationSession<'a> {
     relevant_nodes: HashSet<NodeId>,
     roots: HashSet<NodeId>,
     outputs: HashMap<NodeId, RecordDeltas>,
-    pending_outputs: HashMap<NodeId, RecordDeltas>,
+    pending_outputs: HashMap<NodeId, Arc<RecordDeltas>>,
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
@@ -1449,22 +1449,27 @@ impl<'a> EvaluationSession<'a> {
                         // requests; collapsing it with `Poll::Pending` causes a
                         // self-waking replay loop that can never hydrate a large
                         // indirect literal.
-                        Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
+                        // Interior results are already retained in the memo;
+                        // roots can borrow the same immutable bytes below.
+                        Poll::Ready(result) => result,
                     }
                 };
                 match result {
-                    Ok(mut records) => {
+                    Ok(records) => {
                         if self.work_queue.is_root(node) {
                             let mut materialized = Vec::with_capacity(records.deltas.len());
                             let mut blocked = false;
                             for delta in &records.deltas {
-                                match crate::large_values::materialize_record_attempt(
+                                match crate::large_values::materialize_record_borrowed_attempt(
                                     &records.descriptor,
                                     delta.raw(),
                                     &mut self.evaluation_inputs,
                                 ) {
                                     Ok(record) => materialized.push(RecordDelta {
-                                        record: record.into(),
+                                        record: match record {
+                                            std::borrow::Cow::Borrowed(_) => delta.record.clone(),
+                                            std::borrow::Cow::Owned(record) => record.into(),
+                                        },
                                         weight: delta.weight,
                                     }),
                                     Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
@@ -1503,8 +1508,13 @@ impl<'a> EvaluationSession<'a> {
                                 }
                                 continue;
                             }
-                            records.deltas = materialized;
-                            self.outputs.insert(node, records);
+                            self.outputs.insert(
+                                node,
+                                RecordDeltas {
+                                    descriptor: records.descriptor,
+                                    deltas: materialized,
+                                },
+                            );
                         }
                         self.work_queue.complete(node);
                     }

@@ -181,6 +181,8 @@ pub struct MaintainedSubscriptionViewMetricsFootprint {
     pub result_payloads_bytes: usize,
     /// Approximate heap bytes retained by WeightedVersionIndex.
     pub versions_bytes: usize,
+    /// Approximate heap bytes retained by the physical support frontier and journal.
+    pub supporting_frontier_bytes: usize,
     /// Approximate heap bytes retained by ReplacementIndex.
     pub replacements_bytes: usize,
     /// Approximate heap bytes retained by recursive app-row roots.
@@ -215,6 +217,7 @@ impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionVi
             result_weights_bytes: footprint.result_weights_bytes,
             result_payloads_bytes: footprint.result_payloads_bytes,
             versions_bytes: footprint.versions_bytes,
+            supporting_frontier_bytes: footprint.supporting_frontier_bytes,
             replacements_bytes: footprint.replacements_bytes,
             structured_app_rows_bytes: footprint.structured_app_rows_bytes,
             total_heap_bytes: footprint.total_heap_bytes,

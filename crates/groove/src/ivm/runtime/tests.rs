@@ -967,6 +967,53 @@ fn album_count_graph() -> GraphBuilder {
     )
 }
 
+// Internal work proof: public rows cannot reveal the discarded second render
+// or redundant collector arrangement. Shared rehydration is also forced here
+// by evicting a pure memo, which has no public database operation.
+#[futures_test::test]
+async fn singleton_root_hydration_encodes_once_without_a_second_arrangement() {
+    let schema = albums_schema();
+    let albums = schema.table("albums").unwrap().record_schema();
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    write_two_album_rows(&storage, &albums).await;
+    let graph = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("albums"),
+        ["id"],
+        [
+            crate::ivm::CollectByField::named("id"),
+            crate::ivm::CollectByField::named("title"),
+        ],
+        Vec::<crate::ivm::TopByOrder>::new(),
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let mut subscriptions = Vec::new();
+    for _ in 0..3 {
+        runtime.evict_eval_memo_for_tests(0, 0);
+        crate::records::RECORD_ENCODE_COUNT.with(|count| count.set(0));
+        let subscription = runtime
+            .subscribe_one_sink(graph.clone(), &storage)
+            .await
+            .unwrap();
+        let encodes = crate::records::RECORD_ENCODE_COUNT.with(|count| count.get());
+        assert_eq!(
+            encodes, 2,
+            "one render per root, not one per output channel"
+        );
+        assert_eq!(
+            subscription.recv().unwrap().to_values().unwrap(),
+            vec![
+                (vec![Value::U64(1), Value::String("one".into())], 1),
+                (vec![Value::U64(2), Value::String("two".into())], 1),
+            ]
+        );
+        assert_eq!(runtime.stats().arrangement_count, 0);
+        subscriptions.push(subscription);
+    }
+}
+
 #[futures_test::test]
 async fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     let schema = albums_schema();

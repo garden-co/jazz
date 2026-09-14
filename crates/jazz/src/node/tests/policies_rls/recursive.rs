@@ -702,9 +702,11 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
     );
     assert_view_update_only_ships_rows(&initial, BTreeSet::new());
 
+    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
+    wire_membership.observe(&initial);
     let mut previous_docs = BTreeSet::new();
     let mut doc_delta = |update: &SyncMessage| {
-        let rows = canonical_view_update_rows(update);
+        let rows = canonical_view_update_rows(&wire_membership.observe(update));
         assert!(rows.iter().all(|(table, _, _)| table.as_str() == "docs"));
         let current = rows.into_iter().map(|(_, row, _)| row).collect::<BTreeSet<_>>();
         let added = current.difference(&previous_docs).copied().collect();

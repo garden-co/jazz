@@ -90,7 +90,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     };
     assert!(!peer_payload_inventory.opening_pending);
     let inputs = program_fact_adds
-        .iter()
+        .added_rows().iter()
         .map(|input| input)
         .collect::<Vec<_>>();
     assert_eq!(inputs.len(), 1);

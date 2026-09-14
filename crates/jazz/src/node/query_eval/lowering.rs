@@ -528,7 +528,7 @@ where
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
-        covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+        covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
@@ -567,7 +567,7 @@ where
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
-        covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+        covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
     ) -> Result<QueryProgram, Error> {

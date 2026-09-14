@@ -559,19 +559,21 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
             durability: DurabilityTier::Global,
         })],
         peer_payload_inventory: Default::default(),
-        supporting_rows: vec![jazz::protocol::SupportingRow {
-            physical_table,
-            version_table: "todos".to_owned().into(),
-            row,
-            version: RowVersionRefEntry {
-                tx: tx_id,
-                schema_version: Some(schema.version_id()),
-                layer: ResultRowLayer::Content,
-                batch: Some(tx_id),
-                branch_or_prefix: Some(vec![1, 0, 0, 0, 0]),
-                row_digest: None,
+        supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(vec![
+            jazz::protocol::SupportingRow {
+                physical_table,
+                version_table: "todos".to_owned().into(),
+                row,
+                version: RowVersionRefEntry {
+                    tx: tx_id,
+                    schema_version: Some(schema.version_id()),
+                    layer: ResultRowLayer::Content,
+                    batch: Some(tx_id),
+                    branch_or_prefix: Some(vec![1, 0, 0, 0, 0]),
+                    row_digest: None,
+                },
             },
-        }],
+        ]),
     });
     assert!(
         block_on(worker.stage_upstream_message_for_test(&upstream, incomplete))
@@ -2799,7 +2801,7 @@ fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() 
     assert!(
         authority_updates
             .iter()
-            .any(|update| { !update.supporting_rows.is_empty() }),
+            .any(|update| { !update.supporting_rows.added_rows().is_empty() }),
         "authority sent no typed covered input: {authority_updates:?}",
     );
 

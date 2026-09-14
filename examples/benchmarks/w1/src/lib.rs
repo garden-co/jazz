@@ -64,9 +64,13 @@ pub struct ResumeFixture {
     subscription: SubscriptionStream,
     cursor: Option<ResumeCursor>,
     fresh_post_update_bytes: usize,
-    updated_task: RowUuid,
     task_schema: jazz::schema::TableSchema,
+    rows: ResumeRows,
+    expected_rows: ResumeRows,
+    resume_events: Vec<SubscriptionEvent>,
 }
+
+type ResumeRows = BTreeMap<RowUuid, BTreeMap<String, Option<Value>>>;
 
 struct ByteDuplexTransport {
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
@@ -153,6 +157,12 @@ impl Fixture<MemoryStorage> {
 impl ResumeFixture {
     pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
         let writer = Fixture::<MemoryStorage>::memory(tasks, comments, activity_events);
+        let task_schema = schema(false)
+            .tables()
+            .iter()
+            .find(|table| table.name == "tasks")
+            .unwrap()
+            .clone();
         let server = open_memory_node(schema(false), 0x72, true);
         let client = open_memory_node(schema(false), 0x73, false);
 
@@ -202,7 +212,7 @@ impl ResumeFixture {
             },
         ))
         .expect("subscribe W1 resumed tasks");
-        let mut initial_rows = 0;
+        let mut rows = ResumeRows::new();
         for _ in 0..512 {
             block_on(client.tick()).expect("announce W1 resumed tasks subscription");
             block_on(server.tick()).expect("serve W1 full task snapshot");
@@ -210,20 +220,30 @@ impl ResumeFixture {
             block_on(client.tick()).expect("materialize W1 full task snapshot");
             pump_aux(&client_pump, &server_pump);
             while let Some(event) = subscription.try_next_event() {
-                initial_rows += event_row_count(event);
+                apply_resume_event(&mut rows, &task_schema, event);
             }
-            if initial_rows == tasks {
+            if rows.len() == tasks {
                 break;
             }
         }
-        assert_eq!(initial_rows, tasks);
+        assert_eq!(rows.len(), tasks);
         let initial_snapshot_bytes = block_on(subscriber.lock())
             .last_resume_bytes()
             .expect("W1 full snapshot bytes");
         assert!(initial_snapshot_bytes > 0);
         block_on(server.tick()).expect("refresh W1 served cursor state");
         block_on(client.tick()).expect("apply W1 served cursor state");
-        while subscription.try_next_event().is_some() {}
+        while let Some(event) = subscription.try_next_event() {
+            apply_resume_event(&mut rows, &task_schema, event);
+        }
+        assert_eq!(rows.len(), tasks);
+        let mut expected_rows = rows.clone();
+        let target = expected_rows
+            .get_mut(&writer.task_transition_row)
+            .expect("updated task was in the initial snapshot");
+        let expected_status = Some(Value::String("resume-canary".to_owned()));
+        assert_ne!(target.get("status"), Some(&expected_status));
+        target.insert("status".to_owned(), expected_status);
         let cursor = block_on(subscriber.lock())
             .take_resume_cursor()
             .expect("take W1 subscriber resume cursor");
@@ -281,13 +301,10 @@ impl ResumeFixture {
             subscription,
             cursor: Some(cursor),
             fresh_post_update_bytes,
-            updated_task: writer.task_transition_row,
-            task_schema: schema(false)
-                .tables()
-                .iter()
-                .find(|table| table.name == "tasks")
-                .unwrap()
-                .clone(),
+            task_schema,
+            rows,
+            expected_rows,
+            resume_events: Vec::new(),
         }
     }
 
@@ -312,41 +329,82 @@ impl ResumeFixture {
             .expect("W1 resume catch-up bytes");
         let event =
             block_on(self.subscription.next_event()).expect("W1 resume stream remains open");
-        let mut changed = self.assert_resume_event(event);
+        self.resume_events.push(event);
         while let Some(event) = self.subscription.try_next_event() {
-            changed += self.assert_resume_event(event);
+            self.resume_events.push(event);
         }
-        assert_eq!(changed, 1);
+        resume_bytes
+    }
+
+    /// Correctness-only validation, deliberately outside the timed closure.
+    /// The crate tests exercise the same benchmark sizes and resume path.
+    pub fn assert_resume_receipt(&mut self, resume_bytes: usize) {
+        assert!(!self.resume_events.is_empty());
+        for event in self.resume_events.drain(..) {
+            apply_resume_event(&mut self.rows, &self.task_schema, event);
+        }
+        // A reconnect may publish a complete reset even when IVM computed one
+        // terminal change. Assert the actual application result: identical
+        // membership and every column unchanged except the one expected status.
+        // Full-reset reconnect cost remains measured here (follow-up #2372).
+        assert_eq!(self.rows, self.expected_rows);
         assert!(resume_bytes > 0);
         assert!(
             resume_bytes <= self.fresh_post_update_bytes,
             "resume must not exceed the equivalent fresh post-update response: resume={resume_bytes}, fresh={}",
             self.fresh_post_update_bytes
         );
-        resume_bytes
     }
+}
 
-    fn assert_resume_event(&self, event: SubscriptionEvent) -> usize {
-        if let SubscriptionEvent::Delta {
-            added,
-            updated,
-            removed,
-            settled,
-            ..
-        } = &event
-        {
-            assert!(*settled);
-            assert!(added.is_empty());
-            assert!(removed.is_empty());
-            for update in updated {
-                assert_eq!(update.row.row_uuid(), self.updated_task);
-                assert_eq!(
-                    update.row.cell(&self.task_schema, "status"),
-                    Some(Value::String("resume-canary".to_owned()))
-                );
-            }
+fn apply_resume_event(
+    rows: &mut ResumeRows,
+    task_schema: &jazz::schema::TableSchema,
+    event: SubscriptionEvent,
+) {
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        settled,
+        ..
+    } = event
+    else {
+        panic!("W1 subscription must remain open and authorized: {event:?}");
+    };
+    assert!(settled);
+    if reset {
+        rows.clear();
+        assert!(updated.is_empty(), "reset must supply complete rows");
+    } else {
+        for row in removed {
+            assert_eq!(row.table, "tasks");
+            assert!(rows.remove(&row.row_uuid).is_some());
         }
-        event_row_count(event)
+    }
+    for (is_update, output) in added
+        .into_iter()
+        .map(|row| (false, row))
+        .chain(updated.into_iter().map(|row| (true, row)))
+    {
+        assert_eq!(output.row.table(), "tasks");
+        let cells = task_schema
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.name().to_owned(),
+                    output.row.cell(task_schema, column.name()),
+                )
+            })
+            .collect();
+        let previous = rows.insert(output.row.row_uuid(), cells);
+        assert_eq!(
+            previous.is_some(),
+            is_update,
+            "duplicate add or unknown update"
+        );
     }
 }
 
@@ -1089,6 +1147,19 @@ mod ahead_current_tests {
     fn bounded_receipt_reads_exact_local_and_edge_candidate_depth() {
         for tier in [DurabilityTier::Local, DurabilityTier::Edge] {
             AheadCurrentFixture::new(3, tier).assert_receipt();
+        }
+    }
+
+    /// Exercises the benchmark's exact public-result assertion outside timing.
+    /// Alice seeds, disconnects Bob, updates one task, then Bob resumes. This
+    /// intentionally reuses the byte-wire benchmark harness so CI checks the
+    /// very same reset/delta consumer; it is not a second transport model.
+    #[test]
+    fn resumed_task_update_preserves_every_other_row_and_column() {
+        for (tasks, comments, activity) in [(300, 1_200, 900), (500, 2_000, 1_500)] {
+            let mut fixture = ResumeFixture::memory(tasks, comments, activity);
+            let resume_bytes = fixture.resume_once();
+            fixture.assert_resume_receipt(resume_bytes);
         }
     }
 }

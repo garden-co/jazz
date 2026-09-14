@@ -76,21 +76,20 @@ where
                 if self.catalogue_activation_failed {
                     return Err(Error::CatalogueActivationFailed);
                 }
-                    if ingest_context.is_some() {
-                        let descriptors = version_indirect_descriptors(&versions);
-                        self.current_staged_ids_for_descriptors(&descriptors, true)
-                            .await?;
-                    }
-                    let now_ms = if ingest_context.is_some() {
-                        authority_wall_clock_ms()?
-                    } else {
-                        tx.tx_id.time.physical_ms()
-                    };
-                    // Commit admission owns a large policy/storage state machine.
-                    // Keep it out of the catalogue dispatcher's inline state.
-                    Box::pin(self.ingest_commit_unit_with_context(
-                        tx, versions, now_ms, ingest_context,
-                    )).await
+                if ingest_context.is_some() {
+                    let descriptors = version_indirect_descriptors(&versions);
+                    self.current_staged_ids_for_descriptors(&descriptors, true)
+                        .await?;
+                }
+                let now_ms = if ingest_context.is_some() {
+                    authority_wall_clock_ms()?
+                } else {
+                    tx.tx_id.time.physical_ms()
+                };
+                // Commit admission owns a large policy/storage state machine.
+                // Keep it out of the catalogue dispatcher's inline state.
+                Box::pin(self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context))
+                    .await
             });
         }
         Box::pin(async move {
@@ -105,21 +104,23 @@ where
             }
             match message {
                 SyncMessage::AuthorityPublication(publication) => {
-                    if !ingest_context.is_some_and(|context|
-                        matches!(context.trust, CommitUnitTrust::TrustedAuthority | CommitUnitTrust::TrustedAdmin)
-                            && !context.edge_authority)
-                    {
+                    if !ingest_context.is_some_and(|context| {
+                        matches!(
+                            context.trust,
+                            CommitUnitTrust::TrustedAuthority | CommitUnitTrust::TrustedAdmin
+                        ) && !context.edge_authority
+                    }) {
                         return Err(Error::UnsupportedSyncMessage(
                             "authority publication requires an authenticated edge-to-core authority link",
                         ));
                     }
                     for unit in &publication.commits {
                         let descriptors = version_indirect_descriptors(&unit.versions);
-                        self.current_staged_ids_for_descriptors(&descriptors, true).await?;
+                        self.current_staged_ids_for_descriptors(&descriptors, true)
+                            .await?;
                     }
-                    self.ingest_edge_authority_publication(
-                        publication, authority_wall_clock_ms()?,
-                    ).await
+                    self.ingest_edge_authority_publication(publication, authority_wall_clock_ms()?)
+                        .await
                 }
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(
@@ -271,13 +272,18 @@ where
                 )),
                 SyncMessage::SessionClaims { identity, claims } => {
                     if let Some(context) = ingest_context
-                        && matches!(context.trust, CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority)
+                        && matches!(
+                            context.trust,
+                            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority
+                        )
                     {
                         self.set_session_claims(identity, claims);
                     }
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
-                SyncMessage::CommitUnit { .. } => unreachable!("commit units dispatch before the general message future"),
+                SyncMessage::CommitUnit { .. } => {
+                    unreachable!("commit units dispatch before the general message future")
+                }
                 SyncMessage::FateUpdate {
                     tx_id,
                     fate,
@@ -297,7 +303,7 @@ where
                     supporting_rows: program_fact_adds,
                 }) => {
                     self.apply_view_update(ViewUpdateParts {
-            wire_rows: Some(program_fact_adds),
+                        wire_rows: Some(program_fact_adds),
                         subscription,
                         settled_through,
                         defer_settlement: false,
@@ -308,8 +314,6 @@ where
                         opening_pending: peer_payload_inventory.opening_pending,
                         result_member_adds: Vec::new(),
                         result_member_removes: Vec::new(),
-                        program_fact_adds: Vec::new(),
-                        program_fact_removes: Vec::new(),
                     })
                     .await?;
                     Ok(PublicationOutcome::settled(Vec::new()))
@@ -672,10 +676,8 @@ where
                 // replace them with identities inherited from the source schema,
                 // so allocate against copies and commit only identities retained
                 // by the durable staged mapping.
-                let mut provisional_next_table_id =
-                    self.catalogue.next_physical_table_id;
-                let mut provisional_next_column_id =
-                    self.catalogue.next_physical_column_id;
+                let mut provisional_next_table_id = self.catalogue.next_physical_table_id;
+                let mut provisional_next_column_id = self.catalogue.next_physical_column_id;
                 let fresh = allocate_provisional_physical_mapping(
                     &publication.schema.schema,
                     publication.physical_identities.clone(),
@@ -687,10 +689,8 @@ where
                     &publication.schema,
                     &fresh,
                 )?;
-                let mut next_physical_table_id =
-                    self.catalogue.next_physical_table_id;
-                let mut next_physical_column_id =
-                    self.catalogue.next_physical_column_id;
+                let mut next_physical_table_id = self.catalogue.next_physical_table_id;
+                let mut next_physical_column_id = self.catalogue.next_physical_column_id;
                 for table in mapping.tables.values() {
                     next_physical_table_id = next_physical_table_id.max(
                         table
@@ -700,14 +700,10 @@ where
                             .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?,
                     );
                     for column in table.columns.values() {
-                        next_physical_column_id = next_physical_column_id.max(
-                            column
-                                .0
-                                .checked_add(1)
-                                .ok_or(Error::InvalidStoredValue(
-                                    "physical column id exhausted",
-                                ))?,
-                        );
+                        next_physical_column_id =
+                            next_physical_column_id.max(column.0.checked_add(1).ok_or(
+                                Error::InvalidStoredValue("physical column id exhausted"),
+                            )?);
                     }
                 }
                 let staged = StagedSchemaLineage {
@@ -717,10 +713,7 @@ where
                     mapping,
                 };
                 let mut candidate_mappings = self.catalogue.physical_mappings.clone();
-                candidate_mappings.insert(
-                    staged.publication.schema.id,
-                    staged.mapping.clone(),
-                );
+                candidate_mappings.insert(staged.publication.schema.id, staged.mapping.clone());
                 let mut candidate_aliases = self.catalogue.schema_version_aliases.clone();
                 candidate_aliases.insert(staged.publication.schema.id, staged.alias);
                 validate_scalar_enum_case_provenance(&candidate_mappings, &candidate_aliases)?;
@@ -1213,7 +1206,8 @@ where
                         if !physical_value_epoch_is_compatible(
                             &source_column.column_type,
                             &target_column.column_type,
-                        ) || source_column.large_value_kind != target_column.large_value_kind {
+                        ) || source_column.large_value_kind != target_column.large_value_kind
+                        {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "column transform changes physical value or large-value semantic kind",
                             ));

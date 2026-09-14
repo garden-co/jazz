@@ -782,7 +782,7 @@ where
                     !self.query.retained_root_window_sources.contains_key(key)
                         && (state.live_settled
                             || state.settled_through.is_some()
-                            || !state.settled_program_facts.is_empty())
+                            || !state.covered_input_versions.is_empty())
                 })
                 .count(),
             self.query
@@ -790,7 +790,7 @@ where
                 .iter()
                 .filter(|(key, state)| {
                     !self.query.retained_root_window_sources.contains_key(*key)
-                        && !state.settled_program_facts.is_empty()
+                        && !state.covered_input_versions.is_empty()
                 })
                 .count(),
         )
@@ -829,12 +829,12 @@ where
             })
     }
 
-    /// Forget a recovered authority result that has no live wire owner.
+    /// Forget an in-memory authority result that has no live wire owner.
     ///
-    /// Settled result membership is durable, but relay registration ownership
-    /// is intentionally process-local. A reopened relay therefore cannot use
-    /// an ownerless `RelayAuthoritySession` view to satisfy a new downstream
-    /// usage site: it must first receive a current authoritative reset.
+    /// Retained membership must not outlive its relay registration owner.
+    /// An ownerless `RelayAuthoritySession` view cannot satisfy a new downstream
+    /// usage site: it must first receive a current authoritative reset. Neither
+    /// membership nor registration ownership survives a process restart.
     pub(crate) fn invalidate_ownerless_settled_result_view(
         &mut self,
         binding_view_key: BindingViewKey,
@@ -893,7 +893,7 @@ where
         &mut self,
         key: &AuthorityResultKey,
         schema: SchemaVersionId,
-    ) -> Result<BTreeMap<ProgramFactEntry, VersionRow>, Error> {
+    ) -> Result<BTreeMap<crate::protocol::SupportingRow, VersionRow>, Error> {
         let inputs = self
             .query
             .authority_results
@@ -909,7 +909,7 @@ where
                 .covered_input_version(&input, schema)
                 .await?
                 .ok_or(Error::MissingTransaction(input.version.tx))?;
-            witnesses.insert(ProgramFactEntry::CoveredInput(input), version);
+            witnesses.insert(input, version);
         }
         Ok(witnesses)
     }
@@ -927,10 +927,16 @@ where
             .into_iter()
             .flat_map(|state| state.covered_input_versions.values())
             .filter(|input| {
-                input.source.table.as_str() == table
-                    && input.source.path == [crate::protocol::ProgramSourceRole::Root]
+                self.query
+                    .registered_shapes
+                    .get(&key.binding_view.shape_id)
+                    .and_then(|shape| {
+                        self.scope_physical_table(shape.schema_version(), table)
+                            .ok()
+                    })
+                    == Some(input.physical_table)
             })
-            .map(|input| input.source_row)
+            .map(|input| input.row)
             .collect()
     }
 
@@ -1094,8 +1100,8 @@ where
         {
             return Ok(None);
         }
-        // Durable payload possession survives restart; live authority does not.
-        // Advertising this cursor only deduplicates bodies. The serving peer
+        // This process's unevicted receipt may deduplicate bodies on reconnect;
+        // restart restores neither this cursor nor scope. The serving peer
         // must still send a fresh complete supporting set, and ordinary receipt
         // admission/repair must finish before the query becomes confirmed.
         if let Some(position) = self
@@ -1123,7 +1129,7 @@ where
                 },
             }));
         }
-        // Without a durable cursor, only a live exact receipt can justify an
+        // Without a process-local cursor, only a live exact receipt can justify an
         // exact declaration. Locally authored/cached rows alone cannot do so.
         if !self.has_settled_authority_result(&authority_result_key) {
             return Ok(None);
