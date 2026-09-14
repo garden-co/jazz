@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rebuild the independently cached artifacts used by local Jazz tooling.
+# Rebuild native artifacts or a complete, matching local Jazz workspace.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,13 +9,15 @@ usage() {
   cat <<'EOF'
 Usage: dev/rebuild-artifacts.sh [tools] [server] [napi] [wasm] [wasm-fast]
 
-With no arguments, rebuild every layer. Specify one or more layers to skip
-expensive layers such as wasm.
+With no arguments, run pnpm build:core to produce a matching release workspace.
+Specify one or more layers to rebuild those layers only. The tools layer requires
+expectations from a prior pnpm build:core or pnpm build:correctness-artifacts;
+individual native rebuilds do not assemble a matching TypeScript expectation pair.
 EOF
 }
 
 if (($# == 0)); then
-  layers=(tools server napi wasm)
+  exec pnpm build:core
 else
   layers=("$@")
 fi

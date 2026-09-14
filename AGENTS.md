@@ -112,10 +112,16 @@ and Jazz Tools `src/runtime/native-artifact-fingerprint-{napi,wasm}.ts` are
 ignored build outputs, never source-controlled digest updates. After a fresh
 checkout or branch change, use `pnpm build:core` for release workspace artifacts
 or `pnpm build:correctness-artifacts` before TypeScript correctness consumers.
-Both paths regenerate expectations from the selected native artifacts; release
+Root `pnpm build` (also `build:all`) and `pnpm build:ci` likewise build both
+native prerequisites before deriving expectations and compiling TypeScript.
+`dev/rebuild-artifacts.sh` without arguments delegates to `pnpm build:core`;
+its explicit layers are partial rebuilds requiring an already assembled workspace.
+These paths regenerate expectations from the selected native artifacts; release
 CI derives them from the verified downloaded manifests before compiling Jazz
 Tools. Keep runtime mismatch checks and producer/consumer provenance checks
 enabled. The handwritten `native-artifact-fingerprints.ts` remains source.
+Tracked declaration-only `.d.ts` contracts support source-only checks such as RN
+scaffolds; they provide no runtime values and cannot replace generated artifacts.
 
 **Correctness-artifact cache boundary.** Native/WASM generations are producer
 state, not Turbo cache entries. A NAPI generation can retain many GiB of Cargo
