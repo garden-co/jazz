@@ -175,6 +175,75 @@ fn late_initial_drain_resets_the_complete_retained_source_closure() {
     assert_eq!(rows, BTreeSet::from([first, second]));
 }
 
+// This internal receipt pins a current-runtime receiver with no initial event
+// so it can exercise the rehydrate admission branch without a wall-clock
+// storage race. The public API cannot inspect the retained receiver identity or
+// rehydrate counter needed to prove that an unrelated wake does not replace it.
+#[test]
+fn pending_current_maintained_rehydrate_reuses_the_existing_runtime() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x77));
+    let tx_id = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x78), 1_000).cells(title_cells("pending")),
+        )
+        .unwrap();
+    accept_global(&mut core, tx_id, 1);
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = subscription_key(&shape, &binding);
+    let mut peer = PeerState::new();
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let maintained_id =
+        maintained_subscription_id(&peer, subscription).expect("maintained runtime is installed");
+    let rehydrate_attempts = peer.maintained_subscription_view_metrics().rehydrate_attempts;
+
+    peer.publication_states
+        .get_mut(&subscription)
+        .unwrap()
+        .maintained_subscription_view
+        .as_mut()
+        .unwrap()
+        .initial_received = false;
+    assert!(
+        peer.has_current_pending_initial_maintained_subscription(&core, subscription),
+        "test setup keeps the pending receiver on the current Groove runtime"
+    );
+
+    let update = peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            Default::default(),
+        )
+        .resolve()
+        .unwrap();
+    assert!(
+        update.is_none(),
+        "the retained receiver stays pending when no initial event is available"
+    );
+
+    assert_eq!(
+        maintained_subscription_id(&peer, subscription),
+        Some(maintained_id),
+        "a current-runtime pending receiver is not replaced"
+    );
+    assert_eq!(
+        peer.maintained_subscription_view_metrics().rehydrate_attempts,
+        rehydrate_attempts,
+        "draining a pending receiver is not a new rehydrate"
+    );
+    assert!(
+        !peer.publication_states[&subscription]
+            .maintained_subscription_view
+            .as_ref()
+            .unwrap()
+            .initial_received,
+        "the existing receiver remains pending for its initial drain"
+    );
+}
+
 /// Wire closure deduplicates physical witnesses while self-join aliases remain
 /// distinct inside the evaluator; deletion still carries its authorized witness.
 #[test]

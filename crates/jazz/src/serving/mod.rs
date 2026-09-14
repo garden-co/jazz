@@ -374,6 +374,20 @@ impl ShellDb {
             Self::Durable(db) => db.set_tick_scheduler(scheduler),
         }
     }
+    #[cfg(any(test, feature = "testing"))]
+    fn query_runtime_waker_for_test(&self) -> Option<std::task::Waker> {
+        match self {
+            Self::Memory(db) => db.query_runtime_waker_for_test(),
+            Self::Durable(db) => db.query_runtime_waker_for_test(),
+        }
+    }
+
+    fn mark_subscriber_connections_dirty_after_query_runtime_wake(&self) {
+        match self {
+            Self::Memory(db) => db.mark_subscriber_connections_dirty_after_query_runtime_wake(),
+            Self::Durable(db) => db.mark_subscriber_connections_dirty_after_query_runtime_wake(),
+        }
+    }
 
     fn open_catalogue_uninitialized_edge(
         identity: DbIdentity,
@@ -713,6 +727,23 @@ impl ShellDb {
         match self {
             Self::Memory(db) => db.tick_stats().await.map_err(Into::into),
             Self::Durable(db) => db.tick_stats().await.map_err(Into::into),
+        }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(dead_code)]
+    fn maintained_subscription_rehydrate_attempts_for_test(&self) -> u64 {
+        match self {
+            Self::Memory(db) => db.maintained_subscription_rehydrate_attempts_for_test(),
+            Self::Durable(db) => db.maintained_subscription_rehydrate_attempts_for_test(),
+        }
+    }
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(dead_code)]
+    pub(crate) fn subscriber_dirty_epoch_for_test(&self) -> u64 {
+        match self {
+            Self::Memory(db) => db.subscriber_dirty_epoch_for_test(),
+            Self::Durable(db) => db.subscriber_dirty_epoch_for_test(),
         }
     }
 
@@ -1600,6 +1631,27 @@ impl InMemoryServerShell {
             }
         }
         Ok(())
+    }
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(dead_code)]
+    pub(super) fn query_runtime_waker_for_test(&self) -> Option<std::task::Waker> {
+        self.db.query_runtime_waker_for_test()
+    }
+    pub(super) fn mark_subscriber_connections_dirty_after_query_runtime_wake(&self) {
+        self.db
+            .mark_subscriber_connections_dirty_after_query_runtime_wake();
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(dead_code)]
+    pub(super) fn maintained_subscription_rehydrate_attempts_for_test(&self) -> u64 {
+        self.db
+            .maintained_subscription_rehydrate_attempts_for_test()
+    }
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(dead_code)]
+    pub(crate) fn subscriber_dirty_epoch_for_test(&self) -> u64 {
+        self.db.subscriber_dirty_epoch_for_test()
     }
 
     /// Service the shell database's accepted subscriber connections once.

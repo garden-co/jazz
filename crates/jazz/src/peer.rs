@@ -200,6 +200,9 @@ pub struct MaintainedSubscriptionViewMetrics {
     pub unsupported_skips_out: u64,
     /// Non-empty Groove delta batches drained by maintained subscription views.
     pub delta_batches_in: u64,
+    /// New maintained subscription rehydrations started after readiness.
+    #[cfg(any(test, feature = "testing"))]
+    pub rehydrate_attempts: u64,
     /// Latest maintained subscription view index sizes observed for this peer.
     pub footprint: MaintainedSubscriptionViewMetricsFootprint,
 }
