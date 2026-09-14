@@ -57,6 +57,12 @@ pub type AbiBytes = Vec<u8>;
 pub struct ServerSession {
     transport: usize,
     identity: AuthorSubject,
+    generation: u64,
+}
+
+#[derive(Debug)]
+enum SessionGenerationAllocationError {
+    Exhausted,
 }
 
 /// Capability selected by the server only after authenticating a WebSocket
@@ -215,6 +221,7 @@ pub struct InMemoryServerShell {
     next_wire_upstream_connection_id: u64,
     resume_cursors: BTreeMap<u64, (AuthorSubject, ResumeCursor)>,
     next_resume_token: u64,
+    next_session_generation: u64,
     runtime_schema_state: RuntimeSchemaState,
     metrics: InMemoryServerShellMetrics,
     drain_state: DrainState,
@@ -287,7 +294,7 @@ struct ServerSessionState {
     transport: SharedWireTransport,
     auxiliary_pump: crate::db::PeerIoPump,
     identity: AuthorSubject,
-    epoch: u64,
+    generation: u64,
     resume_status: ServerResumeStatus,
 }
 
@@ -344,7 +351,7 @@ impl fmt::Debug for ServerSessionState {
         f.debug_struct("ServerSessionState")
             .field("transport", &self.transport)
             .field("identity", &self.identity)
-            .field("epoch", &self.epoch)
+            .field("generation", &self.generation)
             .field("resume_status", &self.resume_status)
             .finish_non_exhaustive()
     }
@@ -908,6 +915,7 @@ impl InMemoryServerShell {
             next_wire_upstream_connection_id: 1,
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
+            next_session_generation: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
             metrics: InMemoryServerShellMetrics::default(),
             drain_state: DrainState::Running,
@@ -954,6 +962,7 @@ impl InMemoryServerShell {
             next_wire_upstream_connection_id: 1,
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
+            next_session_generation: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
             metrics: InMemoryServerShellMetrics::default(),
             drain_state: DrainState::Running,
@@ -992,12 +1001,12 @@ impl InMemoryServerShell {
             next_wire_upstream_connection_id: 1,
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
+            next_session_generation: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
             metrics: InMemoryServerShellMetrics::default(),
             drain_state: DrainState::Running,
         }))
     }
-
     /// Return the complete authority catalogue for the authenticated
     /// snapshot-only websocket exchange.
     pub(crate) fn trusted_catalogue_snapshot(
@@ -1319,6 +1328,9 @@ impl InMemoryServerShell {
                 drain_state: self.drain_state,
             });
         }
+        let generation = self
+            .allocate_session_generation()
+            .map_err(|_| ShellError::Storage("server session generation exhausted".into()))?;
         let transport = SharedWireTransport::default();
         let transport_adapter = Box::new(WireTransportAdapter::new_with_session_context(
             transport.clone(),
@@ -1364,21 +1376,18 @@ impl InMemoryServerShell {
         if self.role == NodeRole::Edge {
             connection.set_partial_edge_query_host();
         }
-        let session_id = self.sessions.len();
         let auxiliary_pump = connection.io_pump();
-        self.sessions.push(Some(ServerSessionState {
+        let session_state = ServerSessionState {
             connection,
             transport,
             auxiliary_pump,
             identity,
-            epoch: 1,
+            generation,
             resume_status: ServerResumeStatus::Fresh,
-        }));
+        };
+        let session = self.insert_session_state(session_state);
         self.note_session_admitted();
-        Ok(ServerSession {
-            transport: session_id,
-            identity,
-        })
+        Ok(session)
     }
 
     /// Attach this edge shell to an upstream core transport.
@@ -1482,17 +1491,21 @@ impl InMemoryServerShell {
                 drain_state: self.drain_state,
             });
         }
-        let Some((identity, mut cursor)) = self.resume_cursors.remove(&resume.resume_token) else {
+        let Some(&(identity, _)) = self.resume_cursors.get(&resume.resume_token) else {
             return Err(ShellError::InvalidResumeToken(resume.resume_token));
         };
         if identity != resume.identity {
-            self.resume_cursors
-                .insert(resume.resume_token, (identity, cursor));
             return Err(ShellError::ResumeIdentityMismatch {
                 expected: identity,
                 actual: resume.identity,
             });
         }
+        let generation = self
+            .allocate_session_generation()
+            .map_err(|_| ShellError::Storage("server session generation exhausted".into()))?;
+        let Some((_, mut cursor)) = self.resume_cursors.remove(&resume.resume_token) else {
+            return Err(ShellError::InvalidResumeToken(resume.resume_token));
+        };
         // A resume token only restores in-process state. It still attaches a
         // fresh physical transport, so a scope-isolated relay retains its
         // immutable authenticated binding but not the capability epoch issued
@@ -1505,21 +1518,18 @@ impl InMemoryServerShell {
             BTreeMap::new(),
             Some(cursor),
         );
-        let session_id = self.sessions.len();
         let auxiliary_pump = connection.io_pump();
-        self.sessions.push(Some(ServerSessionState {
+        let session_state = ServerSessionState {
             connection,
             transport,
             auxiliary_pump,
             identity: resume.identity,
-            epoch: resume.resume_token.saturating_add(1),
+            generation,
             resume_status: ServerResumeStatus::Resumed,
-        }));
+        };
+        let session = self.insert_session_state(session_state);
         self.note_session_admitted();
-        Ok(ServerSession {
-            transport: session_id,
-            identity: resume.identity,
-        })
+        Ok(session)
     }
 
     /// Close a subscriber session without preserving a resume cursor.
@@ -1596,6 +1606,7 @@ impl InMemoryServerShell {
         frames: impl IntoIterator<Item = AbiBytes>,
     ) -> ShellResult<()> {
         for frame in frames {
+            self.validate_session(session)?;
             self.metrics.frames_received += 1;
             self.metrics.bytes_received += frame.len() as u64;
             let state = self.session_state(session)?;
@@ -1618,6 +1629,7 @@ impl InMemoryServerShell {
         frames: impl IntoIterator<Item = AbiBytes>,
     ) -> ShellResult<()> {
         for frame in frames {
+            self.validate_session(session)?;
             self.metrics.frames_received += 1;
             self.metrics.bytes_received += frame.len() as u64;
             let state = self.session_state(session)?;
@@ -1724,7 +1736,7 @@ impl InMemoryServerShell {
         let queues = state.transport.queues.borrow();
         Ok(AbiTransportDiagnostics {
             session_id: session.transport().to_string(),
-            epoch: state.epoch,
+            epoch: state.generation,
             resume_status: state.resume_status,
             queued_inbound_frames: queues.inbound.len(),
             queued_outbound_frames: queues.outbound.len(),
@@ -1754,6 +1766,38 @@ impl InMemoryServerShell {
         !matches!(self.drain_state, DrainState::Running)
     }
 
+    fn allocate_session_generation(
+        &mut self,
+    ) -> std::result::Result<u64, SessionGenerationAllocationError> {
+        let generation = self.next_session_generation;
+        let Some(next_generation) = generation.checked_add(1) else {
+            self.metrics.rejected_sessions += 1;
+            return Err(SessionGenerationAllocationError::Exhausted);
+        };
+        self.next_session_generation = next_generation;
+        Ok(generation)
+    }
+
+    fn insert_session_state(&mut self, state: ServerSessionState) -> ServerSession {
+        let session_id = self
+            .sessions
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or(self.sessions.len());
+        let identity = state.identity;
+        let generation = state.generation;
+        if session_id == self.sessions.len() {
+            self.sessions.push(Some(state));
+        } else {
+            self.sessions[session_id] = Some(state);
+        }
+        ServerSession {
+            transport: session_id,
+            identity,
+            generation,
+        }
+    }
+
     fn note_session_admitted(&mut self) {
         self.metrics.active_sessions += 1;
         self.metrics.total_sessions += 1;
@@ -1766,24 +1810,42 @@ impl InMemoryServerShell {
         }
     }
 
+    fn validate_session(&self, session: ServerSession) -> ShellResult<()> {
+        self.sessions
+            .get(session.transport())
+            .and_then(Option::as_ref)
+            .filter(|state| {
+                state.identity == session.identity() && state.generation == session.generation
+            })
+            .map(|_| ())
+            .ok_or(ShellError::InvalidSession)
+    }
+
     fn session_state(&self, session: ServerSession) -> ShellResult<&ServerSessionState> {
         self.sessions
             .get(session.transport())
             .and_then(Option::as_ref)
-            .filter(|state| state.identity == session.identity())
+            .filter(|state| {
+                state.identity == session.identity() && state.generation == session.generation
+            })
             .ok_or(ShellError::InvalidSession)
     }
 
     fn take_session(&mut self, session: ServerSession) -> ShellResult<ServerSessionState> {
-        let state = self
+        let valid = self
             .sessions
-            .get_mut(session.transport())
-            .and_then(Option::take)
-            .ok_or(ShellError::InvalidSession)?;
-        if state.identity != session.identity() {
+            .get(session.transport())
+            .and_then(Option::as_ref)
+            .is_some_and(|state| {
+                state.identity == session.identity() && state.generation == session.generation
+            });
+        if !valid {
             return Err(ShellError::InvalidSession);
         }
-        Ok(state)
+        self.sessions
+            .get_mut(session.transport())
+            .and_then(Option::take)
+            .ok_or(ShellError::InvalidSession)
     }
 }
 
@@ -2520,6 +2582,117 @@ mod tests {
             reopened.db.current_write_schema().unwrap().schema,
             schema_id
         );
+    }
+    #[test]
+    fn closed_session_slot_reuse_rejects_stale_different_identity_handles() {
+        let identity = DbIdentity {
+            node: crate::ids::NodeUuid::from_bytes([0x5e; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let mut shell =
+            InMemoryServerShell::start(InMemoryServerShellConfig::new(simple_schema(), identity))
+                .expect("session shell starts");
+        let first_identity = AuthorSubject::for_test_bytes([0x71; 16]);
+        let second_identity = AuthorSubject::for_test_bytes([0x72; 16]);
+
+        let first = shell
+            .accept_subscriber_session(first_identity)
+            .expect("first session is admitted");
+        assert_eq!(
+            (
+                shell.metrics_snapshot().active_sessions,
+                shell.metrics_snapshot().total_sessions
+            ),
+            (1, 1)
+        );
+        let first_diagnostics = shell
+            .session_diagnostics(first)
+            .expect("first diagnostics are available");
+
+        shell.close_session(first).expect("first session closes");
+        assert_eq!(
+            (
+                shell.metrics_snapshot().active_sessions,
+                shell.metrics_snapshot().total_sessions
+            ),
+            (0, 1)
+        );
+
+        let second = shell
+            .accept_subscriber_session(second_identity)
+            .expect("second session is admitted");
+        let second_diagnostics = shell
+            .session_diagnostics(second)
+            .expect("second diagnostics are available");
+        assert_eq!(second_diagnostics.session_id, first_diagnostics.session_id);
+        assert_ne!(second_diagnostics.epoch, first_diagnostics.epoch);
+
+        let metrics_before_stale = shell.metrics_snapshot();
+        assert_eq!(shell.close_session(first), Err(ShellError::InvalidSession));
+        assert_eq!(
+            shell.session_diagnostics(first),
+            Err(ShellError::InvalidSession)
+        );
+        assert_eq!(shell.metrics_snapshot(), metrics_before_stale);
+        assert_eq!(
+            shell
+                .session_diagnostics(second)
+                .expect("stale operations leave second session live"),
+            second_diagnostics
+        );
+
+        shell.close_session(second).expect("current session closes");
+        let metrics = shell.metrics_snapshot();
+        assert_eq!(metrics.active_sessions, 0);
+        assert_eq!(metrics.total_sessions, 2);
+    }
+
+    #[test]
+    fn reused_session_slot_rejects_stale_same_identity_aba_handles() {
+        let identity = DbIdentity {
+            node: crate::ids::NodeUuid::from_bytes([0x5e; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let mut shell =
+            InMemoryServerShell::start(InMemoryServerShellConfig::new(simple_schema(), identity))
+                .expect("session shell starts");
+        let session_identity = AuthorSubject::for_test_bytes([0x73; 16]);
+
+        let first = shell
+            .accept_subscriber_session(session_identity)
+            .expect("first session is admitted");
+        let first_diagnostics = shell
+            .session_diagnostics(first)
+            .expect("first diagnostics are available");
+        shell.close_session(first).expect("first session closes");
+
+        let second = shell
+            .accept_subscriber_session(session_identity)
+            .expect("second session is admitted");
+        let second_diagnostics = shell
+            .session_diagnostics(second)
+            .expect("second diagnostics are available");
+        assert_eq!(second_diagnostics.session_id, first_diagnostics.session_id);
+        assert_ne!(second_diagnostics.epoch, first_diagnostics.epoch);
+
+        let metrics_before_stale = shell.metrics_snapshot();
+        assert_eq!(shell.close_session(first), Err(ShellError::InvalidSession));
+        assert_eq!(
+            shell.session_diagnostics(first),
+            Err(ShellError::InvalidSession)
+        );
+        assert_eq!(shell.metrics_snapshot(), metrics_before_stale);
+        assert_eq!(
+            shell
+                .session_diagnostics(second)
+                .expect("stale ABA operations leave second session live"),
+            second_diagnostics
+        );
+
+        shell.close_session(second).expect("current session closes");
+        let metrics = shell.metrics_snapshot();
+        assert_eq!(metrics.active_sessions, 0);
+        assert_eq!(metrics.total_sessions, 2);
     }
 
     #[test]
