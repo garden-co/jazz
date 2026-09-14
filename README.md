@@ -43,6 +43,12 @@ pnpm build
 pnpm test
 ```
 
+Native artifact fingerprint values are generated build outputs. `pnpm build`,
+`pnpm build:ci`, and `pnpm build:core` build both native bindings and derive their
+matching TypeScript expectations before building consumers. Source-only checks,
+including React Native scaffold compilation, use declaration-only contracts;
+running Node/WASM consumers still requires the generated artifacts.
+
 `pnpm run ensure:rust-toolchain` adds the `wasm32-unknown-unknown` Rust target
 and installs `wasm-pack` if it is missing. It requires an existing Rust/rustup
 installation. React Native build dependencies have a separate bootstrap script:

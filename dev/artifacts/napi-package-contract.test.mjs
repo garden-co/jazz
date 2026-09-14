@@ -20,6 +20,11 @@ function fixture({ profile = "release" } = {}) {
   mkdirSync(generation, { recursive: true });
   const packageJson = { ...packageSource, scripts: {} };
   writeFileSync(join(packageDir, "package.json"), JSON.stringify(packageJson));
+  // Git ignores generated receipts; the explicit package files list must still ship them.
+  writeFileSync(
+    join(packageDir, ".gitignore"),
+    readFileSync(new URL("../../crates/jazz-napi/.gitignore", import.meta.url)),
+  );
   for (const file of ["index.cjs", "index.mjs", "index.js", "index.d.ts", "native-binding.cjs"])
     writeFileSync(join(packageDir, file), "fixture\n");
   writeFileSync(

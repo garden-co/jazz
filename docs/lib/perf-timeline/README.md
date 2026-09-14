@@ -18,6 +18,7 @@ upstream/API data remain unmodified. Rates are work count / median duration, not
 an independent mean-throughput or sustained-concurrency measurement.
 
 Summary cards run first → latest, with workload rates directly below timings.
+Log scale is the default; uncheck “Log scale” to use a linear zero-based axis.
 Both sides of the chart show the same Y ticks: rounded 1/2/5 linear steps, or
 1/2/5 decade values in log mode (powers of ten for wide ranges). Rounding happens
 in displayed units. The full graph and sparklines share the resulting domain.
@@ -33,13 +34,13 @@ pnpm --filter docs build
 
 - Y: wallclock **median in seconds**, automatically formatted as s/ms/µs. The
   optional min–max whisker is observed sample range, not a confidence interval.
-- X: measured release/PR/commit checkpoints, ordered by **run timestamp**, with
+- X: measured release/PR/commit checkpoints, ordered by **run timestamp** (reviewed historical backfills use release publication time), with
   equal spacing. Labels show the run's **UTC calendar day**, PR/release and
   commit hash. This is not a Git ancestry diagram or elapsed-time scale.
 - Thick amber: main commits proven to be included in a semantic-version tag,
   plus exact tag matches. Solid green: main runs without proven release inclusion.
   Dashed purple: currently open PRs. Historical closed/merged PR trials and
-  other branches are completely excluded from the API dataset, navigation,
+  unregistered other branches are completely excluded from the API dataset, navigation,
   receipts and plots. A PR having merged does not make its earlier experimental
   commits measurements of main. Separate branches/PRs are never connected.
 - Releases without an exact measured commit are identified but never assigned
@@ -101,3 +102,25 @@ required. The public API remains `/api/timeline`. Set the optional server-only
 `PERF_GITHUB_TOKEN` on that project only if higher public-source limits are needed.
 
 After building, run `pnpm --filter docs test:perf-timeline:e2e` for browser checks.
+
+## Audited historical backfills
+
+`backfills.ts` maps exact measured harness SHAs and explicit CodSpeed run/result
+IDs to a released engine SHA and npm publication date. Empty receipt lists do
+not display points. Add IDs only after checking actual job output and uploaded
+engine-tree provenance; never whitelist skipped/carried-forward results. GitHub
+workflow IDs are not CodSpeed run IDs. The release tag must resolve to the
+recorded engine SHA or the mapping is rejected.
+
+Audited backfills appear as Released points and connect to subsequent main points in the same trace. Their `date` is the explicit effective
+release date; `measuredAt` remains the original CodSpeed timestamp and `sha`
+remains the actual harness commit. `release`/`includedInRelease` are not assigned
+from the historical mapping. The receipt retains explicit historical-harness provenance and exposes both dates, the engine commit,
+the harness commit and the workflow provenance artifact. This changes timeline
+placement only, never CodSpeed metadata or Git commit dates.
+
+The alpha.54 harness lives permanently on `bench/alpha54-codspeed-backfill`;
+it must not be merged into main. It retains every released engine crate tree,
+released dependency versions and profiles, and imports the five later CodSpeed
+workloads with harness-only API adaptations. The standalone native Groove
+`record_validation` receipt is outside the CodSpeed workload inventory.

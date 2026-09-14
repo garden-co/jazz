@@ -82,7 +82,10 @@ try {
     ],
   };
   browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  const page = await browser.newPage({
+    viewport: { width: 1440, height: 1000 },
+    timezoneId: "UTC",
+  });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   let fail = false;
@@ -95,6 +98,10 @@ try {
   );
   await page.goto(`${origin}/perf-timeline`);
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("Log scale").isChecked(), true);
+  assert.match(await page.locator(".chart").textContent(), /LOG SCALE/);
+  await page.getByLabel("Log scale").uncheck();
+  assert.match(await page.locator(".chart").textContent(), /ZERO-BASED SCALE/);
   async function assertMatchingPreview() {
     const positions = await page.evaluate(() => ({
       large: [...document.querySelectorAll(".chart-point")].map((p) => [
@@ -173,7 +180,7 @@ try {
   assert.equal(await page.locator(".chart-point").count(), 4);
   assert.match(await page.locator(".chart").textContent(), /2026-09-11/);
   assert.match(await page.locator(".chart").textContent(), /2026-09-14/);
-  assert.match(await page.locator(".chart").textContent(), /RUN DAY \(UTC\)/);
+  assert.match(await page.locator(".chart").textContent(), /CHECKPOINT DAY \(UTC\)/);
   assert.equal(await page.locator(".legend .stage").count(), 3);
   assert.equal(await page.getByRole("option", { name: "Past PR trial" }).count(), 0);
   assert.equal(await page.getByRole("option", { name: "Other branch" }).count(), 0);
@@ -258,6 +265,76 @@ try {
     path: new URL("../.next/perf-timeline-receipts/mobile-dark.png", import.meta.url).pathname,
     fullPage: true,
   });
+
+  // Synthetic browser response only: no fabricated receipt is sent upstream.
+  const historical = {
+    ...point("released", 1, "main"),
+    date: "2026-09-10T04:26:57.178Z",
+    measuredAt: "2026-09-14T15:00:00Z",
+    release: null,
+    includedInRelease: null,
+    backfill: {
+      releaseTag: "v2.0.0-alpha.54",
+      engineSha: "e".repeat(40),
+      harnessSha: "1".repeat(40),
+      harnessSourceSha: "s".repeat(40),
+      effectiveDate: "2026-09-10T04:26:57.178Z",
+      dateSource: "synthetic publication fixture",
+      workflowUrl: "https://example.com/synthetic-workflow",
+      receipts: [],
+    },
+  };
+  fixture.benchmarks[0].points = [historical, point("main", 4, "main")];
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${origin}/perf-timeline?benchmark=first`);
+  await page.getByText("Wallclock timeline", { exact: true }).waitFor();
+  assert.equal(await page.locator(".chart-point").count(), 2);
+  assert.match(await page.locator(".chart").textContent(), /2026-09-10/);
+  assert.match(
+    await page
+      .locator(".chart .axis-text")
+      .allTextContents()
+      .then((labels) => labels.join(" ")),
+    /v2.0.0-alpha.54/,
+  );
+  assert.equal(await page.locator('.chart line[opacity="0.8"]').count(), 1);
+  assert.equal(await page.locator(".bench-item.active .sparkline line").count(), 1);
+  await page.screenshot({
+    path: new URL("../.next/perf-timeline-receipts/released-main-continuity.png", import.meta.url)
+      .pathname,
+    fullPage: true,
+  });
+  assert.equal(await page.getByRole("option", { name: "Historical backfill" }).count(), 0);
+  await page.locator(".chart-point").first().focus();
+  await page.keyboard.press("Enter");
+  assert.match(await page.locator(".receipt").innerText(), /Released/);
+  assert.match(await page.locator(".receipt").innerText(), /Release date Sep 10.*measured Sep 14/);
+  assert.equal(await page.locator(`.receipt a[href$="/commit/${"1".repeat(40)}"]`).count(), 1);
+  assert.equal(await page.locator(`.receipt a[href$="/commit/${"e".repeat(40)}"]`).count(), 1);
+  assert.match(await page.locator(".receipt-id").innerText(), /Historical harness/);
+  assert.doesNotMatch(await page.locator(".receipt-id").innerText(), /exact release commit/);
+  await page.getByLabel("Checkpoint status").selectOption("released");
+  assert.equal(await page.locator(".chart-point").count(), 1);
+  await page.locator(".receipts-table summary").click();
+  assert.match(await page.locator("tbody").innerText(), /v2.0.0-alpha.54/);
+  assert.match(await page.locator("tbody").innerText(), /Sep 10.*measured Sep 14/);
+  await page.screenshot({
+    path: new URL("../.next/perf-timeline-receipts/historical-backfill.png", import.meta.url)
+      .pathname,
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  fixture.benchmarks[0].points = [historical];
+  await page.goto(`${origin}/perf-timeline?benchmark=first`);
+  await page.getByText("Wallclock timeline", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByLabel("Branch trace").locator('option[value="main"]').textContent(),
+    "main",
+  );
+  console.log(
+    "Historical backfill browser receipt: release placement, measured date, both source commits, Released classification, continuous main trace and mobile layout passed.",
+  );
 
   assert.deepEqual(errors, []);
   console.log(

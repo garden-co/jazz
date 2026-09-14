@@ -10,12 +10,13 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
-#[cfg(feature = "sync-autopsy")]
 use std::sync::{
-    LazyLock, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::task::{Context, Poll, Waker};
+#[cfg(feature = "sync-autopsy")]
+use std::sync::{LazyLock, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 
 use futures::lock::Mutex as LocalMutex;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};

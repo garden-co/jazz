@@ -1,3 +1,5 @@
+import type { HistoricalBackfill } from "./backfills.ts";
+
 export type Stage = "released" | "main" | "open";
 export type Distribution = { min: number; median: number; max: number };
 export type RawRun = {
@@ -17,6 +19,8 @@ export type RawRun = {
 };
 export type Release = { name: string; sha: string; url: string };
 export type Point = Distribution & {
+  measuredAt: string;
+  backfill: HistoricalBackfill | null;
   runId: string;
   resultId: string;
   date: string;
@@ -53,6 +57,7 @@ export function buildTimeline(
   releases: Release[],
   now = new Date().toISOString(),
   releaseAncestors: ReadonlyMap<string, string> = new Map(),
+  backfills: readonly HistoricalBackfill[] = [],
 ): Timeline {
   const tagged = new Map(releases.map((r) => [r.sha, r.name]));
   const benchmarks = new Map<string, Benchmark>();
@@ -65,16 +70,26 @@ export function buildTimeline(
     if (!Number.isFinite(Date.parse(run.date))) continue;
     const branch = run.commit.branch;
     const pr = branch?.pullRequest;
+    const historical = backfills.find(
+      (b) =>
+        b.harnessSha === run.commit.hash &&
+        tagged.get(b.engineSha) === b.releaseTag &&
+        Number.isFinite(Date.parse(b.effectiveDate)) &&
+        Date.parse(b.effectiveDate) <= Date.parse(run.date) &&
+        b.receipts.some((r) => r.runId === run.id),
+    );
     const release = tagged.get(run.commit.hash) ?? null;
     const includedInRelease =
       release ?? (branch?.name === "main" ? (releaseAncestors.get(run.commit.hash) ?? null) : null);
-    const stage: Stage | null = includedInRelease
+    const stage: Stage | null = historical
       ? "released"
-      : branch?.name === "main"
-        ? "main"
-        : pr?.status === "OPEN"
-          ? "open"
-          : null;
+      : includedInRelease
+        ? "released"
+        : branch?.name === "main"
+          ? "main"
+          : pr?.status === "OPEN"
+            ? "open"
+            : null;
     // Exclude these at the source boundary, not merely from the chart: no
     // sidebar, sparkline, receipt, filter or API result should retain them.
     if (!stage) {
@@ -82,6 +97,18 @@ export function buildTimeline(
       continue;
     }
     for (const result of run.results) {
+      if (
+        historical &&
+        !historical.receipts.some(
+          (r) =>
+            r.runId === run.id &&
+            r.resultId === result.id &&
+            r.benchmarkName === result.benchmark.name,
+        )
+      ) {
+        excludedResults++;
+        continue;
+      }
       const time = result.walltime;
       if (
         !time ||
@@ -99,7 +126,9 @@ export function buildTimeline(
         ...time,
         runId: run.id,
         resultId: result.id,
-        date: run.date,
+        date: historical?.effectiveDate ?? run.date,
+        measuredAt: run.date,
+        backfill: historical ?? null,
         sha: run.commit.hash,
         title: run.commit.message,
         branch: branch?.name ?? "unknown",
@@ -143,6 +172,7 @@ export function formatTime(seconds: number): string {
 }
 
 export function checkpoint(point: Point): string {
+  if (point.backfill) return point.backfill.releaseTag;
   return (
     point.release ?? (point.pr ? `#${point.pr} · ${point.sha.slice(0, 7)}` : point.sha.slice(0, 7))
   );

@@ -152,6 +152,13 @@ fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
                 .unwrap()
                 .pop_front()
                 .expect("Local delivery stalled without a scheduled host wake");
+            if owner == 0 {
+                // A real server-shell query wake marks the subscriber dirty
+                // before queuing this owner turn. Mirror that private bridge
+                // here because this test intentionally uses a generic host
+                // scheduler to control every turn.
+                relay.mark_subscriber_connections_dirty_for_test();
+            }
             if turns[owner].is_none() {
                 turns[owner] = Some(if owner == 0 {
                     Box::pin(async {
@@ -2711,8 +2718,12 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
     let mut strict = prepared_subscribe(&foreground, &query, global_subscribe_opts()).unwrap();
     // The authority is connected but deliberately not driven. Local reads must
     // still receive the relay's cached/pending row, without a terminal error.
+    // This test drives a generic host scheduler, so mirror the server-shell
+    // owner bridge before each relay turn; production wake handling marks the
+    // relay subscriber dirty before requesting its next turn.
     for _ in 0..16 {
         foreground.tick().unwrap();
+        relay.mark_subscriber_connections_dirty_for_test();
         relay.tick().unwrap();
     }
     foreground.tick().unwrap();
@@ -2749,6 +2760,7 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
             )
             .unwrap();
         for _ in 0..16 {
+            relay.mark_subscriber_connections_dirty_for_test();
             relay.tick().unwrap();
             foreground.tick().unwrap();
         }
@@ -2767,6 +2779,7 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
         core.accept_scope_isolated_relay_subscriber(core_transport, author, BTreeMap::new(), 1);
     for _ in 0..16 {
         core.tick().unwrap();
+        relay.mark_subscriber_connections_dirty_for_test();
         relay.tick().unwrap();
         foreground.tick().unwrap();
     }

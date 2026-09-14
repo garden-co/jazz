@@ -169,6 +169,42 @@ impl Drop for QueuedMutationLease<'_> {
     }
 }
 
+struct QueryRuntimeWake {
+    pending: Arc<AtomicBool>,
+    scheduler: Waker,
+}
+
+impl Wake for QueryRuntimeWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.pending.store(true, Ordering::Release);
+        self.scheduler.wake_by_ref();
+    }
+}
+
+pub(super) fn make_query_runtime_waker(
+    scheduler: &SharedTickScheduler,
+    pending: &Arc<AtomicBool>,
+    cache: &Rc<RefCell<Option<Waker>>>,
+) -> Option<Waker> {
+    if let Some(waker) = cache.borrow().as_ref() {
+        return Some(waker.clone());
+    }
+    let scheduler_waker = scheduler
+        .borrow()
+        .as_ref()
+        .and_then(|scheduler| scheduler.query_runtime_waker())?;
+    let waker = Waker::from(Arc::new(QueryRuntimeWake {
+        pending: Arc::clone(pending),
+        scheduler: scheduler_waker,
+    }));
+    *cache.borrow_mut() = Some(waker.clone());
+    Some(waker)
+}
+
 /// Node-owned participant surface for upstream and subscriber connections.
 pub struct Node<S>
 where
@@ -215,6 +251,8 @@ where
     pub(super) pending_relay_subscription_rejections: PendingRelaySubscriptionRejections,
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
+    query_runtime_wake_pending: Arc<AtomicBool>,
+    query_runtime_waker: Rc<RefCell<Option<Waker>>>,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
     pub(super) detached_large_value_uploads:
         Rc<RefCell<BTreeMap<UpstreamUploadDestination, peer_connection::LargeValueUploadQueues>>>,
@@ -352,6 +390,8 @@ where
             pending_relay_subscription_rejections: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
+            query_runtime_wake_pending: Arc::new(AtomicBool::new(false)),
+            query_runtime_waker: Rc::new(RefCell::new(None)),
             upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
             detached_large_value_uploads: Rc::new(RefCell::new(BTreeMap::new())),
             large_value_upload_retry_deadlines: Rc::new(RefCell::new(BTreeMap::new())),
@@ -1037,6 +1077,14 @@ where
             }
         }
     }
+    pub(super) fn mark_subscriber_connections_dirty_after_query_runtime_wake(&self) {
+        if self
+            .query_runtime_wake_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            self.mark_subscriber_connections_dirty();
+        }
+    }
 
     #[cfg(feature = "testing")]
     /// Test/bench harnesses that mutate the served [`NodeState`] directly must
@@ -1044,6 +1092,28 @@ where
     /// boundaries that call this as a boundary effect.
     pub fn mark_subscriber_connections_dirty_for_test(&self) {
         self.mark_subscriber_connections_dirty();
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn maintained_subscription_rehydrate_attempts_for_test(&self) -> u64 {
+        self.connections
+            .borrow()
+            .iter()
+            .filter_map(|connection| connection.try_lock())
+            .map(|connection| match &connection.link {
+                ConnectionLink::Subscriber(state) => {
+                    state
+                        .peer
+                        .maintained_subscription_view_metrics()
+                        .rehydrate_attempts
+                }
+                ConnectionLink::Upstream(_) => 0,
+            })
+            .sum()
+    }
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn subscriber_dirty_epoch_for_test(&self) -> u64 {
+        self.subscriber_dirty_epoch.get()
     }
 
     #[cfg(feature = "testing")]
@@ -1083,6 +1153,7 @@ where
 
     pub(super) fn set_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
         *self.scheduler.borrow_mut() = scheduler;
+        self.query_runtime_waker.borrow_mut().take();
     }
 
     #[cfg(test)]
@@ -1104,10 +1175,11 @@ where
     /// later cold-storage completion therefore asks the host for one new tick
     /// instead of making this runtime poll while the storage is still cold.
     pub(super) fn query_runtime_waker(&self) -> Option<Waker> {
-        self.scheduler
-            .borrow()
-            .as_ref()
-            .and_then(|scheduler| scheduler.query_runtime_waker())
+        make_query_runtime_waker(
+            &self.scheduler,
+            &self.query_runtime_wake_pending,
+            &self.query_runtime_waker,
+        )
     }
     /// Lock the node for opening a transaction while the database still owns
     /// transaction admission.
@@ -2236,6 +2308,8 @@ where
                 active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
                 coverage_refresh_generations: Rc::clone(&self.coverage_refresh_generations),
                 scheduler: Rc::clone(&self.scheduler),
+                query_runtime_wake_pending: Arc::clone(&self.query_runtime_wake_pending),
+                query_runtime_waker: Rc::clone(&self.query_runtime_waker),
                 upload_retry_clock: Rc::clone(&self.upload_retry_clock),
                 upstream_upload_destination,
                 large_value_upload_retry_deadlines: Rc::clone(
@@ -2657,6 +2731,8 @@ where
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             coverage_refresh_generations: Rc::clone(&self.coverage_refresh_generations),
             scheduler: Rc::clone(&self.scheduler),
+            query_runtime_wake_pending: Arc::clone(&self.query_runtime_wake_pending),
+            query_runtime_waker: Rc::clone(&self.query_runtime_waker),
             upload_retry_clock: Rc::clone(&self.upload_retry_clock),
             upstream_upload_destination: None,
             large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
@@ -3186,6 +3262,10 @@ where
 
     /// Service every accepted subscriber connection once.
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
+        // Storage futures wake on arbitrary threads, but subscriber links remain
+        // thread-affine. Consume the cross-thread marker only at this owner
+        // boundary, before any connection tick can observe stale readiness.
+        self.mark_subscriber_connections_dirty_after_query_runtime_wake();
         self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         let mut stats = DbTickStats::default();

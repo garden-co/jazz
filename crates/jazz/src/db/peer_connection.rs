@@ -8,8 +8,9 @@ use super::mutation_errors::{
     mutation_error_event, mutation_error_event_for, queue_mutation_error,
 };
 use super::node_runtime::{
-    notify_write_state_waiters, refresh_subscriptions_in, retire_relay_upstream_subscription,
-    route_upstream_subscription_rejection, take_relay_upstream_subscription_owner,
+    make_query_runtime_waker, notify_write_state_waiters, refresh_subscriptions_in,
+    retire_relay_upstream_subscription, route_upstream_subscription_rejection,
+    take_relay_upstream_subscription_owner,
 };
 use super::*;
 use crate::protocol::expand_version_carriers;
@@ -619,6 +620,8 @@ where
     pub(super) active_authority_view_receipts: ActiveAuthorityViewReceipts,
     pub(super) coverage_refresh_generations: CoverageRefreshGenerations,
     pub(super) scheduler: SharedTickScheduler,
+    pub(super) query_runtime_wake_pending: Arc<AtomicBool>,
+    pub(super) query_runtime_waker: Rc<RefCell<Option<Waker>>>,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
     pub(super) upstream_upload_destination: Option<UpstreamUploadDestination>,
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
@@ -1717,11 +1720,11 @@ where
     /// tighter one: the client keeps the same subscription, but its visible
     /// membership must be recalculated immediately.
     pub(super) async fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
-        let progress_waker = self
-            .scheduler
-            .borrow()
-            .as_ref()
-            .and_then(|scheduler| scheduler.query_runtime_waker());
+        let progress_waker = make_query_runtime_waker(
+            &self.scheduler,
+            &self.query_runtime_wake_pending,
+            &self.query_runtime_waker,
+        );
         let session_claim_binding = self.subscriber_session_claim_binding();
         let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber(SubscriberConnectionState {
@@ -1938,11 +1941,11 @@ where
             return Err(error);
         }
         let mut stats = DbTickStats::default();
-        let progress_waker = self
-            .scheduler
-            .borrow()
-            .as_ref()
-            .and_then(|scheduler| scheduler.query_runtime_waker());
+        let progress_waker = make_query_runtime_waker(
+            &self.scheduler,
+            &self.query_runtime_wake_pending,
+            &self.query_runtime_waker,
+        );
         let connection_epoch = self.connection_epoch;
         // The host-admitted scope-isolated worker owns one immutable foreground
         // session and may forward that exact binding upstream. A generic
@@ -5623,7 +5626,13 @@ where
                                     Ok(Some(reconciled)) => reconciled,
                                     Ok(None) => {
                                         group.pending_initial_subscribers.insert(subscription);
-                                        serve_again = true;
+                                        if !peer.subscription_awaits_selected_authority_source(
+                                            group_subscription,
+                                        ) && !peer.has_pending_initial_maintained_subscription(
+                                            group_subscription,
+                                        ) {
+                                            serve_again = true;
+                                        }
                                         continue;
                                     }
                                     Err(crate::node::Error::QueryCapability(detail)) => {
@@ -5783,7 +5792,13 @@ where
                                 Ok(Some(update)) => update,
                                 Ok(None) => {
                                     group.pending_initial_subscribers.insert(subscription);
-                                    serve_again = true;
+                                    if !peer.subscription_awaits_selected_authority_source(
+                                        group_subscription,
+                                    ) && !peer.has_pending_initial_maintained_subscription(
+                                        group_subscription,
+                                    ) {
+                                        serve_again = true;
+                                    }
                                     continue;
                                 }
                                 Err(crate::node::Error::QueryCapability(detail)) => {
