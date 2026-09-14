@@ -978,6 +978,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
     });
 
+    await waitFor(async () => updates.length > 0 || undefined, "initial local snapshot");
     expect(updates).toEqual([{ all: [], delta: [], reset: true }]);
 
     const inserted = runtime.insert("todos", {
@@ -1024,7 +1025,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.unsubscribe(handle);
   });
 
-  it("publishes a truthful local empty opening while full propagation continues upstream", async () => {
+  it("publishes an empty local snapshot after initial evaluation for both propagation modes", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -1043,6 +1044,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       "local",
     );
     runtime.executeSubscription(defaultFull, (delta: unknown) => defaultFullUpdates.push(delta));
+    await waitFor(async () => defaultFullUpdates.length > 0 || undefined, "initial full snapshot");
     expect(defaultFullUpdates).toHaveLength(1);
 
     const localOnlyUpdates: unknown[] = [];
@@ -1053,6 +1055,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       JSON.stringify({ propagation: "local-only" }),
     );
     runtime.executeSubscription(localOnly, (delta: unknown) => localOnlyUpdates.push(delta));
+    await waitFor(
+      async () => localOnlyUpdates.length > 0 || undefined,
+      "initial local-only snapshot",
+    );
     expect(localOnlyUpdates).toHaveLength(1);
 
     runtime.unsubscribe(defaultFull);
@@ -1146,6 +1152,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
     });
 
+    await waitFor(async () => rawEvents.length > 0 || undefined, "initial raw snapshot");
     const initialReset = rawEvents.find((event) => event.type === "delta" && event.reset === true);
     const rawReset = expectRawBinaryPayload(initialReset);
     expect(rawReset.terminalOperations).toEqual([]);
@@ -1375,6 +1382,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
     });
 
+    await waitFor(async () => updates.length > 0 || undefined, "initial local snapshot");
     expect(updates).toEqual([{ all: [], delta: [], reset: true }]);
 
     const tx = beginTestBatch(runtime);
@@ -1537,6 +1545,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       aliceDecodedUpdates.push(decodeAliceDelta(delta));
     });
 
+    await waitFor(
+      async () => aliceDecodedUpdates.length > 0 || undefined,
+      "initial Alice snapshot",
+    );
     expect(aliceDecodedUpdates[0]).toEqual({ all: [], delta: [], reset: true });
 
     const aliceTodo = runtime.insert(
