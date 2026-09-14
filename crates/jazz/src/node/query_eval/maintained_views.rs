@@ -140,6 +140,13 @@ impl LocalMaintainedViewSubscription {
     pub(crate) fn subscription_id(&self) -> groove::ivm::SubscriptionId {
         self.subscription.id()
     }
+    /// Match the query's lowered sources, not every table in its schema.
+    pub(crate) fn uses_physical_table(&self, table: crate::ids::GlobalPhysicalTableId) -> bool {
+        self.maintained
+            .physical_tables
+            .iter()
+            .any(|(name, candidate)| self.tables.contains_key(name.as_str()) && *candidate == table)
+    }
 
     pub(crate) fn root_occurrence_ids(&self) -> &[OutputOccurrenceId] {
         &self.root_occurrence_ids

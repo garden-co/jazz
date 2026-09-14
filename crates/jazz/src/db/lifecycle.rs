@@ -1383,6 +1383,13 @@ where
 
     #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        self.refresh_subscriptions_for_tables(None).await
+    }
+
+    pub(super) async fn refresh_subscriptions_for_tables(
+        &self,
+        changed_tables: Option<&HashSet<String>>,
+    ) -> Result<usize, Error> {
         #[cfg(test)]
         if self.stall_next_subscription_refresh.replace(false) {
             std::future::pending::<()>().await;
@@ -1394,7 +1401,10 @@ where
                 "injected subscription refresh failure",
             ));
         }
-        let refreshed = self.node.refresh_subscriptions().await?;
+        let refreshed = self
+            .node
+            .refresh_subscriptions_with_tables(changed_tables)
+            .await?;
         if refreshed > 0 {
             self.node.mark_subscriber_connections_dirty();
         }

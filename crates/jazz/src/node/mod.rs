@@ -2668,6 +2668,10 @@ impl PublishedTransaction {
         self.tx_id
     }
 
+    pub(crate) fn changed_tables(&self) -> &[String] {
+        self.persistence.changed_tables()
+    }
+
     /// Persist the resident publication in storage order.
     pub async fn persist(&self) -> PersistedBatch {
         self.persistence.persist().await

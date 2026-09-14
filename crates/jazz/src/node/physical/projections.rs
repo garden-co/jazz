@@ -15,6 +15,39 @@ where
             .map(|mapping| mapping.table_id)
             .ok_or(Error::InvalidStoredValue("physical table mapping missing"))
     }
+    pub(crate) fn global_physical_table_ids_for_storage_tables(
+        &self,
+        changed_tables: &std::collections::HashSet<String>,
+    ) -> std::collections::HashSet<crate::ids::GlobalPhysicalTableId> {
+        self.catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| {
+                mapping.tables.iter().filter_map(|(logical_table, table)| {
+                    let table_id = table.table_id;
+                    let changed = [
+                        physical_history_table_name(table_id),
+                        physical_register_table_name(table_id),
+                        physical_global_current_table_name(table_id),
+                        physical_register_global_current_table_name(table_id),
+                        physical_ahead_current_table_name(table_id),
+                        physical_register_ahead_current_table_name(table_id),
+                    ]
+                    .iter()
+                    .any(|name| changed_tables.contains(name));
+                    if changed {
+                        mapping
+                            .identities
+                            .tables
+                            .get(logical_table)
+                            .map(|identity| identity.id)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    }
 
     pub(super) fn physical_table_id_for_version(
         &self,
