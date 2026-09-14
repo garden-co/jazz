@@ -4393,6 +4393,11 @@ async fn run_native_relay_socket_worker(
 ) {
     'reconnect: while !cancelled.load(Ordering::Acquire) {
         let request = NativeTransportRequest {
+            requested_link: if relay.inner.scope_admitted {
+                jazz::tools::native_transport_connector::NativeTransportLink::ScopeIsolatedClientRelay
+            } else {
+                jazz::tools::native_transport_connector::NativeTransportLink::OrdinarySession
+            },
             server_url: config.server_url.clone(),
             app_id: config.app_id,
             peer_identity: config.peer_identity,

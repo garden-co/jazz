@@ -1,3 +1,4 @@
+use jazz::tools::native_transport_connector::NativeTransportLink;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -177,12 +178,14 @@ impl NativeTransportConnector for NativeWebSocketConnector {
         Box::pin(async move {
             let permits_delegated_sessions = request.peer_identity == AuthorSubject::SYSTEM
                 && (request.auth.backend_secret.is_some() || request.auth.admin_secret.is_some());
-            let mut transport = WebSocketTransport::connect_with_wake(
+            let mut transport = WebSocketTransport::connect_with_wake_and_bootstrap(
                 request.server_url,
                 request.app_id,
                 request.peer_identity,
                 request.auth,
                 request.wake,
+                false,
+                request.requested_link,
             )
             .await
             .map_err(native_transport_error)?;
@@ -375,8 +378,16 @@ impl WebSocketTransport {
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, WebSocketClientError> {
-        Self::connect_with_wake_and_bootstrap(base_url, app_id, peer_identity, auth, wake, false)
-            .await
+        Self::connect_with_wake_and_bootstrap(
+            base_url,
+            app_id,
+            peer_identity,
+            auth,
+            wake,
+            false,
+            NativeTransportLink::OrdinarySession,
+        )
+        .await
     }
 
     /// Open the authenticated snapshot-only bootstrap exchange.  The returned
@@ -397,6 +408,7 @@ impl WebSocketTransport {
             auth,
             Arc::new(|| {}),
             true,
+            NativeTransportLink::OrdinarySession,
         )
         .await?;
         let (protocol_version, features, session_context) =
@@ -450,6 +462,7 @@ impl WebSocketTransport {
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
         bootstrap_catalogue: bool,
+        requested_link: NativeTransportLink,
     ) -> Result<Self, WebSocketClientError> {
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
@@ -461,7 +474,7 @@ impl WebSocketTransport {
         .map_err(|_| WebSocketClientError::HandshakeTimeout)?
         .map_err(WebSocketClientError::Connect)?;
 
-        let prelude = encode_prelude(peer_identity, auth, bootstrap_catalogue)?;
+        let prelude = encode_prelude(peer_identity, auth, bootstrap_catalogue, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
             .map_err(|_| WebSocketClientError::HandshakeTimeout)?
@@ -491,6 +504,13 @@ impl WebSocketTransport {
         let server_hello = receive_server_hello(&mut ws, deadline).await?;
         let mut negotiated = negotiate_wire(&server_hello, current_wire_features())
             .map_err(WebSocketClientError::Negotiation)?;
+        if requested_link == NativeTransportLink::ScopeIsolatedClientRelay
+            && negotiated.features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY == 0
+        {
+            return Err(WebSocketClientError::ServerRejected(
+                "upstream does not support requested scope_isolated_client_relay link".to_owned(),
+            ));
+        }
         // Receipt semantics require an admitted authority endpoint, not merely
         // a feature bit from a legacy hello.
         if server_hello.authority.is_none() {
@@ -621,6 +641,12 @@ struct WebSocketClientPrelude {
     auth: AuthConfig,
     #[serde(default, skip_serializing_if = "is_false")]
     bootstrap_catalogue: bool,
+    #[serde(skip_serializing_if = "is_ordinary_link")]
+    requested_link: NativeTransportLink,
+}
+
+fn is_ordinary_link(value: &NativeTransportLink) -> bool {
+    *value == NativeTransportLink::OrdinarySession
 }
 
 fn is_false(value: &bool) -> bool {
@@ -631,11 +657,13 @@ fn encode_prelude(
     peer_identity: AuthorSubject,
     auth: AuthConfig,
     bootstrap_catalogue: bool,
+    requested_link: NativeTransportLink,
 ) -> Result<Vec<u8>, WebSocketClientError> {
     serde_json::to_vec(&WebSocketClientPrelude {
         peer_identity: peer_identity.canonical().to_owned(),
         auth,
         bootstrap_catalogue,
+        requested_link,
     })
     .map_err(WebSocketClientError::EncodePrelude)
 }
@@ -1321,6 +1349,7 @@ mod tests {
                     entry["bootstrap_catalogue"]
                         .as_bool()
                         .expect("fixture bootstrap flag"),
+                    NativeTransportLink::OrdinarySession,
                 )
                 .expect("encode fixture prelude"),
             )
@@ -1336,8 +1365,13 @@ mod tests {
 
     #[test]
     fn snapshot_bootstrap_prelude_explicitly_marks_the_snapshot_only_exchange() {
-        let bytes = encode_prelude(AuthorSubject::SYSTEM, AuthConfig::default(), true)
-            .expect("encode snapshot bootstrap prelude");
+        let bytes = encode_prelude(
+            AuthorSubject::SYSTEM,
+            AuthConfig::default(),
+            true,
+            NativeTransportLink::OrdinarySession,
+        )
+        .expect("encode snapshot bootstrap prelude");
         let prelude: serde_json::Value =
             serde_json::from_slice(&bytes).expect("decode snapshot bootstrap prelude");
         assert_eq!(
@@ -1360,6 +1394,61 @@ mod tests {
                 .to_string()
                 .contains("plaintext ws:// bootstrap")
         );
+    }
+
+    // The connector handshake itself is the public observable contract here;
+    // a synthetic upstream lets us withhold exactly one negotiated feature.
+    #[tokio::test]
+    async fn scope_link_requires_negotiated_support_and_never_grants_authority_delegation() {
+        for supported in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let prelude = socket.next().await.unwrap().unwrap().into_data();
+                let prelude: serde_json::Value = serde_json::from_slice(&prelude).unwrap();
+                assert_eq!(prelude["requested_link"], "scope_isolated_client_relay");
+                let _client_hello = socket.next().await.unwrap().unwrap();
+                let mut features = current_wire_features();
+                if !supported {
+                    features &= !jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY;
+                }
+                let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+                    WirePeerRole::Server,
+                    features,
+                )))
+                .unwrap();
+                socket
+                    .send(Message::Binary(
+                        postcard::to_allocvec(&vec![hello]).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+            });
+            let connected = NativeWebSocketConnector
+                .connect(NativeTransportRequest {
+                    requested_link: NativeTransportLink::ScopeIsolatedClientRelay,
+                    server_url: format!("http://{address}"),
+                    app_id: AppId::random(),
+                    peer_identity: AuthorSubject::SYSTEM,
+                    auth: AuthConfig::default(),
+                    wake: Arc::new(|| {}),
+                })
+                .await;
+            if supported {
+                let connected = connected.expect("supported scoped handshake");
+                assert!(!connected.permits_delegated_sessions);
+            } else {
+                let error = match connected {
+                    Ok(_) => panic!("missing scoped feature must fail closed"),
+                    Err(error) => error,
+                };
+                assert!(!error.is_retryable());
+                assert!(error.to_string().contains("scope_isolated_client_relay"));
+            }
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

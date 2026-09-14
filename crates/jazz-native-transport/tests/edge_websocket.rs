@@ -260,6 +260,8 @@ async fn connected_native_transport_reports_idle_websocket_closure() {
     let (url, state, task) = serve_built(built).await;
     let connected = NativeWebSocketConnector
         .connect(NativeTransportRequest {
+            requested_link:
+                jazz::tools::native_transport_connector::NativeTransportLink::OrdinarySession,
             server_url: url,
             app_id,
             peer_identity: jazz::ids::AuthorSubject::SYSTEM,
@@ -302,6 +304,8 @@ async fn connected_native_transport_reports_owner_drop() {
     let (url, _state, task) = serve_built(built).await;
     let connected = NativeWebSocketConnector
         .connect(NativeTransportRequest {
+            requested_link:
+                jazz::tools::native_transport_connector::NativeTransportLink::OrdinarySession,
             server_url: url,
             app_id,
             peer_identity: jazz::ids::AuthorSubject::SYSTEM,
