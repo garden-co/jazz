@@ -1529,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn delayed_tick_keeps_the_native_shell_owner_live_and_does_not_replace_deferred_work() {
+    fn deferred_tick_is_coalesced_and_admission_timer_remains_independent() {
         let (jobs, mut receiver) = mpsc::unbounded();
         let (activity_tx, _) = watch::channel(0_u64);
         let io_wakers = Arc::new(Mutex::new(Vec::new()));
@@ -1541,23 +1541,31 @@ mod tests {
             state: Arc::clone(&state),
         };
 
-        scheduler.schedule_tick_after(20);
+        scheduler.schedule_tick_after(100);
         assert!(
             receiver.next().now_or_never().is_none(),
             "an admission deadline must not enqueue an early shell tick"
         );
 
-        // Ordinary deferred work remains immediately serviceable while the
-        // separate timer waits. This is the native owner-liveness guarantee:
-        // the owner queue never sleeps for an upload admission window.
         scheduler.schedule_tick(TickUrgency::Deferred);
+        scheduler.schedule_tick(TickUrgency::Deferred);
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "deferred work must not re-enter the owner synchronously"
+        );
+
+        std::thread::sleep(Duration::from_millis(10));
         assert!(matches!(
             receiver.next().now_or_never().flatten(),
             Some(ServerShellCommand::RunAsync(_))
         ));
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "coalesced deferred work queues one owner turn"
+        );
         state.queued.store(false, Ordering::Release);
 
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(110));
         assert!(matches!(
             receiver.next().now_or_never().flatten(),
             Some(ServerShellCommand::RunAsync(_))
