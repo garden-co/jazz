@@ -54,6 +54,10 @@ pub(crate) struct CoveredInputReceiver {
     /// deletion-layer fact participates in closure provenance but deliberately
     /// has no source tuple, so it is not retained here.
     installed_records: BTreeMap<GlobalPhysicalTableId, BTreeMap<SupportingRow, Vec<u8>>>,
+    /// Exact descriptor evidence admitted with the current input batch. Older
+    /// aliases can arrive after this receiver was compiled; the terminal cache
+    /// retains these descriptors for later negative deltas as well.
+    pending_witness_descriptors: BTreeMap<(String, SchemaVersionAlias), (String, RecordDescriptor)>,
 }
 
 impl CoveredInputReceiver {
@@ -731,7 +735,7 @@ where
                     .ok_or(Error::InvalidStoredValue(
                         "incremental covered input names no compiled source occurrence",
                     ))?;
-            let Some(record) = self
+            let Some((record, original)) = self
                 .covered_input_runtime_record(
                     input,
                     runtime_source,
@@ -742,6 +746,15 @@ where
             else {
                 continue;
             };
+            if let Some(original) = original {
+                receiver.pending_witness_descriptors.insert(
+                    (
+                        runtime_source.table.to_string(),
+                        original.schema_version_alias(),
+                    ),
+                    (original.table().to_owned(), *original.record.descriptor()),
+                );
+            }
             let records = receiver
                 .installed_records
                 .get(&input.physical_table)
@@ -892,7 +905,7 @@ where
                     "authority covered input names no compiled source occurrence",
                 ));
             };
-            let Some(record) = self
+            let Some((record, original)) = self
                 .covered_input_runtime_record(
                     &input,
                     runtime_source,
@@ -903,6 +916,15 @@ where
             else {
                 continue;
             };
+            if let Some(original) = original {
+                receiver.pending_witness_descriptors.insert(
+                    (
+                        runtime_source.table.to_string(),
+                        original.schema_version_alias(),
+                    ),
+                    (original.table().to_owned(), *original.record.descriptor()),
+                );
+            }
             records
                 .get_mut(&input.physical_table)
                 .expect("source presence was checked above")
@@ -957,7 +979,7 @@ where
         runtime_source: &CoveredInputSource,
         result_schema_version: SchemaVersionId,
         read_view: &ReadViewSpec,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    ) -> Result<Option<(Vec<u8>, Option<VersionRow>)>, Error> {
         let source_table =
             self.table_in_schema(runtime_source.table.as_str(), result_schema_version)?;
         let version = self
@@ -994,14 +1016,19 @@ where
         let schema_alias = self
             .ensure_schema_version_alias(result_schema_version)
             .await?;
-        Ok(Some(super::read_sources::covered_input_record(
+        let record = super::read_sources::covered_input_record(
             &source_table,
             &runtime_source.descriptor,
             &row,
             schema_alias,
             &version.branch_key(),
             Some(&version),
-        )?))
+        )?;
+        let carries_authored_version =
+            runtime_source.descriptor.fields().iter().any(|field| {
+                field.name.as_deref() == Some(super::read_sources::ENCODED_VERSION_FIELD)
+            });
+        Ok(Some((record, carries_authored_version.then_some(version))))
     }
 
     fn project_covered_input_row_in_read_view(
@@ -1072,6 +1099,9 @@ where
                 return Ok((None, false));
             }
         }
+        local.maintained.extend_witness_descriptors(std::mem::take(
+            &mut local.covered_input_receiver.pending_witness_descriptors,
+        ))?;
         self.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();

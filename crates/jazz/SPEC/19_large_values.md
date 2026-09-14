@@ -91,9 +91,14 @@ including its authored schema, independently of the logical read projection. Whe
 there is no physical history source, compiler-private ephemeral byte fields carry
 the original encoded record and its schema/branch identity through both positive
 and negative IVM deltas. They are not application fields or a wire/storage format.
-Decode uses the exact authored descriptor scoped to the source's physical table;
-unknown schemas or mismatched selected coordinates fail closed. Trusted admitted
-bytes are not re-encoded for validation. Snapshot content identity remains the
+Decode uses the exact authored descriptor scoped to the source's physical table.
+A receiver also registers descriptor evidence from each admitted original version,
+so older schema aliases learned after query compilation remain readable; cached
+descriptors survive until their negative witness deltas have drained. Descriptor
+registries may advance only through Groove's existing append-only compatibility
+rule; expanded descriptors also decode older admitted snapshots. Unknown schemas,
+conflicting descriptors, or mismatched selected coordinates fail closed. Trusted
+admitted bytes are not re-encoded for validation. Snapshot content identity remains the
 original content version even when a later restore supplies visible provenance.
 
 ### Frozen V1 JSON and chunking boundary

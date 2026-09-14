@@ -4779,3 +4779,222 @@ fn nullable_json_null_policies_allow_both_null_forms_and_reject_objects() {
         );
     }
 }
+
+#[test]
+fn nullable_json_covered_witnesses_accept_late_authored_schemas() {
+    let source_name = "documents";
+    let target_name = source_name;
+    let scalar = PublicColumnType::ScalarEnum {
+        name: "State".to_owned(),
+        variants: vec!["pending".to_owned(), "done".to_owned()],
+    };
+    let payload_enum = PublicColumnType::EnumPayload {
+        cases: vec![PublicEnumCaseDescriptor {
+            name: "message".to_owned(),
+            fields: vec![PublicColumnDescriptor::new(
+                "level",
+                PublicColumnType::Integer,
+            )],
+        }],
+    };
+    let base = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new(source_name)
+                .nullable_column("payload", PublicColumnType::Json { schema: None })
+                .column("state", scalar.clone())
+                .column("event", payload_enum.clone())
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let evolved = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new(target_name)
+                .nullable_column("payload", PublicColumnType::Json { schema: None })
+                .column("state", scalar.clone())
+                .column("event", payload_enum.clone())
+                .column("added", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let event_column = base.tables[0]
+        .columns
+        .iter()
+        .find(|column| column.name == "event")
+        .unwrap();
+    let ValueType::Enum(event_schema) = &event_column.column_type else {
+        panic!("payload enum");
+    };
+    let event = Value::Enum(
+        EnumValue::create(0, event_schema.cases[0].payload.clone(), &[Value::I32(7)]).unwrap(),
+    );
+    let author = AuthorSubject::for_test_bytes([0x92; 16]);
+    let server = open_core(0x91, AuthorSubject::SYSTEM, &base);
+    let writer = open_db(0x92, author, &base);
+    let (upstream, downstream) = duplex();
+    let _connection = block_on(writer.connect_upstream(upstream));
+    let _subscriber = server.accept_subscriber(downstream, author);
+    let mut transactions = Vec::new();
+    for source in [
+        " \nnull\t".to_owned(),
+        format!("{}null{}", " ".repeat(4095), "\n".repeat(90_000)),
+    ] {
+        let write = writer
+            .insert(
+                source_name,
+                BTreeMap::from([
+                    ("payload".to_owned(), Value::String(source)),
+                    ("state".to_owned(), Value::EnumTag(1)),
+                    ("event".to_owned(), event.clone()),
+                ]),
+                Default::default(),
+            )
+            .unwrap();
+        transactions.push(write.mergeable_tx_id());
+        for _ in 0..64 {
+            writer.tick().unwrap();
+            server.tick().unwrap();
+        }
+        writer.tick().unwrap();
+        block_on(write.wait(DurabilityTier::Global)).unwrap();
+    }
+    let version = SchemaVersion::new(evolved.clone());
+    let ops = vec![LensOp::AddColumn {
+        column: "added".into(),
+        default: Value::String("default".into()),
+    }];
+    let lens = MigrationLens::new(
+        base.version_id(),
+        version.id,
+        vec![TableLens {
+            source_table: source_name.into(),
+            target_table: target_name.into(),
+            ops,
+        }],
+    )
+    .unwrap();
+    let publication = server
+        .author_schema_lineage_publication(
+            version.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    server.publish_schema_with_lens(1, publication).unwrap();
+    server
+        .set_current_write_schema(CurrentWriteSchema {
+            revision: 1,
+            schema: version.id,
+        })
+        .unwrap();
+    let observer = open_db(0x93, author, &evolved);
+    let (upstream, downstream) = duplex();
+    let _observer_connection = block_on(observer.connect_upstream(upstream));
+    let _observer_subscriber = server.accept_subscriber(downstream, author);
+    let observer_pump = block_on(_observer_connection.lock()).io_pump();
+    let server_pump = block_on(_observer_subscriber.lock()).io_pump();
+    let tick_observer = |stage| {
+        let mut tick = Box::pin(observer.tick());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..10_000 {
+            if let std::task::Poll::Ready(result) =
+                std::future::Future::poll(tick.as_mut(), &mut cx)
+            {
+                return result.unwrap_or_else(|error| panic!("{stage}: {error}"));
+            }
+            for (source, destination) in [
+                (&observer_pump, &server_pump),
+                (&server_pump, &observer_pump),
+            ] {
+                if let Some(message) = source.take_outbound(64) {
+                    assert!(block_on(destination.route_incoming(message)).is_ok());
+                }
+            }
+            std::thread::yield_now();
+        }
+        panic!("cold evolved receiver tick did not complete with auxiliary chunk progress");
+    };
+    for _ in 0..64 {
+        tick_observer("before subscription");
+        server.tick().unwrap();
+    }
+    tick_observer("before subscription");
+    let mut subscription = prepared_subscribe(
+        &observer,
+        &Query::from(target_name).filter(is_null(col("payload"))),
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            local_updates: LocalUpdates::Deferred,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
+    for _ in 0..256 {
+        tick_observer("after subscription");
+        server.tick().unwrap();
+    }
+    tick_observer("after subscription");
+    let rows = opened_rows(next_settled_opening(&mut subscription));
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(
+            row.cell(&evolved.tables[0], "state"),
+            Some(Value::EnumTag(1))
+        );
+        assert_eq!(row.cell(&evolved.tables[0], "event"), Some(event.clone()));
+        assert_eq!(
+            row.cell(&evolved.tables[0], "payload"),
+            Some(Value::Nullable(None))
+        );
+        assert_eq!(
+            row.cell(&evolved.tables[0], "added"),
+            Some(Value::String("default".into()))
+        );
+    }
+    for tx in transactions {
+        let SyncMessage::CommitUnit {
+            versions: original, ..
+        } = server.node().borrow_mut().commit_unit_for(tx).unwrap()
+        else {
+            panic!("commit unit");
+        };
+        let state = subscription._state.borrow();
+        let SubscriptionKind::Prepared {
+            maintained_subscription: Some(maintained),
+            ..
+        } = &state.kind
+        else {
+            panic!("maintained receiver");
+        };
+        let decoded = observer
+            .node
+            .node()
+            .borrow()
+            .local_maintained_version_records_for_test(maintained, tx)
+            .unwrap();
+        assert!(
+            decoded == original,
+            "decoded authored witness must stay exact"
+        );
+        let SyncMessage::CommitUnit {
+            versions: received, ..
+        } = observer
+            .node
+            .node()
+            .borrow_mut()
+            .commit_unit_for(tx)
+            .unwrap()
+        else {
+            panic!("commit unit");
+        };
+        assert_eq!(original, received, "authored payload must stay exact");
+    }
+}

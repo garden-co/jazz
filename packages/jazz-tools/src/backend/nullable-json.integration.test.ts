@@ -39,12 +39,19 @@ it("round-trips nullable JSON and preserves omitted patches through the native b
       null,
     ];
     for (const payload of values) {
-      await db.update(app.documents, row.id, { payload }).wait({ tier: "global" });
+      // String inputs follow the existing raw-JSON-source API contract.
+      const authored = typeof payload === "string" ? JSON.stringify(payload) : payload;
+      await db.update(app.documents, row.id, { payload: authored }).wait({ tier: "global" });
       await db.update(app.documents, row.id, { label: "patched" }).wait({ tier: "global" });
       expect(await db.one(app.documents.where({ id: row.id }), { tier: "edge" })).toMatchObject({
         payload,
       });
     }
+    // Unquoted raw source is root null; quoted source above remains a string.
+    await db.update(app.documents, row.id, { payload: "null" }).wait({ tier: "global" });
+    expect(await db.one(app.documents.where({ id: row.id }), { tier: "edge" })).toMatchObject({
+      payload: null,
+    });
     const streamed = await db.insertStreaming(app.documents, {
       label: "streamed root null",
       payload: (async function* () {

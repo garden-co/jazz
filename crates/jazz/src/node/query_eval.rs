@@ -3986,13 +3986,28 @@ where
                     if table_mapping.table_id == table_id
                         && encoded_witness_tables.contains(logical_name)
                     {
-                        let authored_table = self.table_in_schema(authored_name, *schema_id)?;
+                        // The opaque body is an actual stored variant, not
+                        // its logical authored-schema projection. Retain the
+                        // registered physical names and enum registries too.
+                        let tag = match table_mapping.variant_cases.as_slice() {
+                            [] => groove_variant_tag(*alias)?,
+                            [case] => case.tag,
+                            _ => {
+                                return Err(Error::InvalidStoredValue(
+                                    "encoded witness schema has multiple physical row cases",
+                                ));
+                            }
+                        };
+                        let descriptor = self
+                            .database
+                            .table_schema(&physical_history_table_name(table_id))?
+                            .record_schema_for_variant(tag)
+                            .ok_or(Error::InvalidStoredValue(
+                                "encoded witness physical row descriptor is not registered",
+                            ))?;
                         witness_descriptors.insert(
                             (logical_name.clone(), *alias),
-                            (
-                                authored_name.clone(),
-                                authored_table.history_storage_table().record_schema(),
-                            ),
+                            (authored_name.clone(), descriptor),
                         );
                     }
                     if table_mapping.table_id == table_id && authored_name != logical_name {

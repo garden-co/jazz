@@ -175,7 +175,7 @@ impl RecordDescriptor {
 
     /// Whether this descriptor may advance to `next` solely by appending enum
     /// registry cases while preserving every existing field's interpretation.
-    pub(crate) fn can_evolve_registry_to(&self, next: &Self) -> bool {
+    pub fn can_evolve_registry_to(&self, next: &Self) -> bool {
         self.fields.len() == next.fields.len()
             && self
                 .fields

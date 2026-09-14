@@ -561,6 +561,45 @@ impl MaintainedSubscriptionView {
         self.witness_descriptors = (!descriptors.is_empty()).then(|| Arc::new(descriptors));
     }
 
+    pub(crate) fn extend_witness_descriptors(
+        &mut self,
+        descriptors: BTreeMap<(String, SchemaVersionAlias), (String, RecordDescriptor)>,
+    ) -> Result<(), super::Error> {
+        if descriptors.is_empty() {
+            return Ok(());
+        }
+        let cached = Arc::make_mut(
+            self.witness_descriptors
+                .get_or_insert_with(Default::default),
+        );
+        for ((read_table, alias), (authored_table, descriptor)) in descriptors {
+            let key = (read_table.clone(), alias);
+            let value = (authored_table.clone(), descriptor);
+            if let Some(previous) = cached.get(&key) {
+                if previous.0 != value.0 {
+                    return Err(super::Error::InvalidStoredValue(
+                        "admitted witness descriptor conflicts with compiled source schema",
+                    ));
+                }
+                if !previous.1.can_evolve_registry_to(&value.1) {
+                    // An older admitted snapshot may arrive after the registry
+                    // expanded. Keep the expanded descriptor for both signs.
+                    if value.1.can_evolve_registry_to(&previous.1) {
+                        continue;
+                    }
+                    return Err(super::Error::InvalidStoredValue(
+                        "admitted witness descriptor conflicts with compiled source schema",
+                    ));
+                }
+            }
+            cached.insert(key.clone(), value);
+            if read_table != authored_table {
+                self.witness_table_names.insert(key, authored_table);
+            }
+        }
+        Ok(())
+    }
+
     fn supporting_row_for_version(
         &self,
         source: ProgramSourceId,

@@ -32,11 +32,25 @@ it("preserves nullable JSON across persistent browser reopen and subsequent writ
     ];
     const ids = [];
     for (const payload of values) {
+      // String inputs follow the existing raw-JSON-source API contract.
+      const authored = typeof payload === "string" ? JSON.stringify(payload) : payload;
       ids.push(
-        (await db.insert(app.documents, { label: "document", payload }).wait({ tier: "global" }))
-          .id,
+        (
+          await db
+            .insert(app.documents, { label: "document", payload: authored })
+            .wait({ tier: "global" })
+        ).id,
       );
     }
+    // Unquoted raw source is root null; quoted source above remains a string.
+    ids.push(
+      (
+        await db
+          .insert(app.documents, { label: "raw root null", payload: "null" })
+          .wait({ tier: "global" })
+      ).id,
+    );
+    values.push(null);
     const streamed = await db.insertStreaming(app.documents, {
       label: "streamed root null",
       payload: (async function* () {

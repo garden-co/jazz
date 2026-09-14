@@ -9,7 +9,7 @@ use super::*;
 use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
 use std::{future::Future, pin::Pin};
 
-const ENCODED_VERSION_FIELD: &str = "__jazz_authored_version";
+pub(super) const ENCODED_VERSION_FIELD: &str = "__jazz_authored_version";
 const ENCODED_VERSION_BRANCH_FIELD: &str = "__jazz_authored_version_branch";
 const ENCODED_VERSION_SCHEMA_FIELD: &str = "__jazz_authored_version_schema";
 
