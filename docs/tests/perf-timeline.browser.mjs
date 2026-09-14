@@ -98,6 +98,10 @@ try {
   );
   await page.goto(`${origin}/perf-timeline`);
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("Log scale").isChecked(), true);
+  assert.match(await page.locator(".chart").textContent(), /LOG SCALE/);
+  await page.getByLabel("Log scale").uncheck();
+  assert.match(await page.locator(".chart").textContent(), /ZERO-BASED SCALE/);
   async function assertMatchingPreview() {
     const positions = await page.evaluate(() => ({
       large: [...document.querySelectorAll(".chart-point")].map((p) => [

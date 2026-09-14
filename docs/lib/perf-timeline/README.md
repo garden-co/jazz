@@ -18,6 +18,7 @@ upstream/API data remain unmodified. Rates are work count / median duration, not
 an independent mean-throughput or sustained-concurrency measurement.
 
 Summary cards run first → latest, with workload rates directly below timings.
+Log scale is the default; uncheck “Log scale” to use a linear zero-based axis.
 Both sides of the chart show the same Y ticks: rounded 1/2/5 linear steps, or
 1/2/5 decade values in log mode (powers of ten for wide ranges). Rounding happens
 in displayed units. The full graph and sparklines share the resulting domain.

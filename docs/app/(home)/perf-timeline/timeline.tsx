@@ -273,7 +273,7 @@ export function Dashboard() {
   const [days, setDays] = useState("all");
   const [stage, setStage] = useState("all");
   const [branch, setBranch] = useState("all");
-  const [logarithmic, setLogarithmic] = useState(false);
+  const [logarithmic, setLogarithmic] = useState(true);
   const [spread, setSpread] = useState(false);
   const [estimated, setEstimated] = useState(true);
 
