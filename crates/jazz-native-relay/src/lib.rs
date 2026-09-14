@@ -7302,6 +7302,16 @@ mod tests {
                 node: NodeUuid::from_bytes([byte; 16]),
                 author: AuthorSubject::for_test_bytes([byte.wrapping_add(1); 16]),
             };
+            self.admit_identity(sqlite_path, auth_scope, schema, identity)
+        }
+
+        fn admit_identity(
+            &self,
+            sqlite_path: &std::path::Path,
+            auth_scope: &str,
+            schema: &JazzSchema,
+            identity: DbIdentity,
+        ) -> [u8; 32] {
             let request = serde_json::json!({
                 "scope": {
                     "app_namespace": "native-host-reopen-abi",
@@ -14778,17 +14788,29 @@ mod tests {
         let path = directory.path().join("admitted-repair.sqlite");
         let row = RowUuid::from_bytes([0x51; 16]);
         let mut request = None;
+        let mut expected_version = None;
+        let account = jazz::account_registry::AccountId(RowUuid::from_bytes([0x32; 16]).0);
+        let first_author = AuthorSubject::authenticated("https://issuer.example", "first")
+            .unwrap()
+            .with_account(account);
+        let linked_author = AuthorSubject::authenticated("https://issuer.example", "linked")
+            .unwrap()
+            .with_account(account);
         for (reopen, different_scope) in [(false, false), (true, false), (true, true)] {
             let fixture = NativeHostAbiFixture::new();
-            let capability = fixture.admit(
+            let author = if different_scope {
+                linked_author
+            } else {
+                first_author
+            };
+            let capability = fixture.admit_identity(
                 &path,
-                if different_scope {
-                    "other-linked-session"
-                } else {
-                    "repair-account"
-                },
+                author.canonical(),
                 &schema(),
-                if different_scope { 0x33 } else { 0x31 },
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0x31; 16]),
+                    author,
+                },
             );
             let foreground = fixture.open_foreground(&capability);
             let client = unsafe { &*fixture.host }
@@ -14813,6 +14835,9 @@ mod tests {
                         SyncMessage::CommitUnit { tx, versions }
                             if versions.iter().any(|version| version.row_uuid() == row) =>
                         {
+                            expected_version = versions
+                                .into_iter()
+                                .find(|version| version.row_uuid() == row);
                             Some(jazz::protocol::RowVersionRef::new("todos", row, tx.tx_id))
                         }
                         _ => None,
@@ -14872,7 +14897,11 @@ mod tests {
                 "repair ledger is exact to the admitted session, reopen={reopen} different_scope={different_scope}"
             );
             if !different_scope {
-                assert_eq!(versions[0].row_uuid(), row);
+                assert_eq!(
+                    &versions[0],
+                    expected_version.as_ref().unwrap(),
+                    "repair preserves the complete immutable row body"
+                );
             }
         }
     }
