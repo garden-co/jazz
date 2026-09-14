@@ -2787,6 +2787,7 @@ where
                 .into_iter()
                 .filter(|candidate| {
                     candidate.row_uuid() == version.row_uuid()
+                        && candidate.branch_key() == version.branch_key()
                         && candidate.layer() == version.layer()
                 })
                 .filter_map(|candidate| self.physical_table_id_for_version(&candidate).ok())
@@ -2812,7 +2813,7 @@ where
                 // authored alias carried by its immutable history identity.
                 // Resolve it through the catalogue's unambiguous physical
                 // table id, then reload the actual stored row for the same
-                // physical table, row, transaction, and layer.  This is the
+                // physical table, branch, row, transaction, and layer. This is the
                 // same identity boundary used for repair payloads; reused or
                 // unknown logical names fail closed before history is read.
                 if let Some(canonical) = self
@@ -2821,6 +2822,7 @@ where
                     .into_iter()
                     .find(|candidate| {
                         candidate.row_uuid() == version.row_uuid()
+                            && candidate.branch_key() == version.branch_key()
                             && candidate.layer() == version.layer()
                             && self
                                 .physical_table_id_for_version(candidate)

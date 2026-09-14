@@ -585,6 +585,14 @@ terminal may render a selected `{ name, email_address }` app row, but that row
 is not sent as a replacement for Alice's authored version; dropping it and
 rerunning the local IVM produces the same result (ch. 8 §8.4.1).
 
+A relay that rebuilds a current-row input from an admitted authority witness
+must keep the witness's authored schema alias separate from the logical read
+schema. Before publishing a `VersionRecord`, it reloads the immutable history
+record at the exact physical table, branch, row, transaction, and layer. A table
+rename does not permit first-match lookup across branches: one transaction may
+write the same row UUID in two branches. These are runtime identity rules;
+they do not introduce a new durable or wire representation.
+
 ### 10.6 The lens op surface
 
 The lens operation surface is deliberately small and resolved before it reaches

@@ -988,9 +988,11 @@ where
                 "authority covered input does not project into its compiled source schema",
             ));
         }
-        let schema_alias = self
-            .ensure_schema_version_alias(result_schema_version)
-            .await?;
+        // Cells are projected for the requested read schema, but the hidden
+        // witness identifies immutable history. Keep its authored alias so
+        // publication reloads the original record rather than treating the
+        // logical projection as a synthetic version in the read schema.
+        let schema_alias = version.schema_version_alias();
         Ok(Some(super::read_sources::covered_input_record(
             &source_table,
             &runtime_source.descriptor,
