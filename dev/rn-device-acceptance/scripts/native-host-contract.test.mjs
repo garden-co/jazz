@@ -929,6 +929,10 @@ function emittedRelativeModuleGraph(entry, sourceOverrides = new Map()) {
     if (!file || visited.has(file)) continue;
     const source = sourceOverrides.get(file) ?? fs.readFileSync(file, "utf8");
     visited.set(file, source);
+    // Reject a forbidden runtime edge before exploring its native dependencies.
+    // Source-only RN builds deliberately do not emit Node/WASM fingerprints;
+    // their absence must not mask the planted browser-barrel regression.
+    assertEmittedRnGraphHasNoBrowserWasm(new Map([[file, source]]));
     for (const matcher of [staticSpecifiers, dynamicSpecifiers]) {
       matcher.lastIndex = 0;
       for (const match of source.matchAll(matcher)) {
