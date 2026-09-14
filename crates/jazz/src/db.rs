@@ -4346,10 +4346,13 @@ struct SubscriptionState {
     snapshot_index: RelationSnapshotIndex,
     snapshot_source: SubscriptionSnapshotSource,
     settled: bool,
-    /// A replacement graph opened cold. Keep the last complete facade only
-    /// until the replacement has its first local terminal batch, then publish
-    /// one complete reset from that retained baseline.
-    cold_runtime_replacement: bool,
+    /// The graph has not consumed its first local terminal batch. Withhold
+    /// initial publication (or retain the last complete replacement facade)
+    /// until that batch arrives, including a completed zero-row batch.
+    pending_initial_local_snapshot: bool,
+    /// A non-durable foreground has not yet received its local owner's answer.
+    /// This gates only opening; later disconnections retain the published view.
+    pending_initial_owner_result: bool,
     sender: SubscriptionSender,
 }
 

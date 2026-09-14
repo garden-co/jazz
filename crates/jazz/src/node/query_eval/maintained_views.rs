@@ -107,7 +107,7 @@ impl LocalMaintainedViewSubscription {
         self.terminal_schemas.has_root_collector()
     }
 
-    /// Whether this replacement graph has consumed its first local terminal
+    /// Whether this graph has consumed its first local terminal
     /// batch. Before this point an empty materialization is pending, not an
     /// authorization result.
     pub(crate) fn initial_snapshot_received(&self) -> bool {
@@ -405,17 +405,16 @@ where
         if local.has_covered_input_sources()
             && let Some(authority_result_key) = settled_authority_result_key.clone()
         {
-            if self
-                .install_opened_local_covered_receiver(
-                    &mut local,
-                    &authority_result_key,
-                    progress_waker,
-                )
-                .await?
-                .is_none()
-            {
-                local.initial_received = false;
-            }
+            // Local terminal initialization and authority closure readiness are
+            // independent. A missing closure must not erase a consumed initial
+            // batch: an eventual empty closure need not produce another batch.
+            // Publication still checks the exact authority receipt separately.
+            self.install_opened_local_covered_receiver(
+                &mut local,
+                &authority_result_key,
+                progress_waker,
+            )
+            .await?;
         }
         let initial = self
             .materialize_local_maintained_relation_snapshot_with_occurrences(&local)

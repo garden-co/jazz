@@ -12095,6 +12095,95 @@ mod tests {
         );
     }
 
+    // Native-host topology receipt: inspect the first raw stream event inside
+    // the relay owner, before the binding codec can hide a provisional opening.
+    // There is no server: the SQLite owner alone must complete Local loading.
+    fn assert_native_foreground_initial_owner_snapshot(seed_owner: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = NativeRelayRegistry::default();
+        let mut relay_config = config(directory.path().join("initial-owner.sqlite"), Some("alice"));
+        relay_config.schema = permissive_schema();
+        let relay = registry.open(relay_config).unwrap();
+        let expected = RowUuid::from_bytes([0xe1; 16]);
+        if seed_owner {
+            relay
+                .run(move |worker| {
+                    block_on(worker.persistent.insert(
+                        "todos",
+                        BTreeMap::from([("title".to_owned(), Value::String("saved".to_owned()))]),
+                        InsertOptions {
+                            row_id: Some(expected),
+                            ..Default::default()
+                        },
+                    ))
+                    .map_err(RelayError::Db)?;
+                    block_on(worker.persistent.tick()).map_err(RelayError::Db)?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let reader = relay
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xe2; 16]),
+                    author: AuthorSubject::for_test_bytes([0xe3; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let subscription = reader
+            .subscribe_foreground_query_with_options(
+                postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                ReadOpts::default(),
+            )
+            .unwrap();
+        let reader_id = reader.id();
+        let mut first = None;
+        for _ in 0..64 {
+            // Always inspect before pumping: the original empty opening must
+            // fail, even if the owner would deliver the saved row on this turn.
+            first = relay
+                .run(move |worker| {
+                    let reader = worker.foreground_client_mut(reader_id)?;
+                    Ok(reader
+                        .subscriptions
+                        .get_mut(&subscription)
+                        .and_then(|stream| stream.try_next_event()))
+                })
+                .unwrap();
+            if first.is_some() {
+                break;
+            }
+            relay.pump().unwrap();
+        }
+        let Some(SubscriptionEvent::Delta {
+            reset: true,
+            added,
+            updated,
+            removed,
+            ..
+        }) = first
+        else {
+            panic!("the native foreground must complete its initial Local snapshot");
+        };
+        assert_eq!(
+            added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+            if seed_owner { vec![expected] } else { vec![] }
+        );
+        assert!(updated.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn native_foreground_first_snapshot_contains_owner_rows() {
+        assert_native_foreground_initial_owner_snapshot(true);
+    }
+
+    #[test]
+    fn native_foreground_first_snapshot_completes_empty_owner_answer() {
+        assert_native_foreground_initial_owner_snapshot(false);
+    }
+
     #[test]
     fn sibling_ui_subscription_observes_another_ui_client_write() {
         // Internal relay-topology receipt: each UI runtime owns an isolated

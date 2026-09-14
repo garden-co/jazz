@@ -3966,13 +3966,35 @@ where
                 state.upstream_subscription_handles.clone(),
             )
         };
+        let awaiting_initial_owner_result = state.borrow().pending_initial_owner_result;
+        if awaiting_initial_owner_result {
+            let owner = node.lock().await;
+            let ready = !upstream_subscription_handles.is_empty()
+                && upstream_subscription_handles.iter().all(|handle| {
+                    owner
+                        .authority_result_key_for_subscription(handle.subscription)
+                        .is_ok_and(|key| {
+                            owner.has_settled_authority_result(&key)
+                                && !owner.opening_pending_for_authority_result(&key)
+                        })
+                });
+            if !ready {
+                retained.push(Rc::downgrade(&state));
+                continue;
+            }
+        }
         let request_claims = state
             .borrow()
             .request_identity_claims
             .as_ref()
             .map(|(_, claims)| claims.clone());
         let groove_runtime_token = node.lock().await.groove_runtime_token();
-        if state.borrow().groove_runtime_token != groove_runtime_token {
+        // A foreground's provisional graph may already have consumed an empty
+        // first batch. Initialize it again after the owner's complete answer so
+        // the ordinary cold-graph gate covers evaluation of all recovered inputs.
+        if awaiting_initial_owner_result
+            || state.borrow().groove_runtime_token != groove_runtime_token
+        {
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=reopen_runtime stale={} current={}",
@@ -4081,7 +4103,8 @@ where
                 state_ref
                     .local_subscription_cleanup
                     .set(Some((groove_runtime_token, subscription_id)));
-                state_ref.cold_runtime_replacement = replacement_is_cold;
+                state_ref.pending_initial_local_snapshot = replacement_is_cold;
+                state_ref.pending_initial_owner_result = false;
                 if replacement_is_cold {
                     // Own the replacement before yielding its cold initial batch;
                     // otherwise the next owner turn would retire and reopen it.
@@ -4096,6 +4119,22 @@ where
                 retained.push(Rc::downgrade(&state));
                 continue;
             }
+            let mut snapshot_index = {
+                let state_ref = state.borrow();
+                let SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } = &state_ref.kind;
+                let maintained = maintained_subscription
+                    .as_ref()
+                    .expect("replacement maintained subscription installed");
+                let mut index = relation_snapshot_index_with_root_occurrences(
+                    &snapshot,
+                    maintained.root_occurrence_ids(),
+                )?;
+                index.terminal_records = maintained.decoded_terminal_records()?;
+                index
+            };
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
             let settled_binding_view = BindingViewKey {
                 shape_id: shape.shape_id(),
@@ -4185,7 +4224,6 @@ where
                     let terminal_layout = maintained_subscription
                         .as_ref()
                         .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
-                    let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
                     let _ = apply_maintained_update_to_snapshot(
                         &mut snapshot,
                         &mut snapshot_index,
@@ -4204,32 +4242,15 @@ where
                     }
                 }
             }
-            let root_occurrence_ids = if shape.query().aggregate.is_some() || terminal_rows {
-                // A fresh compiler-owned root collector has already produced
-                // this reset snapshot. Pair its roots directly rather than
-                // reconstructing positions from membership state.
-                snapshot
-                    .rows
-                    .iter()
-                    .take(snapshot.root_count)
-                    .map(|row| {
-                        crate::tools::OutputOccurrenceId::single_source(
-                            crate::tools::ObjectId::from_uuid(row.row_uuid().0),
-                        )
-                    })
-                    .collect()
-            } else {
-                let state_ref = state.borrow();
-                let SubscriptionKind::Prepared {
-                    maintained_subscription,
-                    ..
-                } = &state_ref.kind;
-                maintained_subscription
-                    .as_ref()
-                    .expect("replacement maintained subscription installed")
-                    .root_occurrence_ids()
-                    .to_vec()
-            };
+            // Preserve the graph's complete tuple identities and their current
+            // positions, including any terminal edits drained during this reset.
+            // Public root UUIDs alone cannot distinguish flat-join occurrences.
+            let mut positioned_roots = snapshot_index.roots.iter().collect::<Vec<_>>();
+            positioned_roots.sort_by_key(|(_, position)| **position);
+            let root_occurrence_ids = positioned_roots
+                .into_iter()
+                .map(|(occurrence, _)| occurrence.clone())
+                .collect::<Vec<_>>();
             let settled = subscription_is_settled(
                 &node.borrow(),
                 active_authority_view_receipts,
@@ -4316,7 +4337,7 @@ where
             retained.push(Rc::downgrade(&state));
             continue;
         }
-        let cold_runtime_replacement_pending = state.borrow().cold_runtime_replacement;
+        let initial_local_snapshot_pending = state.borrow().pending_initial_local_snapshot;
         let (mut snapshot, mut snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut refresh = DetachedSubscriptionRefresh::new(&state);
             #[cfg(test)]
@@ -4408,6 +4429,7 @@ where
                 );
             }
             if authoritative_reset
+                && !initial_local_snapshot_pending
                 && terminal_rows
                 && refresh
                     .maintained
@@ -4460,6 +4482,11 @@ where
                 refresh
                     .local_subscription_cleanup
                     .set(Some((groove_runtime_token, replacement_subscription_id)));
+                if !maintained.initial_snapshot_received() {
+                    state.borrow_mut().pending_initial_local_snapshot = true;
+                    retained.push(Rc::downgrade(&state));
+                    continue;
+                }
                 let settled = subscription_is_settled(
                     &node.borrow(),
                     active_authority_view_receipts,
@@ -4558,7 +4585,7 @@ where
                 {
                     reconciled_authoritative_resets.insert(key.clone(), generation);
                 }
-                if cold_runtime_replacement_pending {
+                if initial_local_snapshot_pending {
                     let replacement_ready = refresh
                         .maintained
                         .as_ref()
@@ -4575,7 +4602,7 @@ where
                     let maintained = refresh
                         .maintained
                         .take()
-                        .expect("cold runtime replacement kept its maintained subscription");
+                        .expect("pending initial snapshot kept its maintained subscription");
                     let materialized = node
                         .lock()
                         .await
@@ -4600,7 +4627,7 @@ where
                     refresh.snapshot_index.terminal_records = refresh
                         .maintained
                         .as_ref()
-                        .expect("cold runtime replacement restored maintained subscription")
+                        .expect("pending initial snapshot restored maintained subscription")
                         .decoded_terminal_records()?;
                     let settled = subscription_is_settled(
                         &node.borrow(),
@@ -4615,7 +4642,7 @@ where
                     );
                     refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                     refresh.settled = settled;
-                    state.borrow_mut().cold_runtime_replacement = false;
+                    state.borrow_mut().pending_initial_local_snapshot = false;
                     let mut event = subscription_delta_event_with_reset(
                         snapshot_tier,
                         settled,

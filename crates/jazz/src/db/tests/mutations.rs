@@ -4349,7 +4349,12 @@ fn queued_resident_insert_publishes_subscription_in_one_admission_turn() {
     db.set_tick_scheduler(Some(Rc::new(HostScheduler)));
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
-    let _opening = block_on(subscription.next_raw()).unwrap();
+    // This fixture installs a scheduler that deliberately does no work. Drive
+    // initial evaluation before testing the already-ready write admission path.
+    db.tick().unwrap();
+    let _opening = subscription
+        .try_next_event()
+        .expect("completed initial snapshot");
     let write = db
         .enqueue_insert(
             "todos".to_owned(),

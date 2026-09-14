@@ -286,7 +286,7 @@ mod relay_topology {
     ///
     /// ```text
     /// alice ──subscribe(Local)──► relay (no upstream, one stored row)
-    ///   ◄──truthful opening + hydrated row──┘
+    ///   ◄──initial snapshot with stored row──┘
     /// ```
     #[test]
     fn relay_without_any_upstream_settles_downstream_local_reads() {
@@ -310,19 +310,9 @@ mod relay_topology {
             .expect("prepare documents query");
         let mut subscription = block_on(client.subscribe(&documents, ReadOpts::default()))
             .expect("subscribe locally through the relay");
-        let opening = subscription.try_next_event();
         assert!(
-            matches!(
-                opening,
-                Some(SubscriptionEvent::Delta {
-                    reset: true,
-                    tier: DurabilityTier::Local,
-                    ..
-                })
-            ),
-            "a local-tier subscription must publish its truthful opening \
-             immediately instead of waiting for an upstream that does not \
-             exist: {opening:?}"
+            subscription.try_next_event().is_none(),
+            "wait for the relay's stored view"
         );
 
         for _ in 0..3 {
@@ -332,10 +322,9 @@ mod relay_topology {
         }
         let events = drain(&mut subscription);
         assert!(
-            events.iter().any(|event| matches!(
-                event,
-                SubscriptionEvent::Delta { added, .. } if added.len() == 1
-            )),
+            matches!(events.as_slice(), [SubscriptionEvent::Delta {
+                reset: true, settled: true, tier: DurabilityTier::Local, added, ..
+            }] if added.len() == 1),
             "the upstream-less relay must serve its stored row: {events:?}"
         );
     }

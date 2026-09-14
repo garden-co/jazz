@@ -711,14 +711,14 @@ where
             };
             let _ = writeln!(
                 output,
-                "stream tier={:?} remote_tier={:?} settled={} closed={} source={:?} roots={} cold_replacement={} publication_opened={} publication_deferred={} unresolved={}",
+                "stream tier={:?} remote_tier={:?} settled={} closed={} source={:?} roots={} initial_snapshot_pending={} publication_opened={} publication_deferred={} unresolved={}",
                 state.read_tier,
                 state.remote_read_tier,
                 state.settled,
                 state.closed.get(),
                 state.snapshot_source,
                 state.snapshot.root_count,
-                state.cold_runtime_replacement,
+                state.pending_initial_local_snapshot,
                 publication.opened,
                 publication.deferred.is_some(),
                 publication.unresolved.len()
@@ -1196,6 +1196,16 @@ where
             .map(|(index, occurrence)| (occurrence, index))
             .collect();
         snapshot_index.terminal_records = subscription.decoded_terminal_records()?;
+        let pending_initial_owner_result = authorization_mode
+            == QueryAuthorizationMode::ClientLocal
+            && read_tier == DurabilityTier::Local
+            && propagates_upstream
+            && self.node.upstream_durability_floor.get() == DurabilityTier::Local;
+        // Even a warm, empty foreground graph is provisional until its owner
+        // has answered. Refresh initializes the published graph from those inputs.
+        let pending_initial_local_snapshot =
+            pending_initial_owner_result || !subscription.initial_snapshot_received();
+        let settled = settled && !pending_initial_owner_result;
         let maintained_subscription = Some(subscription);
         let closed = Rc::new(Cell::new(false));
         let scalar_reconciliation_enabled = read_tier < DurabilityTier::Edge
@@ -1231,7 +1241,8 @@ where
             snapshot_index,
             snapshot_source: SubscriptionSnapshotSource::LocalMaintained,
             settled,
-            cold_runtime_replacement: false,
+            pending_initial_local_snapshot,
+            pending_initial_owner_result,
             sender,
         }));
         {
@@ -1239,7 +1250,7 @@ where
             let state = state.borrow();
             let event = SubscriptionEvent::Delta {
                 reset: true,
-                publishable: !suppress_provisional_opening,
+                publishable: !suppress_provisional_opening && !pending_initial_local_snapshot,
                 added: initial_outputs,
                 updated: Vec::new(),
                 removed: Vec::new(),

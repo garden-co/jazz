@@ -600,9 +600,10 @@ where
         Ok(())
     }
 
-    /// Configure this database as the optimistic, non-durable side of a
-    /// browser client/worker pair. This must be called before application
-    /// writes begin.
+    /// Configure this database as an optimistic foreground whose upstream
+    /// owns Local durability (for example, a browser worker or native relay).
+    /// Full Local subscriptions wait for that owner's initial query answer.
+    /// This must be called before application writes or subscriptions begin.
     pub fn set_non_durable_client(&self) {
         self.node.set_non_durable_client();
     }

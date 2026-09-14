@@ -3,6 +3,114 @@
 use super::*;
 use groove::storage::{TestStorage, TestStorageOperation};
 
+/// Controlled storage is needed to hold the first terminal batch pending;
+/// JazzClient's test factory does not expose that boundary. Exercise Db's
+/// subscription stream, without inspecting the maintained graph's state.
+fn assert_cold_initial_subscription(seed_row: bool, matches: bool) {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd7; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd7; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd7))),
+    }))
+    .unwrap();
+    let expected = row(0xd7);
+    if seed_row {
+        // Db's storage-level insert accepts physical RowCells, unlike the
+        // JazzClient row_input! API used by end-to-end consumer tests.
+        db.insert(
+            "todos",
+            cells("persisted", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(expected),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.tick().unwrap();
+    }
+    let query = Query::from("todos").filter(eq(col("done"), lit(Value::Bool(!matches))));
+    let prepared = db.prepare_query(&query).unwrap();
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    assert!(
+        subscription.try_next_event().is_none(),
+        "pending storage is not an empty result"
+    );
+    db.refresh_subscriptions().unwrap();
+    assert!(
+        subscription.try_next_event().is_none(),
+        "refresh must preserve pending initialization"
+    );
+    control.resume();
+    let mut initial = None;
+    for _ in 0..16 {
+        db.refresh_subscriptions().unwrap();
+        if let Some(event) = subscription.try_next_event() {
+            initial = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        ..
+    }) = initial
+    else {
+        panic!("completed local evaluation must publish its initial reset, even offline or empty");
+    };
+    let expected_ids = if seed_row && matches {
+        vec![expected]
+    } else {
+        vec![]
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        expected_ids
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    db.refresh_subscriptions().unwrap();
+    assert!(
+        subscription.try_next_event().is_none(),
+        "initial reset is delivered exactly once"
+    );
+}
+
+/// One durable node opens a subscription while its populated storage is cold.
+/// Resuming storage must deliver the stored row as the very first result.
+#[test]
+fn cold_initial_subscription_waits_for_populated_snapshot() {
+    assert_cold_initial_subscription(true, true);
+}
+
+/// One durable node opens over an empty store. Completion with no row changes
+/// must end loading, without publishing before storage finishes.
+#[test]
+fn cold_initial_subscription_completes_empty_snapshot() {
+    assert_cold_initial_subscription(false, true);
+}
+
+/// A populated store can have no matching rows. Its completed empty query is
+/// distinguishable from the provisional empty graph while storage is pending.
+#[test]
+fn cold_initial_subscription_completes_filtered_empty_snapshot() {
+    assert_cold_initial_subscription(true, false);
+}
+
 #[test]
 fn reopened_wait_observer_yields_instead_of_sync_polling_cold_storage() {
     let schema = schema();
