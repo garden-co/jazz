@@ -200,3 +200,48 @@ test("formats seconds without confusing milliseconds or microseconds", () => {
   assert.equal(formatTime(0.042154), "42.15 ms");
   assert.equal(formatTime(0.000042154), "42.15 µs");
 });
+
+test("historical backfill places only approved receipts on release day with true provenance", () => {
+  const measured = run("harness", "bench/historical");
+  measured.results.push({ ...measured.results[0], id: "carried-forward" });
+  const release = { name: "v2.0.0", sha: "engine", url: "https://example.com/tag" };
+  const backfill = {
+    releaseTag: release.name,
+    engineSha: release.sha,
+    harnessSha: "harness",
+    harnessSourceSha: "source",
+    effectiveDate: "2026-09-10T04:26:57.178Z",
+    dateSource: "release publication",
+    workflowUrl: "https://example.com/workflow",
+    receipts: [{ runId: "harness", resultId: "result-harness", benchmarkName: "read" }],
+  };
+  const data = buildTimeline([measured], [release], undefined, undefined, [backfill]);
+  assert.equal(data.benchmarks[0].points.length, 1);
+  const point = data.benchmarks[0].points[0];
+  assert.equal(point.stage, "backfill");
+  assert.equal(point.date, backfill.effectiveDate);
+  assert.equal(point.measuredAt, measured.date);
+  assert.equal(point.sha, "harness");
+  assert.equal(point.backfill?.engineSha, "engine");
+  assert.equal(point.release, null);
+  assert.equal(point.includedInRelease, null);
+  assert.equal(checkpoint(point), "v2.0.0 backfill");
+  assert.equal(data.excludedResults, 1);
+  assert.equal(point.median, measured.results[0].walltime!.median);
+  for (const invalid of [
+    { ...backfill, harnessSha: "other" },
+    { ...backfill, engineSha: "other" },
+    { ...backfill, releaseTag: "v3.0.0" },
+    { ...backfill, effectiveDate: "invalid" },
+    { ...backfill, effectiveDate: "2099-01-01" },
+    { ...backfill, receipts: [] },
+    { ...backfill, receipts: [{ ...backfill.receipts[0], runId: "other" }] },
+    { ...backfill, receipts: [{ ...backfill.receipts[0], resultId: "other" }] },
+    { ...backfill, receipts: [{ ...backfill.receipts[0], benchmarkName: "other" }] },
+  ]) {
+    assert.equal(
+      buildTimeline([measured], [release], undefined, undefined, [invalid]).benchmarks.length,
+      0,
+    );
+  }
+});

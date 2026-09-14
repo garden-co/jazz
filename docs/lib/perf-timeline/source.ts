@@ -1,3 +1,4 @@
+import { historicalBackfills } from "./backfills";
 import { buildTimeline, type RawRun, type Release, type Timeline } from "./model";
 import { resolveReleaseAncestors } from "./releases";
 
@@ -97,7 +98,7 @@ export async function loadTimeline(): Promise<Timeline> {
     },
     process.env.PERF_GITHUB_TOKEN ? 200 : 40,
   );
-  const data = buildTimeline(runs, tags, undefined, ancestry.included);
+  const data = buildTimeline(runs, tags, undefined, ancestry.included, historicalBackfills);
   data.warnings.push(...ancestry.warnings);
   if (warning) data.warnings.push(warning);
   return data;

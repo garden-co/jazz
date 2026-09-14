@@ -686,8 +686,9 @@ export function Dashboard() {
                       </>
                     )}
                     Each line follows one branch or PR, ordered by run time—not commit ancestry.
-                    Dates are run calendar days in UTC. Only releases, main and open PRs are shown.
-                    Min–max is sample range, not a confidence interval.
+                    Dates are UTC. Historical backfills use release publication dates; receipts
+                    retain actual measurement dates. Min–max is sample range, not a confidence
+                    interval.
                   </p>
                 </section>
                 {current && (
@@ -700,7 +701,10 @@ export function Dashboard() {
                       <div>
                         <h3>{current.title.split("\n")[0]}</h3>
                         <p>
-                          {date(current.date)} · {current.branch}
+                          {current.backfill
+                            ? `Release date ${date(current.date)} · measured ${date(current.measuredAt)}`
+                            : date(current.date)}{" "}
+                          · {current.branch}
                         </p>
                         <div className="receipt-links">
                           <a
@@ -710,6 +714,15 @@ export function Dashboard() {
                           >
                             {current.sha.slice(0, 10)} ↗
                           </a>
+                          {current.backfill && (
+                            <a
+                              href={`${repo}/commit/${current.backfill.engineSha}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Released engine {current.backfill.engineSha.slice(0, 10)} ↗
+                            </a>
+                          )}
                           {current.pr && (
                             <a href={`${repo}/pull/${current.pr}`} target="_blank" rel="noreferrer">
                               PR #{current.pr} ({current.prStatus?.toLowerCase()}) ↗
@@ -761,6 +774,16 @@ export function Dashboard() {
                       </div>
                     )}
                     <div className="receipt-id">
+                      {current.backfill && (
+                        <span>
+                          Historical harness {current.sha.slice(0, 10)} ·{" "}
+                          {current.backfill.dateSource} ·{" "}
+                          <a href={current.backfill.workflowUrl} target="_blank" rel="noreferrer">
+                            Provenance artifact ↗
+                          </a>{" "}
+                          ·{" "}
+                        </span>
+                      )}
                       {current.includedInRelease && (
                         <span>
                           Included in {current.includedInRelease}
@@ -809,7 +832,10 @@ export function Dashboard() {
                             <td>
                               <StageLabel stage={p.stage} />
                             </td>
-                            <td>{date(p.date)}</td>
+                            <td>
+                              {date(p.date)}
+                              {p.backfill && <small> · measured {date(p.measuredAt)}</small>}
+                            </td>
                             <td className="numeric">{p.median.toFixed(9)} s</td>
                             <td className="numeric">
                               {formatTime(p.min)} – {formatTime(p.max)}
