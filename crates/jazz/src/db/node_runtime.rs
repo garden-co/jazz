@@ -16,6 +16,21 @@ use super::*;
 type PeerOwnerGuards<'a, S> = BTreeMap<usize, futures::lock::MutexGuard<'a, PeerConnection<S>>>;
 use crate::time::TxTime;
 
+#[cfg(test)]
+thread_local! {
+    static SUBSCRIPTION_REFRESH_VISITS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_subscription_refresh_visits_for_test() {
+    SUBSCRIPTION_REFRESH_VISITS.with(|visits| visits.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn subscription_refresh_visits_for_test() -> usize {
+    SUBSCRIPTION_REFRESH_VISITS.with(Cell::get)
+}
+
 /// Wake observers after any transaction-state transition, whether produced by
 /// a queued mutation, local persistence, or an upstream acknowledgement.
 pub(super) fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) {
@@ -1999,11 +2014,19 @@ where
 
     #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        self.refresh_subscriptions_with_tables(None).await
+    }
+
+    pub(super) async fn refresh_subscriptions_with_tables(
+        &self,
+        changed_tables: Option<&HashSet<String>>,
+    ) -> Result<usize, Error> {
         let progress_waker = self.query_runtime_waker();
-        refresh_subscriptions_in(
+        refresh_subscriptions_in_with_tables(
             &self.node,
             &self.subscriptions,
             &self.active_authority_view_receipts,
+            changed_tables,
             progress_waker.as_ref(),
         )
         .await
@@ -3830,14 +3853,47 @@ where
     keys.all(|candidate| candidate == key).then_some(key)
 }
 
-/// Re-evaluate every live subscription against the node and push a delta event
-/// for any whose rows changed. Shared by local writes
-/// ([`Db::refresh_subscriptions`]) and by inbound sync application
-/// ([`PeerConnection::tick`]).
+fn subscription_needs_targeted_refresh(
+    state: &Rc<RefCell<SubscriptionState>>,
+    changed_logical_tables: &HashSet<String>,
+) -> bool {
+    let state_ref = state.borrow();
+    let SubscriptionKind::Prepared {
+        maintained_subscription,
+        ..
+    } = &state_ref.kind;
+    let Some(maintained) = maintained_subscription.as_ref() else {
+        return true;
+    };
+    maintained.uses_logical_tables(changed_logical_tables)
+}
+
+/// Re-evaluate live subscriptions whose maintained logical inputs may have
+/// changed. Protocol and lifecycle refreshes use the unfiltered wrapper below.
 pub(super) async fn refresh_subscriptions_in<S>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    progress_waker: Option<&Waker>,
+) -> Result<usize, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    refresh_subscriptions_in_with_tables(
+        node,
+        subscriptions,
+        active_authority_view_receipts,
+        None,
+        progress_waker,
+    )
+    .await
+}
+
+pub(super) async fn refresh_subscriptions_in_with_tables<S>(
+    node: &SharedNodeState<S>,
+    subscriptions: &SubscriptionList,
+    active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    changed_tables: Option<&HashSet<String>>,
     progress_waker: Option<&Waker>,
 ) -> Result<usize, Error>
 where
@@ -3851,6 +3907,15 @@ where
         .await
         .drive_ready_query_runtime_with_waker(progress_waker)
         .await?;
+    let changed_logical_tables = if let Some(changed_tables) = changed_tables {
+        let changed = node
+            .lock()
+            .await
+            .logical_table_names_for_storage_tables(changed_tables);
+        (!changed.is_empty()).then_some(changed)
+    } else {
+        None
+    };
     let live_subscriptions = subscriptions.borrow().clone();
     for weak in &live_subscriptions {
         let Some(state) = weak.upgrade() else {
@@ -3862,6 +3927,15 @@ where
         if state.borrow().closed.get() {
             continue;
         }
+        if let Some(changed_logical_tables) = changed_logical_tables.as_ref()
+            && !subscription_needs_targeted_refresh(&state, changed_logical_tables)
+        {
+            // Targeted refresh skips evaluation, not subscription liveness.
+            retained.push(Rc::downgrade(&state));
+            continue;
+        }
+        #[cfg(test)]
+        SUBSCRIPTION_REFRESH_VISITS.with(|visits| visits.set(visits.get() + 1));
         let (
             read_tier,
             pending_overlay,

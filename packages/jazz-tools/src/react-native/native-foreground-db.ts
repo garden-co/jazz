@@ -926,22 +926,19 @@ class NativeForegroundSubscription {
 
   readAll(): unknown[] | { retryAfterMs(): number } {
     if (this.closed) return [];
-    // There is no native-to-JS wake callback in this first slice. Polling must
-    // therefore also drive one fair relay turn before observing the stream;
-    // Drain alone only consumes events which some other caller has advanced.
-    this.db.tick();
+    // Native core publication already materializes the canonical event before
+    // waking this owner. Keep this pull delivery-only: a foreground read must
+    // never run a full relay tick while the JS mutation call is returning.
     const events = this.db.drain(this.handle, this.pendingOperation);
     if (!Array.isArray(events)) {
       this.pendingOperation = events.pendingOperation;
       return { retryAfterMs: () => 0 };
     }
     this.pendingOperation = undefined;
-    // The first command slice has no native-to-JS wake callback yet. Keep the
-    // normal NativeRuntimeAdapter subscription reader suspended on its
-    // existing retry contract so later native deltas are observable without
-    // a second subscription implementation. This polling seam is deliberately
-    // capability-gated and can become a wake-driven pending batch later.
-    return events.length === 0 ? { retryAfterMs: () => 50 } : events;
+    // An empty batch is a ready native pull with no current event. Returning
+    // it lets NativeRuntimeAdapter finish the reader so the next native wake
+    // can restart it; a timer here recreates the old relay-polling latency.
+    return events;
   }
 
   close(): boolean {

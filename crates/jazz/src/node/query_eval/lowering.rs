@@ -356,6 +356,33 @@ pub(crate) struct PolicyAuthorizationGraph {
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct PolicyDependencyFootprint {
+    tables: BTreeSet<String>,
+    uncertain: bool,
+}
+
+impl PolicyDependencyFootprint {
+    fn include(&mut self, dependency: &QueryProgramRequest) {
+        self.tables.extend(
+            dependency
+                .reads
+                .primary
+                .sources
+                .keys()
+                .map(|source| source.table.clone()),
+        );
+        self.tables.extend(
+            dependency
+                .reads
+                .fact_reads
+                .values()
+                .flat_map(|read| read.sources.keys())
+                .map(|source| source.table.clone()),
+        );
+    }
+}
+
 pub(super) fn policy_authorization_graph_cache_key(request: &QueryProgramRequest) -> String {
     format!("{request:?}")
 }
@@ -594,7 +621,7 @@ where
             );
         }
         let policy_replacement_lease = std::rc::Rc::new(());
-        Box::pin(self.prepare_query_program_policy_dependencies(
+        let policy_dependency_footprint = Box::pin(self.prepare_query_program_policy_dependencies(
             &request,
             &access_paths,
             &policy_replacement_lease,
@@ -615,7 +642,14 @@ where
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
-        let result = Box::pin(prepare_and_lower_query_program(request, &mut resolver)).await;
+        let mut result = Box::pin(prepare_and_lower_query_program(request, &mut resolver)).await;
+        if let Ok(program) = result.as_mut() {
+            program
+                .lowered
+                .targeted_refresh_tables
+                .extend(policy_dependency_footprint.tables);
+            program.lowered.targeted_refresh_uncertain |= policy_dependency_footprint.uncertain;
+        }
         resolver
             .node
             .restore_scoped_policy_authorization_graphs(&policy_replacement_lease);
@@ -635,7 +669,7 @@ where
         request: &QueryProgramRequest,
         outer_access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
         lease: &std::rc::Rc<()>,
-    ) -> Result<(), Error> {
+    ) -> Result<PolicyDependencyFootprint, Error> {
         let source_requests = query_program_source_requests(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
         // A deletion terminal carries the raw register but must be gated by
@@ -653,7 +687,7 @@ where
             )
             .collect::<Vec<_>>();
         let read_view = request.reads.primary.clone();
-        let dependencies = {
+        let (dependencies, footprint) = {
             let mut preparer = JazzSourceGraphPreparer {
                 local_unavailable_scope: None,
                 node: self,
@@ -665,13 +699,31 @@ where
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
             };
-            policy_source_requests
-                .iter()
-                .map(|source| preparer.policy_dependency_request(source))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
+            let mut dependencies = Vec::new();
+            let mut footprint = PolicyDependencyFootprint::default();
+            for source in &policy_source_requests {
+                if !matches!(
+                    &source.authorization,
+                    SourceAuthorizationRequest::PolicyFiltered { .. }
+                ) {
+                    continue;
+                }
+                match preparer.policy_dependency_request(source)? {
+                    Some(dependency) => {
+                        footprint.include(&dependency);
+                        dependencies.push(dependency);
+                    }
+                    None => {
+                        // Unsupported policy shapes must not silently become
+                        // stale subscriptions. Keep the protected table and
+                        // make local refresh conservative until a complete
+                        // dependency graph is available.
+                        footprint.uncertain = true;
+                        footprint.tables.insert(source.source.table.clone());
+                    }
+                }
+            }
+            (dependencies, footprint)
         };
         let dependencies = dependencies
             .into_iter()
@@ -754,7 +806,7 @@ where
                 }
             }
         }
-        Ok(())
+        Ok(footprint)
     }
 
     pub(super) fn restore_expired_policy_compilation_state(&mut self) {

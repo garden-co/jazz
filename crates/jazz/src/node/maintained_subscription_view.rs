@@ -121,6 +121,11 @@ pub(crate) struct MaintainedSubscriptionView {
     program_fact_weights: BTreeMap<ProgramFactEntry, i64>,
     pub(super) supporting: super::supporting_frontier::SupportingFrontier,
     pub(super) physical_tables: BTreeMap<groove::Intern<String>, crate::ids::GlobalPhysicalTableId>,
+    /// Logical tables whose writes can affect this program's local result or
+    /// its embedded policy decisions.
+    pub(super) targeted_refresh_tables: BTreeSet<String>,
+    /// Conservative fallback when policy compilation cannot expose all inputs.
+    pub(super) targeted_refresh_uncertain: bool,
     /// Native deletion bodies retained for the frontier's selected-deletion
     /// contributions; this map is payload ownership, not another published set.
     selected_deletion_witnesses: BTreeMap<SupportingRow, VersionRow>,
@@ -154,6 +159,8 @@ impl Default for MaintainedSubscriptionView {
             program_fact_weights: BTreeMap::new(),
             supporting: Default::default(),
             physical_tables: BTreeMap::new(),
+            targeted_refresh_tables: BTreeSet::new(),
+            targeted_refresh_uncertain: false,
             selected_deletion_witnesses: BTreeMap::new(),
             versions: WeightedVersionIndex::default(),
             replacements: ReplacementIndex::default(),

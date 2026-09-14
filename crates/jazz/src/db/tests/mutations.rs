@@ -4371,3 +4371,79 @@ fn queued_resident_insert_publishes_subscription_in_one_admission_turn() {
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row.row_uuid(), write.row_uuid());
 }
+
+#[test]
+fn queued_resident_insert_refreshes_only_matching_subscription_inputs() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text)),
+    );
+    let owner = AuthorSubject::for_test_bytes([0xb5; 16]);
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        crate::groove::storage::MemoryStorage::new(
+            &schema
+                .column_families()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb5; 16]),
+            author: owner,
+        },
+    )))
+    .unwrap();
+    let todos_query = db.prepare_query(&db.table("todos")).unwrap();
+    let notes_query = db.prepare_query(&db.table("notes")).unwrap();
+    let mut todos = block_on(db.subscribe(&todos_query, ReadOpts::default())).unwrap();
+    let mut notes = block_on(db.subscribe(&notes_query, ReadOpts::default())).unwrap();
+    let _ = block_on(todos.next_raw()).unwrap();
+    let _ = block_on(notes.next_raw()).unwrap();
+    super::super::node_runtime::reset_subscription_refresh_visits_for_test();
+
+    let write = db
+        .enqueue_insert(
+            "todos".to_owned(),
+            [("title".into(), Value::String("targeted refresh".into()))].into(),
+            Default::default(),
+        )
+        .unwrap();
+    db.drive_queued_mutation_once();
+
+    assert_eq!(
+        super::super::node_runtime::subscription_refresh_visits_for_test(),
+        1,
+        "a local publication must only refresh subscriptions with matching inputs",
+    );
+    let event = todos
+        .try_next_event()
+        .expect("matching subscription must receive the resident delta");
+    let SubscriptionEvent::Delta { added, .. } = event else {
+        panic!("expected a row delta");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), write.row_uuid());
+    assert!(
+        notes.try_next_event().is_none(),
+        "unrelated subscription must not receive a local event",
+    );
+    let notes_write = db
+        .enqueue_insert(
+            "notes".to_owned(),
+            [("title".into(), Value::String("later matching write".into()))].into(),
+            Default::default(),
+        )
+        .unwrap();
+    db.drive_queued_mutation_once();
+    let event = notes
+        .try_next_event()
+        .expect("subscription must survive an unrelated local refresh");
+    let SubscriptionEvent::Delta { added, .. } = event else {
+        panic!("expected a row delta");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), notes_write.row_uuid());
+}

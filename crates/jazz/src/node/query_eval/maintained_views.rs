@@ -140,6 +140,18 @@ impl LocalMaintainedViewSubscription {
     pub(crate) fn subscription_id(&self) -> groove::ivm::SubscriptionId {
         self.subscription.id()
     }
+    /// Whether a storage publication can affect this maintained view's inputs.
+    pub(crate) fn uses_logical_tables(
+        &self,
+        changed_logical_tables: &std::collections::HashSet<String>,
+    ) -> bool {
+        self.maintained.targeted_refresh_uncertain
+            || self
+                .maintained
+                .targeted_refresh_tables
+                .iter()
+                .any(|table| changed_logical_tables.contains(table))
+    }
 
     pub(crate) fn root_occurrence_ids(&self) -> &[OutputOccurrenceId] {
         &self.root_occurrence_ids

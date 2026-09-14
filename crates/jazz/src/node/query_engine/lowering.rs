@@ -296,6 +296,17 @@ pub(crate) fn lower_resolved_query_program(
     });
     verify_routed_terminal_outputs(&terminals, &parameters, &request, &explain)?;
 
+    let maintained_terminal_tables = resolved_sources
+        .values()
+        .map(|source| {
+            (
+                source.table_schema.name.clone(),
+                source.table_schema.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let targeted_refresh_tables = maintained_terminal_tables.keys().cloned().collect();
+
     Ok(QueryProgram {
         lowered: LoweredGraph {
             shared_witness_sinks: shared_witness_sinks(&terminals),
@@ -303,15 +314,9 @@ pub(crate) fn lower_resolved_query_program(
             internal_app_rows_graph,
             parameters,
             output,
-            maintained_terminal_tables: resolved_sources
-                .values()
-                .map(|source| {
-                    (
-                        source.table_schema.name.clone(),
-                        source.table_schema.clone(),
-                    )
-                })
-                .collect(),
+            maintained_terminal_tables,
+            targeted_refresh_tables,
+            targeted_refresh_uncertain: false,
         },
         source_descriptors: resolved_sources
             .iter()
@@ -963,6 +968,13 @@ pub(crate) struct LoweredGraph {
     /// lowered program. This is derived from resolved query-engine sources, not
     /// recollected from the public query shape.
     pub(crate) maintained_terminal_tables: BTreeMap<String, TableSchema>,
+    /// Logical tables read by embedded policy programs and the main query.
+    /// Unlike `maintained_terminal_tables`, this is an invalidation footprint,
+    /// not a decoding schema map.
+    pub(crate) targeted_refresh_tables: BTreeSet<String>,
+    /// If policy dependency compilation could not expose a complete footprint,
+    /// local writes conservatively refresh this subscription for every table.
+    pub(crate) targeted_refresh_uncertain: bool,
 }
 
 impl LoweredGraph {

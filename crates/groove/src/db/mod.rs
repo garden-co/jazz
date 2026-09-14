@@ -1420,6 +1420,7 @@ pub struct AppliedBatch {
     order: Rc<RefCell<PersistenceOrder>>,
     ivm_tick_time: Duration,
     tick: TickMetrics,
+    changed_tables: Vec<String>,
     notifications_deferred: bool,
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
     abandoned_application: Rc<Cell<bool>>,
@@ -1428,6 +1429,12 @@ pub struct AppliedBatch {
 impl AppliedBatch {
     pub fn publication(&self) -> PublicationId {
         self.publication
+    }
+
+    /// Physical tables whose resident rows changed in this publication.
+    #[doc(hidden)]
+    pub fn changed_tables(&self) -> &[String] {
+        &self.changed_tables
     }
 
     #[cfg_attr(

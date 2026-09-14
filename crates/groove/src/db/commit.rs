@@ -183,6 +183,12 @@ impl Database {
             .collect::<Vec<_>>();
         let table_deltas =
             compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
+        let mut changed_tables = table_deltas
+            .iter()
+            .map(|delta| delta.table.clone())
+            .collect::<Vec<_>>();
+        changed_tables.sort_unstable();
+        changed_tables.dedup();
         let mut durable_root_deltas = BTreeMap::<crate::large_values::NodeRef, i64>::new();
         for table_delta in &table_deltas {
             for delta in &table_delta.deltas {
@@ -399,6 +405,7 @@ impl Database {
             order: Rc::clone(&self.publication_persistence),
             ivm_tick_time,
             tick,
+            changed_tables,
             notifications_deferred: defer_notifications_until_durable,
             lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
             abandoned_application: Rc::clone(&self.abandoned_application),

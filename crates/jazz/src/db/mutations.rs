@@ -2919,8 +2919,16 @@ where
         published: PublishedTransaction,
         upload_unit: Option<SyncMessage>,
     ) -> Result<(), Error> {
+        let changed_tables = published
+            .changed_tables()
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
         self.node.queue_local_publication(published, upload_unit);
-        if let Err(error) = self.refresh_subscriptions().await {
+        if let Err(error) = self
+            .refresh_subscriptions_for_tables(Some(&changed_tables))
+            .await
+        {
             super::peer_connection::route_subscription_refresh_failure(
                 &self.node.subscriptions,
                 &error,
@@ -2941,6 +2949,11 @@ where
             } = outcome;
             loop {
                 if !publications.is_empty() {
+                    let changed_tables = publications
+                        .iter()
+                        .flat_map(|publication| publication.changed_tables())
+                        .cloned()
+                        .collect::<HashSet<_>>();
                     let mut persisted = Vec::with_capacity(publications.len());
                     for publication in &publications {
                         persisted.push((publication.tx_id(), publication.persist().await));
@@ -2950,7 +2963,10 @@ where
                         node.settle_published_transaction(tx_id, persistence)?;
                     }
                     drop(node);
-                    if let Err(error) = self.refresh_subscriptions().await {
+                    if let Err(error) = self
+                        .refresh_subscriptions_for_tables(Some(&changed_tables))
+                        .await
+                    {
                         super::peer_connection::route_subscription_refresh_failure(
                             &self.node.subscriptions,
                             &error,
