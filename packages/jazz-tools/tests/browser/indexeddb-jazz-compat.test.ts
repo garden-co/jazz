@@ -142,7 +142,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     )
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
-    expect(digest).toBe("d25af2eae84cd2255a1384930bab25d2efac1153ce8eaa4eb3f5812c6c52d507");
+    expect(digest).toBe("e1aa237f375db4d060c2a3fe13fa443659fba55c8695f99993e17e200c897b00");
     const publishedApp = s.defineApp({ notes: s.table({ body: s.string() }) });
     const appId = "00000000-0000-4000-8000-000000000054";
     const accounts = await createAccountManager({ appId, serverUrl: "http://127.0.0.1:1" });

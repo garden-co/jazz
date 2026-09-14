@@ -71,7 +71,7 @@
   "browserFixture": {
     "backend": "IndexedDB / idb-tree",
     "platform": "Linux x86_64; Chromium 145.0.7632.6",
-    "fixtureSha256": "d25af2eae84cd2255a1384930bab25d2efac1153ce8eaa4eb3f5812c6c52d507",
+    "fixtureSha256": "e1aa237f375db4d060c2a3fe13fa443659fba55c8695f99993e17e200c897b00",
     "wasmSha256": "a161d093cd2a1b1c65749997c2d5ce94fd10c813a1be5ab22982d3ff035248fa",
     "workerSha256": "b6aa61e927dc9e7bb776996e33788dd8c3bffa7778d18606be147ca7a61fabc5",
     "producer": "dev/fixtures/produce-alpha54-browser.mjs",

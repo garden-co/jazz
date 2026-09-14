@@ -87,9 +87,13 @@ try {
       timer.unref();
     }),
   ]);
-  await writeFile(resolve(output, "browser-corpus.json"), JSON.stringify(result.records) + "\n", {
-    flag: "wx",
-  });
+  await writeFile(
+    resolve(output, "browser-corpus.json"),
+    JSON.stringify(result.records, null, 2) + "\n",
+    {
+      flag: "wx",
+    },
+  );
   await writeFile(
     resolve(output, "browser-receipt.json"),
     JSON.stringify({ chromium: browser.version(), rows: result.rows }, null, 2) + "\n",
