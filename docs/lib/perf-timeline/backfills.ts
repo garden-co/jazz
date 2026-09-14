@@ -20,6 +20,32 @@ export const historicalBackfills: HistoricalBackfill[] = [
     effectiveDate: "2026-09-10T04:26:57.178Z",
     dateSource: "npm jazz-tools time[2.0.0-alpha.54]",
     workflowUrl: "https://github.com/garden-co/jazz/actions/runs/34861926044",
-    receipts: [],
+    receipts: [
+      {
+        runId: "6aa81939e6139cee3e70f236",
+        resultId: "6aa81db9ad9a6239bf751fa7",
+        benchmarkName: "first_sync_27518_rocksdb",
+      },
+      {
+        runId: "6aa81939e6139cee3e70f236",
+        resultId: "6aa81db8ad9a6239bf751fa2",
+        benchmarkName: "batch_update_1350_rocksdb",
+      },
+      {
+        runId: "6aa81939e6139cee3e70f236",
+        resultId: "6aa81db8ad9a6239bf751fa3",
+        benchmarkName: "reopen_1500_rocksdb",
+      },
+      {
+        runId: "6aa81939e6139cee3e70f236",
+        resultId: "6aa81db8ad9a6239bf751fa4",
+        benchmarkName: "sequential_update_1350_rocksdb",
+      },
+      {
+        runId: "6aa81939e6139cee3e70f236",
+        resultId: "6aa81db8ad9a6239bf751fa5",
+        benchmarkName: "sequential_insert_1350_rocksdb",
+      },
+    ],
   },
 ];
