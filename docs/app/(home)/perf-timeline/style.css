@@ -541,7 +541,7 @@
     gap: 10px;
     margin-bottom: 13px;
   }
-  .receipt-& {
+  .receipt-body {
     display: flex;
     justify-content: space-between;
     gap: 30px;
@@ -911,7 +911,7 @@
     .receipt {
       padding: 16px;
     }
-    .receipt-& {
+    .receipt-body {
       gap: 14px;
     }
     .receipt-timing strong {
@@ -948,7 +948,7 @@
     .metrics > div {
       padding: 0 10px;
     }
-    .receipt-& {
+    .receipt-body {
       flex-direction: column;
     }
     .receipt-timing {

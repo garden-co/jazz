@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { chromium } from "playwright";
@@ -110,6 +111,29 @@ try {
       p.forEach((v, j) => assert.ok(Math.abs(v - positions.small[i][j]) < 0.000001)),
     );
   }
+  assert.match(await page.locator('meta[name="robots"]').getAttribute("content"), /noindex/);
+  assert.equal(await page.locator('nav a[href="/perf-timeline"]').count(), 0);
+  assert.equal(await page.getByRole("link", { name: "Jazz home" }).count(), 1);
+  const desktopReceipt = await page.locator(".receipt-body").evaluate((el) => {
+    const details = el.firstElementChild.getBoundingClientRect();
+    const timing = el.lastElementChild.getBoundingClientRect();
+    return {
+      detailsRight: details.right,
+      timingLeft: timing.left,
+      detailsTop: details.top,
+      timingTop: timing.top,
+    };
+  });
+  assert.ok(
+    desktopReceipt.timingLeft > desktopReceipt.detailsRight,
+    "desktop receipt places timing alongside details",
+  );
+  assert.equal(desktopReceipt.detailsTop, desktopReceipt.timingTop);
+  await mkdir(new URL("../.next/perf-timeline-receipts/", import.meta.url), { recursive: true });
+  await page.screenshot({
+    path: new URL("../.next/perf-timeline-receipts/desktop.png", import.meta.url).pathname,
+    fullPage: true,
+  });
   await assertMatchingPreview();
   assert.match(await page.locator(".benchmark-description").innerText(), /Member, not anonymous/);
   assert.match(await page.getByLabel("Throughput receipt").innerText(), /110,072 visible rows\/s/);
@@ -202,6 +226,39 @@ try {
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
   assert.equal(await page.locator(".chart-point").count(), 52);
   await assertMatchingPreview();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  const mobileReceipt = await page.locator(".receipt-body").evaluate((el) => {
+    const details = el.firstElementChild.getBoundingClientRect();
+    const timing = el.lastElementChild.getBoundingClientRect();
+    return {
+      detailsBottom: details.bottom,
+      timingTop: timing.top,
+      detailsLeft: details.left,
+      timingLeft: timing.left,
+    };
+  });
+  assert.ok(
+    mobileReceipt.timingTop > mobileReceipt.detailsBottom,
+    "mobile receipt stacks timing below details",
+  );
+  assert.equal(mobileReceipt.detailsLeft, mobileReceipt.timingLeft);
+  await page.screenshot({
+    path: new URL("../.next/perf-timeline-receipts/mobile.png", import.meta.url).pathname,
+    fullPage: true,
+  });
+  await page.evaluate(() => document.documentElement.classList.add("dark"));
+  const theme = await page.locator(".perf-timeline").evaluate((el) => ({
+    foreground: getComputedStyle(el).color,
+    background: getComputedStyle(el).backgroundColor,
+    font: getComputedStyle(el).fontFamily,
+  }));
+  assert.notEqual(theme.foreground, theme.background);
+  assert.match(theme.font, /body_font/);
+  await page.screenshot({
+    path: new URL("../.next/perf-timeline-receipts/mobile-dark.png", import.meta.url).pathname,
+    fullPage: true,
+  });
+
   assert.deepEqual(errors, []);
   console.log(
     "Browser receipt: classification, dashed PR trace, filters, exact table, keyboard selection, error/retry, deep links and mobile overflow passed.",
