@@ -111,10 +111,10 @@ engine-tree provenance; never whitelist skipped/carried-forward results. GitHub
 workflow IDs are not CodSpeed run IDs. The release tag must resolve to the
 recorded engine SHA or the mapping is rejected.
 
-Backfills form a separate labeled trace. Their `date` is the explicit effective
+Audited backfills appear as Released points and connect to subsequent main points in the same trace. Their `date` is the explicit effective
 release date; `measuredAt` remains the original CodSpeed timestamp and `sha`
 remains the actual harness commit. `release`/`includedInRelease` are not assigned
-from the historical mapping. The receipt exposes both dates, the engine commit,
+from the historical mapping. The receipt retains explicit historical-harness provenance and exposes both dates, the engine commit,
 the harness commit and the workflow provenance artifact. This changes timeline
 placement only, never CodSpeed metadata or Git commit dates.
 

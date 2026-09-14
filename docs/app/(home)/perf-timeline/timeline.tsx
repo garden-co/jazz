@@ -328,7 +328,7 @@ export function Dashboard() {
     ...new Map(
       (benchmark?.points ?? []).map((p) => [
         p.series,
-        p.pr ? `PR #${p.pr} · ${p.branch}` : p.branch,
+        p.series === "main" ? "main" : p.pr ? `PR #${p.pr} · ${p.branch}` : p.branch,
       ]),
     ).entries(),
   ];
@@ -882,10 +882,10 @@ export function Dashboard() {
                 </p>
                 <p>
                   “Released” includes main commits proven to be ancestors of a semantic-version tag,
-                  plus exact tag matches. Exact matches carry the release version; historical
-                  backfills add an explicit “backfill” label and retain their actual harness commit
-                  and measurement date in the receipt. Other points retain their measured commit. No
-                  timing is inferred for an unmeasured release.{" "}
+                  plus exact tag matches and audited historical backfills of released engines.
+                  Release points carry the release version; historical backfills retain their actual
+                  harness commit and measurement date in the receipt. Other points retain their
+                  measured commit. No timing is inferred for an unmeasured release.{" "}
                   {data.releases.length
                     ? data.releases.map((r) => (
                         <span key={r.name}>

@@ -218,14 +218,15 @@ test("historical backfill places only approved receipts on release day with true
   const data = buildTimeline([measured], [release], undefined, undefined, [backfill]);
   assert.equal(data.benchmarks[0].points.length, 1);
   const point = data.benchmarks[0].points[0];
-  assert.equal(point.stage, "backfill");
+  assert.equal(point.stage, "released");
+  assert.equal(point.series, "main");
   assert.equal(point.date, backfill.effectiveDate);
   assert.equal(point.measuredAt, measured.date);
   assert.equal(point.sha, "harness");
   assert.equal(point.backfill?.engineSha, "engine");
   assert.equal(point.release, null);
   assert.equal(point.includedInRelease, null);
-  assert.equal(checkpoint(point), "v2.0.0 backfill");
+  assert.equal(checkpoint(point), "v2.0.0");
   assert.equal(data.excludedResults, 1);
   assert.equal(point.median, measured.results[0].walltime!.median);
   for (const invalid of [

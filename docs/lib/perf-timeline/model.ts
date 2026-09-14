@@ -1,6 +1,6 @@
 import type { HistoricalBackfill } from "./backfills.ts";
 
-export type Stage = "released" | "main" | "open" | "backfill";
+export type Stage = "released" | "main" | "open";
 export type Distribution = { min: number; median: number; max: number };
 export type RawRun = {
   id: string;
@@ -47,7 +47,6 @@ export type Timeline = {
 };
 
 export const stages: Record<Stage, { label: string; color: string; dash: string }> = {
-  backfill: { label: "Historical backfill", color: "#a15c38", dash: "3 3" },
   released: { label: "Released", color: "#b66822", dash: "" },
   main: { label: "Main", color: "#167968", dash: "" },
   open: { label: "Open PR", color: "#7761b8", dash: "7 5" },
@@ -83,7 +82,7 @@ export function buildTimeline(
     const includedInRelease =
       release ?? (branch?.name === "main" ? (releaseAncestors.get(run.commit.hash) ?? null) : null);
     const stage: Stage | null = historical
-      ? "backfill"
+      ? "released"
       : includedInRelease
         ? "released"
         : branch?.name === "main"
@@ -142,13 +141,11 @@ export function buildTimeline(
         // Historical PR trials are not measurements of the merged main tree.
         // Never draw a continuous path across unrelated PRs.
         series:
-          stage === "backfill"
-            ? `backfill:${historical!.releaseTag}`
-            : stage === "main" || stage === "released"
-              ? "main"
-              : pr
-                ? `pr:${pr.number}`
-                : `branch:${branch?.name ?? run.commit.hash}`,
+          stage === "main" || stage === "released"
+            ? "main"
+            : pr
+              ? `pr:${pr.number}`
+              : `branch:${branch?.name ?? run.commit.hash}`,
       });
       benchmarks.set(bench.id, bench);
     }
@@ -175,7 +172,7 @@ export function formatTime(seconds: number): string {
 }
 
 export function checkpoint(point: Point): string {
-  if (point.backfill) return `${point.backfill.releaseTag} backfill`;
+  if (point.backfill) return point.backfill.releaseTag;
   return (
     point.release ?? (point.pr ? `#${point.pr} · ${point.sha.slice(0, 7)}` : point.sha.slice(0, 7))
   );

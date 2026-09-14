@@ -177,7 +177,7 @@ try {
   assert.match(await page.locator(".chart").textContent(), /2026-09-11/);
   assert.match(await page.locator(".chart").textContent(), /2026-09-14/);
   assert.match(await page.locator(".chart").textContent(), /CHECKPOINT DAY \(UTC\)/);
-  assert.equal(await page.locator(".legend .stage").count(), 4);
+  assert.equal(await page.locator(".legend .stage").count(), 3);
   assert.equal(await page.getByRole("option", { name: "Past PR trial" }).count(), 0);
   assert.equal(await page.getByRole("option", { name: "Other branch" }).count(), 0);
   await page.getByLabel("Checkpoint status").selectOption("open");
@@ -264,7 +264,7 @@ try {
 
   // Synthetic browser response only: no fabricated receipt is sent upstream.
   const historical = {
-    ...point("backfill", 1, "backfill:v2.0.0-alpha.54"),
+    ...point("released", 1, "main"),
     date: "2026-09-10T04:26:57.178Z",
     measuredAt: "2026-09-14T15:00:00Z",
     release: null,
@@ -286,18 +286,26 @@ try {
   await page.getByText("Wallclock timeline", { exact: true }).waitFor();
   assert.equal(await page.locator(".chart-point").count(), 2);
   assert.match(await page.locator(".chart").textContent(), /2026-09-10/);
+  assert.equal(await page.locator('.chart line[opacity="0.8"]').count(), 1);
+  assert.equal(await page.locator(".bench-item.active .sparkline line").count(), 1);
+  await page.screenshot({
+    path: new URL("../.next/perf-timeline-receipts/released-main-continuity.png", import.meta.url)
+      .pathname,
+    fullPage: true,
+  });
+  assert.equal(await page.getByRole("option", { name: "Historical backfill" }).count(), 0);
   await page.locator(".chart-point").first().focus();
   await page.keyboard.press("Enter");
-  assert.match(await page.locator(".receipt").innerText(), /Historical backfill/);
+  assert.match(await page.locator(".receipt").innerText(), /Released/);
   assert.match(await page.locator(".receipt").innerText(), /Release date Sep 10.*measured Sep 14/);
   assert.equal(await page.locator(`.receipt a[href$="/commit/${"1".repeat(40)}"]`).count(), 1);
   assert.equal(await page.locator(`.receipt a[href$="/commit/${"e".repeat(40)}"]`).count(), 1);
   assert.match(await page.locator(".receipt-id").innerText(), /Historical harness/);
   assert.doesNotMatch(await page.locator(".receipt-id").innerText(), /exact release commit/);
-  await page.getByLabel("Checkpoint status").selectOption("backfill");
+  await page.getByLabel("Checkpoint status").selectOption("released");
   assert.equal(await page.locator(".chart-point").count(), 1);
   await page.locator(".receipts-table summary").click();
-  assert.match(await page.locator("tbody").innerText(), /v2.0.0-alpha.54 backfill/);
+  assert.match(await page.locator("tbody").innerText(), /v2.0.0-alpha.54/);
   assert.match(await page.locator("tbody").innerText(), /Sep 10.*measured Sep 14/);
   await page.screenshot({
     path: new URL("../.next/perf-timeline-receipts/historical-backfill.png", import.meta.url)
@@ -306,8 +314,15 @@ try {
   });
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  fixture.benchmarks[0].points = [historical];
+  await page.goto(`${origin}/perf-timeline?benchmark=first`);
+  await page.getByText("Wallclock timeline", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByLabel("Branch trace").locator('option[value="main"]').textContent(),
+    "main",
+  );
   console.log(
-    "Historical backfill browser receipt: release placement, measured date, both source commits, distinct classification and mobile layout passed.",
+    "Historical backfill browser receipt: release placement, measured date, both source commits, Released classification, continuous main trace and mobile layout passed.",
   );
 
   assert.deepEqual(errors, []);
