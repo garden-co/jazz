@@ -3554,8 +3554,8 @@ mod tests {
     }
 
     #[test]
-    fn preserves_nullable_and_raw_non_nullable_null_enum_defaults() {
-        let schema = Schema::from([(
+    fn preserves_nullable_and_rejects_required_null_enum_defaults() {
+        let nullable_schema = Schema::from([(
             TableName::new("items"),
             TableSchema::new(RowDescriptor::new(vec![
                 ColumnDescriptor::new(
@@ -3566,6 +3566,26 @@ mod tests {
                 )
                 .nullable()
                 .default(Value::Null),
+            ])),
+        )]);
+
+        let table = convert_public_schema(&nullable_schema)
+            .expect("a nullable enum column may retain a null default")
+            .into_runtime()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "items")
+            .expect("items table must be present");
+        let nullable_status = table
+            .columns
+            .iter()
+            .find(|column| column.name == "nullable_status")
+            .expect("nullable enum column must be present");
+        assert_eq!(nullable_status.default, Some(GrooveValue::Nullable(None)));
+
+        let required_schema = Schema::from([(
+            TableName::new("items"),
+            TableSchema::new(RowDescriptor::new(vec![
                 ColumnDescriptor::new(
                     "required_status",
                     ColumnType::Enum {
@@ -3575,23 +3595,11 @@ mod tests {
                 .default(Value::Null),
             ])),
         )]);
-
-        let table = convert_public_schema(&schema)
-            .expect("null enum defaults retain current conversion behavior")
-            .into_runtime()
-            .tables
-            .into_iter()
-            .find(|table| table.name == "items")
-            .expect("items table must be present");
-
-        for column_name in ["nullable_status", "required_status"] {
-            let column = table
-                .columns
-                .iter()
-                .find(|column| column.name == column_name)
-                .expect("enum column must be present");
-            assert_eq!(column.default, Some(GrooveValue::Nullable(None)));
-        }
+        let error = convert_public_schema(&required_schema)
+            .expect_err("a required enum column must reject a null default");
+        let rendered = error.to_string();
+        assert!(rendered.starts_with("$.items.required_status: "));
+        assert!(rendered.contains("null default requires a nullable column"));
     }
 
     #[test]
