@@ -7,3 +7,9 @@ description = "Shared precondition for trustworthy Jazz benchmark and receipt me
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+mimalloc = ["dep:mimalloc"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false, optional = true }

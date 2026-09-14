@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "kind": "historical-harness-backfill",
+  "releaseTag": "v2.0.0-alpha.54",
+  "engineSha": "7cb8a9b4e088c5810540f221c0d3434069566e6b",
+  "harnessSourceSha": "a2cd41ba1453a575f4e72a3ed17a1e5276265543",
+  "effectiveDate": "2026-09-10T04:26:57.178Z",
+  "effectiveDateSource": "npm jazz-tools time[2.0.0-alpha.54]",
+  "measurementMode": "walltime",
+  "runner": "codspeed-macro",
+  "rustToolchain": "1.93.1",
+  "cargoCodspeedVersion": "5.0.1",
+  "allocator": "mimalloc",
+  "benchmarks": [
+    "first_sync_27518_rocksdb",
+    "sequential_insert_1350_rocksdb",
+    "sequential_update_1350_rocksdb",
+    "reopen_1500_rocksdb",
+    "batch_update_1350_rocksdb"
+  ]
+}
