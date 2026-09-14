@@ -15,35 +15,34 @@ where
             .map(|mapping| mapping.table_id)
             .ok_or(Error::InvalidStoredValue("physical table mapping missing"))
     }
-    pub(crate) fn global_physical_table_ids_for_storage_tables(
+    /// Resolve storage publication names to logical tables across every known
+    /// schema mapping. Local physical identities can differ from the identity
+    /// retained by a maintained view, so targeted refresh uses these names.
+    pub(crate) fn logical_table_names_for_storage_tables(
         &self,
         changed_tables: &std::collections::HashSet<String>,
-    ) -> std::collections::HashSet<crate::ids::GlobalPhysicalTableId> {
+    ) -> std::collections::HashSet<String> {
+        let shared_deletion_history =
+            changed_tables.contains(SHARED_DELETION_HISTORY_TABLE);
         self.catalogue
             .physical_mappings
             .values()
             .flat_map(|mapping| {
                 mapping.tables.iter().filter_map(|(logical_table, table)| {
                     let table_id = table.table_id;
-                    let changed = [
-                        physical_history_table_name(table_id),
-                        physical_register_table_name(table_id),
-                        physical_global_current_table_name(table_id),
-                        physical_register_global_current_table_name(table_id),
-                        physical_ahead_current_table_name(table_id),
-                        physical_register_ahead_current_table_name(table_id),
-                    ]
-                    .iter()
-                    .any(|name| changed_tables.contains(name));
-                    if changed {
-                        mapping
-                            .identities
-                            .tables
-                            .get(logical_table)
-                            .map(|identity| identity.id)
-                    } else {
-                        None
-                    }
+                    let changed = shared_deletion_history
+                        || [
+                            physical_history_table_name(table_id),
+                            physical_register_table_name(table_id),
+                            physical_global_current_table_name(table_id),
+                            physical_register_global_current_table_name(table_id),
+                            physical_ahead_current_table_name(table_id),
+                            physical_register_ahead_current_table_name(table_id),
+                            physical_rejected_versions_table_name(table_id),
+                        ]
+                        .iter()
+                        .any(|name| changed_tables.contains(name));
+                    changed.then_some(logical_table.clone())
                 })
             })
             .collect()

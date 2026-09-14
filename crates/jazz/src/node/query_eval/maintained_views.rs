@@ -140,29 +140,17 @@ impl LocalMaintainedViewSubscription {
     pub(crate) fn subscription_id(&self) -> groove::ivm::SubscriptionId {
         self.subscription.id()
     }
-    /// Match the lowered query and embedded policy inputs, not every table in
-    /// the schema. Unknown inputs conservatively keep the subscription live.
-    pub(crate) fn uses_physical_table(&self, table: crate::ids::GlobalPhysicalTableId) -> bool {
-        if self.maintained.targeted_refresh_uncertain
-            || self.maintained.targeted_refresh_tables.iter().any(|name| {
-                !self
-                    .maintained
-                    .physical_tables
-                    .keys()
-                    .any(|candidate| candidate.as_str() == name)
-            })
-        {
-            return true;
-        }
-        self.maintained
-            .physical_tables
-            .iter()
-            .any(|(name, candidate)| {
-                self.maintained
-                    .targeted_refresh_tables
-                    .contains(name.as_str())
-                    && *candidate == table
-            })
+    /// Whether a storage publication can affect this maintained view's inputs.
+    pub(crate) fn uses_logical_tables(
+        &self,
+        changed_logical_tables: &std::collections::HashSet<String>,
+    ) -> bool {
+        self.maintained.targeted_refresh_uncertain
+            || self
+                .maintained
+                .targeted_refresh_tables
+                .iter()
+                .any(|table| changed_logical_tables.contains(table))
     }
 
     pub(crate) fn root_occurrence_ids(&self) -> &[OutputOccurrenceId] {

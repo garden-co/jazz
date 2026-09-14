@@ -3775,7 +3775,7 @@ where
 
 fn subscription_needs_targeted_refresh(
     state: &Rc<RefCell<SubscriptionState>>,
-    changed_physical_tables: &HashSet<crate::ids::GlobalPhysicalTableId>,
+    changed_logical_tables: &HashSet<String>,
 ) -> bool {
     let state_ref = state.borrow();
     let SubscriptionKind::Prepared {
@@ -3785,12 +3785,10 @@ fn subscription_needs_targeted_refresh(
     let Some(maintained) = maintained_subscription.as_ref() else {
         return true;
     };
-    changed_physical_tables
-        .iter()
-        .any(|table| maintained.uses_physical_table(*table))
+    maintained.uses_logical_tables(changed_logical_tables)
 }
 
-/// Re-evaluate live subscriptions whose maintained physical inputs may have
+/// Re-evaluate live subscriptions whose maintained logical inputs may have
 /// changed. Protocol and lifecycle refreshes use the unfiltered wrapper below.
 pub(super) async fn refresh_subscriptions_in<S>(
     node: &SharedNodeState<S>,
@@ -3829,11 +3827,11 @@ where
         .await
         .drive_ready_query_runtime_with_waker(progress_waker)
         .await?;
-    let changed_physical_tables = if let Some(changed_tables) = changed_tables {
+    let changed_logical_tables = if let Some(changed_tables) = changed_tables {
         let changed = node
             .lock()
             .await
-            .global_physical_table_ids_for_storage_tables(changed_tables);
+            .logical_table_names_for_storage_tables(changed_tables);
         (!changed.is_empty()).then_some(changed)
     } else {
         None
@@ -3849,8 +3847,8 @@ where
         if state.borrow().closed.get() {
             continue;
         }
-        if let Some(changed_physical_tables) = changed_physical_tables.as_ref()
-            && !subscription_needs_targeted_refresh(&state, changed_physical_tables)
+        if let Some(changed_logical_tables) = changed_logical_tables.as_ref()
+            && !subscription_needs_targeted_refresh(&state, changed_logical_tables)
         {
             // Targeted refresh skips evaluation, not subscription liveness.
             retained.push(Rc::downgrade(&state));
