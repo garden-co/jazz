@@ -48,6 +48,7 @@ export default function App() {
 
     return {
       connections,
+      editingConnectionId: fragmentConfig ? null : (activeConnection?.id ?? null),
       initialFormValues: fragmentConfig ?? storedConnectionToFormValues(activeConnection) ?? null,
       screen: "form" as AppScreen,
     };
@@ -58,7 +59,7 @@ export default function App() {
   const [screen, setScreen] = useState<AppScreen>(initialState.screen);
   const [connectionFormMode, setConnectionFormMode] = useState<ConnectionFormMode>("connect");
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(
-    getActiveConnection(initialState.connections)?.id ?? null,
+    initialState.editingConnectionId,
   );
   const [formValues, setFormValues] = useState<DbConfigFormValues | null>(
     initialState.initialFormValues,
@@ -502,7 +503,10 @@ function readStoredConnections(): StoredConnections {
     if (!raw) return emptyConnectionStore();
     const parsed = JSON.parse(raw) as unknown;
     const migrated = migrateStoredConnections(parsed);
-    if (!migrated) return emptyConnectionStore();
+    if (!migrated) {
+      localStorage.removeItem(STORAGE_KEY);
+      return emptyConnectionStore();
+    }
     writeStoredConnections(migrated);
     return migrated;
   } catch {

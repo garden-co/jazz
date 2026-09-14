@@ -365,7 +365,6 @@ describe("App", () => {
     expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
-    const storedBeforeEdit = localStorage.getItem(STORAGE_KEY);
 
     fireEvent.click(screen.getByRole("button", { name: "Edit Local dev" }));
     expect(await screen.findByRole("heading", { name: "Edit connection" })).not.toBeNull();
@@ -456,5 +455,60 @@ describe("App", () => {
     expect(screen.getByLabelText("App ID")).toHaveProperty("value", "preview-app-id");
     expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
     expect(createJazzClientMock).not.toHaveBeenCalled();
+  });
+  it("a fragment connection preserves the existing saved connection", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "saved",
+        connections: [
+          {
+            id: "saved",
+            name: "Saved",
+            serverUrl: "https://saved.example.com",
+            appId: "saved-app",
+            adminSecret: "old-secret",
+            env: "dev",
+            schemaHash: "hash-a",
+          },
+        ],
+      }),
+    );
+    window.location.hash = "#serverUrl=https%3A%2F%2Fnew.example.com&appId=new-app";
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Admin secret"), { target: { value: "new-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await screen.findByRole("heading", { name: "Select schema" });
+    fireEvent.change(screen.getByLabelText("Schema hash"), { target: { value: "hash-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Use schema" }));
+    await screen.findByText("Inspector ready");
+    const store = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
+    expect(store.connections).toHaveLength(2);
+    expect(store.connections.find((c: { id: string }) => c.id === "saved").appId).toBe("saved-app");
+  });
+
+  it("scrubs secrets even when one stored connection is invalid", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "saved",
+        connections: [
+          {
+            id: "saved",
+            name: "Saved",
+            serverUrl: "https://saved.example.com",
+            appId: "saved-app",
+            adminSecret: "old-secret",
+            env: "dev",
+            schemaHash: "hash-a",
+          },
+          {},
+        ],
+      }),
+    );
+    render(<App />);
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 });

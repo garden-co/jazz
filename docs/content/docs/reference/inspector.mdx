@@ -26,7 +26,10 @@ Open [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) and enter:
   branch view)
 
 After connecting, choose the published schema hash you want to inspect. The inspector stores the
-connection locally so you can reopen it without re-entering everything each time.
+connection name, server URL, app ID, environment, and schema hash locally. Admin secrets are kept
+only in memory: re-enter the credential after reloading or reopening a saved connection. Development
+links prefill connection details without including the credential. Legacy credentials in saved
+connections or URL fragments are removed and must be entered again.
 
 ## Features
 
