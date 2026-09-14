@@ -509,8 +509,11 @@ describe("internal subscription delta browser integration", () => {
         "expected the live subscription to observe the subsequent write; " +
         `history=${JSON.stringify(describeSubscriptionHistory(deltas))}`,
     );
-    expect(deltas[0]?.all).toEqual([]);
-    expect(deltas.slice(1).some((delta) => hasChangeForId(delta, 0, value.id))).toBe(true);
+    // A write during initial loading may be included in the opening snapshot
+    // or arrive afterward. Either way, it must be delivered exactly once.
+    expect(deltas[0]?.reset).toBe(true);
+    expect(deltas.filter((delta) => hasChangeForId(delta, 0, value.id))).toHaveLength(1);
+    expect(deltas.at(-1)?.all).toEqual([value]);
 
     unsubscribe();
   });

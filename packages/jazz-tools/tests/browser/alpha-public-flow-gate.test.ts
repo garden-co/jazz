@@ -124,6 +124,9 @@ describe("alpha public package flow", () => {
       }),
     );
 
+    await waitForCondition(() => snapshots.length > 0, 4000, "initial empty snapshot");
+    expect(snapshots[0]).toEqual([]);
+
     const createdWrite = db.insert(app.todos, {
       title: "Adopt alpha public flow",
       done: false,
