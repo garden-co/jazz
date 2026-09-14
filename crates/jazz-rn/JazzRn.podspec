@@ -49,6 +49,9 @@ Pod::Spec.new do |s|
   # dependency through a package-local symlink without copying or modifying its
   # sealed bytes. Refuse an unmanaged file/directory at this generated path.
   payload_link_directory = File.join(__dir__, "ios-payload")
+  if File.symlink?(payload_link_directory) || (File.exist?(payload_link_directory) && !File.directory?(payload_link_directory))
+    raise Pod::Informative, "jazz-rn generated iOS payload directory is occupied: #{payload_link_directory}"
+  end
   FileUtils.mkdir_p(payload_link_directory)
   payload_link = File.join(payload_link_directory, "JazzNativeRelay.xcframework")
   if File.symlink?(payload_link)
