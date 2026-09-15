@@ -1,4 +1,5 @@
 import { cleanup, render, screen } from "@testing-library/react";
+import { schema as s } from "jazz-tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { TableSchemaDefinition } from "./TableSchemaDefinition";
@@ -8,6 +9,12 @@ const mockUseDevtoolsContext = vi.fn();
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => mockUseDevtoolsContext(),
 }));
+
+const bigintDefaultApp = s.defineApp({
+  metrics: s.table({
+    largeCount: s.bigint().default(9007199254740993n),
+  }),
+});
 
 describe("TableSchemaDefinition", () => {
   beforeEach(() => {
@@ -61,18 +68,7 @@ describe("TableSchemaDefinition", () => {
   it("displays a BigInt schema default with its exact decimal digits", () => {
     mockUseDevtoolsContext.mockReturnValue({
       runtime: "overlay",
-      wasmSchema: {
-        metrics: {
-          columns: [
-            {
-              name: "largeCount",
-              column_type: { type: "BigInt" },
-              nullable: false,
-              default: { type: "BigInt", value: 9007199254740993n },
-            },
-          ],
-        },
-      },
+      wasmSchema: bigintDefaultApp.wasmSchema,
       storedPermissions: null,
     });
 

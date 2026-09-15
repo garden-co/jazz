@@ -537,12 +537,7 @@ function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): Queu
       continue;
     }
 
-    if (column.nullable) {
-      edits[column.name] = {
-        text: "",
-        isNull: true,
-      };
-    } else if (column.column_type.type === "Boolean") {
+    if (column.column_type.type === "Boolean") {
       edits[column.name] = {
         text: "false",
         isNull: false,
@@ -573,9 +568,6 @@ function buildQueuedInsertValues(
 
     const edit = queuedInsertEdits[column.name];
     if (!edit) {
-      continue;
-    }
-    if (edit.isNull) {
       continue;
     }
 

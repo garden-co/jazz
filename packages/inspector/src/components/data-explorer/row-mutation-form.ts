@@ -153,7 +153,11 @@ function parseStructuredMutationValue(columnType: ColumnType, value: unknown): u
       const row = { ...(value as Record<string, unknown>) };
       for (const column of columnType.columns) {
         if (Object.hasOwn(row, column.name)) {
-          row[column.name] = parseStructuredMutationValue(column.column_type, row[column.name]);
+          const columnValue = row[column.name];
+          row[column.name] =
+            columnValue === null && column.nullable
+              ? null
+              : parseStructuredMutationValue(column.column_type, columnValue);
         }
       }
       return row;

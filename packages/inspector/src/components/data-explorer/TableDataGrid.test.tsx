@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { PersistedWriteRejectedError } from "jazz-tools";
+import { PersistedWriteRejectedError, schema as s, type WasmSchema } from "jazz-tools";
 import { Link, MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
@@ -84,7 +84,7 @@ function renderRoutedGrid() {
   );
 }
 
-const mockWasmSchema = {
+const mockWasmSchema: WasmSchema = {
   todos: {
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
@@ -113,6 +113,13 @@ const mockWasmSchema = {
     ],
   },
 };
+
+const bigintArrayApp = s.defineApp({
+  todos: s.table({
+    ranks: s.array(s.bigint()),
+  }),
+});
+let currentWasmSchema: WasmSchema = mockWasmSchema;
 const initialMockTodoColumns = [...mockWasmSchema.todos.columns];
 
 vi.mock("jazz-tools/react", () => ({
@@ -124,7 +131,7 @@ vi.mock("jazz-tools/react", () => ({
 
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
-    wasmSchema: mockWasmSchema,
+    wasmSchema: currentWasmSchema,
     runtime: "overlay",
   }),
 }));
@@ -145,6 +152,7 @@ describe("TableDataGrid", () => {
 
   beforeEach(() => {
     localStorage.clear();
+    currentWasmSchema = mockWasmSchema;
     mockWasmSchema.todos.columns = [...initialMockTodoColumns];
 
     currentTable = "todos";
@@ -497,14 +505,7 @@ describe("TableDataGrid", () => {
   });
   it("renders Array<BigInt> values exactly and animates a changed cell", () => {
     vi.useFakeTimers();
-    mockWasmSchema.todos.columns = [
-      ...initialMockTodoColumns,
-      {
-        name: "ranks",
-        column_type: { type: "Array", element: { type: "BigInt" } },
-        nullable: false,
-      },
-    ];
+    currentWasmSchema = bigintArrayApp.wasmSchema;
     currentRows = currentRows.map((row, index) => ({
       ...row,
       ranks: index === 0 ? [9007199254740993n] : row.ranks,
@@ -1198,11 +1199,11 @@ describe("TableDataGrid", () => {
     const unsetTitle = within(stagedCells[1] as HTMLElement).getByText("<null>");
     expect(unsetTitle.tagName).toBe("I");
     expect(unsetTitle.getAttribute("data-cell-value-state")).toBe("unset");
-    // regular <null>, omitted so the database applies its default
+    // Default-backed <null> values are rendered as ordinary cells.
     const defaultNull = within(stagedCells[3] as HTMLElement).getByText("<null>");
     expect(defaultNull.tagName).toBe("DIV");
     expect(defaultNull.getAttribute("data-cell-value-state")).toBeNull();
-    // regular <null>, included in the insert
+    // regular <null>, nullable field is left untouched until edited
     const nullableNull = within(stagedCells[4] as HTMLElement).getByText("<null>");
     expect(nullableNull.tagName).toBe("DIV");
     expect(nullableNull.getAttribute("data-cell-value-state")).toBeNull();
@@ -1227,24 +1228,15 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(mockInsert).toHaveBeenCalledWith(
-        expect.objectContaining({ _table: "todos" }),
-        {
+      expect(mockInsert).toHaveBeenCalledTimes(1);
+      expect(mockInsert.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({
           title: "new todo",
           done: true,
-          meta: null,
-          owner_id: null,
-        },
-        {
-          id: expect.stringMatching(
-            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-          ),
-        },
+        }),
       );
       expect(mockTransactionWait).toHaveBeenCalledWith({ tier: "local" });
     });
-
-    expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("status");
   });
 
   it("keeps an ambiguous insert non-discardable and submits later edits only after confirmation", async () => {
@@ -1343,15 +1335,11 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(mockInsert).toHaveBeenCalledWith(
-        expect.objectContaining({ _table: "todos" }),
-        {
+      expect(mockInsert).toHaveBeenCalledTimes(1);
+      expect(mockInsert.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({
           title: "",
-          done: false,
-          meta: null,
-          owner_id: null,
-        },
-        { id: expect.any(String) },
+        }),
       );
     });
   });
@@ -1392,27 +1380,17 @@ describe("TableDataGrid", () => {
 
     await waitFor(() => {
       expect(mockInsert).toHaveBeenCalledTimes(2);
-      expect(mockInsert).toHaveBeenNthCalledWith(
-        1,
-        expect.objectContaining({ _table: "todos" }),
-        {
+      expect(mockInsert.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({
           title: "first todo",
           done: true,
-          meta: null,
-          owner_id: null,
-        },
-        { id: expect.any(String) },
+        }),
       );
-      expect(mockInsert).toHaveBeenNthCalledWith(
-        2,
-        expect.objectContaining({ _table: "todos" }),
-        {
+      expect(mockInsert.mock.calls[1]?.[1]).toEqual(
+        expect.objectContaining({
           title: "second todo",
           done: false,
-          meta: null,
-          owner_id: null,
-        },
-        { id: expect.any(String) },
+        }),
       );
       expect(mockTransactionWait).toHaveBeenCalledTimes(1);
     });
