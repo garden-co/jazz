@@ -1000,3 +1000,63 @@ async fn provenance_columns_expose_user_principals_and_insert_timestamps_inner()
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
+
+/// A backend explicitly acting as Alice must enforce her read permissions
+/// before merging updates, both ordinarily and inside a transaction.
+/// Its underlying SYSTEM identity must not grant access to Bob's hidden note.
+#[tokio::test]
+async fn backend_session_updates_enforce_local_read_permissions() {
+    tokio::task::LocalSet::new()
+        .run_until(backend_session_updates_enforce_local_read_permissions_inner())
+        .await;
+}
+
+async fn backend_session_updates_enforce_local_read_permissions_inner() {
+    let owner_policy = pe::eq("owner", pe::session(vec!["claims", "sub"]));
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .column("owner", ColumnType::Text)
+                .policies(permissions(|p| {
+                    p.allow_read().where_(owner_policy.clone());
+                    p.allow_insert().always();
+                    p.allow_update()
+                        .where_old(owner_policy.clone())
+                        .where_new(owner_policy);
+                })),
+        )
+        .build();
+    let backend = JazzClient::test_client(schema).await;
+    let (note_id, _, _) = backend
+        .insert(
+            "notes",
+            jazz::row_input!("title" => "Bob's note", "owner" => super::BOB_ID),
+        )
+        .expect("backend creates Bob's note");
+    let mut session = Session::new("urn:jazz:test", super::ALICE_ID);
+    session.account_id = Some(jazz::account_registry::AccountId(uuid::Uuid::from_u128(
+        0xa11ce,
+    )));
+    let alice = backend.for_session(session);
+    let patch = vec![("title".to_owned(), Value::Text("Alice's edit".to_owned()))];
+    let error = alice
+        .update("notes", note_id, patch.clone())
+        .expect_err("explicit Alice session cannot merge Bob's hidden note");
+    assert!(error.to_string().contains("read policy denied"), "{error}");
+    let transaction = alice.begin_transaction().expect("begin Alice transaction");
+    let error = transaction
+        .update("notes", note_id, patch)
+        .expect_err("transaction retains explicit Alice session permissions");
+    assert!(error.to_string().contains("read policy denied"), "{error}");
+    transaction.rollback().expect("rollback Alice transaction");
+    let rows = backend
+        .query(Query::from("notes").select(["title"]), None)
+        .await
+        .expect("backend reads unchanged note");
+    assert_eq!(
+        rows,
+        vec![(note_id, vec![Value::Text("Bob's note".to_owned())])]
+    );
+    backend.shutdown().await.expect("shutdown backend");
+}

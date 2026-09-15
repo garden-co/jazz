@@ -928,7 +928,6 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
 /// alice ──insert owner=alice, folder=shared─────────► server ──► accepted
 /// ```
 #[tokio::test]
-#[ignore = "#1762: inherited write policies resolves on wrong branch"]
 async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
     tokio::task::LocalSet::new()
         .run_until(inherited_folder_insert_requires_folder_owner_when_fk_present_inner())
@@ -943,6 +942,8 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
             permissions(|p| {
                 p.allow_insert().always();
                 p.allow_read().where_(folder_owner_policy());
+                // Child inserts inherit the parent's UPDATE USING permission.
+                p.allow_update().where_old(folder_owner_policy());
             }),
         ))
         .table(make_folder_documents_schema(
@@ -1172,7 +1173,6 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
 /// alice ──delete folder────────────────────────────► server ──► persisted
 /// ```
 #[tokio::test]
-#[ignore = "#1764: folder-owner inherited DELETE leaves the folder-backed document present after an EdgeServer-tier read"]
 async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_documents() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -1327,7 +1327,6 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 /// bob ──delete charlie doc──────────────────────────► server ──✗ rejected
 /// ```
 #[tokio::test]
-#[ignore = "#1764: the document-owner/non-owner inherited DELETE scenario does not settle within 20 seconds"]
 async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owners() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -1713,7 +1712,6 @@ async fn inherited_multiple_folder_paths_compose_with_or_inner() {
 /// Verifies that folder ownership grants UPDATE access to a folder-backed
 /// document when the child row inherits `allowedTo.update(...)` from its parent.
 #[tokio::test]
-#[ignore = "#1762: the Rust client rejects the inherited-visible UPDATE with `read policy denied UPSERT on table documents`"]
 async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
     tokio::task::LocalSet::new()
         .run_until(inherited_folder_update_allows_folder_owner_and_blocks_other_users_inner())
@@ -1831,13 +1829,14 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
         ),
     ));
 
-    update_row(
-        &bob,
-        "documents",
-        doc_id,
-        vec![("title".to_string(), "Edited By Bob".into())],
-    )
-    .await;
+    let error = bob
+        .update(
+            "documents",
+            doc_id,
+            vec![("title".to_string(), "Edited By Bob".into())],
+        )
+        .expect_err("Bob cannot update a row absent from his readable local data");
+    assert!(error.to_string().contains("read policy denied"), "{error}");
     let rows_after_bob = wait_for_query(
         &admin,
         query,
@@ -2925,15 +2924,16 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
 /// folder, but Bob cannot update that root folder. The child's update must
 /// therefore fail the inherited `allowedTo.update(parent_id)` check.
 #[tokio::test]
-#[ignore = "#1762: expects synchronous inherited WITH CHECK rejection, but the update-only child write is accepted optimistically"]
-async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
+async fn update_with_check_inherits_denies_when_parent_is_not_updateable() {
     tokio::task::LocalSet::new()
-        .run_until(local_update_with_check_inherits_denies_when_parent_is_not_updateable_inner())
+        .run_until(update_with_check_inherits_denies_when_parent_is_not_updateable_inner())
         .await;
 }
 
-async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_inner() {
+async fn update_with_check_inherits_denies_when_parent_is_not_updateable_inner() {
     let folders_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
         p.allow_update()
             .where_old(pe::eq("owner_id", pe::session(vec!["claims", "sub"])))
             .where_new(pe::allowed_to_update_with_depth("parent_id", 10));
@@ -2975,7 +2975,17 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_i
     )
     .await;
 
-    let update_err = bob
+    // Give UPDATE a readable preimage so the rejection exercises WITH CHECK,
+    // rather than failing because the child is absent from Bob's local data.
+    wait_for_rows(
+        &bob,
+        Query::from("folders"),
+        "Bob receives his own child before updating it",
+        |rows| rows.iter().any(|(id, _)| *id == child_id).then_some(()),
+    )
+    .await;
+
+    let update_tx = bob
         .update(
             "folders",
             child_id,
@@ -2985,8 +2995,33 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_i
                 ("parent_id".into(), Value::Uuid(root_id)),
             ],
         )
-        .expect_err("update should fail inherited WITH CHECK");
-    assert_client_policy_denied(update_err, "folders", Operation::Update);
+        .expect("submit update to Bob's readable child")
+        .expect("ordinary update has a transaction");
+    let update_err = bob
+        .wait_for_transaction(update_tx, DurabilityTier::EdgeServer)
+        .await
+        .expect_err("authority should reject inherited WITH CHECK");
+    assert!(
+        update_err.to_string().contains("authorization_denied"),
+        "expected policy rejection, got {update_err}"
+    );
+    let rows = wait_for_query(
+        &admin,
+        Query::from("folders").select(["name", "parent_id"]),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "child remains unchanged after rejected update",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == child_id
+                        && *values == vec![Value::Text("Child".into()), Value::Uuid(root_id)]
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 2);
 
     admin.shutdown().await.expect("shutdown admin");
     bob.shutdown().await.expect("shutdown bob");

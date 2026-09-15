@@ -114,7 +114,6 @@ async fn rebac_declared_fk_inheritance_grants_select_access_inner() {
 /// Verifies that declared reverse-FK inheritance can grant UPDATE on a target
 /// row through a visible referencing row.
 #[tokio::test]
-#[ignore = "#1762: an inherited-visible row is rejected locally on update with `read policy denied UPSERT`"]
 async fn rebac_declared_fk_inheritance_grants_update_access() {
     tokio::task::LocalSet::new()
         .run_until(rebac_declared_fk_inheritance_grants_update_access_inner())
@@ -304,7 +303,6 @@ async fn rebac_declared_fk_inheritance_cycle_fails_closed_inner() {
 /// Verifies that access through a declared reverse-FK path is re-evaluated
 /// when the referencing FK column changes from NULL to a target id.
 #[tokio::test]
-#[ignore = "#1762: an accepted referencing-FK update does not re-evaluate the inherited target view"]
 async fn rebac_declared_fk_inheritance_reacts_to_fk_updates() {
     tokio::task::LocalSet::new()
         .run_until(rebac_declared_fk_inheritance_reacts_to_fk_updates_inner())

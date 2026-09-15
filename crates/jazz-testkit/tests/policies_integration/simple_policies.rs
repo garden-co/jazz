@@ -1658,30 +1658,18 @@ async fn row_level_contains_and_in_list_policies_filter_rows_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that read and write policies remain independent:
-/// readable rows can still reject writes, and writable rows can remain hidden.
-///
-/// Actors: alice performs the allowed write, bob reads and attempts the
-/// rejected write, and admin verifies the persisted state.
-///
-/// ```text
-/// bob ──query read_only──────────────► sees row
-/// bob ──update read_only─────────────► server rejects, row stays original
-///
-/// bob ──query write_only─────────────► sees nothing
-/// alice ──update hidden write_only──► server accepts
-/// admin ──query write_only───────────► sees persisted update
-/// bob ──query write_only─────────────► sees row once it satisfies SELECT
-/// ```
+/// Verifies that updating an existing row requires both read and UPDATE permission.
+/// Bob can read a row but lacks UPDATE permission; Alice has UPDATE permission
+/// but cannot read the archived row she inserted. Both updates must be rejected
+/// by the server, and admin must observe the original data afterward.
 #[tokio::test]
-#[ignore = "#1762: the Rust client rejects UPDATE on a write-authorized but read-hidden row with `read policy denied UPSERT`"]
-async fn read_and_write_policies_remain_independent() {
+async fn updates_require_read_and_update_permissions() {
     tokio::task::LocalSet::new()
-        .run_until(read_and_write_policies_remain_independent_inner())
+        .run_until(updates_require_read_and_update_permissions_inner())
         .await;
 }
 
-async fn read_and_write_policies_remain_independent_inner() {
+async fn updates_require_read_and_update_permissions_inner() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents_read_only",
@@ -1742,8 +1730,7 @@ async fn read_and_write_policies_remain_independent_inner() {
     )
     .await;
     let read_only_values = boolean_policy_document_values("owner", "original", false);
-    let revealed_write_only_values =
-        boolean_policy_document_values(super::ALICE_ID, "hidden", false);
+    let write_only_values = boolean_policy_document_values(super::ALICE_ID, "hidden", true);
 
     let read_only_rows = wait_for_rows(
         &bob,
@@ -1754,7 +1741,25 @@ async fn read_and_write_policies_remain_independent_inner() {
     .await;
     assert_eq!(read_only_rows.len(), 1);
 
-    update_document_title(&bob, "documents_read_only", read_only_id, "blocked").await;
+    let transaction = bob
+        .update(
+            "documents_read_only",
+            read_only_id,
+            vec![("title".to_owned(), "blocked".into())],
+        )
+        .expect("stage update to readable row")
+        .expect("update commits immediately");
+    let error = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        bob.wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer),
+    )
+    .await
+    .expect("server decides the read-only update")
+    .expect_err("read permission alone must not authorize UPDATE");
+    assert!(
+        error.to_string().ends_with("authorization_denied"),
+        "unexpected rejection: {error}"
+    );
     let read_only_after = wait_for_rows(
         &admin,
         Query::from("documents_read_only"),
@@ -1777,56 +1782,63 @@ async fn read_and_write_policies_remain_independent_inner() {
         Query::from("documents_write_only"),
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(3),
-        "write-only row stays hidden before reveal",
+        "write-only row is hidden before the attempted update",
         Some,
     )
     .await;
     assert!(write_only_before.is_empty());
-    alice_hidden_reader
-        .shutdown()
-        .await
-        .expect("shutdown alice_hidden_reader");
-
-    update_document_archived(&alice, "documents_write_only", write_only_id, false).await;
-    let alice_visible_reader = connect_ready_user(
-        &server,
-        &schema,
-        super::ALICE_ID,
-        "documents_write_only",
-        READY_TIMEOUT,
-    )
-    .await;
-    let alice_rows = wait_for_rows(
-        &alice_visible_reader,
+    let persisted_before = wait_for_rows(
+        &admin,
         Query::from("documents_write_only"),
-        "same session can reveal a row it was allowed to write before it could read",
-        |rows| has_row(&rows, write_only_id, &revealed_write_only_values).then_some(rows),
+        "hidden insert is persisted before the update",
+        |rows| has_row(&rows, write_only_id, &write_only_values).then_some(rows),
     )
     .await;
-    assert!(has_row(
-        &alice_rows,
-        write_only_id,
-        &revealed_write_only_values,
-    ));
-    alice_visible_reader
-        .shutdown()
-        .await
-        .expect("shutdown alice_visible_reader");
+    assert_eq!(persisted_before.len(), 1);
 
-    let write_only_after = wait_for_query(
-        &bob,
+    let transaction = alice
+        .update(
+            "documents_write_only",
+            write_only_id,
+            vec![("archived".to_owned(), false.into())],
+        )
+        .expect("stage optimistic update to the row Alice inserted")
+        .expect("update commits immediately");
+    let error = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        alice.wait_for_transaction(transaction, jazz::tools::DurabilityTier::EdgeServer),
+    )
+    .await
+    .expect("server decides the hidden-row update")
+    .expect_err("UPDATE permission alone must not authorize updating a hidden row");
+    assert!(
+        error.to_string().ends_with("authorization_denied"),
+        "unexpected rejection: {error}"
+    );
+
+    let persisted_after = wait_for_rows(
+        &admin,
+        Query::from("documents_write_only"),
+        "rejected update leaves the hidden row unchanged",
+        |rows| has_row(&rows, write_only_id, &write_only_values).then_some(rows),
+    )
+    .await;
+    assert_eq!(persisted_after, persisted_before);
+
+    let hidden_after = wait_for_query(
+        &alice_hidden_reader,
         Query::from("documents_write_only"),
         Some(DurabilityTier::EdgeServer),
-        Duration::from_secs(3),
-        "row becomes readable once the update makes it satisfy SELECT",
+        QUERY_TIMEOUT,
+        "rejected update does not reveal the row",
         Some,
     )
     .await;
-    assert!(has_row(
-        &write_only_after,
-        write_only_id,
-        &revealed_write_only_values,
-    ));
+    assert!(hidden_after.is_empty());
+    alice_hidden_reader
+        .shutdown()
+        .await
+        .expect("shutdown hidden reader");
 
     admin.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");

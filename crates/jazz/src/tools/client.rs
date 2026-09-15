@@ -111,8 +111,6 @@ struct UnverifiedJwtClaims {
 ///
 /// Combines local storage with server sync.
 pub struct JazzClient {
-    /// Session inferred from client auth context for user-scoped operations.
-    default_session: Option<Session>,
     /// Write metadata applied to mutations issued through this client.
     write_context: Option<WriteContext>,
     /// Shared core database handle backing the public client facade.
@@ -122,7 +120,6 @@ pub struct JazzClient {
 impl Clone for JazzClient {
     fn clone(&self) -> Self {
         Self {
-            default_session: self.default_session.clone(),
             write_context: self.write_context.clone(),
             db: self.db.clone(),
         }
@@ -3073,16 +3070,18 @@ impl JazzClient {
             return Ok(Some(CoreWriteIdentity::Attribution(author)));
         }
         Ok(self
-            .session_write_identity()?
+            .explicit_session_write_identity()?
             .map(CoreWriteIdentity::Session))
     }
 
-    fn session_write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
+    // The authenticated client identity and claims are installed when opening
+    // the database. Only a per-write session selects backend impersonation and
+    // its local authorization checks; ordinary replica writes use Database.
+    fn explicit_session_write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
         let session = self
             .write_context
             .as_ref()
-            .and_then(|context| context.session())
-            .or(self.default_session.as_ref());
+            .and_then(|context| context.session());
         let Some(session) = session else {
             return Ok(None);
         };
@@ -3640,7 +3639,6 @@ impl JazzClient {
                     .set_identity_claims(identity.author, claims);
             }
             let client = Self {
-                default_session,
                 write_context: None,
                 db,
             };
@@ -3772,7 +3770,7 @@ impl JazzClient {
             .and_then(|ctx| ctx.transaction_id)
         {
             let author = self
-                .session_write_identity()?
+                .explicit_session_write_identity()?
                 .unwrap_or_else(|| self.db.inner.borrow().identity.author);
             self.db
                 .query_transaction_rows(query.clone(), opts, transaction_id, author)
@@ -3981,7 +3979,6 @@ impl JazzClient {
     /// Create a client that uses the given write context for mutations.
     pub fn with_write_context(&self, write_context: WriteContext) -> JazzClient {
         JazzClient {
-            default_session: self.default_session.clone(),
             write_context: Some(write_context),
             db: self.db.clone(),
         }
