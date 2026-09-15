@@ -587,7 +587,11 @@ function isLegacyStoredConfig(value: unknown): value is LegacyStoredConfig {
 }
 
 function writeStoredConnections(connections: StoredConnections): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(connections));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(connections));
+  } catch {
+    // Keep the in-memory connection store responsive when storage is unavailable.
+  }
 }
 
 function emptyConnectionStore(): StoredConnections {
