@@ -483,3 +483,15 @@ describe("reserved table id", () => {
     expect(() => defineTable({ payload: col.enum({ item: { id: col.string() } }) })).not.toThrow();
   });
 });
+
+describe("schema table-name uniqueness", () => {
+  it("rejects duplicate legacy table declarations during schema lowering", () => {
+    resetCollectedState();
+    table("tasks", { title: col.string() });
+    table("tasks", { completed: col.boolean() });
+
+    expect(() => schemaToWasm(getCollectedSchema())).toThrow(
+      'Duplicate table name "tasks" in schema.',
+    );
+  });
+});
