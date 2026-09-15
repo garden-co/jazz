@@ -103,6 +103,14 @@ where
         }
         let head_tx_ids = head_tx_ids.into_iter().collect::<Vec<_>>();
         let raw_head_tx_ids = raw_merge_head_tx_ids(&row_versions_by_tx, &head_tx_ids)?;
+        // Physical heads may retain older merge caches whose raw inputs are
+        // already dominated by one ordinary edit. There is no concurrent
+        // content left to reconcile; merging that singleton would turn each
+        // synthetic child into the next raw head and never reach quiescence.
+        // GSet still needs its history-based materialization below.
+        if raw_head_tx_ids.len() < 2 && !has_gset_column {
+            return Ok(PublicationOutcome::settled(Vec::new()));
+        }
         let mut parents = raw_head_tx_ids.clone();
         parents.sort();
         if row_versions_by_tx.values().any(|version| {
