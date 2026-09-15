@@ -2,8 +2,8 @@ use super::*;
 use crate::tools::object::ObjectId;
 use crate::tools::public_api::policy::{CmpOp, Operation, PolicyValue};
 use crate::tools::public_api::relation_ir::{
-    ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr,
-    RelExpr, ValueRef,
+    ColumnRef, JoinCondition, JoinKind, KeyRef, PredicateCmpOp, PredicateExpr, ProjectColumn,
+    ProjectExpr, RecursionBound, RelExpr, RowIdRef, ValueRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -670,6 +670,19 @@ pub mod policy_expr {
     }
 
     impl Relation {
+        /// Recursively expand projected `id` keys, including the seed and at
+        /// most `max_depth` steps. The step may compare columns to the frontier
+        /// with `rel::eq_frontier` and must project its next key as `id`.
+        pub fn gather(self, step: Relation, max_depth: usize) -> Self {
+            Self::new(RelExpr::Gather {
+                seed: Box::new(self.rel),
+                step: Box::new(step.rel),
+                frontier_key: KeyRef::RowId(RowIdRef::Current),
+                bound: RecursionBound::MaxDepth(max_depth),
+                dedupe_key: vec![KeyRef::RowId(RowIdRef::Current)],
+            })
+        }
+
         /// Project named columns from this relation.
         pub fn select(
             self,
@@ -819,6 +832,15 @@ pub mod policy_expr {
 
     pub mod rel {
         use super::*;
+
+        /// Match a recursive step's column against the current frontier key.
+        pub fn eq_frontier(column: impl Into<ColumnRef>) -> PredicateExpr {
+            cmp(
+                column,
+                PredicateCmpOp::Eq,
+                ValueRef::RowId(RowIdRef::Frontier),
+            )
+        }
 
         /// Refer to a column in a named table or alias.
         pub fn column(scope: impl Into<String>, column: impl Into<String>) -> ColumnRef {
