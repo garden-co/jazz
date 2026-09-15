@@ -292,6 +292,13 @@ impl Database {
                 return Err(Error::IvmRuntime(error));
             }
         };
+        // Durable nodes are already evaluated, even when a query terminal is
+        // waiting for cold content. Include their writes in this publication's
+        // atomic batch now; a later query turn must not append them to a
+        // publication whose persistence snapshot has already been taken.
+        staged_state
+            .borrow_mut()
+            .extend(resident_tick.take_durable_writes());
         // The public direct write APIs are themselves the runtime owner for
         // CPU-only continuations which this tick scheduled.  In particular,
         // a bounded recursive evaluation may yield after making resident

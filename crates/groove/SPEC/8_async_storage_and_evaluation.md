@@ -199,6 +199,14 @@ holding peer-visible effects until their publication is at or below Groove's
 durable frontier. A later publication must never become externally releasable
 past an earlier unresolved publication.
 
+Declared-index and other durable-node writes are prepared before a resident
+publication can park its query-only work. Those completed writes MUST enter the
+same staged atomic batch as that publication's base writes before its persistence
+owner can take a snapshot. A terminal waiting for missing content does not defer
+index durability to a later query turn. Otherwise a settled base publication can
+lack its index, and an older terminal can append obsolete index writes after a
+newer publication has deleted the row (regression #3015).
+
 Durability-before-publication remains an explicit policy for operations such
 as schema installation that must not become optimistically visible. The policy
 is named at the existing Groove database boundary; it does not select another

@@ -106,7 +106,7 @@ pub(super) struct IncrementalEvaluation<'a> {
     pending_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
     /// Derived writes use the same sparse overlay as their evaluation reads.
     /// The owned flush future is retained across resident owner turns.
-    durable_writes: RefCell<StagedWriteState>,
+    durable_writes: Rc<RefCell<StagedWriteState>>,
     persist_flush: Option<PersistFlush<'a>>,
     /// No independent root remains after a scoped failure, so this tick must
     /// not publish its staged globals.
@@ -125,6 +125,16 @@ struct PendingResidentPublication {
 pub(crate) struct ResidentTick {
     pub(crate) metrics: TickMetrics,
     publication: PendingResidentPublication,
+    /// Completed durable-node writes belong to this exact publication, even
+    /// while query-only work remains queued. Sharing the sparse buffer lets
+    /// the facade stage it without searching unrelated pending evaluations.
+    durable_writes: Rc<RefCell<StagedWriteState>>,
+}
+
+impl ResidentTick {
+    pub(crate) fn take_durable_writes(&self) -> Vec<crate::storage::OwnedWriteOperation> {
+        std::mem::take(&mut *self.durable_writes.borrow_mut()).into_operations()
+    }
 }
 
 struct EvaluationFailure {
@@ -1127,7 +1137,8 @@ impl IncrementalEvaluation<'_> {
 
         drop(evaluator);
         if self.persist_flush.is_none() && !self.durable_writes.borrow().is_empty() {
-            let operations = std::mem::take(self.durable_writes.get_mut()).into_operations();
+            let operations =
+                std::mem::take(&mut *self.durable_writes.borrow_mut()).into_operations();
             let storage = self.storage.clone();
             let indeterminate = Rc::clone(&runtime.persistence_indeterminate);
             self.persist_flush = Some(Box::pin(async move {
@@ -1892,6 +1903,7 @@ impl IvmRuntime {
         })
         .await;
         let metrics = evaluation.metrics.clone();
+        let durable_writes = Rc::clone(&evaluation.durable_writes);
         match progress {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(failure)) => return Err(failure.into_error()),
@@ -1916,6 +1928,7 @@ impl IvmRuntime {
         };
         Ok(ResidentTick {
             metrics,
+            durable_writes,
             publication,
         })
     }
@@ -2413,7 +2426,7 @@ impl IvmRuntime {
             }
         }
         let current_tick = self.current_tick + 1;
-        let durable_writes = RefCell::new(StagedWriteState::default());
+        let durable_writes = Rc::new(RefCell::new(StagedWriteState::default()));
         let table_delta_records = table_deltas
             .iter()
             .map(|delta| delta.deltas.len())
