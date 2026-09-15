@@ -202,3 +202,10 @@ versions, or regenerate versions on main during the backmerge. For the next cut,
 merge the selected main revision into `release` through a reviewed PR; repeat
 versioning there. The fixture test in `dev/artifacts/release-branch-policy.test.mjs`
 executes the installed pinned Changesets CLI across this full cycle.
+
+The Changesets workflow explicitly dispatches CI and preview because PRs created
+with `GITHUB_TOKEN` do not automatically trigger PR workflows. It checks the PR
+and branch head before and after dispatch. If either moves, rerun Changesets on
+`release`; required checks attach to the actual executed commit and cannot satisfy
+a different head. Release pushes receive trusted cache reads; only main pushes
+may write the shared sccache cache.

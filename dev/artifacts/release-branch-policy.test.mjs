@@ -82,6 +82,11 @@ test("release triggers and cache trust retain development and release separation
     changesets.jobs["release-pr"].steps.at(-1).env.BASE_BRANCH,
     "${{ github.ref_name }}",
   );
+  const dispatch = changesets.jobs["release-pr"].steps.at(-1).run;
+  assert.match(dispatch, /gh workflow run ci.yml/);
+  assert.match(dispatch, /gh workflow run preview-jazz-tools-alpha-release.yml/);
+  assert.match(dispatch, /CURRENT_SHA.*!=.*RELEASE_SHA/);
+  assert.match(dispatch, /PR_SHA.*!=.*RELEASE_SHA/);
   assert.deepEqual(workflow("ci").on.push.branches, ["main", "release"]);
   assert.match(JSON.stringify(workflow("ci")), /OWNER.*MEMBER.*COLLABORATOR/);
   assert.equal(JSON.parse(readFileSync(join(root, ".changeset/config.json"))).baseBranch, "main");
@@ -192,4 +197,38 @@ test("Changesets prerelease consumption survives release cut, fix, version and m
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("release refresh dispatches required CI and refuses a moved branch", () => {
+  const script = workflow("changesets-release-pr").jobs["release-pr"].steps.at(-1).run;
+  const mock = `
+    gh() {
+      case "$1 $2" in
+        "pr list") echo 1 ;;
+        "pr view") echo candidate ;;
+        "api repos/fixture/git/ref/heads/changeset-release/release") echo "$MOCK_BRANCH_SHA" ;;
+        "workflow run") echo "DISPATCH $3" ;;
+        *) echo "unexpected gh call" >&2; return 1 ;;
+      esac
+    }
+  `;
+  const run = (source, sha) =>
+    execFileSync("bash", ["-e", "-c", mock + source], {
+      encoding: "utf8",
+      env: { ...process.env, REPO: "fixture", BASE_BRANCH: "release", MOCK_BRANCH_SHA: sha },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  assert.match(
+    run(script, "candidate"),
+    /DISPATCH ci.yml[\s\S]*DISPATCH preview-jazz-tools-alpha-release.yml/,
+  );
+  assert.throws(
+    () => run(script, "moved"),
+    (error) => error.status === 1 && !String(error.stdout).includes("DISPATCH"),
+  );
+  const mutation = script.replace(
+    'if [ "${CURRENT_SHA}" != "${RELEASE_SHA}" ] || [ "${PR_SHA}" != "${RELEASE_SHA}" ]; then',
+    "if false; then",
+  );
+  assert.match(run(mutation, "moved"), /DISPATCH ci.yml/);
 });

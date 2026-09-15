@@ -217,7 +217,11 @@ const cacheAccessFor = ({ eventName, ref, sameRepository = false, authorAssociat
   return {
     invocation: trusted ? "trusted" : "untrusted",
     idToken: trusted ? "write" : "none",
-    sccache: trusted ? (eventName === "push" ? "writer" : "reader") : "none",
+    sccache: trusted
+      ? eventName === "push" && ref === "refs/heads/main"
+        ? "writer"
+        : "reader"
+      : "none",
     turbo: trusted,
   };
 };
@@ -263,7 +267,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   });
   assert.equal(trusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(trusted.with, {
-    "sccache-write": "${{ github.event_name == 'push' }}",
+    "sccache-write": "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
     "trusted-cache": true,
   });
   assert.equal(trusted.secrets, "inherit");
@@ -1213,7 +1217,7 @@ test("entry workflow grants credentialed cross-ref caches to main, release and t
     [
       "release push",
       { eventName: "push", ref: "refs/heads/release" },
-      { invocation: "trusted", idToken: "write", sccache: "writer", turbo: true },
+      { invocation: "trusted", idToken: "write", sccache: "reader", turbo: true },
     ],
     [
       "feature push",

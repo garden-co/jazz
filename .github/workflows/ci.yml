@@ -43,7 +43,7 @@ jobs:
     uses: ./.github/workflows/ci-suite.yml
     with:
       trusted-cache: true
-      sccache-write: ${{ github.event_name == 'push' }}
+      sccache-write: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     secrets: inherit
 
   # Preserve the branch-protection check name while the implementation jobs
