@@ -263,6 +263,14 @@ such as `sub` and `user_id` retain their admission-defined values. Additional cl
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
 
+Provider claim paths may traverse nested JSON object fields. Path segments are
+literal keys: `["claims", "org", "slug"]` differs from
+`["claims", "org.slug"]`. Traversal through a missing key or a non-object value
+is unbound and denies the corresponding predicate, including under negation.
+An explicit null leaf remains bound: it matches `IS NULL`, while a missing leaf
+does not. Arrays remain values for containment/membership; object traversal does
+not interpret numeric segments as array indexes.
+
 #### Prepared claim parameters
 
 When a query program contains policy claims, lowering MUST first walk the

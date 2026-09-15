@@ -7,7 +7,7 @@ use crate::groove::records::{
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
-    PolicyBranch, Predicate, Query, provider_claim_operand_key,
+    PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
@@ -2895,6 +2895,13 @@ fn convert_policy_predicate(
             })
             .collect::<Result<Vec<_>, _>>()
             .map(|values| Predicate::In(Operand::Column(column.clone()), values)),
+        PolicyExpr::SessionContains {
+            path: segments,
+            value,
+        } => Ok(Predicate::Contains(
+            convert_session_path_operand(table, path, segments)?,
+            Operand::Literal(convert_policy_literal(table, path, value)?),
+        )),
         PolicyExpr::SessionInList {
             path: path_segments,
             values,
@@ -2948,15 +2955,15 @@ fn convert_session_path_operand(
     {
         return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
     }
-    if path_segments.len() == 2 && path_segments[0] == "claims" {
-        return Ok(Operand::Claim(provider_claim_operand_key(
-            &path_segments[1],
-        )));
+    if path_segments.len() >= 2 && path_segments[0] == "claims" {
+        return Ok(Operand::Claim(
+            crate::query::provider_claim_path_operand_key(&path_segments[1..]),
+        ));
     }
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
         format!(
-            "core schema policies only support session.user, session.authMode, and raw provider claims through session.claims[\"name\"]; got session.{}",
+            "core schema policies only support session.user, session.authMode, and provider claims through session.claims; got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -3003,6 +3010,7 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::provider_claim_operand_key;
     use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
     use crate::tools::object::ObjectId;
     use crate::tools::public_api::policy::{CmpOp, PolicyValue};
@@ -4719,7 +4727,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_policy_subset() {
+    fn rejects_unknown_session_root() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("todos")
@@ -4735,7 +4743,7 @@ mod tests {
 
         let error = convert_public_schema(&schema).unwrap_err();
         assert!(error.to_string().starts_with(
-            "$.todos.policies.select.using: core schema policies do not support SessionContains"
+            "$.todos.policies.select.using: core schema policies only support session.user"
         ));
     }
 

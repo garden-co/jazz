@@ -4869,7 +4869,7 @@ mod tests {
     }
 
     #[test]
-    fn client_session_claim_projection_matches_admission_and_omits_recursive_values() {
+    fn client_session_claim_projection_matches_admission_and_preserves_nested_values() {
         assert_eq!(
             crate::tools::policy_claims::json_value_to_policy_claim(
                 json!(7),
@@ -4900,7 +4900,10 @@ mod tests {
                 crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
-            None
+            Some(CoreValue::Tuple(vec![CoreValue::Tuple(vec![
+                CoreValue::String("role".into()),
+                CoreValue::String("admin".into()),
+            ])]))
         );
     }
 
@@ -5192,7 +5195,7 @@ mod tests {
     // These internal tests are necessary because the distinction is made while
     // decoding the unverified JWT, before a client connection can expose it.
     #[test]
-    fn session_from_unverified_jwt_projects_flat_claims_and_omits_recursive_policy_values() {
+    fn session_from_unverified_jwt_projects_flat_and_nested_policy_claims() {
         let session = session_from_unverified_jwt(&make_test_jwt_without_claims("alice"))
             .expect("derive session from jwt without application claims");
 
@@ -5214,8 +5217,8 @@ mod tests {
             policy.get(&crate::query::provider_claim_key("role")),
             Some(&CoreValue::String("editor".to_owned()))
         );
-        assert!(!policy.contains_key(&crate::query::provider_claim_key("profile")));
-        assert!(!policy.contains_key(&crate::query::provider_claim_key("mixed")));
+        assert!(policy.contains_key(&crate::query::provider_claim_key("profile")));
+        assert!(policy.contains_key(&crate::query::provider_claim_key("mixed")));
         assert_eq!(
             policy.get(&crate::query::provider_claim_key("__proto__")),
             Some(&CoreValue::String("safe".to_owned()))

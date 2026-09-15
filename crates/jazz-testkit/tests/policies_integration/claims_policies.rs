@@ -1169,7 +1169,6 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
 /// anyOf: group="public" OR (group="eng" AND groups CONTAINS "eng")
 /// ```
 #[tokio::test]
-#[ignore = "#1760: server schema conversion does not support nested session claim paths such as claims.org.slug"]
 async fn row_and_claim_predicates_compose_under_and_and_or() {
     tokio::task::LocalSet::new()
         .run_until(row_and_claim_predicates_compose_under_and_and_or_inner())
@@ -1348,5 +1347,111 @@ async fn row_and_claim_predicates_compose_under_and_and_or_inner() {
     north_eng.shutdown().await.expect("shutdown north_eng");
     north_empty.shutdown().await.expect("shutdown north_empty");
     south_eng.shutdown().await.expect("shutdown south_eng");
+    server.shutdown().await;
+}
+
+/// Nested object fields remain distinct from literal dotted keys. Null checks
+/// match explicit null only, and absent or non-object intermediate fields deny.
+#[tokio::test]
+async fn nested_claim_fields_preserve_keys_and_missing_null_semantics() {
+    tokio::task::LocalSet::new()
+        .run_until(nested_claim_fields_preserve_keys_and_missing_null_semantics_inner())
+        .await;
+}
+
+async fn nested_claim_fields_preserve_keys_and_missing_null_semantics_inner() {
+    let table = "nested_claim_documents";
+    let schema = SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            table,
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::all_of([
+                    pe::session_where(vec!["claims", "org", "slug"], "north"),
+                    pe::session_where(vec!["claims", "org.slug"], "literal"),
+                    pe::session_where(
+                        vec!["claims", "org", "groups"],
+                        pe::SessionWhere::contains("eng"),
+                    ),
+                    pe::session_where(
+                        vec!["claims", "org", "revoked"],
+                        pe::SessionWhere::is_null(true),
+                    ),
+                ]));
+            }),
+        ))
+        .build();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start server");
+    let seeder =
+        connect_ready_client(&server, &schema, "nested-seeder", table, READY_TIMEOUT).await;
+    let document = create_title_document(&seeder, table, "visible to matching claims").await;
+    let cases = [
+        (
+            "matching",
+            json!({"org": {"slug": "north", "groups": ["eng"], "revoked": null}, "org.slug": "literal"}),
+            true,
+        ),
+        (
+            "swapped",
+            json!({"org": {"slug": "literal", "groups": ["eng"], "revoked": null}, "org.slug": "north"}),
+            false,
+        ),
+        ("missing-parent", json!({"org.slug": "literal"}), false),
+        (
+            "scalar-parent",
+            json!({"org": "north", "org.slug": "literal"}),
+            false,
+        ),
+        (
+            "null-parent",
+            json!({"org": null, "org.slug": "literal"}),
+            false,
+        ),
+        (
+            "missing-leaf",
+            json!({"org": {"slug": "north", "groups": ["eng"]}, "org.slug": "literal"}),
+            false,
+        ),
+        (
+            "non-null-leaf",
+            json!({"org": {"slug": "north", "groups": ["eng"], "revoked": false}, "org.slug": "literal"}),
+            false,
+        ),
+        (
+            "empty-groups",
+            json!({"org": {"slug": "north", "groups": [], "revoked": null}, "org.slug": "literal"}),
+            false,
+        ),
+    ];
+    for (user, claims, allowed) in cases {
+        let client =
+            connect_ready_claims(&server, &schema, user, claims, table, READY_TIMEOUT).await;
+        if allowed {
+            wait_for_rows(
+                &client,
+                Query::from(table),
+                "matching nested claims read document",
+                |rows| (rows.len() == 1 && rows[0].0 == document).then_some(()),
+            )
+            .await;
+        } else {
+            let rows = wait_for_query(
+                &client,
+                Query::from(table),
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                user,
+                Some,
+            )
+            .await;
+            assert!(rows.is_empty(), "{user} must not read the document");
+        }
+        client.shutdown().await.expect("shutdown reader");
+    }
+    seeder.shutdown().await.expect("shutdown seeder");
     server.shutdown().await;
 }
