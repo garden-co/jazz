@@ -58,6 +58,35 @@ describe("TableSchemaDefinition", () => {
     expect(screen.getByText(/"columns"/)).not.toBeNull();
     expect(screen.getByText(/"select"/)).not.toBeNull();
   });
+  it("displays a BigInt schema default with its exact decimal digits", () => {
+    mockUseDevtoolsContext.mockReturnValue({
+      runtime: "overlay",
+      wasmSchema: {
+        metrics: {
+          columns: [
+            {
+              name: "largeCount",
+              column_type: { type: "BigInt" },
+              nullable: false,
+              default: { type: "BigInt", value: 9007199254740993n },
+            },
+          ],
+        },
+      },
+      storedPermissions: null,
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/data-explorer/metrics/schema"]}>
+        <Routes>
+          <Route path="/data-explorer/:table/schema" element={<TableSchemaDefinition />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("heading", { name: "metrics schema" })).not.toBeNull();
+    expect(screen.getByText(/"value":\s*"9007199254740993"/)).not.toBeNull();
+  });
 
   it("shows an empty state when no permissions head has been published", () => {
     mockUseDevtoolsContext.mockReturnValue({

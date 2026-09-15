@@ -495,6 +495,36 @@ describe("TableDataGrid", () => {
       });
     });
   });
+  it("renders Array<BigInt> values exactly and animates a changed cell", () => {
+    vi.useFakeTimers();
+    mockWasmSchema.todos.columns = [
+      ...initialMockTodoColumns,
+      {
+        name: "ranks",
+        column_type: { type: "Array", element: { type: "BigInt" } },
+        nullable: false,
+      },
+    ];
+    currentRows = currentRows.map((row) => ({ ...row, ranks: [9007199254740993n] }));
+
+    const { rerender } = renderGrid();
+
+    expect(screen.getByText("[9007199254740993]")).not.toBeNull();
+
+    currentRows = currentRows.map((row) => ({ ...row, ranks: [-9223372036854775808n] }));
+    rerender(renderGridUi());
+
+    const changedCell = getContainingCell(screen.getByText("[-9223372036854775808]"));
+    expect(changedCell?.dataset.cellChangeState).toBe("updated");
+
+    act(() => {
+      vi.advanceTimersByTime(1_300);
+    });
+
+    expect(
+      getContainingCell(screen.getByText("[-9223372036854775808]"))?.dataset.cellChangeState,
+    ).toBeUndefined();
+  });
 
   it("edits text cells in place and saves from the banner", async () => {
     renderGrid();

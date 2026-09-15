@@ -17,6 +17,9 @@ const inspectorSaveApp = s.defineApp({
     title: s.string(),
     owner_id: s.uuid(),
     rank: s.bigint().optional(),
+    largeCounts: s.array(s.bigint()).optional(),
+    textNumber: s.string().optional(),
+    jsonNumber: s.json().optional(),
   }),
 });
 const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy, session }) => {
@@ -362,6 +365,44 @@ describe("TableDataGrid real Db save retries", () => {
           title: "exact bigint",
           owner_id: permittedOwner,
           rank: exactValue,
+        }),
+      ]),
+    );
+  }, 30_000);
+  it("round-trips nested BigInts while preserving decimal strings in Text and Json", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    const instrumented = instrumentDb(setup.db);
+    currentDb = instrumented.db;
+    const exactValues = [-(1n << 63n), 9007199254740993n];
+    const decimalString = "9007199254740993";
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    editStagedTextColumn(1, "title", "nested bigint");
+    editStagedTextColumn(2, "owner_id", permittedOwner);
+    editStagedTextColumn(4, "largeCounts", JSON.stringify(exactValues, (_, value) =>
+      typeof value === "bigint" ? value.toString() : value,
+    ));
+    editStagedTextColumn(5, "textNumber", decimalString);
+    editStagedTextColumn(6, "jsonNumber", JSON.stringify({ amount: decimalString }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+
+    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "edge" })).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "nested bigint",
+          owner_id: permittedOwner,
+          largeCounts: exactValues,
+          textNumber: decimalString,
+          jsonNumber: { amount: decimalString },
         }),
       ]),
     );
