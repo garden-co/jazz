@@ -76,6 +76,7 @@
     "test:codegen": "bash scripts/test-codegen.sh",
     "build:relay:android": "bash scripts/build-relay-artifacts.sh android && node ../../dev/artifacts/rn-packages.mjs stage android",
     "build:relay:ios": "bash scripts/build-relay-artifacts.sh ios && node ../../dev/artifacts/rn-packages.mjs stage ios",
+    "size:relay:ios": "bash scripts/relay-size-receipt.sh",
     "verify:abi": "node scripts/generate-native-relay-abi.mjs --check",
     "test": "node scripts/generate-native-relay-abi.mjs --check && jest",
     "typecheck": "tsc",
