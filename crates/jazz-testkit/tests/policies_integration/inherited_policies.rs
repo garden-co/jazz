@@ -508,7 +508,7 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners_inner() {
     let charlie_rows = wait_for_query(
         &charlie,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "charlie sees no documents without folder ownership",
         Some,
@@ -519,7 +519,7 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no documents without folder ownership",
         Some,
@@ -653,7 +653,7 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     let alice_rows_after_delete = wait_for_query(
         &alice_reader,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice's retained document view removes the deleted-parent document",
         |rows| rows.is_empty().then_some(rows),
@@ -675,7 +675,7 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     let folders_after_delete = wait_for_query(
         &bob,
         folders_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees no folders after inherited parent delete",
         |rows| rows.is_empty().then_some(rows),
@@ -686,7 +686,7 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     let final_rows = wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees no documents after inherited parent delete",
         |rows| rows.is_empty().then_some(rows),
@@ -899,7 +899,7 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no documents",
         Some,
@@ -1271,7 +1271,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     let rows_after_doc_delete = wait_for_query(
         &alice,
         documents_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "folder-backed document is gone after folder-owner delete",
         Some,
@@ -1298,7 +1298,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     let rows_after_folder_delete = wait_for_query(
         &alice,
         folders_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "folder is gone after folder-owner delete",
         Some,
@@ -1478,7 +1478,7 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
     let rows_after_unauthorized_delete = wait_for_query(
         &alice,
         documents_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "charlie doc remains after unauthorized delete attempt",
         Some,
@@ -1694,7 +1694,7 @@ async fn inherited_multiple_folder_paths_compose_with_or_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no rows without either inherited path",
         Some,
@@ -1840,7 +1840,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
     let rows_after_bob = wait_for_query(
         &admin,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "non-owner without folder access cannot update the row",
         Some,
@@ -1921,7 +1921,7 @@ async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no files without a visible referencing todo",
         Some,
@@ -2002,7 +2002,7 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     let rows_after_delete = wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "file A is hidden after deleting the referencing todo",
         Some,
@@ -2274,7 +2274,7 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no leaf rows without an inherited path",
         Some,
@@ -2393,7 +2393,7 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
     let rows_after_update = wait_for_query(
         &bob_fresh,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "child row becomes hidden once the parent row stops granting access",
         Some,
@@ -2514,7 +2514,7 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
     let rows_after_retarget = wait_for_query(
         &bob_fresh,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "child row becomes hidden after retargeting to a non-visible parent",
         Some,
@@ -2595,7 +2595,7 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     let initial_rows = wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "bob sees no rows while the child points at a hidden parent",
         Some,
@@ -2742,9 +2742,10 @@ async fn inherits_select_denies_when_parent_operation_policy_is_missing_inner() 
     let rows = alice
         .query(
             Query::from("documents").select(["title"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents as alice");
 
     assert!(
@@ -3008,7 +3009,7 @@ async fn update_with_check_inherits_denies_when_parent_is_not_updateable_inner()
     let rows = wait_for_query(
         &admin,
         Query::from("folders").select(["name", "parent_id"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "child remains unchanged after rejected update",
         |rows| {

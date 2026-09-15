@@ -293,7 +293,7 @@ async fn wait_for_todos_count(
     client: &JazzClient,
     expected_count: usize,
     timeout: Duration,
-    durability_tier: Option<DurabilityTier>,
+    read_tier: jazz::tools::ReadTier,
 ) -> Vec<(jazz::tools::ObjectId, Vec<Value>)> {
     let query = jazz::query::Query::from("todos");
     let deadline = tokio::time::Instant::now() + timeout;
@@ -302,10 +302,11 @@ async fn wait_for_todos_count(
     while tokio::time::Instant::now() < deadline {
         if let Ok(Ok(rows)) = tokio::time::timeout(
             Duration::from_secs(8),
-            client.query(query.clone(), durability_tier),
+            client.query(query.clone(), read_tier),
         )
         .await
         {
+            let rows = jazz::tools::test_support::ordinary_rows(rows);
             if rows.len() == expected_count {
                 return rows;
             }
@@ -327,7 +328,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     while tokio::time::Instant::now() < deadline {
         if let Ok(Ok(_)) = tokio::time::timeout(
             Duration::from_secs(8),
-            client.query(query.clone(), Some(DurabilityTier::EdgeServer)),
+            client.query(query.clone(), jazz::tools::ReadTier::Remote),
         )
         .await
         {
@@ -411,7 +412,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         &client,
         1,
         Duration::from_secs(20),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
     )
     .await;
 
@@ -425,7 +426,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         &client,
         1,
         Duration::from_secs(25),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
     )
     .await;
     assert_eq!(
@@ -458,7 +459,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         &client,
         2,
         Duration::from_secs(25),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
     )
     .await;
     assert_eq!(
@@ -512,7 +513,10 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         .expect("create todo");
 
     let initial_rows = client
-        .query(jazz::query::Query::from("todos"), None)
+        .query(
+            jazz::query::Query::from("todos"),
+            jazz::tools::ReadTier::LocalFirst,
+        )
         .await
         .expect("query rows before restart");
     assert_eq!(
@@ -540,7 +544,10 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         .await
         .expect("reconnect memory client");
     let rows_after_restart = restarted
-        .query(jazz::query::Query::from("todos"), None)
+        .query(
+            jazz::query::Query::from("todos"),
+            jazz::tools::ReadTier::LocalFirst,
+        )
         .await
         .expect("query rows after restart");
     assert_eq!(

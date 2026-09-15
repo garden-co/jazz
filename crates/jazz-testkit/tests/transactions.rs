@@ -29,19 +29,23 @@ fn todo_query() -> jazz::query::Query {
 }
 
 async fn all_todos(client: &JazzClient) -> Vec<(ObjectId, Vec<Value>)> {
-    client.query(todo_query(), None).await.expect("query todos")
+    client
+        .query(todo_query(), jazz::tools::ReadTier::LocalFirst)
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("query todos")
 }
 
 async fn wait_for_todos(
     client: &JazzClient,
-    durability_tier: Option<DurabilityTier>,
+    read_tier: jazz::tools::ReadTier,
     description: &str,
     predicate: impl Fn(&[(ObjectId, Vec<Value>)]) -> bool,
 ) -> Vec<(ObjectId, Vec<Value>)> {
     wait_for_query(
         client,
         todo_query(),
-        durability_tier,
+        read_tier,
         Duration::from_secs(25),
         description,
         |rows| predicate(&rows).then_some(rows),
@@ -52,7 +56,7 @@ async fn wait_for_todos(
 async fn wait_for_edge_ready(client: &JazzClient) {
     let _ = wait_for_todos(
         client,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "EdgeServer query readiness",
         |_| true,
     )
@@ -252,8 +256,9 @@ async fn committed_transaction_rejects_later_handle_operations() {
         (
             "query",
             closed_handle
-                .query(todo_query(), None)
+                .query(todo_query(), jazz::tools::ReadTier::LocalFirst)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect_err("committed transaction handle should reject queries")
                 .to_string(),
         ),
@@ -334,8 +339,9 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
         (
             "query",
             closed_handle
-                .query(todo_query(), None)
+                .query(todo_query(), jazz::tools::ReadTier::LocalFirst)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect_err("rolled-back transaction handle should reject queries")
                 .to_string(),
         ),
@@ -374,8 +380,9 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
         "ordinary local reads should ignore an open transaction"
     );
     assert!(
-        bob.query(todo_query(), Some(DurabilityTier::EdgeServer))
+        bob.query(todo_query(), jazz::tools::ReadTier::Remote)
             .await
+            .map(jazz::tools::test_support::ordinary_rows)
             .expect("bob edge query before commit")
             .is_empty(),
         "peer edge reads should not see an uncommitted transaction"
@@ -386,7 +393,7 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
 
     let rows = wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob sees committed transaction",
         |rows| {
             rows.iter()
@@ -444,7 +451,7 @@ async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction(
 
     let rows = wait_for_todos(
         &client,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "client sees updated insert from transaction",
         |rows| has_todo(rows, todo_id, "final", false),
     )
@@ -495,8 +502,9 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
     );
     let tx_rows = tx
         .client()
-        .query(todo_query(), None)
+        .query(todo_query(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("transaction-scoped query");
     assert!(has_todo(&tx_rows, todo_id, "renamed", true));
 
@@ -504,7 +512,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
 
     let rows = wait_for_todos(
         &client,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "client sees composed transaction update",
         |rows| has_todo(rows, todo_id, "renamed", true),
     )
@@ -550,7 +558,7 @@ async fn multiple_writes_in_one_transaction_settle_atomically() {
 
     let rows = wait_for_todos(
         &client,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "client sees both rows from one transaction",
         |rows| {
             rows.iter()
@@ -585,7 +593,7 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     let todo_id = insert_visible_todo(&alice, "shared", false).await;
     wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob sees shared row",
         |rows| has_todo(rows, todo_id, "shared", false),
     )
@@ -614,7 +622,7 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     support::wait_for_edge_txs(&alice, &[alice_tx_id]).await;
     wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob learns alice transaction before committing his staged transaction",
         |rows| has_todo(rows, todo_id, "alice", false),
     )
@@ -631,7 +639,7 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
 
     let rows = wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob still sees alice value after rejection",
         |rows| has_todo(rows, todo_id, "alice", false),
     )
@@ -653,7 +661,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     let todo_id = insert_visible_todo(&alice, "shared", false).await;
     wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob sees shared row",
         |rows| has_todo(rows, todo_id, "shared", false),
     )
@@ -672,7 +680,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     support::wait_for_edge_txs(&alice, &[alice_tx_id]).await;
     wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob learns alice transaction before staging",
         |rows| has_todo(rows, todo_id, "alice", false),
     )
@@ -692,7 +700,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
 
     let rows = wait_for_todos(
         &alice,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "alice sees bob transaction after acceptance",
         |rows| has_todo(rows, todo_id, "bob", false),
     )

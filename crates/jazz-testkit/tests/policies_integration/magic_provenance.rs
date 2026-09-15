@@ -1,4 +1,3 @@
-use jazz::tools::DurabilityTier;
 use jazz_server::JazzServer;
 use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
 
@@ -102,9 +101,10 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
                     "$createdAt",
                     "$updatedAt",
                 ]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query initial note");
     assert_eq!(initial.len(), 1, "draft note should be queryable");
     assert_eq!(
@@ -152,9 +152,10 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
                     "$createdAt",
                     "$updatedAt",
                 ]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query updated note");
     assert_eq!(updated.len(), 1, "updated note should remain queryable");
     assert_eq!(updated[0].1[0], Value::Text("revised".into()));
@@ -180,9 +181,10 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
             Query::from("notes")
                 .filter(eq(col("$updatedBy.account"), lit(bob_account.0)))
                 .select(["title", "$updatedBy"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query notes updated by bob");
     assert_eq!(updated_by_bob.len(), 1);
     assert_eq!(
@@ -201,9 +203,10 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
             Query::from("notes")
                 .filter(eq(col("title"), lit("system note")))
                 .select(["title", "$createdBy", "$updatedBy"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query system-authored note");
     assert_eq!(system.len(), 1);
     assert_eq!(
@@ -264,9 +267,10 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
             Query::from("notes")
                 .filter(eq(col("title"), lit("draft")))
                 .select(["$createdAt", "$updatedAt"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query initial note timestamps");
     assert_eq!(initial.len(), 1, "draft note should be queryable");
     let Value::Timestamp(initial_created_at) = initial[0].1[0] else {
@@ -306,9 +310,10 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
                     "$createdAt",
                     "$updatedAt",
                 ]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query backfilled note");
     assert_eq!(updated.len(), 1, "backfilled note should remain queryable");
     assert_eq!(updated[0].1[0], Value::Text("backfilled".into()));
@@ -389,9 +394,10 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
             Query::from("notes")
                 .select(["title", "$createdBy"])
                 .order_by("title", jazz::query::OrderDirection::Asc),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query notes as alice");
     assert_eq!(
         alice_visible
@@ -408,9 +414,10 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
     let bob_visible = bob
         .query(
             Query::from("notes").select(["title"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query notes as bob");
     assert!(
         bob_visible.is_empty(),
@@ -439,9 +446,10 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
             Query::from("notes")
                 .select(["title"])
                 .order_by("title", jazz::query::OrderDirection::Asc),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query notes as alice after mutations");
     assert_eq!(
         alice_after_mutations

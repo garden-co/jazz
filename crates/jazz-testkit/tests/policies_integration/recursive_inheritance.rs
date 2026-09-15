@@ -27,8 +27,9 @@ fn insert_folder(
 
 async fn query_folder_ids(client: &JazzClient) -> HashSet<ObjectId> {
     client
-        .query(Query::from("folders"), Some(DurabilityTier::EdgeServer))
+        .query(Query::from("folders"), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query folders")
         .into_iter()
         .map(|(id, _)| id)
@@ -41,9 +42,10 @@ async fn query_folder_name_as(client: &JazzClient, folder_id: ObjectId) -> Optio
             Query::from("folders")
                 .filter(eq(col("id"), lit(*folder_id.uuid())))
                 .select(["name"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query folders")
         .first()
         .map(|(_, values)| {

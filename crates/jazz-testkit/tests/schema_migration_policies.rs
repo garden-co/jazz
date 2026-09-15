@@ -259,7 +259,7 @@ async fn owner_policy_keeps_serving_v1_documents_to_v2_reader_impl() {
     let rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees all of her v1-authored documents through the v2 generation",
         |rows| {
@@ -318,7 +318,7 @@ async fn owner_policy_still_denies_v1_documents_to_other_sessions_after_migratio
     let rows = wait_for_query(
         &mallory,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "mallory sees her own v1-authored document through the v2 generation",
         |rows| {
@@ -759,7 +759,7 @@ async fn one_shot_query_honors_v1_membership_dependency_impl() {
     let rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice's one-shot query returns the membership-granted v1 document",
         |rows| {
@@ -794,7 +794,7 @@ async fn one_shot_query_honors_v1_membership_dependency_impl() {
     let mallory_rows = wait_for_query(
         &mallory,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         STEADY_STATE_TIMEOUT,
         "mallory's one-shot query settles",
         Some,
@@ -853,7 +853,7 @@ async fn v2_document_with_v1_membership_dependency_is_served_impl() {
     let rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees both the v1 and the v2 document through her v1 membership",
         |rows| {
@@ -927,7 +927,7 @@ async fn local_query_honors_v1_membership_dependency_impl() {
     let local_rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::Local),
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         "alice's local-tier read shows the membership-granted document",
         |rows| {
@@ -945,8 +945,9 @@ async fn local_query_honors_v1_membership_dependency_impl() {
 
     let mallory = connect_user(&server, &membership_schema_v2(), MALLORY_ID).await;
     let mallory_rows = mallory
-        .query(Query::from("documents"), Some(DurabilityTier::Local))
+        .query(Query::from("documents"), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("mallory's local-tier read succeeds");
     assert!(
         mallory_rows.is_empty(),
@@ -1031,7 +1032,7 @@ async fn local_query_honors_v1_membership_for_v2_documents_impl() {
     let local_rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::Local),
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         "alice's local-tier read shows the v2 document granted by her v1 membership",
         |rows| {
@@ -1051,8 +1052,9 @@ async fn local_query_honors_v1_membership_for_v2_documents_impl() {
 
     let mallory = connect_user(&server, &membership_schema_v2(), MALLORY_ID).await;
     let mallory_rows = mallory
-        .query(Query::from("documents"), Some(DurabilityTier::Local))
+        .query(Query::from("documents"), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("mallory's local-tier read succeeds");
     assert!(
         mallory_rows.is_empty(),

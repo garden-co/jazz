@@ -142,8 +142,9 @@ async fn wait_for_values(
     let last_actual;
     loop {
         let mut actual = client
-            .query(query.clone(), None)
+            .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
             .await
+            .map(jazz::tools::test_support::ordinary_rows)
             .unwrap_or_else(|err| panic!("{label}: query failed: {err}"))
             .into_iter()
             .map(|(_, values)| values)
@@ -437,7 +438,7 @@ async fn wait_for_one_shot_values(
     wait_for_query(
         client,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         label,
         |rows| {
@@ -1619,7 +1620,7 @@ async fn integer_min_max_and_order_by_remain_signed() {
                 jazz::query::Query::from("metrics")
                     .select(["bucket", "score"])
                     .order_by("score", OrderDirection::Asc),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "integer order_by stays signed",
                 |rows| {
@@ -1796,7 +1797,7 @@ async fn integer_counter_columns_merge_signed_public_values() {
             wait_for_query(
                 &bob,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "bob sees counter base",
                 |rows| {
@@ -1839,7 +1840,7 @@ async fn integer_counter_columns_merge_signed_public_values() {
             wait_for_query(
                 &alice,
                 query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "signed integer counter deltas merge",
                 |rows| {
@@ -1893,7 +1894,7 @@ async fn bigint_counter_columns_merge_signed_public_values() {
             wait_for_query(
                 &bob,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "bob sees bigint counter base",
                 |rows| {
@@ -1936,7 +1937,7 @@ async fn bigint_counter_columns_merge_signed_public_values() {
             wait_for_query(
                 &alice,
                 query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "signed bigint counter deltas merge",
                 |rows| {

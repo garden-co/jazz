@@ -140,9 +140,10 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
     let staged_rows = transaction
         .query(
             Query::from("notes").select(["title", "$createdBy", "$updatedBy"]),
-            None,
+            jazz::tools::ReadTier::LocalFirst,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("transaction reads retain the explicit session author");
     assert_eq!(
         staged_rows[0].1,
@@ -706,8 +707,9 @@ async fn backend_attribution_survives_transactions_and_later_mutations() {
                 .expect("stage insert");
             let query = Query::from("notes").select(["title", "$createdBy", "$updatedBy"]);
             let staged = transaction
-                .query(query.clone(), None)
+                .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("read staged attribution");
             assert_eq!(
                 staged[0].1,
@@ -1051,8 +1053,12 @@ async fn backend_session_updates_enforce_local_read_permissions_inner() {
     assert!(error.to_string().contains("read policy denied"), "{error}");
     transaction.rollback().expect("rollback Alice transaction");
     let rows = backend
-        .query(Query::from("notes").select(["title"]), None)
+        .query(
+            Query::from("notes").select(["title"]),
+            jazz::tools::ReadTier::LocalFirst,
+        )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("backend reads unchanged note");
     assert_eq!(
         rows,

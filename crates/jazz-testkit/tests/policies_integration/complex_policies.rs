@@ -4,7 +4,7 @@ use jazz::query::Query;
 
 use super::support::{
     collect_stream_deltas, connect_ready_claims, connect_ready_client, connect_ready_user,
-    has_added_id, has_removed, has_updated, wait_for_query, wait_for_rows,
+    has_added_id, has_removed, has_updated, wait_for_query, wait_for_query_results, wait_for_rows,
     wait_for_subscription_update,
 };
 use super::{pe, permissions};
@@ -443,7 +443,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     let initial_bob = wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "bob initially sees no shared documents",
         Some,
@@ -452,7 +452,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     let initial_dave = wait_for_query(
         &dave,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave initially sees no shared documents",
         Some,
@@ -529,7 +529,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     let final_bob = wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "bob ends with no shared documents",
         Some,
@@ -538,7 +538,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
     let final_dave = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave ends with no shared documents",
         Some,
@@ -602,7 +602,7 @@ async fn exists_rel_join_grants_and_denies_correctly_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave does not see joined grant without matching membership",
         Some,
@@ -619,7 +619,7 @@ async fn exists_rel_join_grants_and_denies_correctly_inner() {
 /// Verifies that join queries apply `SELECT` policies to rows from joined
 /// tables, not only to the base table.
 #[tokio::test]
-#[ignore = "#1761: flat-join policy filtering hangs for more than 45 seconds without returning results"]
+#[ignore = "#1761: flat-join policy lowering omits the claims.sub route field from app_rows"]
 async fn join_query_applies_policy_filter_on_joined_table() {
     tokio::task::LocalSet::new()
         .run_until(join_query_applies_policy_filter_on_joined_table_inner())
@@ -645,8 +645,8 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
     let bob =
         connect_ready_user(&server, &schema, super::BOB_ID, "join_users", READY_TIMEOUT).await;
 
-    let alice_user = create_join_policy_user(&admin, super::ALICE_ID).await;
-    let bob_user = create_join_policy_user(&admin, super::BOB_ID).await;
+    create_join_policy_user(&admin, super::ALICE_ID).await;
+    create_join_policy_user(&admin, super::BOB_ID).await;
     create_join_policy_post(&admin, super::ALICE_ID, "Alice post").await;
     create_join_policy_post(&admin, super::BOB_ID, "Bob post").await;
 
@@ -656,37 +656,32 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
         "join_posts.owner_name",
     );
 
-    let alice_rows = wait_for_rows(
-        &alice,
-        query.clone(),
-        "alice sees joined row allowed by joined-table policy",
-        |rows| (rows.len() == 1 && rows[0].0 == alice_user).then_some(rows),
-    )
-    .await;
-    assert_eq!(
-        alice_rows[0].1,
-        vec![
-            Value::Text(super::ALICE_ID.to_string()),
-            Value::Text(super::ALICE_ID.to_string()),
-            Value::Text("Alice post".to_string()),
-        ]
-    );
-
-    let bob_rows = wait_for_rows(
-        &bob,
-        query,
-        "bob sees joined row allowed by joined-table policy",
-        |rows| (rows.len() == 1 && rows[0].0 == bob_user).then_some(rows),
-    )
-    .await;
-    assert_eq!(
-        bob_rows[0].1,
-        vec![
-            Value::Text(super::BOB_ID.to_string()),
-            Value::Text(super::BOB_ID.to_string()),
-            Value::Text("Bob post".to_string()),
-        ]
-    );
+    for (client, owner, title) in [
+        (&alice, super::ALICE_ID, "Alice post"),
+        (&bob, super::BOB_ID, "Bob post"),
+    ] {
+        let rows = wait_for_query_results(
+            client,
+            query.clone(),
+            jazz::tools::ReadTier::Remote,
+            QUERY_TIMEOUT,
+            "reader sees only the joined row allowed by the posts policy",
+            |rows| (rows.len() == 1).then_some(rows),
+        )
+        .await;
+        assert_eq!(
+            rows[0].get("join_users.name"),
+            Some(&Value::Text(owner.into()))
+        );
+        assert_eq!(
+            rows[0].get("join_posts.owner_name"),
+            Some(&Value::Text(owner.into()))
+        );
+        assert_eq!(
+            rows[0].get("join_posts.title"),
+            Some(&Value::Text(title.into()))
+        );
+    }
 
     admin.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
@@ -743,7 +738,7 @@ async fn exists_rel_hop_grants_and_denies_correctly_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave does not see hop grant without matching membership",
         Some,
@@ -1015,7 +1010,7 @@ async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected
     let rows_after_rejection = wait_for_query(
         &observer,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "observer sees unchanged protected fields after rejected update",
         |rows| {
@@ -1127,8 +1122,9 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     .expect("optimistic local exists update");
 
     let rows_after_update = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after rejected exists update");
     assert!(
         rows_after_update

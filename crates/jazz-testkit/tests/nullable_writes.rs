@@ -36,8 +36,9 @@ fn profiles_query() -> jazz::query::Query {
 
 async fn profile_values(client: &JazzClient, row_id: ObjectId) -> Vec<Value> {
     client
-        .query(profiles_query(), None)
+        .query(profiles_query(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query profiles")
         .into_iter()
         .find(|(id, _)| *id == row_id)

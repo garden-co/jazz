@@ -119,7 +119,7 @@ async fn local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inn
             wait_for_query(
                 &alice,
                 Query::from(table),
-                Some(jazz::tools::DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "policy evidence stays private",
                 |rows| rows.is_empty().then_some(()),
@@ -309,7 +309,7 @@ async fn local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non
         Query::from("admins")
             .filter(eq(col("id"), lit(*admin_id.uuid())))
             .select(["user_id"]),
-        Some(jazz::tools::DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(5),
         "Alice admin row becomes visible",
         |rows| (rows == [(admin_id, vec![Value::Text(super::ALICE_ID.into())])]).then_some(()),
@@ -325,13 +325,14 @@ async fn local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non
     )
     .await;
     let bob_rows = bob
-        .query_with_read_tier(
+        .query(
             Query::from("admins")
                 .filter(eq(col("id"), lit(*admin_id.uuid())))
                 .select(["user_id"]),
             jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query admins as Bob");
     assert!(bob_rows.is_empty(), "Bob should not see Alice's admin row");
 
@@ -731,7 +732,6 @@ async fn uncorrelated_exists_select_tracks_private_grants() {
 async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyExpr) {
     tokio::task::LocalSet::new()
         .run_until(async {
-            use jazz::tools::DurabilityTier;
             use jazz_testkit::{
                 connect_ready_user, has_added_id, has_removed, wait_for_edge_txs, wait_for_query,
                 wait_for_subscription_update,
@@ -787,7 +787,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "empty grant table denies SELECT",
                 |rows| rows.is_empty().then_some(()),
@@ -811,7 +811,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "duplicate grants produce one row",
                 |rows| (rows == [(row, vec![Value::Text("secret".into())])]).then_some(()),
@@ -820,7 +820,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &bob,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "Alice's grant does not authorize Bob",
                 |rows| rows.is_empty().then_some(()),
@@ -831,7 +831,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "second grant keeps access",
                 |rows| (rows.len() == 1).then_some(()),
@@ -840,7 +840,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &alice,
                 Query::from("grants"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "private grant rows stay hidden",
                 |rows| rows.is_empty().then_some(()),
@@ -852,7 +852,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &alice,
                 query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "no remaining grants denies SELECT",
                 |rows| rows.is_empty().then_some(()),

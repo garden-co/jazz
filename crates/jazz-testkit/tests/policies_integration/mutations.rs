@@ -17,7 +17,7 @@ async fn wait_for_protected_rows(
     wait_for_query(
         client,
         query,
-        Some(jazz::tools::DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(5),
         description,
         |rows| predicate(&rows).then_some(rows),
@@ -110,7 +110,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
     wait_for_query(
         &bob,
         document_query.clone(),
-        Some(jazz::tools::DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(5),
         "Bob observes Alice's document before attempting the update",
         |rows| (rows == original_row).then_some(rows),
@@ -140,11 +140,9 @@ async fn rebac_update_denied_by_using_policy_inner() {
     );
 
     let alice_rows = alice
-        .query(
-            document_query,
-            Some(jazz::tools::DurabilityTier::EdgeServer),
-        )
+        .query(document_query, jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query alice document");
     assert_eq!(
         alice_rows, original_row,
@@ -223,7 +221,7 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
         Query::from("admins")
             .filter(eq(col("id"), lit(*admin_id.uuid())))
             .select(["user_id"]),
-        Some(jazz::tools::DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(5),
         "bob sees alice's admin row",
         |rows| (rows == [(admin_id, vec![Value::Text(super::ALICE_ID.into())])]).then_some(rows),

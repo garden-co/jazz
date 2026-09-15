@@ -51,6 +51,7 @@ async fn local_rows(client: &JazzClient, query: Query) -> Vec<(ObjectId, Vec<Val
             },
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("inspect local cache")
 }
 

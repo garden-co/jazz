@@ -1,5 +1,4 @@
 use super::*;
-use jazz::tools::DurabilityTier;
 use jazz_server::JazzServer;
 use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
 
@@ -67,8 +66,9 @@ async fn rebac_recursive_inherits_cycle_does_not_overgrant_inner() {
     wait_for_edge_txs(&admin, &[cycle_tx]).await;
 
     let result_ids: HashSet<_> = alice
-        .query(Query::from("folders"), Some(DurabilityTier::EdgeServer))
+        .query(Query::from("folders"), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query folders as alice")
         .into_iter()
         .map(|(id, _)| id)

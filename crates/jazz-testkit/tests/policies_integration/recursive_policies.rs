@@ -16,8 +16,8 @@ use jazz::tools::public_schema::{
     RelRecursionBound as RecursionBound, RelValueRef as ValueRef, RowIdRef,
 };
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
-    TableSchema, TableSchemaBuilder, Value,
+    ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies, TableSchema,
+    TableSchemaBuilder, Value,
 };
 use jazz::tools::{Operation, PolicyExpr};
 use jazz_server::JazzServer;
@@ -511,7 +511,7 @@ async fn recursive_inherits_grants_visible_ancestor_chain_and_denies_unrelated_s
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no recursive folders without an owned ancestor",
         Some,
@@ -857,7 +857,7 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no documents without a reachable team path",
         Some,
@@ -944,8 +944,9 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
     create_team_edge(&admin, mid_b, root).await;
 
     let rows_after_second_path = bob
-        .query(query, Some(DurabilityTier::EdgeServer))
+        .query(query, jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents after second recursive path");
     assert_eq!(
         rows_after_second_path.len(),

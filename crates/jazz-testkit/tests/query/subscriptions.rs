@@ -874,7 +874,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
     let rows = wait_for_query(
         &client,
         query.clone(),
-        None,
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         format!("local client sees final bulk title {final_title}"),
         |rows| {

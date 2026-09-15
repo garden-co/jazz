@@ -14,9 +14,7 @@ use std::time::Duration;
 use jazz::row_input;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
-use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use reqwest::StatusCode;
 use serde_json::json;
@@ -215,7 +213,7 @@ async fn newest_write_wins_when_row_history_spans_variable_column_generations_im
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees the v1-era task before updating it",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -227,7 +225,7 @@ async fn newest_write_wins_when_row_history_spans_variable_column_generations_im
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "the mixed-generation row converges to the newest write",
         |rows| {
@@ -285,7 +283,7 @@ async fn cold_client_converges_row_with_mixed_generation_history_impl() {
     wait_for_query(
         &carol,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "a cold client converges the mixed-generation row",
         |rows| {
@@ -359,7 +357,7 @@ async fn late_write_under_prior_generation_converges_with_current_schema_update_
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees alice's late v1 rename translated into v2",
         |rows| {
@@ -376,7 +374,7 @@ async fn late_write_under_prior_generation_converges_with_current_schema_update_
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "the v2 update and the late v1-era values both survive the fate round-trip",
         |rows| {
@@ -395,7 +393,7 @@ async fn late_write_under_prior_generation_converges_with_current_schema_update_
     wait_for_query(
         &alice,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice's v1 view converges on the renamed row",
         |rows| {
@@ -455,7 +453,7 @@ async fn read_paths_agree_on_newest_state_after_mixed_generation_writes_impl() {
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees the v1-era task before updating it",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -468,7 +466,7 @@ async fn read_paths_agree_on_newest_state_after_mixed_generation_writes_impl() {
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "one-shot read resolves the newest mixed-generation state",
         |rows| {
@@ -518,7 +516,7 @@ async fn read_paths_agree_on_newest_state_after_mixed_generation_writes_impl() {
     wait_for_query(
         &dave,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "the persistent client syncs the newest mixed-generation state",
         |rows| {
@@ -534,7 +532,7 @@ async fn read_paths_agree_on_newest_state_after_mixed_generation_writes_impl() {
     wait_for_query(
         &reopened,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "warm restart resolves the newest mixed-generation state",
         |rows| {
@@ -591,7 +589,7 @@ async fn migration_published_at_runtime_still_converges_mixed_generation_row_imp
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees the v1-era task before updating it",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -603,7 +601,7 @@ async fn migration_published_at_runtime_still_converges_mixed_generation_row_imp
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "the runtime-migrated row converges to the newest write",
         |rows| {
@@ -727,7 +725,7 @@ async fn draft_schema_without_lineage_does_not_affect_active_generation_reads_im
     wait_for_query(
         &alice,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "v1 queries keep serving both rows despite the staged draft",
         |rows| {
@@ -783,7 +781,7 @@ async fn partial_current_schema_update_keeps_untouched_added_column_readable_imp
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees the v1-era task before updating it",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -806,7 +804,7 @@ async fn partial_current_schema_update_keeps_untouched_added_column_readable_imp
     wait_for_query(
         &bob,
         jazz::query::Query::from("tasks"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "the partially updated row stays readable with the lens default",
         |rows| {

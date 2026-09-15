@@ -390,8 +390,9 @@ async fn admin_role_claims_reject_member_mutations_inner() {
         .expect("optimistic local member update");
 
     let rows_after_rejected_update = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after rejected member update");
     assert!(
         rows_after_rejected_update.iter().any(|(id, values)| {
@@ -410,8 +411,9 @@ async fn admin_role_claims_reject_member_mutations_inner() {
         .expect("optimistic local member delete");
 
     let rows_after_rejected_delete = observer
-        .query(query, Some(DurabilityTier::EdgeServer))
+        .query(query, jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after rejected member delete");
     assert!(
         rows_after_rejected_delete.iter().any(|(id, values)| {
@@ -499,7 +501,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "alice sees seeded documents before updates",
         |rows| {
@@ -518,7 +520,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     wait_for_query(
         &observer,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "observer sees seeded documents before updates",
         |rows| {
@@ -562,7 +564,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     wait_for_query(
         &observer,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "observer sees allowed row update persist",
         |rows| {
@@ -606,8 +608,9 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     );
 
     let rows_after_rejected_update = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after rejected blocked-row update");
     assert!(
         rows_after_rejected_update.iter().any(|(id, values)| {
@@ -744,7 +747,7 @@ async fn role_claim_presence_gates_row_visibility_inner() {
     let null_role_rows = wait_for_query(
         &null_role,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "explicit null role sees nothing",
         Some,
@@ -755,7 +758,7 @@ async fn role_claim_presence_gates_row_visibility_inner() {
     let missing_role_rows = wait_for_query(
         &missing_role,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "missing role sees nothing",
         Some,
@@ -905,7 +908,7 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner() {
     let empty_rows = wait_for_query(
         &empty,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "empty groups_allowed denies all rows",
         Some,
@@ -916,7 +919,7 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner() {
     let missing_rows = wait_for_query(
         &missing,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "missing groups_allowed claim denies all rows",
         Some,
@@ -1096,7 +1099,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
     let explicit_null_present_rows = wait_for_query(
         &explicit_null,
         present_query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "explicit null claim does not match != null policy",
         Some,
@@ -1107,7 +1110,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
     let present_value_null_rows = wait_for_query(
         &present_value,
         null_query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "present claim does not match IS NULL policy",
         Some,
@@ -1130,7 +1133,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
     let missing_null_rows = wait_for_query(
         &missing_path,
         null_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "missing claim path does not match IS NULL policy",
         Some,
@@ -1141,7 +1144,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
     let missing_present_rows = wait_for_query(
         &missing_path,
         present_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "missing claim path does not match != null policy",
         Some,
@@ -1286,7 +1289,7 @@ async fn row_and_claim_predicates_compose_under_and_and_or_inner() {
     let north_empty_all_of_rows = wait_for_query(
         &north_empty,
         all_of_query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "north client without eng membership fails allOf",
         Some,
@@ -1297,7 +1300,7 @@ async fn row_and_claim_predicates_compose_under_and_and_or_inner() {
     let south_eng_all_of_rows = wait_for_query(
         &south_eng,
         all_of_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "south org client fails dotted org.slug branch",
         Some,
@@ -1446,7 +1449,7 @@ async fn nested_claim_fields_preserve_keys_and_missing_null_semantics_inner() {
             let rows = wait_for_query(
                 &client,
                 Query::from(table),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 user,
                 Some,

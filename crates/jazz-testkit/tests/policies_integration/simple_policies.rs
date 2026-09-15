@@ -11,7 +11,7 @@ use super::support::{
 use super::{pe, permissions};
 use jazz::tools::public_schema::CmpOp;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
+    ColumnType, JazzClient, ObjectId, SchemaBuilder, TablePolicies, TableSchema,
     TableSchemaBuilder, Value,
 };
 use jazz_server::JazzServer;
@@ -459,9 +459,10 @@ async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
             Query::from("protected_records")
                 .filter(eq(col("id"), lit(*record_id.uuid())))
                 .select(["body"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query protected records");
 
     assert_eq!(
@@ -475,9 +476,10 @@ async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
             Query::from("access_grants")
                 .filter(eq(col("id"), lit(*grant_id.uuid())))
                 .select(["principal_id", "active"]),
-            Some(DurabilityTier::Local),
+            jazz::tools::ReadTier::LocalFirst,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query access grants locally");
 
     assert_eq!(
@@ -1780,7 +1782,7 @@ async fn updates_require_read_and_update_permissions_inner() {
     let write_only_before = wait_for_query(
         &alice_hidden_reader,
         Query::from("documents_write_only"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "write-only row is hidden before the attempted update",
         Some,
@@ -1828,7 +1830,7 @@ async fn updates_require_read_and_update_permissions_inner() {
     let hidden_after = wait_for_query(
         &alice_hidden_reader,
         Query::from("documents_write_only"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "rejected update does not reveal the row",
         Some,
@@ -1928,8 +1930,9 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     )
     .await;
     let rows_after_hidden_insert = verifier_after_hidden_insert
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after hidden insert");
     assert!(
         has_row(&rows_after_hidden_insert, visible_id, &visible_values),
@@ -2131,7 +2134,7 @@ async fn admin_secret_ws_client_bypasses_row_select_policies_inner() {
     let observer_rows = wait_for_query(
         &observer,
         Query::from(table_name),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "ordinary observer stays filtered by select policy",
         Some,

@@ -3681,85 +3681,14 @@ impl JazzClient {
         Ok(SubscriptionStream::new(rx, cancellation))
     }
 
-    /// One-shot query using a product-level read tier.
-    ///
-    /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
-    pub async fn query_with_read_tier(
-        &self,
-        query: Query,
-        tier: ReadTier,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+    /// One-shot query with read tier.
+    pub async fn query(&self, query: Query, tier: ReadTier) -> Result<Vec<QueryResult>> {
         self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
             .await
     }
 
-    /// One-shot query, optionally waiting for a legacy durability tier.
-    ///
-    /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
-    #[deprecated(
-        note = "read APIs should use query_with_read_tier(query, ReadTier); DurabilityTier remains supported for write waits"
-    )]
-    pub async fn query(
-        &self,
-        query: Query,
-        durability_tier: Option<DurabilityTier>,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        self.query_with_opts(query, Self::core_read_opts(durability_tier))
-            .await
-    }
-
-    /// Execute a row-id query using the canonical core read options.
+    /// Execute a query providing all read options.
     pub async fn query_with_opts(
-        &self,
-        query: Query,
-        opts: CoreReadOpts,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        if query.flat_join.is_some() {
-            return Err(JazzError::Query(
-                "joined results require query_results(), which returns stable ResultKey values"
-                    .to_owned(),
-            ));
-        }
-        let results = self.query_results_with_opts(query, opts).await?;
-        results
-            .into_iter()
-            .map(|result| {
-                let row_id = result.key.row_id().ok_or_else(|| {
-                    JazzError::Query(
-                        "joined result cannot be represented by the legacy row-id query API"
-                            .to_owned(),
-                    )
-                })?;
-                Ok((row_id, result.into_values()))
-            })
-            .collect()
-    }
-
-    /// One-shot query with stable result keys using a product-level read tier.
-    pub async fn query_results_with_read_tier(
-        &self,
-        query: Query,
-        tier: ReadTier,
-    ) -> Result<Vec<QueryResult>> {
-        self.query_results_with_opts(query, Self::core_read_opts_for_read_tier(tier))
-            .await
-    }
-
-    /// One-shot query with stable keys using a legacy durability tier.
-    #[deprecated(
-        note = "read APIs should use query_results_with_read_tier(query, ReadTier); DurabilityTier remains supported for write waits"
-    )]
-    pub async fn query_results(
-        &self,
-        query: Query,
-        durability_tier: Option<DurabilityTier>,
-    ) -> Result<Vec<QueryResult>> {
-        self.query_results_with_opts(query, Self::core_read_opts(durability_tier))
-            .await
-    }
-
-    /// Execute a query using the canonical core read options.
-    pub async fn query_results_with_opts(
         &self,
         query: Query,
         opts: CoreReadOpts,
@@ -5226,8 +5155,7 @@ mod tests {
             )
             .expect("write local row");
 
-        let mut query =
-            Box::pin(client.query_with_read_tier(Query::from("todos"), ReadTier::Remote));
+        let mut query = Box::pin(client.query(Query::from("todos"), ReadTier::Remote));
         let waker = std::task::Waker::noop();
         let mut context = std::task::Context::from_waker(waker);
         assert!(
@@ -5290,7 +5218,7 @@ mod tests {
             .record_tick_driver_failure(error.to_string());
 
         let error = client
-            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+            .query(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect_err("a stopped tick driver must be visible to the caller");
         assert!(
@@ -5332,17 +5260,17 @@ mod tests {
             .await
             .expect("reconnect offline persistent client");
         let rows = restarted
-            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+            .query(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect("query rehydrated rows");
 
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, row_id);
         assert_eq!(
-            rows,
-            vec![(
-                row_id,
-                vec![Value::Text("rehydrated".to_string()), Value::Boolean(false)]
-            )]
+            rows[0].get("title"),
+            Some(&Value::Text("rehydrated".to_string()))
         );
+        assert_eq!(rows[0].get("completed"), Some(&Value::Boolean(false)));
     }
 
     /// A retained public subscription must become terminal during shutdown so
@@ -6080,7 +6008,7 @@ mod tests {
         );
 
         let error = retained_clone
-            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+            .query(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect_err("retained clone must not operate after shared shutdown");
         assert!(
@@ -6260,12 +6188,12 @@ mod tests {
             ("user_title", "first by user_title"),
         ] {
             let rows = client
-                .query_results(
+                .query(
                     Query::from("items")
                         .order_by(column, OrderDirection::Asc)
                         .limit(1)
                         .select(["label"]),
-                    Some(DurabilityTier::Local),
+                    crate::tools::ReadTier::LocalFirst,
                 )
                 .await
                 .expect("evaluate projected window");
@@ -6297,7 +6225,7 @@ mod tests {
                 .expect("insert with explicit row UUID");
         }
         let rows = alice
-            .query_results_with_read_tier(
+            .query(
                 Query::from("items")
                     .order_by("id", OrderDirection::Desc)
                     .select(["id", "label"]),
@@ -6315,7 +6243,7 @@ mod tests {
         assert_eq!(rows[0].get("label"), Some(&Value::Text("a".to_owned())));
         assert_eq!(rows[1].get("label"), Some(&Value::Text("z".to_owned())));
         let selected = alice
-            .query_results_with_read_tier(
+            .query(
                 Query::from("items")
                     .filter(eq(col("id"), lit(Uuid::from_u128(1))))
                     .select(["id", "label"]),
@@ -6367,11 +6295,11 @@ mod tests {
             ("_app_score", [12, 9, 1, 18, 24]),
         ] {
             let rows = client
-                .query_results(
+                .query(
                     Query::from("items")
                         .order_by(order, OrderDirection::Asc)
                         .limit(1),
-                    Some(DurabilityTier::Local),
+                    crate::tools::ReadTier::LocalFirst,
                 )
                 .await
                 .unwrap();
@@ -6430,7 +6358,7 @@ mod tests {
                 ),
             ] {
                 let rows = client
-                    .query_results(query, Some(DurabilityTier::Local))
+                    .query(query, crate::tools::ReadTier::LocalFirst)
                     .await
                     .unwrap();
                 assert_eq!(rows.len(), 1);
@@ -6466,12 +6394,12 @@ mod tests {
                 .unwrap();
         }
         let rows = client
-            .query_results(
+            .query(
                 Query::from("items")
                     .count()
                     .group_by("state")
                     .order_by("state", OrderDirection::Asc),
-                Some(DurabilityTier::Local),
+                crate::tools::ReadTier::LocalFirst,
             )
             .await
             .unwrap();
@@ -6485,9 +6413,9 @@ mod tests {
         assert_eq!(rows[1].get("state"), Some(&Value::Text("beta".into())));
         assert_eq!(rows[1].get("count"), Some(&Value::Timestamp(1)));
         let rows = client
-            .query_results(
+            .query(
                 Query::from("items").count().group_by("user_state"),
-                Some(DurabilityTier::Local),
+                crate::tools::ReadTier::LocalFirst,
             )
             .await
             .unwrap();
@@ -6525,13 +6453,13 @@ mod tests {
                 .unwrap();
         }
         let rows = client
-            .query_results(
+            .query(
                 Query::from("people")
                     .join_via_column("tasks", "owner", "id", [])
                     .order_by("name", OrderDirection::Desc)
                     .offset(1)
                     .limit(3),
-                Some(DurabilityTier::Local),
+                crate::tools::ReadTier::LocalFirst,
             )
             .await
             .unwrap();
@@ -6597,7 +6525,7 @@ mod tests {
             .filter(gte(col("$updatedAt"), lit(updated_at_ms)))
             .select(["$updatedAt"]);
         let results = client
-            .query_results(query, Some(DurabilityTier::Local))
+            .query(query, crate::tools::ReadTier::LocalFirst)
             .await
             .expect("query with physical-ms provenance predicate");
         assert_eq!(results.len(), 1);

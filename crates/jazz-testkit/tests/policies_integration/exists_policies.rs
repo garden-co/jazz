@@ -20,7 +20,7 @@ async fn wait_for_protected_row(
         Query::from("protected")
             .filter(eq(col("id"), lit(*protected_id.uuid())))
             .select(["data"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         WAIT_TIMEOUT,
         description,
         |rows| (rows == [(protected_id, vec![Value::Text(expected_data.into())])]).then_some(()),
@@ -38,7 +38,7 @@ async fn wait_for_protected_row_absent(
         Query::from("protected")
             .filter(eq(col("id"), lit(*protected_id.uuid())))
             .select(["data"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         WAIT_TIMEOUT,
         description,
         |rows| rows.is_empty().then_some(()),
@@ -52,7 +52,7 @@ async fn wait_for_admin_row(client: &JazzClient, admin_id: ObjectId, user_id: &s
         Query::from("admins")
             .filter(eq(col("id"), lit(*admin_id.uuid())))
             .select(["user_id"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         WAIT_TIMEOUT,
         format!("{user_id} admin row becomes visible"),
         |rows| (rows == [(admin_id, vec![Value::Text(user_id.into())])]).then_some(()),

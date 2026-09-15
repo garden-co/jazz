@@ -10,8 +10,8 @@ use super::support::{
 };
 use super::{pe, permissions};
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
-    TableSchema, TableSchemaBuilder, Value,
+    ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies, TableSchema,
+    TableSchemaBuilder, Value,
 };
 use jazz_server::JazzServer;
 use serde_json::json;
@@ -660,7 +660,7 @@ async fn anonymous_client_cannot_see_owner_restricted_rows_inner() {
     let charlie_rows = wait_for_query(
         &charlie,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "charlie sees no owner-restricted rows",
         Some,
@@ -1289,7 +1289,7 @@ async fn in_session_array_policy_gates_visibility_by_membership_inner() {
     let alice_rows = wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "alice visible team documents",
         |rows| (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows),
@@ -1307,7 +1307,7 @@ async fn in_session_array_policy_gates_visibility_by_membership_inner() {
     let bob_rows = wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "bob visible team documents",
         |rows| (rows.len() == 1 && rows[0].0 == bob_doc).then_some(rows),
@@ -1521,8 +1521,9 @@ async fn update_policies_block_unauthorized_server_mutations_inner() {
     // EdgeServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted update has been accepted or rejected.
     let rows_after_update = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after unauthorized update");
     assert!(
         rows_after_update.iter().any(|(id, values)| *id == doc_id
@@ -1739,8 +1740,9 @@ async fn update_policy_read_clause_differs_from_write_clause_inner() {
 
     // EdgeServer query is the causal barrier.
     let rows_after = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after unauthorized update");
     assert!(
         rows_after.iter().any(|(id, values)| *id == doc_id
@@ -1940,8 +1942,9 @@ async fn delete_policies_block_unauthorized_server_mutations_inner() {
     // EdgeServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted delete has been accepted or rejected.
     let rows_after_delete = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after unauthorized delete");
     assert!(
         rows_after_delete.iter().any(|(id, values)| *id == doc_id
@@ -2179,7 +2182,7 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     let alice_rows = wait_for_query(
         &alice,
         query,
-        None,
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         "alice: local cache converged after rollback",
         |rows| {
@@ -2315,7 +2318,7 @@ async fn nested_join_subscription_tracks_membership_changes_inner() {
     let rows = wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice has no organization after removing membership",
         |rows| rows.is_empty().then_some(rows),

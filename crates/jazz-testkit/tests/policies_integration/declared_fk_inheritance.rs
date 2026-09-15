@@ -1,5 +1,5 @@
 use crate::JazzClient;
-use jazz::tools::{DurabilityTier, TransactionId};
+use jazz::tools::TransactionId;
 use jazz_server::JazzServer;
 use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
 
@@ -63,8 +63,9 @@ fn insert_todo_with_images(
 
 async fn query_ids(client: &JazzClient, table: &str) -> HashSet<ObjectId> {
     client
-        .query(Query::from(table), Some(DurabilityTier::EdgeServer))
+        .query(Query::from(table), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query rows")
         .into_iter()
         .map(|(id, _)| id)
