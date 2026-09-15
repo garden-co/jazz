@@ -804,6 +804,7 @@ where
                 .await?;
         }
         node.synchronize_physical_version_tables().await?;
+        node.database.ensure_declared_index_generation(1).await?;
         node.recover_pending_schema_lineages().await?;
         node.recover_pending_catalogue_pointers().await?;
         #[cfg(feature = "testing")]

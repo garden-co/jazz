@@ -3,6 +3,99 @@
 use super::*;
 
 impl IvmRuntime {
+    pub(crate) fn declared_index_repair_is_idle(&self) -> bool {
+        self.multisink_subscriptions.is_empty()
+            && self.prepared_shapes.is_empty()
+            && !self.pending_incremental.is_pending()
+            && !self.pending_incremental_polling
+            && self.pending_binding_retractions.is_empty()
+            && self.deferred_notifications.is_empty()
+            && !self.persistence_indeterminate.get()
+    }
+
+    /// Replay only schema-owned TableSource -> IndexBy -> Persist graphs.
+    /// Startup callers must exclude publications and queries for the duration.
+    pub(crate) async fn rebuild_declared_indexes<S: OrderedKvStorage>(
+        &mut self,
+        storage: &S,
+    ) -> Result<(), IvmRuntimeError> {
+        const BATCH_SIZE: usize = 1024;
+        let tables = self.schema.tables.clone();
+        for table in &tables {
+            for index in &table.indices {
+                let persist = self.add_dedup_schema_index(table, index)?;
+                let node = self
+                    .graph
+                    .node(persist)
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(persist))?;
+                let OpType::Persist(op) = node.descriptor.operator.clone() else {
+                    return Err(IvmRuntimeError::UnsupportedOperator);
+                };
+                let [input] = node.descriptor.inputs.as_slice() else {
+                    return Err(IvmRuntimeError::GraphInputArityMismatch(persist));
+                };
+                let input = *input;
+                // Repeated bounded prefix scans avoid retaining all old keys and
+                // never touch primary rows or another derived object's prefix.
+                loop {
+                    let entries = crate::storage::collect_scan(
+                        storage
+                            .scan(
+                                crate::storage::ScanRequest::prefix(
+                                    op.storage.column_family.clone(),
+                                    op.storage.key_prefix.clone(),
+                                )
+                                .with_max_items(BATCH_SIZE),
+                            )
+                            .await?,
+                    )
+                    .await?;
+                    if entries.is_empty() {
+                        break;
+                    }
+                    storage
+                        .write_many(
+                            entries
+                                .into_iter()
+                                .map(|(key, _)| crate::storage::OwnedWriteOperation::Delete {
+                                    cf: op.storage.column_family.clone(),
+                                    key,
+                                })
+                                .collect(),
+                        )
+                        .await?;
+                }
+                self.invalidate_table_inputs(&table.name);
+                let snapshot = self
+                    .hydration_snapshot(input, storage, HydrationMode::Ordinary)
+                    .await?;
+                // Hydration currently materializes one index snapshot. Bound
+                // write batches independently of that existing read machinery.
+                for chunk in snapshot.deltas.chunks(BATCH_SIZE) {
+                    apply_persist_delta(
+                        storage,
+                        &op.storage,
+                        &op.key_fields,
+                        op.unique,
+                        &RecordDeltas {
+                            descriptor: snapshot.descriptor,
+                            deltas: chunk.to_vec(),
+                        },
+                    )
+                    .await?;
+                }
+            }
+            if !table.indices.is_empty() {
+                // Repair hydration is temporary startup work, not a query
+                // warmup. Release its primary/index snapshots even when no
+                // later write advances this table's frontier (notably empty
+                // deletion tables), before recovery or user reads begin.
+                self.invalidate_table_inputs(&table.name);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn register_table(&mut self, table: TableSchema) -> Result<(), IvmRuntimeError> {
         if self.schema.table(&table.name).is_some() {
             return Err(IvmRuntimeError::TableAlreadyExists(table.name));

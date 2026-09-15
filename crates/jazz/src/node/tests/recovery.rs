@@ -2988,3 +2988,86 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         }
     }
 }
+
+/// Alice's unsynced write survives a missing-generation index repair before
+/// recovery: commit -> damage derived indexes -> reopen -> read pending write.
+#[test]
+fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
+    // Direct storage damage is necessary to emulate an older buggy writer;
+    // ordinary APIs cannot create missing or malformed index entries.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let pending_tx;
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        pending_tx = node
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(9), 10).cells(title_cells("pending")),
+            )
+            .unwrap();
+        node.database.close().unwrap();
+    }
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let expected_indexes;
+    let primary_before;
+    {
+        let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+        primary_before = cfs
+            .iter()
+            .filter(|cf| cf.as_str() != "__groove_class_indices")
+            .map(|cf| (cf.clone(), storage.prefix(cf.clone(), Vec::new()).unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let storage =
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+        let marker = b"\0groove-declared-index-generation".to_vec();
+        storage.delete("indices".into(), marker).unwrap();
+        expected_indexes = storage.prefix("indices".into(), Vec::new()).unwrap();
+        assert!(!expected_indexes.is_empty());
+        for (key, _) in &expected_indexes {
+            storage.delete("indices".into(), key.clone()).unwrap();
+        }
+        // A malformed stale value must be removed without attempting decode.
+        let mut stale = expected_indexes[0].0.clone();
+        stale.extend_from_slice(b"stale");
+        storage
+            .set("indices".into(), stale, b"malformed".to_vec())
+            .unwrap();
+        storage.close().unwrap();
+    }
+    {
+        let mut reopened = open_node_at(&temp_dir, schema.clone());
+        assert_eq!(
+            reopened
+                .current_rows("todos", DurabilityTier::Local)
+                .unwrap()
+                .into_iter()
+                .map(current_row_pair)
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([(row(9), title_cells("pending"))])
+        );
+        assert_eq!(
+            reopened.transaction_state_settled(pending_tx).unwrap(),
+            (Fate::Pending, None, DurabilityTier::Local)
+        );
+        reopened.database.close().unwrap();
+    }
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    for (cf, expected) in primary_before {
+        assert_eq!(
+            storage.prefix(cf.clone(), Vec::new()).unwrap(),
+            expected,
+            "repair must preserve every non-index byte in {cf}"
+        );
+    }
+    let storage =
+        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+    let indexes = storage
+        .prefix("indices".into(), Vec::new())
+        .unwrap()
+        .into_iter()
+        .filter(|(key, _)| key != b"\0groove-declared-index-generation")
+        .collect::<Vec<_>>();
+    assert_eq!(indexes, expected_indexes);
+    storage.close().unwrap();
+}

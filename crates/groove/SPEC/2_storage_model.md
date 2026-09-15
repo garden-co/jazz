@@ -671,6 +671,29 @@ Schema indices are persisted in the `"indices"` record store under
 `("key": Bytes, "value": Bytes)`. `DatabaseSchema::column_families()` includes
 `"indices"` whenever any table declares an `IndexSchema` (`INV-STORAGE-21`).
 
+Jazz startup repairs declared indexes (`INV-STORAGE-36`) using one database-wide generation record
+in logical `indices`: key bytes `00` followed by ASCII
+`groove-declared-index-generation`, value exactly eight bytes encoding an unsigned
+64-bit big-endian generation. Alpha55 uses generation 1 (`00 00 00 00 00 00 00
+01`). This key contains exactly one NUL; every declared-index prefix contains
+two NUL separators, so no declared-index prefix can contain this marker, even
+for empty names. It is independent of the class-layout and catalogue markers.
+Missing or older generations trigger repair after physical variants have been
+registered and before index-dependent recovery. Malformed or future generations
+fail startup. Repair deletes only each declared index's logical prefix and
+replays its primary table through its existing index projection and persistence
+encoding. Primary records, history, fate records, and pending writes are untouched.
+Deletes and replay writes use batches of at most 1024 entries; hydration currently
+materializes one index snapshot, so peak memory still scales with that snapshot.
+Repair releases each repaired table's hydration memo before continuing, so
+normal recovery and reads do not inherit one-time repair snapshots.
+All index writes are flushed before the generation is written, and the generation
+is flushed before startup succeeds. A failed or interrupted attempt requires
+reopening; absent completion, it clears and rebuilds again. Matching generations
+require only a marker read. Newly registered indexes retain their ordinary
+registration backfill. Running an older buggy writer after repair is outside this
+guarantee: it can corrupt indexes without invalidating the completion marker.
+
 Index entries use ordered keys produced by `encode_key_part`, which preserves
 logical order and rejects arrays as keys (`INV-STORAGE-25`). An index scan
 decodes each entry's `"value"` as primary-key bytes and fetches the
