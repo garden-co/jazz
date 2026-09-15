@@ -1,0 +1,75 @@
+name: Stage Inspector production
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact-run-id:
+        description: "Successful package-build workflow run containing inspector-prebuilt"
+        required: true
+        type: string
+      source-sha:
+        description: "Exact deployment SHA (must have the same source tree as the artifact run)"
+        required: true
+        type: string
+      source-branch:
+        description: "Source branch used by the production promotion lookup"
+        required: true
+        default: release
+        type: string
+
+jobs:
+  stage:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SOURCE_SHA: ${{ inputs.source-sha }}
+      SOURCE_BRANCH: ${{ inputs.source-branch }}
+      ARTIFACT_RUN_ID: ${{ inputs.artifact-run-id }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_INSPECTOR_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Verify artifact run identity and deployment source tree
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node dev/scripts/inspector-provenance.mjs
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.artifact-run-id }}
+          name: inspector-prebuilt
+          path: target/inspector-prebuilt
+
+      - name: Verify complete output and stage without assigning domains
+        env:
+          ARTIFACT_SHA: ${{ steps.artifact.outputs.source_sha }}
+        run: |
+          node dev/scripts/inspector-prebuilt.mjs verify target/inspector-prebuilt "${ARTIFACT_SHA}"
+          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing ${name}. Configure the matching Vercel Inspector GitHub secret."
+              exit 1
+            fi
+          done
+          # Vercel checks the invocation root and the configured project root.
+          # Keep both copies identical; the project root is packages/inspector.
+          mkdir -p target/inspector-prebuilt/packages/inspector/.vercel
+          cp -R target/inspector-prebuilt/.vercel/output target/inspector-prebuilt/packages/inspector/.vercel/output
+          cd target/inspector-prebuilt
+          node --input-type=module -e 'import fs from "node:fs"; fs.writeFileSync(".vercel/project.json", JSON.stringify({orgId: process.env.VERCEL_ORG_ID, projectId: process.env.VERCEL_PROJECT_ID}));'
+          npx --yes vercel@latest deploy --prebuilt --prod --skip-domain --yes \
+            --token="${VERCEL_TOKEN}" --scope="${VERCEL_ORG_ID}" \
+            --meta "githubCommitSha=${SOURCE_SHA}" --meta "githubCommitRef=${SOURCE_BRANCH}" \
+            --meta "releaseSourceSha=${ARTIFACT_SHA}"

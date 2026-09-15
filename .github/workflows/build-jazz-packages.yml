@@ -376,6 +376,18 @@ jobs:
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build
 
+      - name: Build and seal standalone Inspector from verified SDK artifacts
+        run: |
+          pnpm --filter inspector run build:web
+          node dev/scripts/inspector-prebuilt.mjs seal packages/inspector/dist target/inspector-prebuilt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: inspector-prebuilt
+          path: target/inspector-prebuilt
+          include-hidden-files: true
+          if-no-files-found: error
+
       - name: Build create-jazz TypeScript package
         run: pnpm --filter create-jazz build
 
