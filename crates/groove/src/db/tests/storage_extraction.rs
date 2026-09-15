@@ -242,13 +242,13 @@ async fn cancelled_storage_extraction_leaves_the_database_unusable() {
     assert!(futures::poll!(prepare.as_mut()).is_pending());
     drop(prepare);
     assert!(matches!(
-        database.prepare_for_storage_extraction().await,
-        Err(Error::DatabasePoisoned)
-    ));
-    assert!(matches!(
         database
             .subscribe_one_sink(GraphBuilder::table("objects"))
             .await,
+        Err(Error::DatabasePoisoned)
+    ));
+    assert!(matches!(
+        database.prepare_for_storage_extraction().await,
         Err(Error::DatabasePoisoned)
     ));
     assert!(database.ivm_runtime.has_pending_storage_writes());
@@ -396,4 +396,87 @@ async fn runtime_rebuild_preserves_in_flight_local_chunk_read() {
         .unwrap();
     rebuilt.drive_progress().await.unwrap();
     assert!(rows.recv().unwrap().is_empty());
+}
+
+/// Alice queues two direct incremental writes behind the same cold terminal.
+/// Bob's retirement must flush their index entries in temporal order exactly once.
+#[futures_test::test]
+async fn storage_extraction_flushes_multiple_queued_writes_in_order() {
+    let (mut database, control, _subscription) = pending_durable_fixture(false).await;
+    let descriptor = database.table("objects").unwrap().record_schema();
+    database
+        .ivm_runtime
+        .tick_resident_staged(
+            vec![TableDelta {
+                variant_tag: 0,
+                table: "objects".into(),
+                descriptor: descriptor.clone(),
+                deltas: vec![RecordDelta {
+                    record: descriptor
+                        .create(&[Value::U64(2), Value::Bytes(vec![0x62])])
+                        .unwrap()
+                        .into(),
+                    weight: 1,
+                }],
+            }],
+            OwnedStorage::new(database.storage.clone()),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    let storage = database.storage.clone();
+    let first = database
+        .persisted_index_scan_prefix("objects", "objects_by_id", &[Value::U64(1)])
+        .unwrap();
+    let second = database
+        .persisted_index_scan_prefix("objects", "objects_by_id", &[Value::U64(2)])
+        .unwrap();
+    control.take_observed();
+    control.pause_on(TestStorageOperation::WriteMany);
+    let mut prepare = Box::pin(database.prepare_for_storage_extraction());
+    assert!(futures::poll!(prepare.as_mut()).is_pending());
+    assert_eq!(
+        control.take_observed(),
+        vec![TestStorageOperation::WriteMany]
+    );
+    control.release_one();
+    assert!(futures::poll!(prepare.as_mut()).is_pending());
+    assert_eq!(
+        storage
+            .prefix("indices".into(), first.clone())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        storage
+            .prefix("indices".into(), second.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        control
+            .take_observed()
+            .iter()
+            .filter(|operation| **operation == TestStorageOperation::WriteMany)
+            .count(),
+        1
+    );
+    control.resume();
+    prepare.await.unwrap();
+    assert_eq!(
+        storage.prefix("indices".into(), first).await.unwrap().len(),
+        1
+    );
+    assert_eq!(
+        storage
+            .prefix("indices".into(), second)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }

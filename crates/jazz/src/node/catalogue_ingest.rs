@@ -217,6 +217,9 @@ where
     where
         S: ReopenableStorage,
     {
+        if self.catalogue_activation_failed {
+            return Err(Error::CatalogueActivationFailed);
+        }
         self.database.ensure_usable()?;
         if self.database.has_unsettled_publications() {
             return Err(groove::db::Error::UnsettledPublications.into());

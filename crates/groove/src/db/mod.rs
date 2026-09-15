@@ -1709,7 +1709,7 @@ pub enum Error {
     ImmutableBatchConflict,
     #[error("immutable batch must be rebuilt against the current database state")]
     StaleImmutableBatch,
-    #[error("database instance is unavailable after failure or storage extraction")]
+    #[error("database instance is poisoned after failure or storage extraction")]
     DatabasePoisoned,
     #[error("database storage extraction requires all publications to be settled")]
     UnsettledPublications,
