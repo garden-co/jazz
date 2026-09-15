@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       source-sha:
-        description: "Exact source SHA built by that workflow run"
+        description: "Exact deployment SHA (must have the same source tree as the artifact run)"
         required: true
         type: string
       source-branch:
@@ -38,17 +38,33 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Verify artifact run identity
+      - name: Verify artifact run identity and deployment source tree
+        id: artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           [[ "${SOURCE_SHA}" =~ ^[a-f0-9]{40}$ ]]
           [[ "${ARTIFACT_RUN_ID}" =~ ^[0-9]+$ ]]
           gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACT_RUN_ID}" > "${RUNNER_TEMP}/inspector-run.json"
-          node --input-type=module -e '
+          ARTIFACT_SHA=$(node --input-type=module -e '
             import fs from "node:fs";
             const run = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/inspector-run.json"));
-            if (run.status !== "completed" || run.conclusion !== "success" || run.head_sha !== process.env.SOURCE_SHA || run.head_branch !== process.env.SOURCE_BRANCH || run.head_repository?.full_name !== process.env.GITHUB_REPOSITORY) throw new Error("Inspector artifact run must be successful and match the exact repository, source SHA and branch");'
+            if (run.status !== "completed" || run.conclusion !== "success" || !/^[a-f0-9]{40}$/.test(run.head_sha) || run.head_repository?.full_name !== process.env.GITHUB_REPOSITORY) throw new Error("Inspector artifact run must be successful and belong to this repository");
+            console.log(run.head_sha);')
+          gh api "repos/${GITHUB_REPOSITORY}/git/commits/${ARTIFACT_SHA}" > "${RUNNER_TEMP}/inspector-artifact-commit.json"
+          gh api "repos/${GITHUB_REPOSITORY}/git/commits/${SOURCE_SHA}" > "${RUNNER_TEMP}/inspector-deploy-commit.json"
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const read = name => JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/inspector-" + name + "-commit.json"));
+            const artifact = read("artifact"), deploy = read("deploy");
+            if (!/^[a-f0-9]{40}$/.test(artifact.tree?.sha) || artifact.tree.sha !== deploy.tree?.sha) throw new Error("Inspector artifact and deployment source trees differ");'
+          ENCODED_BRANCH=$(node -p 'encodeURIComponent(process.env.SOURCE_BRANCH)')
+          BRANCH_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${ENCODED_BRANCH}" --jq .sha)
+          if [ "${BRANCH_SHA}" != "${SOURCE_SHA}" ]; then
+            echo "::error::Deployment SHA must be the current head of the requested deployment branch."
+            exit 1
+          fi
+          echo "source_sha=${ARTIFACT_SHA}" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -59,16 +75,23 @@ jobs:
           path: target/inspector-prebuilt
 
       - name: Verify complete output and stage without assigning domains
+        env:
+          ARTIFACT_SHA: ${{ steps.artifact.outputs.source_sha }}
         run: |
-          node dev/scripts/inspector-prebuilt.mjs verify target/inspector-prebuilt "${SOURCE_SHA}"
+          node dev/scripts/inspector-prebuilt.mjs verify target/inspector-prebuilt "${ARTIFACT_SHA}"
           for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
             if [ -z "${!name}" ]; then
               echo "::error::Missing ${name}. Configure the matching Vercel Inspector GitHub secret."
               exit 1
             fi
           done
+          # Vercel checks the invocation root and the configured project root.
+          # Keep both copies identical; the project root is packages/inspector.
+          mkdir -p target/inspector-prebuilt/packages/inspector/.vercel
+          cp -R target/inspector-prebuilt/.vercel/output target/inspector-prebuilt/packages/inspector/.vercel/output
           cd target/inspector-prebuilt
           node --input-type=module -e 'import fs from "node:fs"; fs.writeFileSync(".vercel/project.json", JSON.stringify({orgId: process.env.VERCEL_ORG_ID, projectId: process.env.VERCEL_PROJECT_ID}));'
           npx --yes vercel@latest deploy --prebuilt --prod --skip-domain --yes \
             --token="${VERCEL_TOKEN}" --scope="${VERCEL_ORG_ID}" \
-            --meta "githubCommitSha=${SOURCE_SHA}" --meta "githubCommitRef=${SOURCE_BRANCH}"
+            --meta "githubCommitSha=${SOURCE_SHA}" --meta "githubCommitRef=${SOURCE_BRANCH}" \
+            --meta "releaseSourceSha=${ARTIFACT_SHA}"

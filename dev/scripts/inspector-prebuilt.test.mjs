@@ -1,5 +1,14 @@
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import {
+  cpSync,
+  readFileSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -34,3 +43,31 @@ for (const mutation of ["changed", "extra", "missing", "symlink"]) {
     assert.throws(() => verifyInspector(staged, sha), /inventory\/hash mismatch|non-regular file/);
   });
 }
+
+test("archive source builds stop before dependency installation with prebuilt guidance", (t) => {
+  const { dist } = fixture(t);
+  const root = join(dist, "archive");
+  mkdirSync(join(root, "dev/scripts"), { recursive: true });
+  cpSync(
+    new URL("./build-inspector-vercel.sh", import.meta.url),
+    join(root, "dev/scripts/build-inspector-vercel.sh"),
+  );
+  const result = spawnSync("bash", [join(root, "dev/scripts/build-inspector-vercel.sh")], {
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /source archive, use the verified inspector-prebuilt artifact/);
+});
+
+test("source fallback retains complete native producer and fingerprint prerequisites", () => {
+  const root = new URL("../../", import.meta.url);
+  const pkg = JSON.parse(readFileSync(new URL("packages/inspector/package.json", root)));
+  assert.equal(pkg.scripts["build:vercel"], "bash ../../dev/scripts/build-inspector-vercel.sh");
+  const script = readFileSync(new URL("dev/scripts/build-inspector-vercel.sh", root), "utf8");
+  assert.ok(script.indexOf("build:ci") < script.indexOf("run build:web"));
+  const build = JSON.parse(readFileSync(new URL("package.json", root))).scripts["build:ci"];
+  assert.match(
+    build,
+    /--filter=jazz-napi --only.*stage-native-fingerprints.mjs --workspace.*--filter=jazz-tools/,
+  );
+});

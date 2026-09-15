@@ -60,8 +60,11 @@ output file (including Vercel routing) to the exact source SHA. It avoids anothe
 native compilation on Vercel.
 
 Run **Stage Inspector production** with the successful package-build run ID,
-source SHA, and branch. The workflow checks that run's repository, branch, SHA and
-success, verifies every downloaded output hash, then deploys with `--prebuilt
+deployment SHA, and branch. The workflow checks the artifact run's repository and
+success, proves its source tree equals the deployment SHA's tree, and checks the
+deployment branch still points to that SHA. Thus a release merge can reuse a
+verified preview artifact only when the entire source tree (including package
+versions) is identical. It verifies every downloaded output hash, then deploys with `--prebuilt
 --prod --skip-domain`. This does not assign production domains. Run **Promote
 inspector production** with that same SHA and branch after staging acceptance;
 it resolves and promotes those exact bytes without rebuilding. Do not use a
@@ -73,6 +76,10 @@ For a local recovery from the downloaded artifact, first run
 artifact from the trusted successful workflow run for that SHA; the receipt is an
 integrity check, not a signature. Keep the output intact and use the same prebuilt
 staging flags and `githubCommitSha` / `githubCommitRef` metadata as the workflow.
+Preserve the artifact source SHA separately in `releaseSourceSha`. The Vercel
+project root is `packages/inspector`: copy the verified `.vercel/output` to
+`packages/inspector/.vercel/output` as well before invoking the CLI from the
+staging root. Both output locations are required by the CLI/project-root checks.
 
 The three `VERCEL_INSPECTOR_*` GitHub secrets must identify one project and team
 and a token with access to both deployment lookup and deployment/promotion. A 403
