@@ -211,17 +211,9 @@ async fn rebac_declared_fk_inheritance_array_membership_grants_access_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that cyclic declared reverse-FK inheritance fails closed instead
-/// of recursively granting access through the cycle.
+/// Rejects cyclic reverse-FK policy expansion before starting the server.
 #[tokio::test]
-#[ignore = "#1763: recursive reverse-FK policy cycles currently overflow the Rust evaluator stack"]
-async fn rebac_declared_fk_inheritance_cycle_fails_closed() {
-    tokio::task::LocalSet::new()
-        .run_until(rebac_declared_fk_inheritance_cycle_fails_closed_inner())
-        .await;
-}
-
-async fn rebac_declared_fk_inheritance_cycle_fails_closed_inner() {
+async fn rebac_declared_fk_inheritance_cycle_is_rejected() {
     let a_policies = permissions(|p| {
         p.allow_read().where_(pe::any_of([
             pe::eq("owner_id", pe::session(vec!["claims", "sub"])),
@@ -248,56 +240,117 @@ async fn rebac_declared_fk_inheritance_cycle_fails_closed_inner() {
                 .policies(b_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone())
+    match JazzServer::start_with_schema(schema).await {
+        Err(error) => {
+            assert!(
+                error.contains("cyclic policy expansion under INHERITS_REFERENCING"),
+                "{error}"
+            );
+            assert!(error.contains("table_a.SELECT"), "{error}");
+            assert!(error.contains("table_b.SELECT"), "{error}");
+        }
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("cyclic reverse-FK policy expansion must be rejected");
+        }
+    }
+}
+
+/// A forward dependency expanded inside a reverse source must share its guard.
+#[tokio::test]
+async fn mixed_forward_reverse_inheritance_cycle_is_rejected() {
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("roots").policies(permissions(|p| {
+            p.allow_read()
+                .where_(pe::allowed_to_read_referencing("sources", "root_id"));
+        })))
+        .table(
+            TableSchema::builder("sources")
+                .fk_column("root_id", "roots")
+                .policies(permissions(|p| {
+                    p.allow_read().where_(pe::allowed_to_read("root_id"));
+                })),
+        )
+        .build();
+    match JazzServer::start_with_schema(schema).await {
+        Err(error) => assert!(
+            error.contains("cyclic policy expansion under INHERITS_REFERENCING"),
+            "{error}",
+        ),
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("mixed forward/reverse policy expansion must be rejected");
+        }
+    }
+}
+
+/// Reusing the same source in separate alternatives is not a dependency cycle.
+#[tokio::test]
+async fn reverse_inheritance_allows_repeated_source_branches() {
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("roots").policies(permissions(|p| {
+            p.allow_read().where_(pe::any_of([
+                pe::allowed_to_read_referencing("sources", "root_id"),
+                pe::allowed_to_read_referencing("sources", "other_root_id"),
+            ]));
+        })))
+        .table(
+            TableSchema::builder("sources")
+                .fk_column("root_id", "roots")
+                .fk_column("other_root_id", "roots")
+                .policies(permissions(|p| {
+                    p.allow_read()
+                        .where_(pe::allowed_to_read_referencing("grants", "source_id"));
+                })),
+        )
+        .table(
+            TableSchema::builder("grants")
+                .fk_column("source_id", "sources")
+                .policies(permissions(|p| {
+                    p.allow_read().always();
+                })),
+        )
+        .build();
+    let server = JazzServer::start_with_schema(schema)
         .await
-        .expect("start test server");
-    let admin = connect_ready_client(
-        &server,
-        &schema,
-        "declared-cycle-admin",
-        "table_a",
-        READY_TIMEOUT,
-    )
-    .await;
-    let alice =
-        connect_ready_user(&server, &schema, super::ALICE_ID, "table_a", READY_TIMEOUT).await;
+        .expect("independent branches may expand the same source policy");
+    server.shutdown().await;
+}
 
-    let (a_id, _, a_tx) = admin
-        .insert(
-            "table_a",
-            crate::row_input!("owner_id" => super::BOB_ID, "b_id" => Value::Null),
+/// Revisiting a table for another operation is valid when expansion terminates.
+#[tokio::test]
+async fn reverse_inheritance_distinguishes_source_operations() {
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("roots").policies(permissions(|p| {
+            p.allow_read()
+                .where_(pe::allowed_to_read_referencing("sources", "root_id"));
+        })))
+        .table(
+            TableSchema::builder("sources")
+                .fk_column("root_id", "roots")
+                .nullable_fk_column("parent_id", "sources")
+                .policies(permissions(|p| {
+                    p.allow_read().where_(pe::allowed_to_referencing(
+                        jazz::tools::Operation::Update,
+                        "sources",
+                        "parent_id",
+                    ));
+                    p.allow_update()
+                        .where_old(pe::allowed_to_read_referencing("grants", "source_id"))
+                        .where_new(pe::always());
+                })),
         )
-        .expect("insert table_a");
-    let (b_id, _, b_tx) = admin
-        .insert(
-            "table_b",
-            crate::row_input!("owner_id" => super::CAROL_ID, "a_id" => a_id),
+        .table(
+            TableSchema::builder("grants")
+                .fk_column("source_id", "sources")
+                .policies(permissions(|p| {
+                    p.allow_read().always();
+                })),
         )
-        .expect("insert table_b");
-    wait_for_edge_txs(
-        &admin,
-        &[
-            a_tx.expect("table_a insert should commit immediately"),
-            b_tx.expect("table_b insert should commit immediately"),
-        ],
-    )
-    .await;
-
-    let link_tx = admin
-        .update("table_a", a_id, vec![("b_id".into(), Value::Uuid(b_id))])
-        .expect("link table_a")
-        .expect("table_a update should commit immediately");
-    wait_for_edge_txs(&admin, &[link_tx]).await;
-
-    let visible_ids = query_ids(&alice, "table_a").await;
-
-    assert!(
-        visible_ids.is_empty(),
-        "cycle path should fail closed and not grant access"
-    );
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
+        .build();
+    let server = JazzServer::start_with_schema(schema)
+        .await
+        .expect("source SELECT may depend on source UPDATE without a cycle");
     server.shutdown().await;
 }
 

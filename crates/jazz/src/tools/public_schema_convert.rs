@@ -939,7 +939,52 @@ fn convert_policy(
     path: &str,
     expr: &PolicyExpr,
 ) -> Result<Query, SchemaConversionError> {
-    convert_policy_with_native_select_inherits(schema, table_schema, table, path, expr, true)
+    convert_policy_with_native_select_inherits(
+        schema,
+        table_schema,
+        table,
+        path,
+        expr,
+        true,
+        &mut Vec::new(),
+    )
+}
+
+/// Expand only the current dependency path; sibling branches may reuse a policy.
+fn convert_expanded_inherited_policy(
+    schema: &Schema,
+    table_schema: &TableSchema,
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+    operation: Operation,
+    expansion_path: &mut Vec<(String, Operation)>,
+) -> Result<Query, SchemaConversionError> {
+    let key = (table.as_str().to_owned(), operation);
+    if let Some(start) = expansion_path.iter().position(|active| active == &key) {
+        let cycle = expansion_path[start..]
+            .iter()
+            .chain(std::iter::once(&key))
+            .map(|(table, operation)| format!("{table}.{operation}"))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        return Err(err(
+            format!("$.{}.{path}", table.as_str()),
+            format!("cyclic policy expansion under INHERITS_REFERENCING is unsupported: {cycle}"),
+        ));
+    }
+    expansion_path.push(key);
+    let result = convert_policy_with_native_select_inherits(
+        schema,
+        table_schema,
+        table,
+        path,
+        expr,
+        false,
+        expansion_path,
+    );
+    expansion_path.pop();
+    result
 }
 
 /// Convert a policy for a location where native SELECT inherits may or may not
@@ -953,6 +998,7 @@ fn convert_policy_with_native_select_inherits(
     path: &str,
     expr: &PolicyExpr,
     native_select_inherits: bool,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     // Do this before choosing a lowering path. In particular, an ExistsRel
     // nested below a boolean operator must not escape this validation merely
@@ -976,6 +1022,7 @@ fn convert_policy_with_native_select_inherits(
                     query,
                     expr,
                     native_select_inherits,
+                    expansion_path,
                 )?;
             }
             Ok(query)
@@ -990,6 +1037,7 @@ fn convert_policy_with_native_select_inherits(
                     &format!("{path}.Or[{index}]"),
                     expr,
                     native_select_inherits,
+                    expansion_path,
                 )?;
                 for branch in PolicyBranch::alternatives_from_query(branch) {
                     query = query.policy_branch(branch);
@@ -1011,6 +1059,7 @@ fn convert_policy_with_native_select_inherits(
             via_column,
             *max_depth,
             native_select_inherits,
+            expansion_path,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -1025,6 +1074,7 @@ fn convert_policy_with_native_select_inherits(
             *operation,
             source_table,
             via_column,
+            expansion_path,
         ),
         PolicyExpr::Exists {
             table: exists_table,
@@ -1079,6 +1129,7 @@ fn append_policy_clause(
     query: Query,
     expr: &PolicyExpr,
     native_select_inherits: bool,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     // A clause conjoins the entire policy accumulated so far, including every
     // alternative created by an earlier OR. Appending only to the false base
@@ -1100,6 +1151,7 @@ fn append_policy_clause(
                 branch,
                 expr,
                 native_select_inherits,
+                expansion_path,
             )?;
             for alternative in PolicyBranch::alternatives_from_query(branch) {
                 combined = combined.policy_branch(alternative);
@@ -1119,6 +1171,7 @@ fn append_policy_clause(
                     query,
                     expr,
                     native_select_inherits,
+                    expansion_path,
                 )?;
             }
             Ok(query)
@@ -1137,6 +1190,7 @@ fn append_policy_clause(
             via_column,
             *max_depth,
             native_select_inherits,
+            expansion_path,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -1151,6 +1205,7 @@ fn append_policy_clause(
             *operation,
             source_table,
             via_column,
+            expansion_path,
         ),
         PolicyExpr::Exists {
             table: exists_table,
@@ -1169,6 +1224,7 @@ fn append_policy_clause(
                     &format!("{path}.Or[{index}]"),
                     expr,
                     native_select_inherits,
+                    expansion_path,
                 )?;
                 for branch in PolicyBranch::alternatives_from_query(branch_query) {
                     for existing in &existing_branches {
@@ -1246,6 +1302,7 @@ fn predicate_filters_for_expr(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_inherited_referencing_policy(
     schema: &Schema,
     table: &TableName,
@@ -1254,6 +1311,7 @@ fn append_inherited_referencing_policy(
     operation: Operation,
     source_table: &str,
     via_column: &str,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     let source_table_name = TableName::new(source_table.to_owned());
     let source_schema = schema.get(&source_table_name).ok_or_else(|| {
@@ -1310,13 +1368,14 @@ fn append_inherited_referencing_policy(
     match source_filter {
         Ok(source_filter) => Ok(query.join_via(source_table, via_column, [source_filter])),
         Err(_) if policy_requires_branch(source_policy) => {
-            let source_query = convert_policy_with_native_select_inherits(
+            let source_query = convert_expanded_inherited_policy(
                 schema,
                 source_schema,
                 &source_table_name,
                 &format!("{path}.InheritsReferencing[{source_table}]"),
                 source_policy,
-                false,
+                operation,
+                expansion_path,
             )?;
             append_inherited_referencing_policy_branches(
                 query,
@@ -2736,6 +2795,7 @@ fn append_inherited_policy(
     via_column: &str,
     max_depth: Option<usize>,
     native_select_inherits: bool,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     let column = table_schema
         .columns
@@ -2786,6 +2846,8 @@ fn append_inherited_policy(
             parent_table,
             via_column,
             parent_policy,
+            operation,
+            expansion_path,
         );
     }
 
@@ -2809,6 +2871,8 @@ fn append_inherited_policy_expanded_fallback(
     parent_table: &TableName,
     via_column: &str,
     parent_policy: &PolicyExpr,
+    operation: Operation,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     let parent_filter = convert_policy_predicate(
         parent_table,
@@ -2820,13 +2884,14 @@ fn append_inherited_policy_expanded_fallback(
             Ok(query.join_via_row_id(parent_table.as_str(), via_column, [parent_filter]))
         }
         Err(_) if policy_requires_branch(parent_policy) => {
-            let parent_query = convert_policy_with_native_select_inherits(
+            let parent_query = convert_expanded_inherited_policy(
                 schema,
                 parent_schema,
                 parent_table,
                 &format!("{path}.Inherits[{parent_table}]"),
                 parent_policy,
-                false,
+                operation,
+                expansion_path,
             )?;
             append_inherited_policy_branches(
                 table,
