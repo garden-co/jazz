@@ -108,10 +108,28 @@ export interface Column {
   allowExternalProvenanceName?: true;
 }
 
+type EnumCaseFieldValue<Field extends Column> =
+  | TSTypeFromSqlType<Field["sqlType"]>
+  | (Field["nullable"] extends true ? null : never);
+
+type EnumCaseFieldIsOptional<Field extends Column> = Field["nullable"] extends true
+  ? true
+  : Field extends { __jazzHasDefault: true }
+    ? true
+    : false;
+
+type EnumCasePayload<Fields extends readonly Column[]> = {
+  [Field in Fields[number] as EnumCaseFieldIsOptional<Field> extends true
+    ? never
+    : Field["name"]]: EnumCaseFieldValue<Field>;
+} & {
+  [Field in Fields[number] as EnumCaseFieldIsOptional<Field> extends true
+    ? Field["name"]
+    : never]?: EnumCaseFieldValue<Field>;
+};
+
 export type EnumValueFromCases<Cases extends readonly EnumCaseSqlType[]> = {
-  [Case in Cases[number] as Case["name"]]: { type: Case["name"] } & {
-    [Field in Case["fields"][number] as Field["name"]]: TSTypeFromSqlType<Field["sqlType"]>;
-  };
+  [Case in Cases[number] as Case["name"]]: { type: Case["name"] } & EnumCasePayload<Case["fields"]>;
 }[Cases[number]["name"]];
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";

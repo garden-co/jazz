@@ -947,6 +947,8 @@ export const col = {
             [Field in keyof Cases[Name] & string]: Column & {
               name: Field;
               sqlType: ColumnBuilderSqlType<Cases[Name][Field]>;
+              nullable: ColumnBuilderOptional<Cases[Name][Field]>;
+              __jazzHasDefault: ColumnBuilderHasDefault<Cases[Name][Field]>;
             };
           }[keyof Cases[Name] & string][];
         };

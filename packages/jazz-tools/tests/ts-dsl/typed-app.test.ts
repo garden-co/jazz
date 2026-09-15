@@ -546,7 +546,7 @@ describe("typed app prototype", () => {
       },
     };
 
-    expectTypeOf<EventInsert["event"]>().toEqualTypeOf<{
+    expectTypeOf<EventInsert["event"]>().branded.toEqualTypeOf<{
       type: "message";
       requiredText: string;
       nullableText?: string | null;
@@ -557,13 +557,9 @@ describe("typed app prototype", () => {
 
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       // @ts-expect-error required payload fields cannot be omitted
-      const missingRequired: EventInsert = {
-        event: { type: "message" },
-      };
+      const missingRequired: EventInsert = { event: { type: "message" } };
       // @ts-expect-error required payload fields cannot be null
-      const nullRequired: EventInsert = {
-        event: { type: "message", requiredText: null },
-      };
+      const nullRequired: EventInsert = { event: { type: "message", requiredText: null } };
       void missingRequired;
       void nullRequired;
     }
