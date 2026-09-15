@@ -2,7 +2,7 @@ use super::*;
 use crate::tools::object::ObjectId;
 use crate::tools::public_api::policy::{CmpOp, Operation, PolicyValue};
 use crate::tools::public_api::relation_ir::{
-    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+    ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -624,6 +624,14 @@ pub mod policy_expr {
     }
 
     impl Table {
+        /// Name this source occurrence for scoped predicates and joins.
+        pub fn alias(self, alias: impl Into<String>) -> Relation {
+            Relation::new(RelExpr::TableScan {
+                table: self.table,
+                alias: Some(alias.into()),
+            })
+        }
+
         pub fn where_<W: IntoTableWhere>(self, condition: W) -> W::Output {
             condition.into_table_where(self.table)
         }
@@ -661,6 +669,24 @@ pub mod policy_expr {
     }
 
     impl Relation {
+        /// Join another relation on one column equality.
+        pub fn join(
+            self,
+            right: Relation,
+            left_column: impl Into<ColumnRef>,
+            right_column: impl Into<ColumnRef>,
+        ) -> Self {
+            Self::new(RelExpr::Join {
+                left: Box::new(self.rel),
+                right: Box::new(right.rel),
+                on: vec![JoinCondition {
+                    left: left_column.into(),
+                    right: right_column.into(),
+                }],
+                join_kind: JoinKind::Inner,
+            })
+        }
+
         fn new(rel: RelExpr) -> Self {
             Self { rel }
         }
@@ -776,7 +802,18 @@ pub mod policy_expr {
     pub mod rel {
         use super::*;
 
-        pub fn eq_session(column: impl Into<String>, path: impl IntoSessionPath) -> PredicateExpr {
+        /// Refer to a column in a named table or alias.
+        pub fn column(scope: impl Into<String>, column: impl Into<String>) -> ColumnRef {
+            ColumnRef {
+                scope: Some(scope.into()),
+                column: column.into(),
+            }
+        }
+
+        pub fn eq_session(
+            column: impl Into<ColumnRef>,
+            path: impl IntoSessionPath,
+        ) -> PredicateExpr {
             cmp(
                 column,
                 PredicateCmpOp::Eq,
@@ -785,7 +822,7 @@ pub mod policy_expr {
         }
 
         pub fn eq_outer(
-            column: impl Into<String>,
+            column: impl Into<ColumnRef>,
             outer_column: impl Into<String>,
         ) -> PredicateExpr {
             cmp(
@@ -795,13 +832,13 @@ pub mod policy_expr {
             )
         }
 
-        pub fn eq_literal(column: impl Into<String>, value: impl Into<Value>) -> PredicateExpr {
+        pub fn eq_literal(column: impl Into<ColumnRef>, value: impl Into<Value>) -> PredicateExpr {
             cmp(column, PredicateCmpOp::Eq, ValueRef::Literal(value.into()))
         }
 
-        pub fn is_null(column: impl Into<String>) -> PredicateExpr {
+        pub fn is_null(column: impl Into<ColumnRef>) -> PredicateExpr {
             PredicateExpr::IsNull {
-                column: ColumnRef::unscoped(column),
+                column: column.into(),
             }
         }
 
@@ -824,12 +861,12 @@ pub mod policy_expr {
         }
 
         pub fn cmp(
-            column: impl Into<String>,
+            column: impl Into<ColumnRef>,
             op: PredicateCmpOp,
             right: ValueRef,
         ) -> PredicateExpr {
             PredicateExpr::Cmp {
-                left: ColumnRef::unscoped(column),
+                left: column.into(),
                 op,
                 right,
             }
