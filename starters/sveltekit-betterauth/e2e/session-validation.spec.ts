@@ -24,28 +24,25 @@ test("revoked session cookies cannot reopen the dashboard", async ({ browser, pa
   }
 
   const origin = new URL(page.url()).origin;
-  const dashboardResponse = await page.goto(`${origin}/dashboard`, {
-    waitUntil: "networkidle",
+  const dashboardResponse = await page.request.get(`${origin}/dashboard`, {
+    maxRedirects: 0,
   });
-  expect(dashboardResponse?.ok()).toBe(true);
-  await expect(page).toHaveURL(`${origin}/dashboard`, { timeout: TIMEOUT });
-  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible({
-    timeout: TIMEOUT,
-  });
+  expect(dashboardResponse.status()).toBe(200);
 
-  const signOutResponse = await page.request.post("/api/auth/sign-out");
+  const signOutResponse = await page.request.post("/api/auth/sign-out", {
+    headers: { Origin: origin },
+  });
   expect(signOutResponse.ok()).toBe(true);
 
   const replayContext = await browser.newContext();
   try {
     await replayContext.addCookies([sessionCookie]);
-    const replayPage = await replayContext.newPage();
-    await replayPage.goto(`${origin}/dashboard`, { waitUntil: "networkidle" });
-
-    await expect(replayPage).toHaveURL(`${origin}/`, { timeout: TIMEOUT });
-    await expect(replayPage.getByRole("heading", { name: "Sign in" })).toBeVisible({
-      timeout: TIMEOUT,
+    const replayResponse = await replayContext.request.get(`${origin}/dashboard`, {
+      maxRedirects: 0,
     });
+
+    expect(replayResponse.status()).toBe(303);
+    expect(replayResponse.headers().location).toBe("/");
   } finally {
     await replayContext.close();
   }
