@@ -201,3 +201,68 @@ async fn failed_blocked_publication_does_not_persist_an_index_alone() {
             .is_empty()
     );
 }
+
+/// Alice sees her resident index before persistence, while Bob reopening the
+/// underlying storage cannot see either base or index until the atomic write.
+#[futures_test::test]
+async fn resident_index_visible_before_publication_persistence() {
+    let (database, _control, _subscription, _publication, _ready) =
+        pending_publication_fixture().await;
+    assert_eq!(
+        database
+            .index_get("objects", "objects_by_id", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        database
+            .storage
+            .prefix("objects".into(), Vec::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        database
+            .storage
+            .prefix("indices".into(), Vec::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Cancelling Alice's shared atomic write leaves both base and index absent
+/// and prevents Bob from continuing to use the incomplete runtime.
+#[futures_test::test]
+async fn cancelled_publication_keeps_base_and_index_atomic() {
+    let (database, control, _subscription, publication, _ready) =
+        pending_publication_fixture().await;
+    control.pause_on(TestStorageOperation::WriteMany);
+    let mut persistence = Box::pin(publication.persist());
+    assert!(futures::poll!(persistence.as_mut()).is_pending());
+    drop(persistence);
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(Error::DatabasePoisoned)
+    ));
+    assert!(
+        database
+            .storage
+            .prefix("objects".into(), Vec::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        database
+            .storage
+            .prefix("indices".into(), Vec::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    control.resume();
+}
