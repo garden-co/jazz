@@ -110,6 +110,11 @@ where
 
     /// Open a database over the supplied storage and recover local state.
     ///
+    /// If a persistent replica missed a schema publication, recovery uses its
+    /// admitted durable catalogue so networking can start. Application access
+    /// to the requested schema stays unavailable until the authority supplies
+    /// its published lineage; opening never publishes that schema locally.
+    ///
     /// ```rust
     /// # use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
     /// # use jazz::db::doctest_support::{block_on, schema, MemoryStorage};
@@ -139,15 +144,27 @@ where
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node =
-            NodeState::new(config.identity.node, config.schema.clone(), config.storage).await?;
+        let node = NodeState::new_client(
+            config.identity.node,
+            config.schema.clone(),
+            config.storage,
+            false,
+        )
+        .await?;
+        let requires_open_schema_admission =
+            !node.catalogue_schemas().contains_key(&schema_version_id);
         let node = Node::new(node);
+        if requires_open_schema_admission {
+            *node.open_schema_admission.borrow_mut() =
+                Some(PendingOpenSchema::new(schema_version_id));
+        }
         node.restore_pending_uploads(config.identity).await?;
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
             schema_version_id,
             schema_view_is_fixed: false,
+            requires_open_schema_admission,
             schema_views,
             identity: config.identity,
             node: Rc::new(node),
@@ -236,6 +253,7 @@ where
             schema: config.schema,
             schema_version_id,
             schema_view_is_fixed: false,
+            requires_open_schema_admission: false,
             schema_views,
             identity: config.identity,
             node: Rc::new(Node::new(node)),
@@ -262,25 +280,50 @@ where
     /// This mode is intended for server shells and tests that own authoritative
     /// in-memory history rather than a partial client replica.
     pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
+        Self::open_history_complete_inner(config, false).await
+    }
+
+    async fn open_history_complete_inner(
+        config: DbConfig<S>,
+        recover_client: bool,
+    ) -> Result<Self, Error> {
         let schema_version_id = config.schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node = NodeState::new_history_complete(
-            config.identity.node,
-            config.schema.clone(),
-            config.storage,
-        )
-        .await?;
+        let node = if recover_client {
+            NodeState::new_client(
+                config.identity.node,
+                config.schema.clone(),
+                config.storage,
+                true,
+            )
+            .await?
+        } else {
+            NodeState::new_history_complete(
+                config.identity.node,
+                config.schema.clone(),
+                config.storage,
+            )
+            .await?
+        };
+        let requires_open_schema_admission =
+            !node.catalogue_schemas().contains_key(&schema_version_id);
+        let node = Node::new(node);
+        if requires_open_schema_admission {
+            *node.open_schema_admission.borrow_mut() =
+                Some(PendingOpenSchema::new(schema_version_id));
+        }
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
             schema_version_id,
             schema_view_is_fixed: false,
+            requires_open_schema_admission,
             schema_views,
             identity: config.identity,
-            node: Rc::new(Node::new(node)),
+            node: Rc::new(node),
             row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
@@ -306,7 +349,7 @@ where
     pub async unsafe fn open_history_complete_with_backend_attribution(
         config: DbConfig<S>,
     ) -> Result<Self, Error> {
-        let mut db = Self::open_history_complete(config).await?;
+        let mut db = Self::open_history_complete_inner(config, true).await?;
         db.backend_attribution = true;
         db.node
             .restore_backend_pending_uploads(db.identity.node)
@@ -340,6 +383,7 @@ where
             schema: bootstrap_schema,
             schema_version_id,
             schema_view_is_fixed: false,
+            requires_open_schema_admission: false,
             schema_views,
             identity: config.identity,
             node: Rc::new(node),
@@ -425,6 +469,9 @@ where
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
         let schema_version_id = schema.version_id();
         let schema_view_id = SchemaViewId::for_schema(&schema);
+        // A replica opened ahead of its durable catalogue must first receive
+        // the published lineage; view registration cannot manufacture it.
+        self.ensure_open_schema_admitted()?;
         self.admit_local_schema_view_if_needed(&schema).await?;
         {
             let node = self.node.node.borrow();
@@ -461,6 +508,7 @@ where
             schema,
             schema_version_id,
             schema_view_is_fixed: true,
+            requires_open_schema_admission: false,
             schema_views: Rc::clone(&self.schema_views),
             identity: self.identity,
             node: Rc::clone(&self.node),
@@ -712,6 +760,7 @@ where
             schema: self.schema.clone(),
             schema_version_id: self.schema_version_id,
             schema_view_is_fixed: self.schema_view_is_fixed,
+            requires_open_schema_admission: self.requires_open_schema_admission,
             schema_views: Rc::clone(&self.schema_views),
             identity: self.identity,
             node: Rc::clone(&self.node),
@@ -733,6 +782,7 @@ where
             schema: self.schema.clone(),
             schema_version_id: self.schema_version_id,
             schema_view_is_fixed: self.schema_view_is_fixed,
+            requires_open_schema_admission: self.requires_open_schema_admission,
             schema_views: Rc::clone(&self.schema_views),
             identity: self.identity,
             node: Rc::clone(&self.node),
@@ -750,6 +800,7 @@ where
     }
 
     pub(super) fn ensure_mutation_operation_admitted(&self) -> Result<(), Error> {
+        self.ensure_open_schema_admitted()?;
         if self.owner_operation_admitted {
             Ok(())
         } else {

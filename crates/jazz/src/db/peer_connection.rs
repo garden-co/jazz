@@ -626,6 +626,7 @@ where
     pub(super) upstream_upload_destination: Option<UpstreamUploadDestination>,
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
+    pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) current_rows: row_availability::SharedCurrentRows,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -1937,6 +1938,20 @@ where
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub async fn tick(&mut self) -> Result<DbTickStats, Error> {
+        let result = self.tick_inner().await;
+        if let Err(error) = &result {
+            if matches!(self.link, ConnectionLink::Upstream(_)) {
+                finish_open_schema_connection(
+                    &self.open_schema_admission,
+                    self.connection_epoch,
+                    Err(error.clone()),
+                );
+            }
+        }
+        result
+    }
+
+    async fn tick_inner(&mut self) -> Result<DbTickStats, Error> {
         if let Some(error) = self.startup_error.take() {
             return Err(error);
         }
@@ -2747,6 +2762,22 @@ where
                                     .await
                                     .apply_trusted_catalogue_snapshot(*snapshot)
                                     .await?;
+                                let requested = self.open_schema_admission.borrow()
+                                    .as_ref().map(|pending| pending.schema);
+                                if let Some(requested) = requested {
+                                    let admitted = self.node.lock().await
+                                        .catalogue_schemas().contains_key(&requested);
+                                    if let Some(pending) = self.open_schema_admission.borrow_mut().as_mut() {
+                                        if pending.connection_epoch == Some(self.connection_epoch) {
+                                            pending.authoritative_catalogue_received = true;
+                                        }
+                                    }
+                                    finish_open_schema_connection(
+                                        &self.open_schema_admission,
+                                        self.connection_epoch,
+                                        if admitted { Ok(()) } else { Err(pending_open_schema_error()) },
+                                    );
+                                }
                                 publications.extend(outcome.publications);
                             }
                             SyncMessage::CurrentRowsReceipt(receipt) => {
@@ -3805,15 +3836,30 @@ where
                 serve_dirty,
             }) => {
                 let stop = Box::pin(async {
-                // A trusted backend subscriber is an edge's normal upstream
-                // link.  Unlike an application subscriber, it is entitled to
-                // the authority catalogue and has no application subscription
-                // that would otherwise cause a ViewUpdate to carry the
-                // snapshot.  Announce it eagerly (and again only when its
-                // fingerprint changes) so catalogue publication can propagate
-                // Core -> peer edge before any client work starts.
-                if ingest_context.trust.is_trusted() {
-                    send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut())?;
+                // These links have a host-admitted app identity (or an existing
+                // trusted catalogue capability). Send the same app-wide metadata
+                // that precedes a ViewUpdate before query compilation: a replica
+                // reopening an unknown published schema cannot register that query
+                // until the catalogue arrives. A generic relay has no admitted
+                // application scope and retains its request-driven delivery.
+                let catalogue_ready = self.node.borrow().catalogue_bootstrap_state()
+                    == crate::node::CatalogueBootstrapState::Ready;
+                let owner_admitted = self.open_schema_admission.borrow().as_ref()
+                    .is_none_or(|pending| pending.authoritative_catalogue_received);
+                let catalogue_entitled = ingest_context.trust.is_trusted()
+                    || (!peer.has_announced_catalogue_snapshot()
+                        && (ingest_context.trust == CommitUnitTrust::Session
+                            || (ingest_context.trust == CommitUnitTrust::Relay
+                                && peer.admitted_scope_relay_binding().is_some())));
+                if catalogue_ready && owner_admitted && catalogue_entitled {
+                    match send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut()) {
+                        Ok(()) => {},
+                        Err(error) if error.code == ErrorCode::Backpressure => {
+                            schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                            return Ok(true);
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 let mut applied_inbound = false;
                 let mut scheduled_follow_up = false;

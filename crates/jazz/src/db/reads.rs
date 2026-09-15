@@ -125,6 +125,7 @@ where
     /// Runtime callers must use this entry point when another operation may
     /// be suspended on storage. The synchronous API requires an idle owner.
     pub async fn prepare_query_async(&self, query: &Query) -> Result<PreparedQuery, Error> {
+        self.ensure_open_schema_admitted()?;
         let mut node = self.node.node.lock().await;
         let (schema, schema_version) = if self.schema_view_is_fixed {
             (self.schema.clone(), self.schema_version_id)
@@ -234,6 +235,18 @@ where
         F: FnOnce(QueryAttachment),
         E: Fn() -> bool,
     {
+        {
+            let admission = self.await_open_schema_for_read(&opts);
+            let mut admission = std::pin::pin!(admission);
+            std::future::poll_fn(|cx| match admission.as_mut().poll(cx) {
+                Poll::Pending if coverage_expired() => Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Timed out waiting for query coverage",
+                ))),
+                outcome => outcome,
+            })
+            .await?;
+        }
         let decoded: Query = crate::wire::decode_postcard_exact(query)
             .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
         let is_relation = decoded.relation.is_some();
@@ -421,6 +434,7 @@ where
         &self,
         query: &Query,
     ) -> Result<PreparedQuery, Error> {
+        self.ensure_open_schema_admitted()?;
         self.prepare_query_bound_for_schema(
             query,
             BTreeMap::new(),
@@ -436,6 +450,7 @@ where
         schema: &JazzSchema,
         schema_version: SchemaVersionId,
     ) -> Result<PreparedQuery, Error> {
+        self.ensure_open_schema_admitted()?;
         let shape = query.validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(params)?;
         let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
@@ -476,6 +491,7 @@ where
     /// coverage is tracked separately by query attachments and durability-aware
     /// subscription reads.
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.ensure_open_schema_admitted()?;
         let mut node = self.node.node.borrow_mut();
         let groove_runtime_token = node.groove_runtime_token();
         super::block_on(node.query_rows_local_preview(
@@ -505,6 +521,7 @@ where
         &self,
         prepared: &PreparedQuery,
     ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
+        self.ensure_open_schema_admitted()?;
         let mut node = self.node.node.borrow_mut();
         let groove_runtime_token = node.groove_runtime_token();
         super::block_on(node.query_rows_local_preview_profiled(
@@ -538,6 +555,7 @@ where
 
     /// Resolve creator/updater provenance for a row returned by this database.
     pub fn row_provenance(&self, row: &CurrentRow) -> Result<Option<RowProvenance>, Error> {
+        self.ensure_open_schema_admitted()?;
         self.node
             .node
             .borrow_mut()
@@ -551,6 +569,7 @@ where
         &self,
         row: &CurrentRow,
     ) -> Result<Option<RowProvenance>, Error> {
+        self.ensure_open_schema_admitted()?;
         self.node
             .node
             .lock()
@@ -577,6 +596,7 @@ where
         position: GlobalTime,
         prepared: &PreparedQuery,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.ensure_open_schema_admitted()?;
         super::block_on(
             self.node
                 .node
@@ -653,6 +673,7 @@ where
         author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.await_open_schema_for_read(&opts).await?;
         let tier = effective_read_tier(&opts);
         // Follow the same host-selected authority route as subscription
         // registration. Storage durability alone cannot identify that route:
@@ -761,6 +782,8 @@ where
         &self,
         event: &mut SubscriptionEvent,
     ) -> Result<(), BindingHydrationError> {
+        self.ensure_open_schema_admitted()
+            .map_err(BindingHydrationError::Error)?;
         let SubscriptionEvent::Delta {
             added,
             updated,
@@ -810,6 +833,7 @@ where
     /// before a language binding encodes it.
     #[doc(hidden)]
     pub async fn hydrate_rows_for_binding(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
+        self.ensure_open_schema_admitted()?;
         self.node
             .node
             .lock()
@@ -845,6 +869,7 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
+        self.await_open_schema_for_read(&opts).await?;
         ensure_supported_read_view(&opts)?;
         if opts.include_deleted {
             return Err(Error::new(
@@ -873,6 +898,7 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
+        self.await_open_schema_for_read(&opts).await?;
         ensure_supported_read_view(&opts)?;
         if opts.include_deleted {
             return Err(Error::new(
@@ -914,6 +940,7 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
+        self.await_open_schema_for_read(&opts).await?;
         ensure_default_read_view(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
         // Output-changing relation queries currently normalize to a single
@@ -935,6 +962,7 @@ where
         opts: ReadOpts,
         author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
+        self.await_open_schema_for_read(&opts).await?;
         ensure_default_read_view(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
         // Output-changing relation queries currently normalize to a single

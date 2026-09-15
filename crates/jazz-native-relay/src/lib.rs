@@ -9043,6 +9043,12 @@ mod tests {
             )
         };
 
+        // Complete each foreground's initial catalogue exchange before the
+        // callback-isolation probe. Otherwise the liveness tick for B below
+        // also performs startup and legitimately queues a second owner wake.
+        fixture.tick(a);
+        fixture.tick(b);
+
         let a_wake = Arc::new(QueuedNativeWake::active());
         let b_wake = Arc::new(QueuedNativeWake::active());
         for (foreground, wake) in [(a, &a_wake), (b, &b_wake)] {

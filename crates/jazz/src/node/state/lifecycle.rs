@@ -44,6 +44,93 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, false).await
     }
 
+    /// Recover a partial client replica using a schema already admitted by its
+    /// durable catalogue. The caller's requested schema remains a Db view only;
+    /// this path never publishes it or allocates its physical mapping.
+    pub(crate) async fn new_client(
+        node_uuid: NodeUuid,
+        requested_schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
+        let meta_database = Database::new_with_storage_layout(
+            JazzSchema::empty().lower_catalogue_meta_to_groove(),
+            storage,
+            StorageLayout::jazz_class_v1(),
+        )
+        .await?;
+        let requested_key = [
+            Value::U64(codec::CatalogueRecordKind::Schema.key()),
+            Value::Uuid(requested_schema.version_id().0),
+        ];
+        let schema = if meta_database
+            .primary_key_get_raw("jazz_catalogue", &requested_key)
+            .await?
+            .is_some()
+        {
+            requested_schema
+        } else {
+            let genesis_rows = meta_database
+                .primary_key_scan_raw(
+                    "jazz_catalogue",
+                    &[Value::U64(codec::CatalogueRecordKind::Genesis.key())],
+                )
+                .await?;
+            match genesis_rows.as_slice() {
+                [] => requested_schema,
+                [genesis] => {
+                    let id = SchemaVersionId(
+                        genesis
+                            .record()
+                            .get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?,
+                    );
+                    let raw = meta_database
+                        .primary_key_get_raw(
+                            "jazz_catalogue",
+                            &[
+                                Value::U64(codec::CatalogueRecordKind::Schema.key()),
+                                Value::Uuid(id.0),
+                            ],
+                        )
+                        .await?
+                        .ok_or(Error::InvalidStoredValue(
+                            "durable genesis schema is missing",
+                        ))?;
+                    let schema = codec::decode_catalogue_schema(
+                        raw.record()
+                            .get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if schema.id != id {
+                        return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
+                    }
+                    schema.schema
+                }
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "duplicate catalogue genesis marker",
+                    ));
+                }
+            }
+        };
+        // Ordinary recovery validates every catalogue record and physical mapping.
+        // Discovery adds only a point read on an already-admitted schema open.
+        Self::new_with_options_inner(
+            node_uuid,
+            schema,
+            meta_database.into_storage(),
+            history_complete,
+            CatalogueBootstrapState::Ready,
+            #[cfg(feature = "testing")]
+            None,
+            #[cfg(any(test, feature = "testing"))]
+            None,
+        )
+        .await
+    }
+
     /// Direct-message test peers share one authority catalogue for each fixture
     /// schema, just as network peers exchange the catalogue before row versions.
     #[cfg(any(test, feature = "testing"))]
@@ -1698,7 +1785,14 @@ where
     /// must not leave a settled stamp that could satisfy the next usage site.
     fn retire_authority_result_view(&mut self, authority_result_key: AuthorityResultKey) {
         #[cfg(any(test, feature = "testing"))]
-        crate::delivery_diagnostics::record(|| format!("retire_receipt runtime={} binding={:?} generation={}", self.groove_runtime_token(), authority_result_key.binding_view, self.applied_authority_result_generation(&authority_result_key)));
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "retire_receipt runtime={} binding={:?} generation={}",
+                self.groove_runtime_token(),
+                authority_result_key.binding_view,
+                self.applied_authority_result_generation(&authority_result_key)
+            )
+        });
         self.query.authority_results.remove(&authority_result_key);
         self.query
             .retained_root_window_sources

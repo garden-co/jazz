@@ -273,6 +273,7 @@ where
         Rc<RefCell<BTreeMap<UpstreamUploadDestination, peer_connection::LargeValueUploadQueues>>>,
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
+    pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) current_rows: row_availability::SharedCurrentRows,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -411,6 +412,7 @@ where
             detached_large_value_uploads: Rc::new(RefCell::new(BTreeMap::new())),
             large_value_upload_retry_deadlines: Rc::new(RefCell::new(BTreeMap::new())),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
+            open_schema_admission: Rc::new(RefCell::new(None)),
             mutation_errors: Rc::new(RefCell::new(MutationErrorState {
                 callback: None,
                 pending: pending_mutation_errors,
@@ -449,6 +451,13 @@ where
     }
 
     pub(super) fn begin_mutation_shutdown(&self) {
+        finish_open_schema_admission(
+            &self.open_schema_admission,
+            Err(Error::new(
+                ErrorCode::Protocol,
+                "database closed before schema admission",
+            )),
+        );
         self.mutation_owner_lifecycle
             .set(MutationOwnerLifecycle::Closing);
         // Wait observers may be parked on a state-change channel even when
@@ -2119,6 +2128,7 @@ where
             let connection_epoch = session_context
                 .map(|context| context.local.epoch)
                 .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+            begin_open_schema_connection(&self.open_schema_admission, connection_epoch);
             // Durable settled-view state remains available for known-state
             // payload repair, but a new upstream (including an edge switch) owns
             // no settlement receipts until it sends a fresh ViewUpdate.
@@ -2339,6 +2349,7 @@ where
                     &self.large_value_upload_retry_deadlines,
                 ),
                 write_state_waiters: Rc::clone(&self.write_state_waiters),
+                open_schema_admission: Rc::clone(&self.open_schema_admission),
                 permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
                 current_rows: Rc::clone(&self.current_rows),
                 edge_fate_routes: Rc::clone(&self.edge_fate_routes),
@@ -2706,11 +2717,15 @@ where
         }
         let local_receiver = self.receives_commits_as_local() && !edge_authority;
         let (peer, ingest_context, session_claims, session_claim_revision) = match cursor {
-            Some(cursor) => {
+            Some(mut cursor) => {
                 assert_eq!(
                     cursor.ingest_context.identity, identity,
                     "a resume cursor may only be used by its authenticated identity"
                 );
+                // Catalogue receipt is per physical connection. Retain the
+                // cursor's subscription state, but force the new connection's
+                // initial metadata even when the authority is unchanged.
+                cursor.peer.reset_catalogue_snapshot_announcement();
                 (
                     cursor.peer,
                     cursor.ingest_context,
@@ -2760,6 +2775,7 @@ where
             upstream_upload_destination: None,
             large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
+            open_schema_admission: Rc::clone(&self.open_schema_admission),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             current_rows: Rc::clone(&self.current_rows),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
@@ -2938,6 +2954,16 @@ where
             return false;
         }
         let connection_epoch = connection_ref.connection_epoch;
+        if matches!(connection_ref.link, ConnectionLink::Upstream(_)) {
+            finish_open_schema_connection(
+                &self.open_schema_admission,
+                connection_epoch,
+                Err(Error::new(
+                    ErrorCode::Protocol,
+                    "upstream disconnected before schema admission",
+                )),
+            );
+        }
         if let ConnectionLink::Subscriber(state) = &mut connection_ref.link {
             state.pending_authority_repairs.clear();
         }

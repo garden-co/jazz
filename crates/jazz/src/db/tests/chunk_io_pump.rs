@@ -763,6 +763,13 @@ fn detach_during_peer_tick_chunk_lookup_drops_missing_and_found_outcomes() {
         });
         let (mut client_transport, server_transport) = duplex();
         let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+        // Finish authenticated startup before exercising the control under test.
+        crate::db::block_on(subscriber.borrow_mut().tick()).unwrap();
+        assert!(matches!(
+            client_transport.try_recv(),
+            Some(SyncMessage::CatalogueSnapshot(_))
+        ));
+        assert!(client_transport.try_recv().is_none());
         let resolver = server.node.chunk_resolver.clone();
         let pump = subscriber.borrow().io_pump();
         let request = ChunkRequestEntry {

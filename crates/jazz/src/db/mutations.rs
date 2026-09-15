@@ -3063,9 +3063,42 @@ where
         next
     }
 
+    pub(super) fn ensure_open_schema_admitted(&self) -> Result<(), Error> {
+        if !self.requires_open_schema_admission {
+            return Ok(());
+        }
+        let admission = self.node.open_schema_admission.borrow();
+        admission
+            .as_ref()
+            .and_then(|pending| pending.result.clone())
+            .unwrap_or_else(|| Err(pending_open_schema_error()))
+    }
+
+    pub(super) async fn await_open_schema_for_read(&self, opts: &ReadOpts) -> Result<(), Error> {
+        if !self.requires_open_schema_admission {
+            return Ok(());
+        }
+        if effective_read_tier(opts) < DurabilityTier::Edge
+            || opts.propagation == Propagation::LocalOnly
+        {
+            return self.ensure_open_schema_admitted();
+        }
+        let wait = {
+            let state = self.node.open_schema_admission.borrow();
+            let pending = state.as_ref().expect("pending owner has admission state");
+            if let Some(result) = &pending.result {
+                return result.clone();
+            }
+            pending.wait.clone()
+        };
+        wait.await?;
+        self.ensure_open_schema_admitted()
+    }
+
     pub(super) fn current_write_schema_for_query(
         &self,
     ) -> Result<(JazzSchema, SchemaVersionId), Error> {
+        self.ensure_open_schema_admitted()?;
         if self.schema_view_is_fixed {
             return Ok((self.schema.clone(), self.schema_version_id));
         }
@@ -3200,6 +3233,7 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
+        self.ensure_open_schema_admitted()?;
         self.table_schema(table)?;
         Ok(self
             .node

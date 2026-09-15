@@ -2,6 +2,420 @@
 
 use super::*;
 
+// Keep large async constructor/read futures in helper frames so this multi-open
+// lifecycle fixture runs on an ordinary Rust test thread's default stack.
+fn open_offline_catalogue_replica(
+    schema: JazzSchema,
+    storage: groove::storage::TestStorage,
+    identity: DbIdentity,
+    backend: bool,
+) -> Db<groove::storage::TestStorage> {
+    let config = DbConfig::new(schema, storage, identity);
+    if backend {
+        // SAFETY: this fixture explicitly admits Bob's synthetic backend identity.
+        block_on(Box::pin(unsafe {
+            Db::open_history_complete_with_backend_attribution(config)
+        }))
+        .expect("open backend replica sync owner")
+    } else {
+        block_on(Box::pin(Db::open(config))).expect("open replica sync owner")
+    }
+}
+
+fn offline_catalogue_remote_read<'a>(
+    db: &'a Db<groove::storage::TestStorage>,
+    query: &'a PreparedQuery,
+) -> Pin<Box<dyn Future<Output = Result<Vec<CurrentRow>, Error>> + 'a>> {
+    Box::pin(db.all(
+        query,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..ReadOpts::default()
+        },
+    ))
+}
+
+fn offline_catalogue_serialized_read(
+    db: &Db<groove::storage::TestStorage>,
+) -> Pin<Box<dyn Future<Output = Result<SerializedReadResult, Error>> + '_>> {
+    offline_catalogue_serialized_read_with_deadline(db, None)
+}
+
+fn offline_catalogue_serialized_read_with_deadline(
+    db: &Db<groove::storage::TestStorage>,
+    deadline: Option<std::time::Instant>,
+) -> Pin<Box<dyn Future<Output = Result<SerializedReadResult, Error>> + '_>> {
+    Box::pin(async move {
+        let query = postcard::to_allocvec(&Query::from("items")).unwrap();
+        db.all_serialized_query(
+            &query,
+            ReadOpts {
+                tier: DurabilityTier::Global,
+                ..ReadOpts::default()
+            },
+            None,
+            None,
+            None,
+            false,
+            || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline),
+            |_| {},
+        )
+        .await
+    })
+}
+
+fn tick_offline_catalogue_connection(
+    connection: &Rc<LocalMutex<PeerConnection<groove::storage::TestStorage>>>,
+) {
+    block_on(Box::pin(connection.borrow_mut().tick())).unwrap();
+}
+
+fn assert_offline_catalogue_all_denied(
+    db: &Db<groove::storage::TestStorage>,
+    query: &PreparedQuery,
+) {
+    assert!(block_on(Box::pin(db.all(query, ReadOpts::default()))).is_err());
+}
+
+fn assert_offline_catalogue_relation_denied(
+    db: &Db<groove::storage::TestStorage>,
+    query: &PreparedQuery,
+) {
+    assert!(
+        block_on(Box::pin(
+            db.all_relation_snapshot(query, ReadOpts::default())
+        ))
+        .is_err()
+    );
+    assert!(
+        block_on(Box::pin(db.all_relation_snapshot_for_identity(
+            query,
+            ReadOpts::default(),
+            AuthorSubject::SYSTEM
+        )))
+        .is_err()
+    );
+}
+
+fn assert_offline_catalogue_subscription_denied(
+    db: &Db<groove::storage::TestStorage>,
+    query: &PreparedQuery,
+) {
+    assert!(block_on(Box::pin(db.subscribe(query, ReadOpts::default()))).is_err());
+}
+
+/// Alice reopens an offline replica directly at Bob's published next schema.
+/// Bob A -> Alice A -> offline -> Bob A→B -> Alice opens B -> catalogue -> rows.
+/// Uses the binding-facing Db boundary to verify durable recovery independently
+/// of environment startup; full transport authentication belongs to shell tests.
+#[test]
+fn offline_replica_opens_requested_schema_only_after_published_lineage() {
+    assert_offline_replica_schema_bootstrap(false);
+}
+
+/// Alice's backend replica uses complete-history attribution without inventing B.
+/// Bob A -> offline Alice A -> Bob A→B -> Alice opens B -> catalogue -> rows.
+#[test]
+fn offline_backend_opens_requested_schema_only_after_published_lineage() {
+    assert_offline_replica_schema_bootstrap(true);
+}
+
+fn assert_offline_replica_schema_bootstrap(backend: bool) {
+    let make_schema = |extra: bool| {
+        let builder = PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("label", PublicColumnType::Text)
+                .policies(
+                    public_legacy_write_policy(PublicPolicyExpr::True)
+                        .with_select(PublicPolicyExpr::True),
+                ),
+        );
+        build_public_db_test_schema(if extra {
+            builder.table(
+                PublicTableSchemaBuilder::new("controls")
+                    .column("value", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+        } else {
+            builder
+        })
+    };
+    let base = make_schema(false);
+    let target = make_schema(true);
+    let families = target.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, _) = groove::storage::TestStorage::controlled(&refs);
+    let reopen = storage.clone();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xe1; 16]),
+        author: if backend {
+            AuthorSubject::SYSTEM
+        } else {
+            AuthorSubject::for_test_bytes([0xe1; 16])
+        },
+    };
+    let trust = if backend {
+        CommitUnitTrust::TrustedBackend
+    } else {
+        CommitUnitTrust::Session
+    };
+    let alice = open_offline_catalogue_replica(base.clone(), storage, identity, backend);
+    let bob = open_core(0xe2, AuthorSubject::SYSTEM, &base);
+    let (upstream, downstream) = duplex();
+    let accepted = bob.accept_subscriber_with_trust(downstream, identity.author, trust);
+    let connection = block_on(alice.connect_upstream(upstream));
+    for _ in 0..20 {
+        bob.tick().unwrap();
+        alice.tick().unwrap();
+    }
+    block_on(alice.detach_connection_async(&connection)).unwrap();
+    drop(connection);
+    drop(accepted);
+    // A local pending edit must survive both recovery and later catalogue sync.
+    let write = alice
+        .insert(
+            "items",
+            BTreeMap::from([(
+                "label".to_owned(),
+                Value::String("retained pending edit".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+    let retained_row = write.row_uuid();
+    let retained_query = alice.prepare_query(&Query::from("items")).unwrap();
+    drop(write);
+    block_on(alice.close()).unwrap();
+    drop(alice);
+
+    let storage = block_on(reopen.clone().reopen(families.clone())).unwrap();
+    let alice = open_offline_catalogue_replica(target.clone(), storage, identity, backend);
+    assert!(alice.read(&retained_query).is_err());
+    assert!(alice.read_profiled(&retained_query).is_err());
+    assert_offline_catalogue_all_denied(&alice, &retained_query);
+    assert_offline_catalogue_relation_denied(&alice, &retained_query);
+    assert!(block_on(alice.local_current_row("items", retained_row)).is_err());
+    assert_offline_catalogue_subscription_denied(&alice, &retained_query);
+    assert!(alice.attach_query(&retained_query).is_err());
+    assert!(block_on(alice.begin_mergeable(OpenTransactionId::new())).is_err());
+    assert!(block_on(alice.begin_exclusive(OpenTransactionId::new())).is_err());
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    // Cancellation before the first catalogue must not affect a later waiter.
+    let mut expired = offline_catalogue_serialized_read_with_deadline(
+        &alice,
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(10)),
+    );
+    assert!(expired.as_mut().poll(&mut context).is_pending());
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    match expired.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(Err(error)) => assert_eq!(error.code, ErrorCode::NotObserved),
+        _ => panic!("schema admission must preserve the serialized read deadline"),
+    }
+    drop(expired);
+    let mut cancelled = offline_catalogue_remote_read(&alice, &retained_query);
+    assert!(cancelled.as_mut().poll(&mut context).is_pending());
+    drop(cancelled);
+    let mut closing = offline_catalogue_remote_read(&alice, &retained_query);
+    assert!(closing.as_mut().poll(&mut context).is_pending());
+    block_on(alice.close()).unwrap();
+    assert!(matches!(
+        closing.as_mut().poll(&mut context),
+        std::task::Poll::Ready(Err(_))
+    ));
+    drop(closing);
+    drop(alice);
+    let storage = block_on(reopen.clone().reopen(families.clone())).unwrap();
+    let alice = open_offline_catalogue_replica(target.clone(), storage, identity, backend);
+    let mut unpublished = offline_catalogue_remote_read(&alice, &retained_query);
+    assert!(unpublished.as_mut().poll(&mut context).is_pending());
+    let unavailable = alice.prepare_query(&Query::from("items")).unwrap_err();
+    assert!(
+        unavailable
+            .to_string()
+            .contains("awaiting published catalogue admission")
+    );
+    assert!(block_on(alice.register_schema_view(target.clone())).is_err());
+    assert!(
+        alice
+            .insert(
+                "items",
+                BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("must not be written under A".to_owned())
+                ),]),
+                Default::default()
+            )
+            .is_err()
+    );
+    let (upstream, downstream) = duplex();
+    let detached = bob.accept_subscriber_with_trust(downstream, identity.author, trust);
+    let connection = block_on(alice.connect_upstream(upstream));
+    block_on(alice.detach_connection_async(&connection)).unwrap();
+    assert!(matches!(
+        unpublished.as_mut().poll(&mut context),
+        std::task::Poll::Ready(Err(_))
+    ));
+    drop(unpublished);
+    drop(connection);
+    drop(detached);
+    // A live authority that has not published B cannot authorize the request.
+    let (upstream, downstream) = duplex();
+    let accepted = bob.accept_subscriber_with_trust(downstream, identity.author, trust);
+    let connection = block_on(alice.connect_upstream(upstream));
+    let (mut absent_foreground, absent_transport) = duplex();
+    let absent_connection = alice.accept_subscriber(absent_transport, identity.author);
+    let mut unpublished = offline_catalogue_remote_read(&alice, &retained_query);
+    assert!(unpublished.as_mut().poll(&mut context).is_pending());
+    for _ in 0..20 {
+        bob.tick().unwrap();
+        alice.tick().unwrap();
+    }
+    assert!(matches!(
+        unpublished.as_mut().poll(&mut context),
+        std::task::Poll::Ready(Err(_))
+    ));
+    assert!(
+        matches!(
+            absent_foreground.try_recv(),
+            Some(SyncMessage::CatalogueSnapshot(_))
+        ),
+        "validated absence must reach the foreground instead of hanging"
+    );
+    block_on(alice.detach_connection_async(&absent_connection)).unwrap();
+    drop(absent_connection);
+    drop(unpublished);
+    assert!(alice.prepare_query(&Query::from("items")).is_err());
+    assert!(block_on(alice.register_schema_view(target.clone())).is_err());
+    block_on(alice.detach_connection_async(&connection)).unwrap();
+    drop(connection);
+    drop(accepted);
+    // Closing while offline neither admits B nor destroys A's data.
+    block_on(alice.close()).unwrap();
+    drop(alice);
+    let storage = block_on(reopen.clone().reopen(families.clone())).unwrap();
+    let alice = open_offline_catalogue_replica(base.clone(), storage, identity, backend);
+    assert_eq!(
+        prepared_all(&alice, &Query::from("items"), ReadOpts::default()).len(),
+        1
+    );
+    block_on(alice.close()).unwrap();
+    drop(alice);
+
+    let lens = MigrationLens::new(
+        base.version_id(),
+        target.version_id(),
+        vec![TableLens {
+            source_table: "items".to_owned(),
+            target_table: "items".to_owned(),
+            ops: vec![],
+        }],
+    )
+    .unwrap();
+    let publication = bob
+        .author_schema_lineage_publication(
+            SchemaVersion::new(target.clone()),
+            lens,
+            vec!["controls".to_owned()],
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    bob.publish_schema_with_lens(1, publication).unwrap();
+    bob.set_current_write_schema(CurrentWriteSchema {
+        revision: 1,
+        schema: target.version_id(),
+    })
+    .unwrap();
+    let storage = block_on(reopen.clone().reopen(families.clone())).unwrap();
+    let alice = open_offline_catalogue_replica(target.clone(), storage, identity, backend);
+    let (mut foreground, foreground_transport) = duplex();
+    let foreground_connection = alice.accept_subscriber(foreground_transport, identity.author);
+    alice.tick().unwrap();
+    assert!(
+        foreground.try_recv().is_none(),
+        "pending owner must not announce its recovered old catalogue"
+    );
+    let mut waiting = offline_catalogue_serialized_read(&alice);
+    assert!(waiting.as_mut().poll(&mut context).is_pending());
+    let (upstream, downstream) = duplex();
+    let accepted = bob.accept_subscriber_with_trust(downstream, identity.author, trust);
+    let old_connection = block_on(alice.connect_upstream(upstream));
+    let (replacement_upstream, replacement_downstream) = duplex();
+    let replacement_accepted =
+        bob.accept_subscriber_with_trust(replacement_downstream, identity.author, trust);
+    let connection = block_on(alice.connect_upstream(replacement_upstream));
+    assert!(
+        matches!(waiting.as_mut().poll(&mut context), Poll::Ready(Err(_))),
+        "replacement must reject old waiter"
+    );
+    drop(waiting);
+    let mut waiting = offline_catalogue_serialized_read(&alice);
+    assert!(waiting.as_mut().poll(&mut context).is_pending());
+    for _ in 0..30 {
+        bob.tick().unwrap();
+        tick_offline_catalogue_connection(&old_connection);
+    }
+    assert!(
+        waiting.as_mut().poll(&mut context).is_pending(),
+        "stale catalogue must not resolve new waiter"
+    );
+    tick_offline_catalogue_connection(&foreground_connection);
+    assert!(
+        foreground.try_recv().is_none(),
+        "stale upstream must not announce a downstream catalogue"
+    );
+    for _ in 0..30 {
+        bob.tick().unwrap();
+        tick_offline_catalogue_connection(&connection);
+    }
+    assert!(
+        foreground.try_recv().is_none(),
+        "stale upstream must not admit the owner's downstream catalogue"
+    );
+    alice.tick().unwrap();
+    assert!(matches!(
+        foreground.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    block_on(alice.detach_connection_async(&foreground_connection)).unwrap();
+    drop(foreground_connection);
+    block_on(alice.detach_connection_async(&old_connection)).unwrap();
+    drop(old_connection);
+    drop(replacement_accepted);
+    assert!(matches!(
+        waiting.as_mut().poll(&mut context),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    drop(waiting);
+    let rows = prepared_all(&alice, &Query::from("items"), ReadOpts::default());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .cell(
+                target
+                    .tables
+                    .iter()
+                    .find(|table| table.name == "items")
+                    .unwrap(),
+                "label"
+            )
+            .unwrap(),
+        Value::String("retained pending edit".to_owned())
+    );
+    assert!(prepared_all(&alice, &Query::from("controls"), ReadOpts::default()).is_empty());
+    block_on(alice.detach_connection_async(&connection)).unwrap();
+    drop(connection);
+    drop(accepted);
+    block_on(alice.close()).unwrap();
+    drop(alice);
+    let storage = block_on(reopen.reopen(families)).unwrap();
+    let alice = open_offline_catalogue_replica(target, storage, identity, backend);
+    assert_eq!(
+        prepared_all(&alice, &Query::from("items"), ReadOpts::default()).len(),
+        1
+    );
+}
+
 #[test]
 fn trusted_snapshot_preserves_offline_enum_rows_and_reopens() {
     assert_snapshot_preserves_offline_enum_rows(false);
@@ -710,4 +1124,88 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
             .message
             .contains("catalogue updates require a serving Node")
     );
+}
+
+/// Authenticated app peers receive the existing app-wide metadata before a query;
+/// a subjectless transport receives neither that catalogue nor application rows.
+#[test]
+fn catalogue_bootstrap_announces_only_to_admitted_sessions_and_scopes() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .column("label", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::False)),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xe9; 16]);
+    let server = open_core(0xea, AuthorSubject::SYSTEM, &schema);
+    for kind in 0..3 {
+        let (mut receiver, sender) = duplex();
+        let connection = match kind {
+            0 => server.accept_subscriber_with_trust(sender, author, CommitUnitTrust::Session),
+            1 => server.server.accept_scope_isolated_relay_subscriber(
+                sender,
+                author,
+                BTreeMap::new(),
+                1,
+            ),
+            _ => server.server.accept_relay_subscriber(sender),
+        };
+        server.tick().unwrap();
+        if kind < 2 {
+            let Some(SyncMessage::CatalogueSnapshot(snapshot)) = receiver.try_recv() else {
+                panic!("admitted session must receive catalogue before querying");
+            };
+            assert!(
+                snapshot
+                    .schemas
+                    .iter()
+                    .any(|version| version.id == schema.version_id())
+            );
+        }
+        assert!(
+            receiver.try_recv().is_none(),
+            "bootstrap carries no rows or unbound relay metadata"
+        );
+        drop(connection);
+    }
+    let outbound = Rc::new(RefCell::new(std::collections::VecDeque::new()));
+    let connection = server.accept_subscriber_with_trust(
+        Box::new(BackpressureOnceTransport {
+            outbound: Rc::clone(&outbound),
+            failed: false,
+        }),
+        author,
+        CommitUnitTrust::Session,
+    );
+    connection.borrow_mut().tick().unwrap();
+    assert!(outbound.borrow().is_empty());
+    connection.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        outbound.borrow_mut().pop_front(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    connection.borrow_mut().tick().unwrap();
+    assert!(
+        outbound.borrow().is_empty(),
+        "accepted bootstrap is sent once"
+    );
+}
+
+#[test]
+fn uninitialized_catalogue_source_keeps_admitted_session_pending() {
+    let empty = JazzSchema::empty();
+    let families = empty.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, _) = groove::storage::TestStorage::controlled(&refs);
+    let state = block_on(Box::pin(NodeState::new_catalogue_uninitialized(
+        NodeUuid::from_bytes([0xeb; 16]),
+        storage,
+    )))
+    .unwrap();
+    let source = Node::new(state);
+    let (mut receiver, sender) = duplex();
+    let connection = source.accept_subscriber(sender, AuthorSubject::for_test_bytes([0xec; 16]));
+    tick_offline_catalogue_connection(&connection);
+    assert!(receiver.try_recv().is_none());
 }

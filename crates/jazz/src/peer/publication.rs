@@ -213,6 +213,14 @@ impl PeerState {
         )
     }
 
+    pub(crate) fn reset_catalogue_snapshot_announcement(&mut self) {
+        self.announced_catalogue_fingerprint = None;
+    }
+
+    pub(crate) fn has_announced_catalogue_snapshot(&self) -> bool {
+        self.announced_catalogue_fingerprint.is_some()
+    }
+
     pub(crate) fn needs_catalogue_snapshot(&self, fingerprint: [u8; 32]) -> bool {
         self.announced_catalogue_fingerprint != Some(fingerprint)
     }
@@ -567,7 +575,6 @@ impl PeerState {
         }
         self.refresh_maintained_subscription_view_footprint(subscription);
     }
-
 
     fn requires_selected_authority_source(
         &self,

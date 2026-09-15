@@ -1862,6 +1862,13 @@ fn authorization_scope_rejects_unrelated_caller_intent() {
     };
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, identity);
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
     client_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -2527,6 +2534,13 @@ fn oversized_register_shape_read_view_is_rejected_before_key_derivation_or_reten
     let subscriber =
         server.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x96; 16]));
 
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
     client_transport
         .send(SyncMessage::RegisterShape {
             shape_id,

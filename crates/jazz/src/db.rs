@@ -18,6 +18,7 @@ use std::sync::{
 use std::sync::{LazyLock, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
+use futures::FutureExt as _;
 use futures::lock::Mutex as LocalMutex;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_channel::oneshot;
@@ -1250,6 +1251,104 @@ impl groove::chunks::MissingChunkResolver for PeerChunkResolver {
 }
 pub(crate) type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
 
+/// One pending owner schema, shared with its authenticated upstream connections.
+/// Shared futures release their waiter registrations when individual reads cancel.
+struct PendingOpenSchema {
+    connection_epoch: Option<u64>,
+    authoritative_catalogue_received: bool,
+    schema: SchemaVersionId,
+    result: Option<Result<(), Error>>,
+    sender: Option<futures::channel::oneshot::Sender<Result<(), Error>>>,
+    wait: futures::future::Shared<futures::future::LocalBoxFuture<'static, Result<(), Error>>>,
+}
+
+type OpenSchemaAdmission = Rc<RefCell<Option<PendingOpenSchema>>>;
+
+impl PendingOpenSchema {
+    fn new(schema: SchemaVersionId) -> Self {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        Self {
+            connection_epoch: None,
+            authoritative_catalogue_received: false,
+            schema,
+            result: None,
+            sender: Some(sender),
+            wait: async move {
+                receiver.await.unwrap_or_else(|_| {
+                    Err(Error::new(
+                        ErrorCode::Protocol,
+                        "database closed before schema admission",
+                    ))
+                })
+            }
+            .boxed_local()
+            .shared(),
+        }
+    }
+}
+
+fn finish_open_schema_admission(state: &OpenSchemaAdmission, result: Result<(), Error>) {
+    let sender = {
+        let mut state = state.borrow_mut();
+        let Some(pending) = state.as_mut() else {
+            return;
+        };
+        if matches!(pending.result, Some(Ok(()))) {
+            return;
+        }
+        pending.result = Some(result.clone());
+        pending.sender.take()
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(result);
+    }
+}
+
+fn finish_open_schema_connection(
+    state: &OpenSchemaAdmission,
+    connection_epoch: u64,
+    result: Result<(), Error>,
+) {
+    let owns_attempt = state
+        .borrow()
+        .as_ref()
+        .is_some_and(|pending| pending.connection_epoch == Some(connection_epoch));
+    if owns_attempt {
+        finish_open_schema_admission(state, result);
+    }
+}
+
+fn begin_open_schema_connection(state: &OpenSchemaAdmission, connection_epoch: u64) {
+    let replace = state.borrow().as_ref().is_some_and(|pending| {
+        pending.connection_epoch.is_some() && !matches!(pending.result, Some(Ok(())))
+    });
+    if replace {
+        finish_open_schema_admission(
+            state,
+            Err(Error::new(
+                ErrorCode::Protocol,
+                "upstream replaced before schema admission",
+            )),
+        );
+    }
+    if let Some(pending) = state.borrow_mut().as_mut() {
+        if matches!(pending.result, Some(Ok(()))) {
+            return;
+        }
+        if replace {
+            *pending = PendingOpenSchema::new(pending.schema);
+        }
+        pending.connection_epoch = Some(connection_epoch);
+    }
+}
+
+fn pending_open_schema_error() -> Error {
+    Error::new(
+        ErrorCode::Schema,
+        "opened schema is awaiting published catalogue admission; connect to the authority",
+    )
+}
+
 /// Temporary source-compatibility for node operations that are still wholly
 /// synchronous. Storage-facing call sites must use `lock().await` instead.
 /// Remove this trait as the remaining domains become suspendable.
@@ -1516,6 +1615,7 @@ where
     schema: JazzSchema,
     schema_version_id: SchemaVersionId,
     schema_view_is_fixed: bool,
+    requires_open_schema_admission: bool,
     schema_views: Rc<RefCell<BTreeMap<SchemaViewId, JazzSchema>>>,
     identity: DbIdentity,
     node: Rc<Node<S>>,
