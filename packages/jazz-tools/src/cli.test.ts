@@ -3512,6 +3512,25 @@ describe("bin integration", () => {
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
   });
+  it.each([
+    ["validate --schema-dir", ["validate", "--schema-dir"]],
+    [
+      "validate --schema-dir followed by another flag",
+      ["validate", "--schema-dir", "--strict-provenance"],
+    ],
+    ["validate --schema-dir with an empty value", ["validate", "--schema-dir", ""]],
+  ])("rejects %s with a deterministic missing-value error", async (_description, args) => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    // A valid cwd schema proves the parser does not silently fall back to cwd
+    // when a recognized value flag is missing.
+    const result = runBin(args, { cwd: root });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Missing value for --schema-dir.");
+  });
 
   it("loads root permissions.ts through the validate command", async () => {
     const { root } = await createWorkspace();
