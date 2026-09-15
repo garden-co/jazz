@@ -146,7 +146,16 @@ pub(super) fn rewrite_claim_predicate_for_binding(
             case,
             payload: Box::new(rewrite_claim_predicate_for_binding(*payload, claims)),
         },
-        Predicate::IsNull(_) => false_predicate(),
+        Predicate::IsNull(Operand::Claim(name)) => {
+            let storage_name = crate::query::operand_claim_storage_key(&name);
+            match claims.and_then(|claims| claims.get(&storage_name)) {
+                Some(Value::Nullable(None)) => Predicate::All(Vec::new()),
+                // Missing claims must not match IS NULL; the Not guard above
+                // also prevents them from matching IS NOT NULL.
+                _ => false_predicate(),
+            }
+        }
+        Predicate::IsNull(operand) => Predicate::IsNull(operand),
     }
 }
 
@@ -240,6 +249,14 @@ fn bind_scope_claim_predicate(
     binding_values: &mut BTreeMap<String, Value>,
 ) {
     match predicate {
+        Predicate::Not(inner) if predicate_contains_unbound_claim(inner, Some(claim_values)) => {
+            *predicate = false_predicate();
+        }
+        Predicate::IsNull(Operand::Claim(_)) => {
+            // Null checks need no typed parameter: resolve them before claim
+            // slot inference, which cannot infer a type from IS NULL alone.
+            *predicate = rewrite_claim_predicate_for_binding(predicate.clone(), Some(claim_values));
+        }
         Predicate::All(predicates) | Predicate::Any(predicates) => {
             for predicate in predicates {
                 bind_scope_claim_predicate(predicate, claim_values, binding_values);

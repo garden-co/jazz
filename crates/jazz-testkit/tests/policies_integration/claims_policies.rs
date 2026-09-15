@@ -640,7 +640,6 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
 /// role missing   ──query──► {}
 /// ```
 #[tokio::test]
-#[ignore = "#1760: server schema conversion does not support SessionIsNotNull for claims paths"]
 async fn role_claim_presence_gates_row_visibility() {
     tokio::task::LocalSet::new()
         .run_until(role_claim_presence_gates_row_visibility_inner())
@@ -781,7 +780,6 @@ async fn role_claim_presence_gates_row_visibility_inner() {
 /// claims[] or missing   ──query/stream──► {}
 /// ```
 #[tokio::test]
-#[ignore = "#1760: multiple claim-array-scoped live subscriptions hang for more than 60 seconds waiting for follow-up delivery"]
 async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates() {
     tokio::task::LocalSet::new()
         .run_until(groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner())
@@ -1006,7 +1004,6 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner() {
 /// claims.revoked_at is missing  ──► matches neither table
 /// ```
 #[tokio::test]
-#[ignore = "#1760: server schema conversion does not support SessionIsNull for claims paths"]
 async fn claim_null_checks_distinguish_explicit_null_from_missing_paths() {
     tokio::task::LocalSet::new()
         .run_until(claim_null_checks_distinguish_explicit_null_from_missing_paths_inner())

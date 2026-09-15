@@ -1320,6 +1320,9 @@ fn validate_predicate(
             );
             validate_predicate(&payload_table, payload, params)
         }
+        // Claims are dynamically typed and become literals when binding the session.
+        // Either can be checked for nullness without a statically nullable column.
+        Predicate::IsNull(Operand::Claim(_) | Operand::Literal(_)) => Ok(()),
         Predicate::IsNull(operand) => match operand_type(table, operand, params)? {
             Some(ColumnType::Nullable(_)) => Ok(()),
             Some(_) => Err(QueryError::OperandTypeMismatch),

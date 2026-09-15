@@ -2845,6 +2845,15 @@ fn convert_policy_predicate(
             value,
         } => {
             let left = convert_session_path_operand(table, path, path_segments)?;
+            if matches!(value, Value::Null) {
+                match op {
+                    CmpOp::Eq => return Ok(Predicate::IsNull(left)),
+                    CmpOp::Ne => {
+                        return Ok(Predicate::Not(Box::new(Predicate::IsNull(left))));
+                    }
+                    _ => {}
+                }
+            }
             let right = Operand::Literal(convert_policy_literal(table, path, value)?);
             Ok(match op {
                 CmpOp::Eq => Predicate::Eq(left, right),
@@ -2857,6 +2866,12 @@ fn convert_policy_predicate(
                 }
             })
         }
+        PolicyExpr::SessionIsNull { path: segments } => Ok(Predicate::IsNull(
+            convert_session_path_operand(table, path, segments)?,
+        )),
+        PolicyExpr::SessionIsNotNull { path: segments } => Ok(Predicate::Not(Box::new(
+            Predicate::IsNull(convert_session_path_operand(table, path, segments)?),
+        ))),
         PolicyExpr::IsNull { column } => Ok(Predicate::IsNull(Operand::Column(column.clone()))),
         PolicyExpr::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
             Operand::Column(column.clone()),
