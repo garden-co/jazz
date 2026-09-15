@@ -2274,3 +2274,60 @@ async fn declared_index_generation_final_marker_flush_failure_and_cancel() {
         );
     }
 }
+
+// Unknown physical variants must fail closed during primary replay. Only direct
+// storage corruption can install a tag absent from the admitted schema.
+#[futures_test::test]
+async fn declared_index_generation_rejects_unknown_primary_variant() {
+    let mut schema = indexed_albums_schema();
+    schema.tables[0] = schema.tables[0].clone().with_variant(1, ["id", "title"]);
+    let descriptor = schema.tables[0].record_schema_for_variant(1).unwrap();
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        crate::records::VariantRecord::create(
+            1,
+            descriptor,
+            &[Value::U64(7), Value::String("title".into())],
+        )
+        .unwrap(),
+    );
+    database.commit_batch(batch).await.unwrap();
+    drop(database);
+    let rows = storage.prefix("albums".into(), Vec::new()).await.unwrap();
+    let raw = descriptor
+        .create(&[Value::U64(7), Value::String("title".into())])
+        .unwrap();
+    let invalid = crate::records::encode_variant_record(99, &raw);
+    storage
+        .set("albums".into(), rows[0].0.clone(), invalid.clone())
+        .await
+        .unwrap();
+    let mut database = Database::new(schema, storage.clone()).await.unwrap();
+    assert!(database.ensure_declared_index_generation(1).await.is_err());
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(Error::DatabasePoisoned)
+    ));
+    assert_eq!(
+        storage
+            .get(
+                "indices".into(),
+                b"\0groove-declared-index-generation".to_vec()
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        storage
+            .get("albums".into(), rows[0].0.clone())
+            .await
+            .unwrap(),
+        Some(invalid)
+    );
+}
