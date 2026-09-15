@@ -42,29 +42,7 @@ jobs:
         id: artifact
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          [[ "${SOURCE_SHA}" =~ ^[a-f0-9]{40}$ ]]
-          [[ "${ARTIFACT_RUN_ID}" =~ ^[0-9]+$ ]]
-          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACT_RUN_ID}" > "${RUNNER_TEMP}/inspector-run.json"
-          ARTIFACT_SHA=$(node --input-type=module -e '
-            import fs from "node:fs";
-            const run = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/inspector-run.json"));
-            if (run.status !== "completed" || run.conclusion !== "success" || !/^[a-f0-9]{40}$/.test(run.head_sha) || run.head_repository?.full_name !== process.env.GITHUB_REPOSITORY) throw new Error("Inspector artifact run must be successful and belong to this repository");
-            console.log(run.head_sha);')
-          gh api "repos/${GITHUB_REPOSITORY}/git/commits/${ARTIFACT_SHA}" > "${RUNNER_TEMP}/inspector-artifact-commit.json"
-          gh api "repos/${GITHUB_REPOSITORY}/git/commits/${SOURCE_SHA}" > "${RUNNER_TEMP}/inspector-deploy-commit.json"
-          node --input-type=module -e '
-            import fs from "node:fs";
-            const read = name => JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/inspector-" + name + "-commit.json"));
-            const artifact = read("artifact"), deploy = read("deploy");
-            if (!/^[a-f0-9]{40}$/.test(artifact.tree?.sha) || artifact.tree.sha !== deploy.tree?.sha) throw new Error("Inspector artifact and deployment source trees differ");'
-          ENCODED_BRANCH=$(node -p 'encodeURIComponent(process.env.SOURCE_BRANCH)')
-          BRANCH_SHA=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${ENCODED_BRANCH}" --jq .sha)
-          if [ "${BRANCH_SHA}" != "${SOURCE_SHA}" ]; then
-            echo "::error::Deployment SHA must be the current head of the requested deployment branch."
-            exit 1
-          fi
-          echo "source_sha=${ARTIFACT_SHA}" >> "${GITHUB_OUTPUT}"
+        run: node dev/scripts/inspector-provenance.mjs
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:

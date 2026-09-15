@@ -71,3 +71,36 @@ test("source fallback retains complete native producer and fingerprint prerequis
     /--filter=jazz-napi --only.*stage-native-fingerprints.mjs --workspace.*--filter=jazz-tools/,
   );
 });
+
+test("CLI seals actual checkout HEAD when GITHUB_SHA names a different synthetic PR merge", (t) => {
+  const { dist, staged } = fixture(t);
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: join(dist, ".."), encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git("init", "--quiet");
+  git("add", "dist/index.html", "dist/app.js");
+  git(
+    "-c",
+    "user.name=Synthetic Test",
+    "-c",
+    "user.email=synthetic@example.invalid",
+    "commit",
+    "-qm",
+    "synthetic source",
+  );
+  const checkoutSha = git("rev-parse", "HEAD");
+  const result = spawnSync(
+    process.execPath,
+    [new URL("./inspector-prebuilt.mjs", import.meta.url).pathname, "seal", dist, staged],
+    {
+      cwd: join(dist, ".."),
+      env: { ...process.env, GITHUB_SHA: "f".repeat(40) },
+      encoding: "utf8",
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(verifyInspector(staged, checkoutSha).sourceSha, checkoutSha);
+  assert.throws(() => verifyInspector(staged, "f".repeat(40)), /source SHA mismatch/);
+});
