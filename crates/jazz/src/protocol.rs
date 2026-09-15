@@ -4765,7 +4765,7 @@ impl<'de> serde::Deserialize<'de> for SchemaVersion {
 }
 
 /// Atomic catalogue payload that admits one non-genesis schema.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct SchemaLineagePublication {
     /// Content-addressed identity of this complete bundle.
     pub id: SchemaLineagePublicationId,
@@ -4781,6 +4781,32 @@ pub struct SchemaLineagePublication {
     /// paths only locate the entity in this immutable descriptor; they are not
     /// inputs to the UUID allocation.
     pub physical_identities: PhysicalIdentityManifest,
+}
+
+// Table declarations are multisets in the v1 content ID and durable encoding.
+// Compare the full payload, never just its claimed (or recomputed) digest.
+impl PartialEq for SchemaLineagePublication {
+    fn eq(&self, other: &Self) -> bool {
+        fn same_declarations(left: &[String], right: &[String]) -> bool {
+            if left == right {
+                return true;
+            }
+            if left.len() != right.len() {
+                return false;
+            }
+            let mut left = left.iter().collect::<Vec<_>>();
+            let mut right = right.iter().collect::<Vec<_>>();
+            left.sort_unstable();
+            right.sort_unstable();
+            left == right
+        }
+        self.id == other.id
+            && self.schema == other.schema
+            && self.lens == other.lens
+            && self.physical_identities == other.physical_identities
+            && same_declarations(&self.new_tables, &other.new_tables)
+            && same_declarations(&self.dropped_tables, &other.dropped_tables)
+    }
 }
 
 /// Immutable globally meaningful physical identities for one published schema
@@ -5490,6 +5516,8 @@ impl SchemaLineagePublication {
             dropped_tables,
             physical_identities,
         };
+        publication.new_tables.sort();
+        publication.dropped_tables.sort();
         publication.id = publication.content_id();
         Ok(publication)
     }
@@ -5515,6 +5543,8 @@ impl SchemaLineagePublication {
             dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
             physical_identities,
         };
+        publication.new_tables.sort();
+        publication.dropped_tables.sort();
         publication.id = publication.content_id();
         publication
     }
