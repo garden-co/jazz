@@ -86,13 +86,15 @@ codegen-units = 256
 # `panic = "abort"` is deliberate and worth ~7 MB of unwind tables. Consequence:
 # a panic in a relay tokio task terminates the host process instead of being
 # contained by that task. Panics already abort at the crate's `extern "C"`
-# boundary under edition 2024, so this narrows, not introduces, the exposure.
+# boundary since Rust 1.81 (unconditional for `extern "C"`, not an edition
+# rule), so this narrows, not introduces, the exposure.
 #
 # Measured on a fully stripped arm64 link proxy referencing all 27 exported
 # symbols: 37.7 MB -> 15.7 MB executable, 15.7 MB -> 7.7 MB gzip, device `.a`
 # 107 MB -> 30 MB. Full table in https://github.com/garden-co/jazz/issues/3008.
 # ponytail: `debug`/`strip` are already the `release` defaults, so they are not
-# restated; npm packaging strips separately.
+# restated; the `.a` ships as built (nothing in the normal pipeline strips it)
+# and the inherited `debug = false` is what keeps debuginfo out.
 [profile.release-mobile]
 inherits = "release"
 opt-level = "s"

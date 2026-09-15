@@ -4,7 +4,7 @@
 # -dead_strip discard everything unreachable from that public ABI, then report
 # the fully stripped and gzipped bytes. This is an upper bound on what the relay
 # adds to an app's arm64 slice, not an App Store Connect download/install size.
-# ponytail: iOS device slice only; an Android/ELF receipt is a follow-up.
+# ponytail: iOS device slice only; an Android/ELF receipt is a follow-up tracked in #3008.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
@@ -19,16 +19,21 @@ if [[ ! -f "$archive" ]]; then
   exit 1
 fi
 
-# Xcode's nm cannot parse the LLVM bitcode archive members that a newer rustc
-# emits for compiler_builtins; it still lists every Mach-O member's symbols, so
-# tolerate its exit status and let the empty-symbol check below catch real
-# failures.
+# The shipped C header is the authoritative export set; the archive must match
+# it exactly, so a truncated or mis-targeted nm listing can never quietly
+# under-count. Xcode's nm exits non-zero on the LLVM-bitcode archive members a
+# newer rustc emits for compiler_builtins, but it still lists every Mach-O
+# member's symbols, so `|| true` is tolerable only because of the diff below.
+header="$root/crates/jazz-native-relay/include/jazz_native_relay.h"
+expected=$(grep -oE '\bjazz_native_relay_[A-Za-z0-9_]+[[:space:]]*\(' "$header" | tr -d ' (' | sort -u)
 symbols=$({ xcrun nm -gU "$archive" 2>/dev/null || true; } | sed -nE 's/^[0-9a-f]+ T _(jazz_native_relay_[A-Za-z0-9_]+)$/\1/p' | sort -u)
-if [[ -z "$symbols" ]]; then
-  echo "no exported T _jazz_native_relay_* symbols in $archive" >&2
+if ! diff <(printf '%s\n' "$expected") <(printf '%s\n' "$symbols") >/dev/null; then
+  echo "exported symbols in $archive do not match $header" >&2
+  comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$symbols") | sed 's/^/  missing from archive: /' >&2
+  comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$symbols") | sed 's/^/  unexpected in archive: /' >&2
   exit 1
 fi
-count=$(printf '%s\n' "$symbols" | wc -l | tr -d ' ')
+count=$(printf '%s\n' "$expected" | wc -l | tr -d ' ')
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -41,6 +46,8 @@ trap 'rm -rf "$tmp"' EXIT
   echo "}; return (int)(intptr_t)p[argc % $count]; }"
 } > "$tmp/main.c"
 
+# -lc++ and -miphoneos-version-min=15.0 are conveniences of this link proxy, not
+# requirements or a supported deployment floor of the relay itself.
 xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=15.0 -O2 \
   "$tmp/main.c" "$archive" \
   -framework Security -framework CoreFoundation -lc++ \
