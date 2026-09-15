@@ -204,8 +204,9 @@ gradle.beforeProject { project ->
 }`,
         dependencies,
         `def shippedKotlinVersion = project.properties["JazzRn_kotlinVersion"]?.toString()
-def expectedKotlinVersion = rootProject.ext.has("kotlinVersion")
-  ? rootProject.ext.get("kotlinVersion").toString()
+def requestedRootKotlinVersion = project.properties["jazzRnRootKotlinVersion"]?.toString()
+def expectedKotlinVersion = requestedRootKotlinVersion != null && !requestedRootKotlinVersion.isEmpty()
+  ? requestedRootKotlinVersion
   : shippedKotlinVersion
 
 tasks.register("assertKotlinVersionContract") {
@@ -214,6 +215,12 @@ tasks.register("assertKotlinVersionContract") {
       "the isolated root must read JazzRn_kotlinVersion from its copied gradle.properties"
     assert expectedKotlinVersion != null && !expectedKotlinVersion.isEmpty():
       "the Kotlin version fallback must be present"
+    if (requestedRootKotlinVersion != null && !requestedRootKotlinVersion.isEmpty()) {
+      assert rootProject.ext.has("kotlinVersion"):
+        "the override must install rootProject.ext.kotlinVersion"
+      assert rootProject.ext.get("kotlinVersion").toString() == requestedRootKotlinVersion:
+        "the installed root Kotlin version must match the requested override"
+    }
 
     def kotlinPluginArtifact = project.buildscript.configurations.classpath.resolvedConfiguration.resolvedArtifacts.find {
       it.moduleVersion.id.group == "org.jetbrains.kotlin" &&

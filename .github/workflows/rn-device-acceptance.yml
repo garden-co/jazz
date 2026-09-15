@@ -6,6 +6,7 @@ on:
     types: [opened, reopened, synchronize, labeled]
     paths:
       - "dev/rn-device-acceptance/**"
+      - "dev/gates/test/jazz-rn-kotlin-contract.test.mjs"
       - "crates/jazz-rn/**"
       - "crates/jazz-native-relay/**"
       - "crates/jazz/**"
