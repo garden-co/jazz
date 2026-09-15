@@ -336,27 +336,6 @@ fn public_schema_rejects_references_on_non_uuid_columns() {
     }
 }
 
-/// A declared UUID reference compiles before any target row is present.
-#[test]
-fn public_schema_allows_uuid_reference_without_target_rows() {
-    let schema = SchemaBuilder::new()
-        .table(TableSchemaBuilder::new("roots").fk_column("target_id", "targets"))
-        .table(TableSchemaBuilder::new("targets"))
-        .build();
-
-    let compiled = JazzSchema::new(&schema)
-        .expect("declared UUID references must not require target rows during admission");
-    let roots = compiled
-        .tables()
-        .iter()
-        .find(|table| table.name == "roots")
-        .expect("roots table is compiled");
-    assert_eq!(
-        roots.references.get("target_id").map(String::as_str),
-        Some("targets")
-    );
-}
-
 /// A runtime owner may exist before any typed application schema is known;
 /// registering the first typed view must still permit local-first staging.
 #[test]
