@@ -120,8 +120,14 @@ export async function fetchSchemaHashes(
   if (!response.ok) {
     const bodyText = await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
+    // A 404 also deliberately hides invalid/mismatched app IDs. It is not a
+    // transient-readiness signal, so leave the retry decision with the caller.
+    const guidance =
+      response.status === 404
+        ? " Check the server URL and app ID. If this Cloud app was just created, wait for its regional status to become healthy and synced, then retry deployment. A 404 alone does not confirm startup is still in progress."
+        : "";
     throw new Error(
-      `Schema hashes fetch failed: ${response.status} ${response.statusText}${detail}`,
+      `Schema hashes fetch failed: ${response.status} ${response.statusText}${detail}${guidance}`,
     );
   }
 
