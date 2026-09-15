@@ -178,6 +178,11 @@ test("Changesets prerelease consumption survives release cut, fix, version and m
     const pre = JSON.parse(readFileSync(join(dir, ".changeset/pre.json")));
     assert.deepEqual(new Set(pre.changesets), new Set(["previous", "fix"]));
     assert.match(readFileSync(join(dir, ".changeset/future.md"), "utf8"), /Next development/);
+    // A premature consumption mutation must prevent the next release bump.
+    write(".changeset/pre.json", { ...pre, changesets: [...pre.changesets, "future"] });
+    version();
+    assert.equal(JSON.parse(readFileSync(join(dir, "package.json"))).version, "1.0.0-alpha.55");
+    git("restore", ".changeset/pre.json", "package.json");
     version();
     assert.equal(JSON.parse(readFileSync(join(dir, "package.json"))).version, "1.0.0-alpha.56");
     assert.deepEqual(

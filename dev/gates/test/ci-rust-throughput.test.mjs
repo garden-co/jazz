@@ -153,7 +153,8 @@ const assertIntegrationCheckIsGating = (typescriptJob) => {
 const trustedCachePullRequest =
   'github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association)';
 const trustedCacheCondition =
-  "github.event_name == 'push' && github.ref == 'refs/heads/main' || " + trustedCachePullRequest;
+  "github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') || " +
+  trustedCachePullRequest;
 const untrustedCacheCondition = "github.event_name != 'push' && !(" + trustedCachePullRequest + ")";
 const sccacheWriter =
   "inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''";
@@ -210,7 +211,9 @@ const cacheAccessFor = ({ eventName, ref, sameRepository = false, authorAssociat
     eventName === "pull_request" &&
     sameRepository &&
     ["OWNER", "MEMBER", "COLLABORATOR"].includes(authorAssociation);
-  const trusted = (eventName === "push" && ref === "refs/heads/main") || trustedPullRequest;
+  const trusted =
+    (eventName === "push" && ["refs/heads/main", "refs/heads/release"].includes(ref)) ||
+    trustedPullRequest;
   return {
     invocation: trusted ? "trusted" : "untrusted",
     idToken: trusted ? "write" : "none",
@@ -278,7 +281,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.deepEqual(aggregate.permissions, { contents: "read" });
   assert.equal(document.on.pull_request_target, undefined);
   assert.equal(document.on.pull_request, null, "stacked PR bases must not be branch-filtered");
-  assert.deepEqual(document.on.push, { branches: ["main"] });
+  assert.deepEqual(document.on.push, { branches: ["main", "release"] });
 };
 const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
   assert.doesNotMatch(
@@ -1200,11 +1203,16 @@ test("shared Rust cache writes are main-only while trusted PRs receive read acce
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
 });
 
-test("entry workflow grants credentialed cross-ref caches to main and trusted stacked PRs", () => {
+test("entry workflow grants credentialed cross-ref caches to main, release and trusted stacked PRs", () => {
   const cases = [
     [
       "main push",
       { eventName: "push", ref: "refs/heads/main" },
+      { invocation: "trusted", idToken: "write", sccache: "writer", turbo: true },
+    ],
+    [
+      "release push",
+      { eventName: "push", ref: "refs/heads/release" },
       { invocation: "trusted", idToken: "write", sccache: "writer", turbo: true },
     ],
     [
@@ -1484,7 +1492,7 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
   assert.deepEqual(document.on.pull_request, {
     types: ["opened", "reopened", "synchronize", "labeled", "unlabeled"],
   });
-  assert.deepEqual(document.on.push.branches, ["main"]);
+  assert.deepEqual(document.on.push.branches, ["main", "release"]);
   assertRnNativeArtifactPushPaths(document.on.push.paths);
   assert.throws(
     () =>
@@ -1633,7 +1641,7 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
 test("realistic benchmark compilation has an explicit guarded trigger matrix", () => {
   const document = parse(realisticWorkflow);
   assert.deepEqual(document.on.pull_request, {
-    branches: ["main"],
+    branches: ["main", "release"],
     types: ["opened", "reopened", "synchronize", "labeled"],
   });
   assert.deepEqual(document.on.push, { branches: ["main"] });
