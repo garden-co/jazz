@@ -1234,6 +1234,10 @@ fn validate_predicate(
         }
         Predicate::In(left, values) => {
             let left_type = operand_type(table, left, params)?;
+            if values.is_empty() {
+                *predicate = Predicate::Any(Vec::new());
+                return Ok(());
+            }
             for value in values {
                 let mut value_type = operand_type(table, value, params)?;
                 if let (Some(left_type), Some(candidate_type)) = (&left_type, &value_type)
