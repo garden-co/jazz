@@ -19,7 +19,7 @@ async function runWrapper(
     stdout: string;
     stderr: string;
   }>();
-  const child = spawn(process.execPath, [wrapper, ...args], {
+  const child = spawn(process.execPath, ["--no-warnings", wrapper, ...args], {
     cwd: options.cwd,
     env: options.env ?? process.env,
     stdio: ["ignore", "pipe", "pipe"],

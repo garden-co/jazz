@@ -3480,7 +3480,7 @@ function runBin(
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, [binPath, ...args], {
+  return spawnSync(process.execPath, ["--no-warnings", binPath, ...args], {
     encoding: "utf8",
     cwd: options.cwd,
     env: options.env ?? process.env,
@@ -3496,7 +3496,7 @@ async function runCli(
     stdout: string;
     stderr: string;
   }>();
-  const child = spawn(process.execPath, [distCliPath, ...args], {
+  const child = spawn(process.execPath, ["--no-warnings", distCliPath, ...args], {
     cwd: options.cwd,
     env: options.env ?? process.env,
     stdio: ["ignore", "pipe", "pipe"],
