@@ -1918,3 +1918,212 @@ async fn live_index_registration_rejects_while_a_publication_is_resident() {
         [vec![Value::U64(7), Value::String("Blue Train".to_owned())]]
     );
 }
+
+// Internal storage corruption is necessary to reproduce old writer bugs and
+// pin the durable repair marker; assertions use normal indexed/primary reads.
+#[futures_test::test]
+async fn declared_index_generation_repairs_missing_and_stale_entries_once() {
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    for id in 0..1030 {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("title-{id}"))],
+        );
+    }
+    database.commit_batch(batch).await.unwrap();
+    let primary_before = storage.prefix("albums".into(), Vec::new()).await.unwrap();
+    let expected = storage
+        .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(expected.len(), 1030);
+    storage
+        .delete("indices".into(), expected[0].0.clone())
+        .await
+        .unwrap();
+    let stale_key = b"albums\0albums_by_title\0obsolete".to_vec();
+    storage
+        .set(
+            "indices".into(),
+            stale_key.clone(),
+            b"invalid obsolete value".to_vec(),
+        )
+        .await
+        .unwrap();
+    drop(database);
+    let mut database = Database::new(indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    database.ensure_declared_index_generation(1).await.unwrap();
+    assert_eq!(
+        storage
+            .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        storage.prefix("albums".into(), Vec::new()).await.unwrap(),
+        primary_before
+    );
+    assert_eq!(
+        database
+            .index_scan_raw("albums", "albums_by_title", &[])
+            .await
+            .unwrap()
+            .len(),
+        1030
+    );
+    // Byte fixture: one NUL followed by ASCII, then exactly BE u64.
+    assert_eq!(
+        storage
+            .get(
+                "indices".into(),
+                b"\x00groove-declared-index-generation".to_vec()
+            )
+            .await
+            .unwrap(),
+        Some(vec![0, 0, 0, 0, 0, 0, 0, 1])
+    );
+    // A completed generation does no repair work on reopen. Injecting a stale
+    // entry distinguishes that fast path from a silently repeated rebuild.
+    storage
+        .set("indices".into(), stale_key.clone(), b"sentinel".to_vec())
+        .await
+        .unwrap();
+    drop(database);
+    let mut database = Database::new(indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    database.ensure_declared_index_generation(1).await.unwrap();
+    assert_eq!(
+        storage
+            .get("indices".into(), stale_key.clone())
+            .await
+            .unwrap(),
+        Some(b"sentinel".to_vec())
+    );
+    database.ensure_declared_index_generation(2).await.unwrap();
+    assert_eq!(
+        storage.get("indices".into(), stale_key).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        storage.prefix("albums".into(), Vec::new()).await.unwrap(),
+        primary_before
+    );
+}
+
+// Storage failpoints/cancellation cannot be driven through a public query.
+#[futures_test::test]
+async fn declared_index_generation_retries_cancelled_and_failed_repair() {
+    for cancel in [false, true] {
+        let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+        let mut database = Database::new(indexed_albums_schema(), storage.clone())
+            .await
+            .unwrap();
+        let mut batch = database.open_batch();
+        batch.insert("albums", vec![Value::U64(7), Value::String("title".into())]);
+        database.commit_batch(batch).await.unwrap();
+        if cancel {
+            control.pause_on(TestStorageOperation::WriteMany);
+            control.release_one(); // Clear commits; suspend before replay.
+            let mut repair = Box::pin(database.ensure_declared_index_generation(1));
+            control.take_observed();
+            for _ in 0..100 {
+                assert!(futures::poll!(repair.as_mut()).is_pending());
+                if control
+                    .observed()
+                    .iter()
+                    .filter(|op| **op == TestStorageOperation::WriteMany)
+                    .count()
+                    == 2
+                {
+                    break;
+                }
+            }
+            assert_eq!(
+                control
+                    .observed()
+                    .iter()
+                    .filter(|op| **op == TestStorageOperation::WriteMany)
+                    .count(),
+                2
+            );
+            drop(repair);
+            control.resume();
+        } else {
+            control.fail_next(TestStorageOperation::FlushWriteBoundary);
+            assert!(database.ensure_declared_index_generation(1).await.is_err());
+        }
+        assert!(matches!(
+            database.ensure_usable(),
+            Err(Error::DatabasePoisoned)
+        ));
+        assert_eq!(
+            storage
+                .get(
+                    "indices".into(),
+                    b"\0groove-declared-index-generation".to_vec()
+                )
+                .await
+                .unwrap(),
+            None
+        );
+        drop(database);
+        let mut database = Database::new(indexed_albums_schema(), storage.clone())
+            .await
+            .unwrap();
+        database.ensure_declared_index_generation(1).await.unwrap();
+        assert_eq!(
+            database
+                .index_scan_raw("albums", "albums_by_title", &[])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            database
+                .primary_key_scan_raw("albums", &[])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+// Pin malformed/future durable marker handling before destructive repair.
+#[futures_test::test]
+async fn declared_index_generation_rejects_unknown_marker_without_writing() {
+    for bytes in [vec![], vec![1], 2u64.to_be_bytes().to_vec()] {
+        let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+        storage
+            .set(
+                "indices".into(),
+                b"\0groove-declared-index-generation".to_vec(),
+                bytes,
+            )
+            .await
+            .unwrap();
+        let mut database = Database::new(indexed_albums_schema(), storage)
+            .await
+            .unwrap();
+        control.take_observed();
+        assert!(matches!(
+            database.ensure_declared_index_generation(1).await,
+            Err(Error::InvalidPersistedIndex(_))
+        ));
+        assert!(
+            control
+                .take_observed()
+                .iter()
+                .all(|op| *op == TestStorageOperation::Get)
+        );
+    }
+}

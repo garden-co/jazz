@@ -121,6 +121,57 @@ pub(super) fn validate_table_schema_variants(table: &TableSchema) -> Result<(), 
 }
 
 impl Database {
+    /// Repair schema-declared derived indexes once for a caller-owned generation.
+    /// Call during startup, after all stored table variants are registered and
+    /// before index-dependent recovery or serving queries. A failed repair
+    /// poisons this instance; reopening retries from the primary records.
+    #[doc(hidden)]
+    pub async fn ensure_declared_index_generation(&mut self, generation: u64) -> Result<(), Error> {
+        const KEY: &[u8] = b"\0groove-declared-index-generation";
+        self.ensure_not_poisoned()?;
+        if !self.resident_publications.is_empty()
+            || !self.ivm_runtime.declared_index_repair_is_idle()
+        {
+            return Err(Error::InvalidPersistedIndex(
+                "index repair requires an idle startup runtime".into(),
+            ));
+        }
+        if let Some(bytes) = self.storage.get("indices".into(), KEY.to_vec()).await? {
+            let bytes: [u8; 8] = bytes.try_into().map_err(|_| {
+                Error::InvalidPersistedIndex(
+                    "malformed declared-index generation (expected BE u64)".into(),
+                )
+            })?;
+            let stored = u64::from_be_bytes(bytes);
+            if stored > generation {
+                return Err(Error::InvalidPersistedIndex(format!(
+                    "declared-index generation {stored} is newer than supported {generation}"
+                )));
+            }
+            if stored == generation {
+                return Ok(());
+            }
+        }
+        // Poison before the first destructive write: cancellation, as well as
+        // any storage/decode error, requires reopening instead of using a
+        // partially rebuilt instance.
+        self.poisoned = true;
+        self.ivm_runtime
+            .rebuild_declared_indexes(&self.storage)
+            .await?;
+        self.storage.flush_write_boundary().await?;
+        self.storage
+            .set(
+                "indices".into(),
+                KEY.to_vec(),
+                generation.to_be_bytes().to_vec(),
+            )
+            .await?;
+        self.storage.flush_write_boundary().await?;
+        self.poisoned = false;
+        Ok(())
+    }
+
     /// Capture the complete process-local registry state before a compound
     /// schema activation.  Call [`Self::restore_runtime_registry`] if the
     /// enclosing activation fails before its durable commit point.
