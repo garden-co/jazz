@@ -1329,6 +1329,102 @@ fn cancelled_started_persistence_wakes_queued_publication_with_order_failure() {
 }
 
 #[test]
+fn abandoning_predecessor_wakes_and_fails_queued_successors() {
+    struct RecordingWake(AtomicUsize);
+
+    impl ArcWake for RecordingWake {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+
+    let mut predecessor = database.open_batch();
+    predecessor.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    let predecessor = block_on(database.apply_batch(predecessor)).unwrap();
+
+    let mut successor_b = database.open_batch();
+    successor_b.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Blue Train".into())],
+    );
+    let successor_b = block_on(database.apply_batch(successor_b)).unwrap();
+
+    let mut successor_c = database.open_batch();
+    successor_c.insert(
+        "albums",
+        vec![Value::U64(3), Value::String("Giant Steps".into())],
+    );
+    let successor_c = block_on(database.apply_batch(successor_c)).unwrap();
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::WriteMany);
+
+    let b_wakes = Arc::new(RecordingWake(AtomicUsize::new(0)));
+    let b_waker = waker(Arc::clone(&b_wakes));
+    let mut b_context = Context::from_waker(&b_waker);
+    let mut b_persistence = Box::pin(successor_b.persist());
+    assert!(matches!(
+        Pin::new(&mut b_persistence).poll(&mut b_context),
+        Poll::Pending
+    ));
+
+    let c_wakes = Arc::new(RecordingWake(AtomicUsize::new(0)));
+    let c_waker = waker(Arc::clone(&c_wakes));
+    let mut c_context = Context::from_waker(&c_waker);
+    let mut c_persistence = Box::pin(successor_c.persist());
+    assert!(matches!(
+        Pin::new(&mut c_persistence).poll(&mut c_context),
+        Poll::Pending
+    ));
+    assert_eq!(b_wakes.0.load(Ordering::Acquire), 0);
+    assert_eq!(c_wakes.0.load(Ordering::Acquire), 0);
+    assert!(
+        !control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany),
+        "successors must not submit storage writes while predecessor is pending"
+    );
+
+    drop(predecessor);
+
+    assert!(b_wakes.0.load(Ordering::Acquire) > 0);
+    assert!(c_wakes.0.load(Ordering::Acquire) > 0);
+
+    let Poll::Ready(b_result) = Pin::new(&mut b_persistence).poll(&mut b_context) else {
+        panic!("woken successor B remained pending behind abandoned predecessor");
+    };
+    let Poll::Ready(c_result) = Pin::new(&mut c_persistence).poll(&mut c_context) else {
+        panic!("woken successor C remained pending behind abandoned predecessor");
+    };
+
+    assert!(matches!(
+        database.finish_persistence(b_result),
+        Err(DatabaseError::Storage(_))
+    ));
+    assert!(matches!(
+        database.finish_persistence(c_result),
+        Err(DatabaseError::Storage(_))
+    ));
+    assert_eq!(database.durable_publication_frontier(), None);
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(DatabaseError::DatabasePoisoned)
+    ));
+    assert!(
+        !control
+            .observed()
+            .contains(&TestStorageOperation::WriteMany),
+        "abandoning a predecessor must not submit a successor write"
+    );
+}
+
+#[test]
 fn possibly_committed_receipt_poisoned_database_before_settlement() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
