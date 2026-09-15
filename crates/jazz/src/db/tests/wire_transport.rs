@@ -1216,7 +1216,10 @@ fn wire_transport_adapter_lz4_compresses_payload_when_negotiated() {
 
 #[cfg(feature = "transport-compression-lz4")]
 #[test]
-fn lz4_fragmentation_rejects_compressed_payload_over_logical_limit_before_emitting() {
+fn lz4_fragmentation_round_trips_incompressible_payload_over_logical_limit() {
+    // Keep an independent wasm32-safe mirror of the encoded-cap formula.
+    const EXPECTED_MAX_ENCODED_MESSAGE_BYTES: usize =
+        MAX_LOGICAL_MESSAGE_BYTES + MAX_LOGICAL_MESSAGE_BYTES / 10 + 24;
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     let mut bytes = vec![0_u8; MAX_LOGICAL_MESSAGE_BYTES - 32 * 1024];
     for byte in &mut bytes {
@@ -1230,67 +1233,86 @@ fn lz4_fragmentation_rejects_compressed_payload_over_logical_limit_before_emitti
         claims: BTreeMap::from([("entropy".to_owned(), Value::Bytes(bytes))]),
     };
     let logical = encode_sync_message(&message).expect("deterministic message encodes");
+    let logical_len = logical.len();
     let (compressed, active_feature) =
-        crate::wire::compress_sync_payload(logical.clone(), crate::wire::FEATURE_PAYLOAD_LZ4)
+        crate::wire::compress_sync_payload(logical, crate::wire::FEATURE_PAYLOAD_LZ4)
             .expect("lz4 compresses");
     assert_eq!(active_feature, crate::wire::FEATURE_PAYLOAD_LZ4);
     assert!(
-        logical.len() <= MAX_LOGICAL_MESSAGE_BYTES,
+        logical_len <= MAX_LOGICAL_MESSAGE_BYTES,
         "pre-compression D={} must fit the existing logical cap",
-        logical.len()
+        logical_len
     );
     assert!(
         compressed.len() > MAX_LOGICAL_MESSAGE_BYTES,
-        "compressed E={} must exceed the existing logical cap",
+        "compressed E={} must exceed the old logical cap",
         compressed.len()
+    );
+    assert!(
+        compressed.len() <= EXPECTED_MAX_ENCODED_MESSAGE_BYTES,
+        "compressed E={} must fit the encoded cap {}",
+        compressed.len(),
+        EXPECTED_MAX_ENCODED_MESSAGE_BYTES
     );
 
     let features = FEATURE_SYNC_MESSAGE_PAYLOAD
         | crate::wire::FEATURE_PAYLOAD_LZ4
         | FEATURE_MESSAGE_FRAGMENTATION;
     let (left, right) = byte_duplex_raw();
-    let staged = Rc::clone(&right.inbound);
     let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
-    let error = sender
-        .send(message)
-        .expect_err("sender must reject E after compressing, before emitting fragments");
-    assert!(matches!(error, TransportError::Failed(_)));
-    assert!(
-        staged.borrow().is_empty(),
-        "an over-limit compressed message must not emit physical frames"
-    );
+    let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
 
+    sender
+        .send(message.clone())
+        .expect("encoded payload within the encoded cap is admitted");
+    assert_eq!(receiver.try_recv(), Some(message));
+    assert!(receiver.try_recv().is_none());
+}
+
+#[cfg(feature = "transport-compression-lz4")]
+#[test]
+fn lz4_fragmentation_rejects_encoded_payload_over_encoded_cap_before_admitting() {
+    const EXPECTED_MAX_ENCODED_MESSAGE_BYTES: usize =
+        MAX_LOGICAL_MESSAGE_BYTES + MAX_LOGICAL_MESSAGE_BYTES / 10 + 24;
+    // Reassembly is the private pre-allocation resource seam: use a one-byte
+    // synthetic extent so this rejection proves no over-cap payload is staged
+    // without allocating a payload near the encoded cap.
     let mut reassembler = LogicalMessageReassembler::default();
-    let receiver_error = reassembler
+    let error = reassembler
         .push(
             WireMessageFragment {
                 protocol_version: WIRE_PROTOCOL_VERSION,
-                features,
+                features: FEATURE_SYNC_MESSAGE_PAYLOAD
+                    | crate::wire::FEATURE_PAYLOAD_LZ4
+                    | FEATURE_MESSAGE_FRAGMENTATION,
                 session: None,
                 message_id: 91,
-                message_digest: *blake3::hash(&compressed).as_bytes(),
-                total_len: compressed.len() as u64,
+                message_digest: [9; 32],
+                total_len: (EXPECTED_MAX_ENCODED_MESSAGE_BYTES + 1) as u64,
                 offset: 0,
-                payload: vec![compressed[0]],
+                payload: vec![9],
             },
             0,
         )
-        .expect_err("receiver must reject over-limit E before retaining fragment state");
-    assert!(receiver_error.contains("logical message payload"));
+        .expect_err("encoded payload over the encoded cap must be rejected");
+    assert!(error.contains("encoded message payload"));
     assert!(reassembler.incomplete.is_empty());
+    assert_eq!(reassembler.staged_bytes, 0);
+}
 
+#[cfg(feature = "transport-compression-lz4")]
+#[test]
+fn lz4_decoder_rejects_decompressed_payload_over_logical_limit() {
     let mut decoder =
         WireStreamDecoder::new(crate::wire::FEATURE_PAYLOAD_LZ4).expect("lz4 decoder");
     let mut decompression_bomb = (MAX_LOGICAL_MESSAGE_BYTES as u32 + 1)
         .to_le_bytes()
         .to_vec();
     decompression_bomb.push(0);
-    assert!(
-        decoder
-            .decode_message(&decompression_bomb, crate::wire::FEATURE_PAYLOAD_LZ4)
-            .is_err(),
-        "receiver must retain the decompressed-output bound"
-    );
+    let error = decoder
+        .decode_message(&decompression_bomb, crate::wire::FEATURE_PAYLOAD_LZ4)
+        .expect_err("receiver must retain the decompressed-output bound");
+    assert!(error.contains("exceeds max"));
 }
 
 #[cfg(feature = "transport-compression-zstd")]
