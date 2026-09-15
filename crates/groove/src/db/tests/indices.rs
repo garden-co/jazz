@@ -2172,3 +2172,105 @@ async fn declared_index_generation_rejects_duplicate_unique_owners_across_batche
         before
     );
 }
+
+// The final marker durability boundary is inaccessible via public queries.
+#[futures_test::test]
+async fn declared_index_generation_final_marker_flush_failure_and_cancel() {
+    for cancel in [false, true] {
+        let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+        let mut database = Database::new(indexed_albums_schema(), storage.clone())
+            .await
+            .unwrap();
+        let mut batch = database.open_batch();
+        batch.insert("albums", vec![Value::U64(7), Value::String("title".into())]);
+        database.commit_batch(batch).await.unwrap();
+        let expected = storage
+            .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+            .await
+            .unwrap();
+        control.take_observed();
+        control.pause_on(TestStorageOperation::FlushWriteBoundary);
+        control.release_one();
+        let mut repair = Box::pin(database.ensure_declared_index_generation(1));
+        for _ in 0..100 {
+            assert!(futures::poll!(repair.as_mut()).is_pending());
+            if control
+                .observed()
+                .iter()
+                .filter(|op| **op == TestStorageOperation::FlushWriteBoundary)
+                .count()
+                == 2
+            {
+                break;
+            }
+        }
+        let observed = control.observed();
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|op| **op == TestStorageOperation::FlushWriteBoundary)
+                .count(),
+            2
+        );
+        let marker_write = observed
+            .iter()
+            .position(|op| *op == TestStorageOperation::Set)
+            .unwrap();
+        let first_flush = observed
+            .iter()
+            .position(|op| *op == TestStorageOperation::FlushWriteBoundary)
+            .unwrap();
+        assert!(first_flush < marker_write);
+        if cancel {
+            drop(repair);
+        } else {
+            control.fail_next(TestStorageOperation::FlushWriteBoundary);
+            control.resume();
+            assert!(repair.await.is_err());
+        }
+        control.resume();
+        assert!(matches!(
+            database.ensure_usable(),
+            Err(Error::DatabasePoisoned)
+        ));
+        assert_eq!(
+            storage
+                .get(
+                    "indices".into(),
+                    b"\0groove-declared-index-generation".to_vec()
+                )
+                .await
+                .unwrap(),
+            Some(1u64.to_be_bytes().to_vec())
+        );
+        assert_eq!(
+            storage
+                .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+                .await
+                .unwrap(),
+            expected
+        );
+        drop(database);
+        let mut reopened = Database::new(indexed_albums_schema(), storage.clone())
+            .await
+            .unwrap();
+        control.take_observed();
+        let reads_before = control.point_read_count();
+        reopened.ensure_declared_index_generation(1).await.unwrap();
+        assert_eq!(control.point_read_count(), reads_before + 1);
+        assert!(
+            control
+                .take_observed()
+                .iter()
+                .all(|op| *op == TestStorageOperation::Get)
+        );
+        assert_eq!(
+            reopened
+                .index_scan_raw("albums", "albums_by_title", &[])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
