@@ -1138,7 +1138,6 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 ///   result:          [Bob Org]
 /// ```
 #[tokio::test]
-#[ignore = "#1761: policy-filtered nested join queries hang for more than 60 seconds"]
 async fn select_policy_excludes_rows_from_join_results() {
     tokio::task::LocalSet::new()
         .run_until(select_policy_excludes_rows_from_join_results_inner())
@@ -1233,7 +1232,6 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
 /// bob claims:   [team_b] ──query──► [team_b row]
 /// ```
 #[tokio::test]
-#[ignore = "#1760: IN session-claim array visibility queries hang for more than 60 seconds"]
 async fn in_session_array_policy_gates_visibility_by_membership() {
     tokio::task::LocalSet::new()
         .run_until(in_session_array_policy_gates_visibility_by_membership_inner())
@@ -2166,5 +2164,153 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
 
     alice.shutdown().await.expect("shutdown alice");
     observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}
+
+/// Removing a nested membership removes the joined organization from that
+/// user's subscription; another user's hidden membership cannot keep it alive.
+#[tokio::test]
+async fn nested_join_subscription_tracks_membership_changes() {
+    tokio::task::LocalSet::new()
+        .run_until(nested_join_subscription_tracks_membership_changes_inner())
+        .await;
+}
+
+async fn nested_join_subscription_tracks_membership_changes_inner() {
+    let schema = join_select_policy_schema();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("admin")
+        .as_admin()
+        .ready_on("team_memberships", READY_TIMEOUT)
+        .connect()
+        .await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id(super::ALICE_ID)
+        .as_user()
+        .ready_on("team_memberships", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id(super::BOB_ID)
+        .as_user()
+        .ready_on("team_memberships", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let alice_org = create_org(&admin, "Alice Org").await;
+    let bob_org = create_org(&admin, "Bob Org").await;
+    let alice_team = create_team(&admin, "Alice Team", alice_org).await;
+    let bob_team = create_team(&admin, "Bob Team", bob_org).await;
+    let alice_membership = create_team_membership(&admin, super::ALICE_ID, alice_team).await;
+    let _bob_membership = create_team_membership(&admin, super::BOB_ID, bob_team).await;
+
+    let membership_join = Query::from("teams")
+        .join_via("team_memberships", "team_id", [])
+        .joins
+        .into_iter()
+        .next()
+        .expect("membership join");
+    let query =
+        Query::from("orgs").join_via_with_nested_joins("teams", "org_id", [], [membership_join]);
+
+    let mut alice_stream = alice
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe alice");
+    let mut bob_stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
+    let mut alice_log = Vec::new();
+    let mut bob_log = Vec::new();
+    wait_for_subscription_update(
+        &mut alice_stream,
+        &mut alice_log,
+        QUERY_TIMEOUT,
+        "alice sees her organization",
+        |log| has_added_id(log, alice_org),
+    )
+    .await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "bob sees his organization",
+        |log| has_added_id(log, bob_org),
+    )
+    .await;
+    assert!(!has_any_change(&alice_log, bob_org));
+    assert!(!has_any_change(&bob_log, alice_org));
+    alice_log.clear();
+    bob_log.clear();
+
+    // Bob also belongs to Alice's team. His membership remains hidden from
+    // Alice and must not preserve her organization after her own row is deleted.
+    create_team_membership(&bob, super::BOB_ID, alice_team).await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "bob sees the shared organization through his own membership",
+        |log| has_added_id(log, alice_org),
+    )
+    .await;
+    bob_log.clear();
+    admin
+        .delete(alice_membership)
+        .expect("delete alice membership");
+    wait_for_subscription_update(
+        &mut alice_stream,
+        &mut alice_log,
+        QUERY_TIMEOUT,
+        "alice loses organization despite bob's hidden membership",
+        |log| has_removed(log, alice_org),
+    )
+    .await;
+    let rows = wait_for_query(
+        &alice,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "alice has no organization after removing membership",
+        |rows| rows.is_empty().then_some(rows),
+    )
+    .await;
+    assert!(rows.is_empty());
+    alice_log.clear();
+
+    create_team_membership(&admin, super::ALICE_ID, alice_team).await;
+    wait_for_subscription_update(
+        &mut alice_stream,
+        &mut alice_log,
+        QUERY_TIMEOUT,
+        "alice regains organization with a new membership",
+        |log| has_added_id(log, alice_org),
+    )
+    .await;
+    collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
+    assert!(
+        !has_removed(&bob_log, alice_org),
+        "alice's membership changes must not revoke bob's access"
+    );
+    let rows = wait_for_rows(&bob, query, "bob retains both organizations", |rows| {
+        (rows.len() == 2
+            && rows.iter().any(|(id, _)| *id == alice_org)
+            && rows.iter().any(|(id, _)| *id == bob_org))
+        .then_some(rows)
+    })
+    .await;
+    assert_eq!(rows.len(), 2);
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }

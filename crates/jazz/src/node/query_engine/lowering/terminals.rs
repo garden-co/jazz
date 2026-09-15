@@ -391,10 +391,25 @@ pub(super) fn lowered_terminals(
                 &contribution_route_fields,
             )?
         } else {
+            let (visible_parent, parent_source) = match &contribution.parent {
+                Some(parent) => (
+                    covered_source_members.get(parent).cloned().ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Runtime(
+                            "nested join contribution requires its admitted parent".to_owned(),
+                        ))
+                    })?,
+                    resolved_sources.get(parent).ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Runtime(
+                            "nested join parent source was not resolved".to_owned(),
+                        ))
+                    })?,
+                ),
+                None => (closure.visible_root.clone(), source),
+            };
             join_contribution_membership_graph(
-                closure.visible_root.clone(),
+                visible_parent,
                 contribution,
-                source,
+                parent_source,
                 resolved_source,
                 &request.input.shape.nodes,
                 resolved_sources,
@@ -818,16 +833,14 @@ pub(super) fn lowered_terminals(
                         request,
                         claim_route_fields.clone(),
                     )?;
-                    let contribution_graph = join_contribution_membership_graph(
-                        closure.visible_root.clone(),
-                        contribution,
-                        source,
-                        resolved_source,
-                        &request.input.shape.nodes,
-                        resolved_sources,
-                        request,
-                        &claim_route_fields,
-                    )?;
+                    let contribution_graph = covered_source_members
+                        .get(&contribution.source)
+                        .cloned()
+                        .ok_or_else(|| {
+                            single_gap_report(UnsupportedReason::Runtime(
+                                "join contribution has no admitted source rows".to_owned(),
+                            ))
+                        })?;
                     let graph = fact_terminal_graph(
                         fact,
                         contribution_graph,
