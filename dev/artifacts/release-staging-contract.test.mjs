@@ -642,7 +642,7 @@ test("release publishing rebuilds when workflow changes invalidate preview artif
 
   assert.match(
     workflow,
-    /if \(!treeReuseSafe\) \{\s+reason = `main tree \$\{currentTree\} differs from release PR head tree \$\{previewTree\}`;/,
+    /if \(!treeReuseSafe\) \{\s+reason = `release tree \$\{currentTree\} differs from release PR head tree \$\{previewTree\}`;/,
   );
   assert.doesNotMatch(workflow, /workflow-only drift|nonWorkflowFiles/);
 });
