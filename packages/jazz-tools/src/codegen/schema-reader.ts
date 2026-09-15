@@ -25,6 +25,7 @@ import type {
 } from "../drivers/types.js";
 import { analyzeRelations } from "./relation-analyzer.js";
 import { toValue } from "../runtime/value-converter.js";
+import { assertSchemaNameAllowed } from "../schema-name.js";
 
 const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
@@ -260,6 +261,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   const tables: Record<string, TableSchema> = {};
 
   for (const table of schema.tables) {
+    assertSchemaNameAllowed(table.name);
     const columns: ColumnDescriptor[] = table.columns.map((col) => {
       const columnType = sqlTypeToWasm(col.sqlType);
       if (

@@ -19,6 +19,7 @@ import {
   type NoExplicitIdColumn,
   assertUserTableColumnNameAllowed,
 } from "./magic-columns.js";
+import { assertSchemaNameAllowed } from "./schema-name.js";
 import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
@@ -1606,6 +1607,7 @@ function columnTransformsForSchema(definition: SchemaDefinition): ColumnTransfor
 function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchema): SchemaAst {
   return {
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
+      assertSchemaNameAllowed(tableName);
       const indexedColumns = tableIndexedColumns(tableDefinition);
       const branchColumns = tableBranchColumns(tableDefinition);
       return {
@@ -1621,8 +1623,9 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
 export function defineSchema<const TSchema extends SchemaDefinition>(
   definition: TSchema & ValidateSchemaRefs<TSchema> & ValidateSchemaColumnNames<TSchema>,
 ): Schema<TSchema> {
-  for (const table of Object.values(definition)) {
-    for (const column of Object.keys(unwrapTableDefinition(table))) {
+  for (const [tableName, tableDefinition] of Object.entries(definition)) {
+    assertSchemaNameAllowed(tableName);
+    for (const column of Object.keys(unwrapTableDefinition(tableDefinition))) {
       assertUserTableColumnNameAllowed(column);
     }
   }
@@ -1696,6 +1699,7 @@ export function defineSliceableApp(
       }
 
       for (const tableName of tableNames) {
+        assertSchemaNameAllowed(tableName);
         if (!(tableName in normalizedDefinition)) {
           throw new Error(`slice(...) references unknown table "${tableName}".`);
         }
@@ -1729,6 +1733,7 @@ function createAppForTables(
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
   for (const tableName of tableNames) {
+    assertSchemaNameAllowed(tableName);
     tables[tableName] = new TypedTableQueryBuilder(
       tableName,
       wasmSchema,
