@@ -20,9 +20,9 @@ pub const MAX_WIRE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 ///
 /// Carrier encoders split above this count. It is deliberately the same as
 /// the maximum atomic commit-unit cardinality; meanwhile the 512 KiB
-/// fragmentation extent means even a maximum legal 256 MiB logical message
-/// needs only 512 physical frames. This keeps a tiny-frame flood from being
-/// retained or staged beyond a bounded cardinality at the WebSocket boundary.
+/// fragmentation extent means a maximum legal encoded message needs at most
+/// 564 physical frames. This keeps a tiny-frame flood from being retained or
+/// staged beyond a bounded cardinality at the WebSocket boundary.
 pub const MAX_WIRE_BATCH_FRAMES: usize = MAX_COMMIT_UNIT_VERSIONS;
 
 /// Resource ceiling for one decoded logical message, independent of framing.
@@ -30,8 +30,20 @@ pub const MAX_WIRE_BATCH_FRAMES: usize = MAX_COMMIT_UNIT_VERSIONS;
 /// This prevents allocation bombs while allowing normal database payloads to
 /// span many physical frames. Deployments may make it configurable later.
 pub const MAX_LOGICAL_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
-/// Per-peer aggregate memory budget for incomplete logical messages.
-pub const MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
+
+/// Resource ceiling for one encoded logical-message payload.
+///
+/// The installed LZ4 encoder's worst-case bound is `floor(1.1 * D) + 20`
+/// bytes, and `compress_prepend_size` adds its four-byte decoded-size prefix.
+/// The installed zstd encoder's `ZSTD_compressBound(D)` also fits this
+/// ceiling. The additive/division form avoids an intermediate multiplication
+/// overflow on wasm32.
+pub const MAX_ENCODED_MESSAGE_BYTES: usize =
+    MAX_LOGICAL_MESSAGE_BYTES + MAX_LOGICAL_MESSAGE_BYTES / 10 + 24;
+
+/// Per-peer aggregate memory budget for incomplete encoded logical messages.
+pub const MAX_INFLIGHT_ENCODED_MESSAGE_BYTES: usize = MAX_ENCODED_MESSAGE_BYTES;
+
 /// Per-peer fairness bound for concurrently incomplete logical messages.
 pub const MAX_INFLIGHT_LOGICAL_MESSAGES: usize = 4;
 /// Maximum inactivity after the last novel fragment before reassembly expires.
@@ -139,9 +151,15 @@ pub fn validate_wire_frame_len(len: usize) -> Result<(), String> {
     validate_len("wire frame", len, MAX_WIRE_FRAME_BYTES)
 }
 
-/// Validate raw encoded sync payload bytes before decoding the semantic message.
+/// Validate logical (uncompressed or decompressed) sync payload bytes before
+/// semantic decoding.
 pub fn validate_logical_message_len(len: usize) -> Result<(), String> {
     validate_len("logical message payload", len, MAX_LOGICAL_MESSAGE_BYTES)
+}
+
+/// Validate encoded logical sync payload bytes before reassembly or decoding.
+pub fn validate_encoded_message_len(len: usize) -> Result<(), String> {
+    validate_len("encoded message payload", len, MAX_ENCODED_MESSAGE_BYTES)
 }
 
 /// Validate the shape AST independently of its registration options.

@@ -11,8 +11,8 @@ use super::{ConnectionSessionContext, Transport};
 use crate::protocol::SyncMessage;
 use crate::protocol_limits::{
     MAX_FRAGMENT_REASSEMBLY_AGE_MS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
-    MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
-    validate_logical_message_len, validate_wire_frame_len,
+    MAX_INFLIGHT_ENCODED_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
+    validate_encoded_message_len, validate_logical_message_len, validate_wire_frame_len,
 };
 use crate::wire::{
     FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError,
@@ -51,7 +51,7 @@ impl Default for LogicalMessageReassembler {
             incomplete: HashMap::new(),
             staged_bytes: 0,
             deadlines: BTreeSet::new(),
-            staging_budget: MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES,
+            staging_budget: MAX_INFLIGHT_ENCODED_MESSAGE_BYTES,
             recently_completed: VecDeque::new(),
         }
     }
@@ -111,13 +111,13 @@ impl LogicalMessageReassembler {
             };
         }
         let total_len = usize::try_from(fragment.total_len)
-            .map_err(|_| "logical message length does not fit this receiver".to_owned())?;
-        validate_logical_message_len(total_len)?;
+            .map_err(|_| "encoded message length does not fit this receiver".to_owned())?;
+        validate_encoded_message_len(total_len)?;
         let offset = usize::try_from(fragment.offset)
-            .map_err(|_| "logical message fragment offset does not fit this receiver".to_owned())?;
+            .map_err(|_| "encoded message fragment offset does not fit this receiver".to_owned())?;
         let end = offset
             .checked_add(fragment.payload.len())
-            .ok_or_else(|| "logical message fragment range overflow".to_owned())?;
+            .ok_or_else(|| "encoded message fragment range overflow".to_owned())?;
         if fragment.payload.is_empty() || end > total_len {
             return Err("logical message fragment has an empty or out-of-range extent".to_owned());
         }
@@ -469,6 +469,9 @@ where
             Ok(payload) => payload,
             Err(message) => return Err(TransportError::Failed(message)),
         };
+        if let Err(message) = validate_encoded_message_len(payload.len()) {
+            return Err(TransportError::Failed(message));
+        }
         let active_features = (negotiated_features
             & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD))
             | self.outbound_stream.active_feature();
@@ -508,7 +511,7 @@ where
                     .enumerate()
                 {
                     let offset = u64::try_from(index * WIRE_FRAGMENT_PAYLOAD_BYTES)
-                        .expect("fragment offset is bounded by logical message size");
+                        .expect("fragment offset is bounded by encoded message size");
                     let fragment = WireMessageFragment {
                         protocol_version: envelope.protocol_version,
                         features: envelope.features,
