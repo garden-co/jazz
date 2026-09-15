@@ -9,13 +9,7 @@ use super::support::{
 };
 use super::{pe, permissions};
 use jazz::tools::PolicyExpr;
-use jazz::tools::TableName;
-use jazz::tools::public_schema::{
-    RelColumnRef as ColumnRef, RelExpr, RelJoinCondition as JoinCondition, RelJoinKind as JoinKind,
-    RelPredicateCmpOp as PredicateCmpOp, RelPredicateExpr as PredicateExpr,
-    RelProjectColumn as ProjectColumn, RelProjectExpr as ProjectExpr, RelValueRef as ValueRef,
-    RowIdRef,
-};
+use jazz::tools::public_schema::RelPredicateExpr as PredicateExpr;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
     TableSchema, TableSchemaBuilder, Value,
@@ -100,13 +94,6 @@ fn immutable_chat_metadata_update_check_policy() -> PolicyExpr {
     ])))
 }
 
-fn scoped_column(scope: &str, column: &str) -> ColumnRef {
-    ColumnRef {
-        scope: Some(scope.to_owned()),
-        column: column.to_owned(),
-    }
-}
-
 fn join_membership_select_policy(member_filter: PredicateExpr) -> PolicyExpr {
     pe::exists(
         pe::table("document_grants")
@@ -124,43 +111,24 @@ fn join_membership_select_policy(member_filter: PredicateExpr) -> PolicyExpr {
 }
 
 fn hop_membership_select_policy() -> PolicyExpr {
-    PolicyExpr::ExistsRel {
-        rel: RelExpr::Project {
-            input: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::Join {
-                    left: Box::new(RelExpr::Filter {
-                        input: Box::new(RelExpr::TableScan {
-                            table: TableName::new("group_memberships"),
-                            alias: None,
-                        }),
-                        predicate: PredicateExpr::Cmp {
-                            left: scoped_column("group_memberships", "user_id"),
-                            op: PredicateCmpOp::Eq,
-                            right: ValueRef::SessionRef(vec!["user".to_owned()]),
-                        },
-                    }),
-                    right: Box::new(RelExpr::TableScan {
-                        table: TableName::new("document_grants"),
-                        alias: Some("__hop_0".to_owned()),
-                    }),
-                    on: vec![JoinCondition {
-                        left: scoped_column("group_memberships", "group_slug"),
-                        right: scoped_column("__hop_0", "group_slug"),
-                    }],
-                    join_kind: JoinKind::Inner,
-                }),
-                predicate: PredicateExpr::Cmp {
-                    left: scoped_column("__hop_0", "document_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::RowId(RowIdRef::Outer),
-                },
-            }),
-            columns: vec![ProjectColumn {
-                alias: "document_id".to_string(),
-                expr: ProjectExpr::Column(scoped_column("__hop_0", "document_id")),
-            }],
-        },
-    }
+    pe::exists(
+        pe::table("group_memberships")
+            .alias("memberships")
+            .where_(pe::rel::eq_session(
+                pe::rel::column("memberships", "user_id"),
+                "claims.sub",
+            ))
+            .join(
+                pe::table("document_grants").alias("grants"),
+                pe::rel::column("memberships", "group_slug"),
+                pe::rel::column("grants", "group_slug"),
+            )
+            .where_(pe::rel::eq_outer(
+                pe::rel::column("grants", "document_id"),
+                "id",
+            ))
+            .select([("document_id", pe::rel::column("grants", "document_id"))]),
+    )
 }
 
 fn mixed_complex_select_policy() -> PolicyExpr {
@@ -738,7 +706,6 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
 /// dave ──hop via sales─────────► query sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "#1761: read-side ExistsRel hop grants never become visible in integration"]
 async fn exists_rel_hop_grants_and_denies_correctly() {
     tokio::task::LocalSet::new()
         .run_until(exists_rel_hop_grants_and_denies_correctly_inner())
@@ -758,6 +725,8 @@ async fn exists_rel_hop_grants_and_denies_correctly_inner() {
         connect_ready_user(&server, &schema, super::DAVE_ID, "documents", READY_TIMEOUT).await;
 
     let doc_id = create_title_document(&admin, "Hop Visible").await;
+    // A membership in the granted group must not expose unrelated documents.
+    create_title_document(&admin, "No Grant").await;
     create_group_membership(&admin, super::BOB_ID, "eng").await;
     create_group_membership(&admin, super::DAVE_ID, "sales").await;
     create_document_grant(&admin, doc_id, "eng").await;

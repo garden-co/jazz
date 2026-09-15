@@ -1680,6 +1680,82 @@ fn uncorrelated_exists_join(
     }
 }
 
+/// Orient an inner-join tree from the source correlated to the protected row.
+/// Reversing an equality edge preserves existence, provided each source keeps
+/// its filters and every off-path branch remains attached to that same source.
+fn root_exists_rel_at_correlation(
+    table: &TableName,
+    path: &str,
+    lowered: &mut LoweredRel,
+) -> Result<(), SchemaConversionError> {
+    // Gather uses a separate access/frontier lowering path.
+    if !lowered.reachable.is_empty() || lowered.pending_reachable.is_some() {
+        return Ok(());
+    }
+    while !lowered
+        .filters
+        .iter()
+        .any(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+    {
+        let Some(index) = lowered.joins.iter().position(join_has_outer_correlations) else {
+            break;
+        };
+        let mut next = lowered.joins.remove(index);
+        let source_column = next.source_column.take().ok_or_else(|| {
+            err(
+                format!("$.{}.{path}", table.as_str()),
+                "core schema ExistsRel nested join is missing its source column",
+            )
+        })?;
+        let previous_table = lowered.table.replace(next.table).ok_or_else(|| {
+            err(
+                format!("$.{}.{path}", table.as_str()),
+                "core schema ExistsRel correlation requires a row-producing relation",
+            )
+        })?;
+        let reverse = JoinVia {
+            table: previous_table,
+            target: if source_column == "id" {
+                JoinTarget::RowId
+            } else {
+                JoinTarget::Column
+            },
+            on_column: source_column,
+            source_column: Some(next.on_column),
+            source_lookup: None,
+            correlated_filters: Vec::new(),
+            filters: std::mem::take(&mut lowered.filters)
+                .into_iter()
+                .map(|filter| filter.predicate)
+                .collect(),
+            nested_joins: std::mem::take(&mut lowered.joins),
+        };
+        lowered.filters = next
+            .filters
+            .into_iter()
+            .map(|predicate| LoweredRelPredicate {
+                predicate,
+                column: None,
+                value: None,
+            })
+            .chain(
+                next.correlated_filters
+                    .into_iter()
+                    .map(|correlation| LoweredRelPredicate {
+                        predicate: Predicate::All(Vec::new()),
+                        column: Some(correlation.join_column),
+                        value: Some(LoweredRelValue::OuterRow(correlation.source_column)),
+                    }),
+            )
+            .collect();
+        next.nested_joins.push(reverse);
+        lowered.joins = next.nested_joins;
+        // Scope routing is complete; these paths described the old orientation.
+        lowered.scope_paths.clear();
+    }
+    Ok(())
+}
+
 fn append_exists_rel_policy_clause(
     table: &TableName,
     path: &str,
@@ -1687,6 +1763,7 @@ fn append_exists_rel_policy_clause(
     rel: &RelExpr,
 ) -> Result<Query, SchemaConversionError> {
     let mut lowered = lower_exists_rel(table, path, rel)?;
+    root_exists_rel_at_correlation(table, path, &mut lowered)?;
     let correlation_index = lowered
         .filters
         .iter()
@@ -1801,8 +1878,8 @@ fn append_exists_rel_policy_clause(
     })?;
 
     if !lowered.joins.is_empty() {
-        // The relation's left-most scan is the row correlated to the
-        // protected row. Its joins remain nested beneath that root; replacing
+        // The oriented root is the row correlated to the protected row.
+        // Its joins remain nested beneath that root; replacing
         // it with the first nested join loses the FK relation and produces a
         // `JoinNotRefCompatible` plan (for example task.block -> member.id).
         // Lift outer correlations on a nested join through its equality edge,

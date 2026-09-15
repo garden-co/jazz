@@ -2,7 +2,8 @@ use super::*;
 use crate::tools::object::ObjectId;
 use crate::tools::public_api::policy::{CmpOp, Operation, PolicyValue};
 use crate::tools::public_api::relation_ir::{
-    ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
+    ColumnRef, JoinCondition, JoinKind, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr,
+    RelExpr, ValueRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -669,6 +670,23 @@ pub mod policy_expr {
     }
 
     impl Relation {
+        /// Project named columns from this relation.
+        pub fn select(
+            self,
+            columns: impl IntoIterator<Item = (impl Into<String>, impl Into<ColumnRef>)>,
+        ) -> Self {
+            Self::new(RelExpr::Project {
+                input: Box::new(self.rel),
+                columns: columns
+                    .into_iter()
+                    .map(|(alias, column)| ProjectColumn {
+                        alias: alias.into(),
+                        expr: ProjectExpr::Column(column.into()),
+                    })
+                    .collect(),
+            })
+        }
+
         /// Join another relation on one column equality.
         pub fn join(
             self,
