@@ -93,11 +93,11 @@ fn scalar_enum_descriptor_decoders_reject_duplicate_variant_names() {
 
 #[test]
 fn scalar_enum_serde_ingress_rejects_duplicate_variant_names() {
-    let schema_json = r#"{
-        "name": "state",
-        "variants": ["Open", "Done", "Open"]
-    }"#;
-    let schema = serde_json::from_str::<ScalarEnumSchema>(schema_json);
+    let schema = ScalarEnumSchema::new("state", ["Open", "Done", "Closed"]).unwrap();
+    let schema_json = serde_json::to_string(&schema)
+        .unwrap()
+        .replacen("\"Closed\"", "\"Open\"", 1);
+    let schema = serde_json::from_str::<ScalarEnumSchema>(&schema_json);
     assert!(
         schema.is_err(),
         "serde scalar enum ingress must reject duplicate variant names"
