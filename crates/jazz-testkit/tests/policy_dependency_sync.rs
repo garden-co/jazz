@@ -507,7 +507,7 @@ async fn dependency_row_update_propagates_to_dependent_visibility_inner() {
     // Revoke: deleting the membership row breaks the grant chain, so the
     // dependent document must leave alice's subscription.
     let revoke_tx = admin
-        .delete(membership_id)
+        .delete("memberships", membership_id)
         .expect("admin revokes alice's membership");
     support::wait_for_edge_txs(
         &admin,

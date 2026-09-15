@@ -794,6 +794,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
                 .expect("alice inserts child");
             let update_tx = alice_session
                 .update(
+                    "children",
                     child_id,
                     vec![("title".to_string(), Value::Text("published".to_string()))],
                 )
@@ -908,6 +909,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                 .expect("alice inserts child");
             let update_tx = alice_session
                 .update(
+                    "children",
                     child_id,
                     vec![("title".to_string(), Value::Text("published".to_string()))],
                 )
@@ -1017,6 +1019,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 .expect("alice inserts child");
             let update_tx = alice_session
                 .update(
+                    "children",
                     child_id,
                     vec![
                         ("parent_id".to_string(), Value::Uuid(parent_b)),

@@ -197,6 +197,7 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads_inner() {
 
     admin
         .update(
+            table_name,
             admin_doc,
             vec![("title".to_string(), "admin updated".into())],
         )
@@ -228,7 +229,7 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads_inner() {
         *id == admin_doc && *values == title_document_values("admin updated")
     }));
 
-    admin.delete(admin_doc).expect("admin delete");
+    admin.delete(table_name, admin_doc).expect("admin delete");
     wait_for_subscription_update(
         &mut member_stream,
         &mut member_log,
@@ -382,6 +383,7 @@ async fn admin_role_claims_reject_member_mutations_inner() {
 
     member
         .update(
+            table_name,
             admin_doc,
             vec![("title".to_string(), "member hacked".into())],
         )
@@ -404,7 +406,7 @@ async fn admin_role_claims_reject_member_mutations_inner() {
     );
 
     member
-        .delete(admin_doc)
+        .delete(table_name, admin_doc)
         .expect("optimistic local member delete");
 
     let rows_after_rejected_delete = observer
@@ -549,6 +551,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
 
     let allowed_tx = alice
         .update(
+            table_name,
             allowed_doc,
             vec![("title".to_string(), "allowed updated".into())],
         )
@@ -583,6 +586,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
 
     let blocked_tx = alice
         .update(
+            table_name,
             blocked_doc,
             vec![("title".to_string(), "blocked updated".into())],
         )

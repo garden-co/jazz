@@ -278,16 +278,30 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
         ]
     );
 
-    let denied_update = bob.update(alice_note, vec![("title".to_string(), "bob edit".into())]);
-    assert!(
-        denied_update.is_err(),
-        "bob should not be able to update alice's row under $createdBy policy"
-    );
-    let denied_delete = bob.delete(alice_note);
-    assert!(
-        denied_delete.is_err(),
-        "bob should not be able to delete alice's row under $createdBy policy"
-    );
+    for operation in ["update", "delete"] {
+        let result = match operation {
+            "update" => bob.update(
+                "notes",
+                alice_note,
+                vec![("title".to_string(), "bob edit".into())],
+            ),
+            "delete" => bob.delete("notes", alice_note),
+            _ => unreachable!(),
+        };
+        if let Ok(transaction_id) = result {
+            let error = bob
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation has a transaction"),
+                    jazz::tools::DurabilityTier::EdgeServer,
+                )
+                .await
+                .expect_err("Bob must not mutate Alice's note");
+            assert!(
+                error.to_string().contains("authorization_denied"),
+                "{error}"
+            );
+        }
+    }
 
     let alice_rows = wait_for_rows(
         &alice,
@@ -705,7 +719,7 @@ async fn backend_attribution_survives_transactions_and_later_mutations() {
             )
             .await;
             let update = attributed
-                .update(id, vec![("title".into(), "updated".into())])
+                .update("notes", id, vec![("title".into(), "updated".into())])
                 .expect("attributed update")
                 .unwrap();
             wait_for_edge_txs(&backend, &[update]).await;
@@ -734,7 +748,10 @@ async fn backend_attribution_survives_transactions_and_later_mutations() {
             assert_eq!(rows[0].1, vec!["upserted".into(), author.clone(), author]);
             wait_for_edge_txs(
                 &backend,
-                &[attributed.delete(id).expect("attributed delete").unwrap()],
+                &[attributed
+                    .delete("notes", id)
+                    .expect("attributed delete")
+                    .unwrap()],
             )
             .await;
             wait_for_rows(
@@ -843,6 +860,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
 
     let bob_update = bob
         .update(
+            "notes",
             note_id,
             vec![
                 ("title".to_string(), "revised by bob".into()),

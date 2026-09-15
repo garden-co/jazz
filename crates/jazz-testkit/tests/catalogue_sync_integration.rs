@@ -1546,6 +1546,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
 
     let transaction_id = writer
         .update(
+            "users",
             accepted_row_id,
             vec![(
                 "name".to_string(),
@@ -1576,7 +1577,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     assert_eq!(rows_after_update.len(), 1);
 
     let transaction_id = writer
-        .delete(accepted_row_id)
+        .delete("users", accepted_row_id)
         .expect("delete should succeed once permissions exist");
     support::wait_for_edge_txs(
         &writer,
@@ -2697,6 +2698,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
 
     let transaction_id = bob
         .update(
+            "people",
             row_id,
             vec![
                 (
@@ -2736,7 +2738,9 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     .await;
     assert_eq!(rows_after_update.len(), 1);
 
-    let transaction_id = bob.delete(row_id).expect("bob deletes renamed row");
+    let transaction_id = bob
+        .delete("people", row_id)
+        .expect("bob deletes renamed row");
     support::wait_for_edge_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
@@ -3113,6 +3117,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
 
     let transaction_id = bob
         .update(
+            "posts",
             second_post_id,
             vec![("viewer_name".to_owned(), Value::Text(test_user_id("alice")))],
         )

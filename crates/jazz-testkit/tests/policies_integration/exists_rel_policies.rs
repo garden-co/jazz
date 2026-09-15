@@ -206,6 +206,7 @@ async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
 
     let bob_transaction = bob
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("bob update".into()))],
         )
@@ -220,6 +221,7 @@ async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
 
     let alice_transaction = alice
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("alice update".into()))],
         )
@@ -677,7 +679,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
     .await;
 
     let bob_transaction = bob
-        .delete(protected)
+        .delete("protected", protected)
         .expect("non-admin delete should be accepted optimistically")
         .expect("non-admin delete should be pending server policy evaluation");
     assert!(
@@ -688,7 +690,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
     );
 
     let alice_transaction = alice
-        .delete(protected)
+        .delete("protected", protected)
         .expect("admin delete should be accepted optimistically");
     if let Some(transaction) = alice_transaction {
         alice
@@ -697,7 +699,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
             .expect("admin delete should be allowed");
     }
     let second_delete = alice
-        .delete(protected)
+        .delete("protected", protected)
         .expect_err("deleted row should not be deleted again");
     assert!(format!("{second_delete:?}").contains("row already deleted"));
 
@@ -824,7 +826,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
                 |rows| rows.is_empty().then_some(()),
             )
             .await;
-            let tx = admin.delete(grant1).unwrap();
+            let tx = admin.delete("grants", grant1).unwrap();
             wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
             wait_for_query(
                 &alice,
@@ -845,7 +847,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             )
             .await;
             log.clear();
-            let tx = admin.delete(grant2).unwrap();
+            let tx = admin.delete("grants", grant2).unwrap();
             wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
             wait_for_query(
                 &alice,

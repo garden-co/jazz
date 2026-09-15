@@ -109,6 +109,7 @@ async fn create_team(
 async fn set_team_projects(admin: &JazzClient, team_id: ObjectId, project_ids: &[ObjectId]) {
     let transaction_id = admin
         .update(
+            "teams",
             team_id,
             vec![(
                 "project_ids".to_string(),

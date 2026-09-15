@@ -173,13 +173,29 @@ async fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     let _bob_visible = query_folder_ids(&bob).await;
 
     let result = alice.update(
+        "folders",
         grand,
         vec![("name".to_string(), Value::Text("Renamed by Alice".into()))],
     );
-    let result_is_err = result.is_err();
-    if let Ok(Some(transaction_id)) = result {
-        wait_for_edge_txs(&alice, &[transaction_id]).await;
-    }
+    let result_is_err = match result {
+        Err(_) => true,
+        Ok(transaction_id) => match alice
+            .wait_for_transaction(
+                transaction_id.expect("ordinary mutation has a transaction"),
+                DurabilityTier::EdgeServer,
+            )
+            .await
+        {
+            Ok(()) => false,
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("authorization_denied"),
+                    "{error}"
+                );
+                true
+            }
+        },
+    };
 
     let name = query_folder_name_as(&bob, grand)
         .await

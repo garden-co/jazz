@@ -120,6 +120,7 @@ async fn fresh_client_resolves_object_with_deep_update_history_impl() {
     for revision in 1..=DEEP_HISTORY_UPDATES {
         writer
             .update(
+                "todos",
                 todo_id,
                 vec![(
                     "title".to_string(),
@@ -352,6 +353,7 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_
 
     let transaction_id = client_a
         .update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
@@ -431,7 +433,9 @@ async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
     )
     .await;
 
-    let transaction_id = client_a.delete(todo_id).expect("delete todo from client a");
+    let transaction_id = client_a
+        .delete("todos", todo_id)
+        .expect("delete todo from client a");
     support::wait_for_edge_txs(
         &client_a,
         &[transaction_id.expect("ordinary mutation commits immediately")],
@@ -780,6 +784,7 @@ async fn jazz_tools_cli_two_different_users_sync_values_impl() {
 
     client_bob
         .update(
+            "todos",
             shared_todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )

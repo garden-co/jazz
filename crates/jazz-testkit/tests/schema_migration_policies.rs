@@ -384,7 +384,11 @@ async fn v2_update_of_v1_document_preserves_untouched_columns_impl() {
     )
     .await;
     let transaction_id = alice
-        .update(doc_id, vec![("name".into(), Value::Text("renamed".into()))])
+        .update(
+            "documents",
+            doc_id,
+            vec![("name".into(), Value::Text("renamed".into()))],
+        )
         .expect("alice updates her v1 document through the v2 schema");
     wait_for_edge_txs(
         &alice,
@@ -441,6 +445,7 @@ async fn v2_update_denied_by_owner_policy_stays_rejected_impl() {
     // local write is refused outright or the synced write settles rejected.
     let mallory = connect_user(&server, &owner_schema_v2(), MALLORY_ID).await;
     match mallory.update(
+        "documents",
         doc_id,
         vec![("name".into(), Value::Text("hijacked".into()))],
     ) {

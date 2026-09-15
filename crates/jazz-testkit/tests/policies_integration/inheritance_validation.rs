@@ -57,7 +57,11 @@ async fn rebac_recursive_inherits_cycle_does_not_overgrant_inner() {
 
     // Close the cycle: A.parent_id = B
     let cycle_tx = admin
-        .update(a, vec![("parent_id".to_string(), Value::Uuid(b))])
+        .update(
+            "folders",
+            a,
+            vec![("parent_id".to_string(), Value::Uuid(b))],
+        )
         .expect("close folder cycle")
         .expect("cycle update should commit immediately");
     wait_for_edge_txs(&admin, &[cycle_tx]).await;

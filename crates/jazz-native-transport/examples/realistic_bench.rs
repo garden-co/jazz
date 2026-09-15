@@ -676,6 +676,7 @@ async fn run_w1_interactive(
                 let task = &seed.tasks[task_idx];
                 let assignee = seed.users[rng.next_usize(seed.users.len())];
                 client.update(
+                    "tasks",
                     task.id,
                     vec![
                         (
@@ -708,6 +709,7 @@ async fn run_w1_interactive(
             "update_project_meta" => {
                 let project_idx = rng.next_usize(seed.projects.len());
                 client.update(
+                    "projects",
                     seed.projects[project_idx],
                     vec![
                         (

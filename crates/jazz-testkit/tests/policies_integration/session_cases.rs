@@ -248,7 +248,11 @@ async fn create_paginated_document(
 
 async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
     client
-        .update(document_id, vec![("title".to_string(), title.into())])
+        .update(
+            "documents",
+            document_id,
+            vec![("title".to_string(), title.into())],
+        )
         .expect("update document title");
 }
 
@@ -798,6 +802,7 @@ async fn session_claims_sub_policies_scope_crud_to_owned_rows_inner() {
 
     alice
         .update(
+            "documents",
             alice_doc,
             vec![
                 ("owner_id".to_string(), super::BOB_ID.into()),
@@ -848,7 +853,8 @@ async fn session_claims_sub_policies_scope_crud_to_owned_rows_inner() {
         "bob should still be unable to see alice's row after alice's rejected transfer"
     );
 
-    bob.delete(bob_doc).expect("delete bob owned row");
+    bob.delete("documents", bob_doc)
+        .expect("delete bob owned row");
     let bob_reader_after_delete =
         connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
     let bob_rows = wait_for_rows(
@@ -971,6 +977,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 
     alice
         .update(
+            "documents",
             active_id,
             vec![
                 ("owner_id".to_string(), super::BOB_ID.into()),
@@ -1035,6 +1042,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 
     alice
         .update(
+            "documents",
             transferable_id,
             vec![
                 ("owner_id".to_string(), super::BOB_ID.into()),
@@ -1066,6 +1074,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 
     alice
         .update(
+            "documents",
             archived_id,
             vec![
                 ("owner_id".to_string(), super::BOB_ID.into()),
@@ -1502,8 +1511,12 @@ async fn update_policies_block_unauthorized_server_mutations_inner() {
     })
     .await;
 
-    bob.update(doc_id, vec![("title".to_string(), "hacked".into())])
-        .expect("optimistic local update");
+    bob.update(
+        "documents",
+        doc_id,
+        vec![("title".to_string(), "hacked".into())],
+    )
+    .expect("optimistic local update");
 
     // EdgeServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted update has been accepted or rejected.
@@ -1717,8 +1730,12 @@ async fn update_policy_read_clause_differs_from_write_clause_inner() {
 
     // Bob's update is applied optimistically on his local client but the
     // with_check policy fails on the server: owner_id=super::ALICE_ID ≠ bob's user_id.
-    bob.update(doc_id, vec![("title".to_string(), "hacked".into())])
-        .expect("optimistic local update");
+    bob.update(
+        "documents",
+        doc_id,
+        vec![("title".to_string(), "hacked".into())],
+    )
+    .expect("optimistic local update");
 
     // EdgeServer query is the causal barrier.
     let rows_after = observer
@@ -1799,7 +1816,9 @@ async fn delete_then_reinsert_by_owner_visible_to_others_inner() {
     )
     .await;
 
-    alice.delete(doc1_id).expect("delete first document");
+    alice
+        .delete("documents", doc1_id)
+        .expect("delete first document");
     wait_for_subscription_update(
         &mut observer_stream,
         &mut observer_log,
@@ -1915,7 +1934,8 @@ async fn delete_policies_block_unauthorized_server_mutations_inner() {
     })
     .await;
 
-    bob.delete(doc_id).expect("optimistic local delete");
+    bob.delete("documents", doc_id)
+        .expect("optimistic local delete");
 
     // EdgeServer query is the causal barrier: it blocks until the server has
     // settled, guaranteeing bob's attempted delete has been accepted or rejected.
@@ -2009,7 +2029,11 @@ async fn single_client_operations_reach_server_in_causal_order_inner() {
 
     // Transfer ownership (allowed — USING checks current owner_id = super::ALICE_ID).
     alice
-        .update(doc_id, vec![("owner_id".to_string(), super::BOB_ID.into())])
+        .update(
+            "documents",
+            doc_id,
+            vec![("owner_id".to_string(), super::BOB_ID.into())],
+        )
         .expect("optimistic local update: transfer ownership");
 
     // Yield to the runtime so the transport's background sender can pick up
@@ -2023,7 +2047,11 @@ async fn single_client_operations_reach_server_in_causal_order_inner() {
     // order, ownership has already moved to bob.
     for i in 0..500 {
         alice
-            .update(doc_id, vec![("title".to_string(), "nope".into())])
+            .update(
+                "documents",
+                doc_id,
+                vec![("title".to_string(), "nope".into())],
+            )
             .unwrap_or_else(|error| {
                 panic!("optimistic local update: title change after lockout {i}: {error}")
             });
@@ -2117,11 +2145,19 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     .await;
 
     alice
-        .update(doc_id, vec![("owner_id".to_string(), super::BOB_ID.into())])
+        .update(
+            "documents",
+            doc_id,
+            vec![("owner_id".to_string(), super::BOB_ID.into())],
+        )
         .expect("optimistic local update: transfer ownership");
 
     alice
-        .update(doc_id, vec![("title".to_string(), "nope".into())])
+        .update(
+            "documents",
+            doc_id,
+            vec![("title".to_string(), "nope".into())],
+        )
         .expect("optimistic local update: title change after lockout");
 
     // Use the marker as a causal barrier so we know the server has settled
@@ -2167,8 +2203,9 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     server.shutdown().await;
 }
 
-/// Removing a nested membership removes the joined organization from that
-/// user's subscription; another user's hidden membership cannot keep it alive.
+/// Alice deletes a membership received only as supporting join data.
+/// Her organization subscription follows the membership; Bob's hidden membership
+/// cannot keep an organization visible to Alice after she leaves.
 #[tokio::test]
 async fn nested_join_subscription_tracks_membership_changes() {
     tokio::task::LocalSet::new()
@@ -2264,8 +2301,9 @@ async fn nested_join_subscription_tracks_membership_changes_inner() {
     )
     .await;
     bob_log.clear();
-    admin
-        .delete(alice_membership)
+    // Alice received this membership only as supporting data for the nested join.
+    alice
+        .delete("team_memberships", alice_membership)
         .expect("delete alice membership");
     wait_for_subscription_update(
         &mut alice_stream,

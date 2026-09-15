@@ -235,6 +235,7 @@ async fn committed_transaction_rejects_later_handle_operations() {
             "update",
             closed_handle
                 .update(
+                    "todos",
                     todo_id,
                     vec![("title".to_string(), Value::Text("too late".to_string()))],
                 )
@@ -244,7 +245,7 @@ async fn committed_transaction_rejects_later_handle_operations() {
         (
             "delete",
             closed_handle
-                .delete(todo_id)
+                .delete("todos", todo_id)
                 .expect_err("committed transaction handle should reject deletes")
                 .to_string(),
         ),
@@ -316,6 +317,7 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
             "update",
             closed_handle
                 .update(
+                    "todos",
                     todo_id,
                     vec![("title".to_string(), Value::Text("too late".to_string()))],
                 )
@@ -325,7 +327,7 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
         (
             "delete",
             closed_handle
-                .delete(todo_id)
+                .delete("todos", todo_id)
                 .expect_err("rolled-back transaction handle should reject deletes")
                 .to_string(),
         ),
@@ -426,6 +428,7 @@ async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction(
     assert_eq!(insert_tx_id, None);
     assert_eq!(
         tx.update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("final".to_string()))],
         )
@@ -474,6 +477,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
         .expect("begin transaction through client API");
     assert_eq!(
         tx.update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("renamed".to_string()))],
         )
@@ -482,6 +486,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
     );
     assert_eq!(
         tx.update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))]
         )
@@ -590,12 +595,14 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     let bob_tx = bob.begin_transaction().expect("begin bob transaction");
     let alice_staged = alice_tx
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("alice".to_string()))],
         )
         .expect("alice stages update");
     let bob_staged = bob_tx
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("bob".to_string()))],
         )
@@ -655,6 +662,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     let alice_tx = alice.begin_transaction().expect("begin alice transaction");
     let alice_staged = alice_tx
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("alice".to_string()))],
         )
@@ -673,6 +681,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     let bob_tx = bob.begin_transaction().expect("begin bob transaction");
     let bob_staged = bob_tx
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("bob".to_string()))],
         )
@@ -768,7 +777,7 @@ async fn global_wait_after_over_one_mib_websocket_import_settles() {
         .expect("queue one logical import message");
 
     let target_tx = client
-        .update(target_id, vec![("completed".to_owned(), Value::Boolean(true))])
+        .update("todos", target_id, vec![("completed".to_owned(), Value::Boolean(true))])
         .expect("update target row after import");
 
     client

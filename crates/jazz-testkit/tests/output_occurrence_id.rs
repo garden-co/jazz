@@ -227,7 +227,9 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
                 "initial reset includes joined-source occurrence"
             );
 
-            let tx = client.delete(joined).expect("delete joined source");
+            let tx = client
+                .delete("todos", joined)
+                .expect("delete joined source");
             support::wait_for_edge_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
@@ -431,6 +433,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
             );
             let tx = client
                 .update(
+                    "todos",
                     root,
                     vec![("title".to_owned(), Value::Text("revised".to_owned()))],
                 )
@@ -455,6 +458,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
 
             let tx = client
                 .update(
+                    "todos",
                     second,
                     vec![("title".to_owned(), Value::Text("second revised".to_owned()))],
                 )
@@ -487,7 +491,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 Some(Value::Text("second revised".to_owned()))
             );
 
-            let tx = client.delete(first).expect("remove first joined row");
+            let tx = client.delete("todos", first).expect("remove first joined row");
             support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let removal = next_delta_with_removed(&mut joined_stream).await;
             let two_hop_removal = next_delta_with_removed(&mut two_hop_stream).await;
@@ -584,7 +588,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction() {
                     row_input!("title" => "transient", "bucket" => "shared", "done" => true),
                 )
                 .expect("stage matching joined row");
-            tx.delete(transient)
+            tx.delete("todos", transient)
                 .expect("stage removal of that same joined occurrence");
             let net_tx = tx.commit().expect("commit add-then-remove tx");
 

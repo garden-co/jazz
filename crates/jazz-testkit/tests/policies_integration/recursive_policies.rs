@@ -285,11 +285,16 @@ async fn create_recursive_folder(
 
 async fn update_recursive_folder_parent(
     client: &JazzClient,
+    table_name: &str,
     folder_id: ObjectId,
     parent_id: Option<ObjectId>,
 ) {
     client
-        .update(folder_id, vec![("parent_id".to_string(), parent_id.into())])
+        .update(
+            table_name,
+            folder_id,
+            vec![("parent_id".to_string(), parent_id.into())],
+        )
         .expect("update recursive folder parent");
 }
 
@@ -642,7 +647,7 @@ async fn recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch_
         Some(cycle_a),
     )
     .await;
-    update_recursive_folder_parent(&admin, cycle_a, Some(cycle_b)).await;
+    update_recursive_folder_parent(&admin, table_name, cycle_a, Some(cycle_b)).await;
 
     let query = Query::from(table_name);
     let alice_rows = wait_for_rows(
@@ -732,7 +737,7 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change_inner()
     collect_stream_deltas(&mut alice_stream, &mut alice_log, NO_DELTA_WINDOW).await;
     alice_log.clear();
 
-    update_recursive_folder_parent(&admin, child, Some(root)).await;
+    update_recursive_folder_parent(&admin, table_name, child, Some(root)).await;
     wait_for_subscription_update(
         &mut alice_stream,
         &mut alice_log,
@@ -759,7 +764,7 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change_inner()
     collect_stream_deltas(&mut alice_stream, &mut alice_log, NO_DELTA_WINDOW).await;
     alice_log.clear();
 
-    update_recursive_folder_parent(&admin, child, None).await;
+    update_recursive_folder_parent(&admin, table_name, child, None).await;
     wait_for_subscription_update(
         &mut alice_stream,
         &mut alice_log,

@@ -202,6 +202,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
 
     let bob_transaction_id = bob
         .update(
+            "protected",
             protected_id,
             vec![("data".into(), Value::Text("hacked by bob".into()))],
         )
@@ -234,6 +235,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
 
     alice
         .update(
+            "protected",
             protected_id,
             vec![("data".into(), Value::Text("updated by admin alice".into()))],
         )
@@ -303,6 +305,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
     let bob_err = client
         .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("bob update".into()))],
         )
@@ -312,6 +315,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
     client
         .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("alice update".into()))],
         )

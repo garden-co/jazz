@@ -155,6 +155,7 @@ async fn update_reads_back_non_null_values_in_nullable_columns() {
 
     client
         .update(
+            "profiles",
             row_id,
             vec![
                 ("name".to_owned(), Value::Text("updated".to_owned())),
@@ -202,6 +203,7 @@ async fn staged_insert_and_update_read_back_non_null_values_in_nullable_columns_
         .expect("stage insert non-null values into nullable columns");
 
     tx.update(
+        "profiles",
         row_id,
         vec![
             ("name".to_owned(), Value::Text("staged updated".to_owned())),

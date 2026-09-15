@@ -154,7 +154,6 @@ struct ClientDbInner {
     upstream_recovery_generation: Option<u64>,
     upstream_state_notify: Arc<tokio::sync::Notify>,
     write_map: HashMap<TransactionId, CoreTxId>,
-    row_tables: HashMap<ObjectId, String>,
     transactions: HashMap<OpenTransactionId, ExclusiveTransactionState>,
     closed_transactions: HashMap<OpenTransactionId, ClosedTransactionState>,
     tick_driver_error: Option<String>,
@@ -747,12 +746,7 @@ impl Backend {
 
 struct ExclusiveTransactionState {
     author: Option<CoreAuthorSubject>,
-    writes: Vec<ExclusiveTransactionWrite>,
-}
-
-struct ExclusiveTransactionWrite {
-    table: String,
-    row_id: ObjectId,
+    has_writes: bool,
 }
 
 #[derive(Default)]
@@ -1005,12 +999,11 @@ impl ClientDb {
         &self,
         query: crate::query::Query,
         opts: CoreReadOpts,
-        table: String,
         wait_for_coverage: bool,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         self.ensure_tick_driver_running()?;
-        ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage, scope).await
+        ClientDbInner::handle_query(&self.inner, query, opts, wait_for_coverage, scope).await
     }
 
     async fn query_transaction_rows(
@@ -1018,7 +1011,6 @@ impl ClientDb {
         query: crate::query::Query,
         opts: CoreReadOpts,
         transaction_id: OpenTransactionId,
-        table: String,
         author: CoreAuthorSubject,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         let prepared = {
@@ -1037,7 +1029,6 @@ impl ClientDb {
             .transaction_all_for_identity(transaction_id, &prepared, author, opts)
             .await
             .map_err(|error| JazzError::Query(error.to_string()))?;
-        self.inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
     }
 
@@ -1045,7 +1036,6 @@ impl ClientDb {
         &self,
         query: crate::query::Query,
         opts: CoreReadOpts,
-        table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         cancellation: oneshot::Receiver<()>,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
@@ -1056,7 +1046,6 @@ impl ClientDb {
             self.query_decoder.clone(),
             query,
             opts,
-            table,
             tx,
             cancellation,
             scope,
@@ -1100,7 +1089,7 @@ impl ClientDb {
         };
         JazzClient::check_core_write_not_rejected(inner.backend()?, tx_id)?;
         let object_id = ObjectId::from_uuid(row_uuid.0);
-        inner.remember_write(object_id, &table, tx_id);
+        inner.remember_write(tx_id);
         Ok((object_id, tx_id))
     }
 
@@ -1123,11 +1112,7 @@ impl ClientDb {
             .transactions
             .get_mut(&transaction_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite {
-            table: table.clone(),
-            row_id,
-        });
-        inner.row_tables.insert(row_id, table);
+        tx.has_writes = true;
         Ok(row_id)
     }
 
@@ -1154,8 +1139,7 @@ impl ClientDb {
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
-        let object_id = ObjectId::from_uuid(row_id);
-        inner.remember_write(object_id, &table, write);
+        inner.remember_write(write);
         let tx_id = write;
         Ok(tx_id)
     }
@@ -1168,7 +1152,6 @@ impl ClientDb {
         cells: crate::db::RowCells,
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let object_id = ObjectId::from_uuid(row_id);
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
@@ -1179,29 +1162,23 @@ impl ClientDb {
             .transactions
             .get_mut(&transaction_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite {
-            table: table.clone(),
-            row_id: object_id,
-        });
-        inner.row_tables.insert(object_id, table);
+        tx.has_writes = true;
         Ok(())
     }
 
     fn update(
         &self,
+        table: &str,
         row_id: ObjectId,
         cells: crate::db::RowCells,
         identity: Option<CoreWriteIdentity>,
         updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write("update requires a row created or observed by this client".to_string())
-        })?;
         let write = match identity {
             Some(identity) => inner.backend()?.upsert_for_identity(
                 identity,
-                &table,
+                table,
                 CoreRowUuid(*row_id.uuid()),
                 cells,
                 updated_at_ms,
@@ -1209,76 +1186,78 @@ impl ClientDb {
             None => {
                 inner
                     .backend()?
-                    .update(&table, CoreRowUuid(*row_id.uuid()), cells, updated_at_ms)
+                    .update(table, CoreRowUuid(*row_id.uuid()), cells, updated_at_ms)
             }
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
-        inner.remember_write(row_id, &table, write);
+        inner.remember_write(write);
         let tx_id = write;
         Ok(tx_id)
     }
 
     fn stage_update(
         &self,
+        table: &str,
         transaction_id: OpenTransactionId,
         row_id: ObjectId,
         cells: crate::db::RowCells,
     ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write("update requires a row created or observed by this client".to_string())
-        })?;
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_update(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
+            .exclusive_update(tx_id, table, CoreRowUuid(*row_id.uuid()), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
             .get_mut(&transaction_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite { table, row_id });
+        tx.has_writes = true;
         Ok(())
     }
 
-    fn delete(&self, row_id: ObjectId, identity: Option<CoreWriteIdentity>) -> Result<CoreTxId> {
+    fn delete(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+        identity: Option<CoreWriteIdentity>,
+    ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write("delete requires a row created or observed by this client".to_string())
-        })?;
         let write = match identity {
             Some(identity) => {
                 inner
                     .backend()?
-                    .delete_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()))
+                    .delete_for_identity(identity, table, CoreRowUuid(*row_id.uuid()))
             }
-            None => inner.backend()?.delete(&table, CoreRowUuid(*row_id.uuid())),
+            None => inner.backend()?.delete(table, CoreRowUuid(*row_id.uuid())),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
-        inner.remember_write(row_id, &table, write);
+        inner.remember_write(write);
         let tx_id = write;
         Ok(tx_id)
     }
 
-    fn stage_delete(&self, transaction_id: OpenTransactionId, row_id: ObjectId) -> Result<()> {
+    fn stage_delete(
+        &self,
+        table: &str,
+        transaction_id: OpenTransactionId,
+        row_id: ObjectId,
+    ) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write("delete requires a row created or observed by this client".to_string())
-        })?;
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_delete(tx_id, &table, CoreRowUuid(*row_id.uuid()))
+            .exclusive_delete(tx_id, table, CoreRowUuid(*row_id.uuid()))
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
             .get_mut(&transaction_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite { table, row_id });
+        tx.has_writes = true;
         Ok(())
     }
 
@@ -1307,7 +1286,7 @@ impl ClientDb {
             transaction_id,
             ExclusiveTransactionState {
                 author,
-                writes: Vec::new(),
+                has_writes: false,
             },
         );
         Ok(transaction_id)
@@ -1316,12 +1295,11 @@ impl ClientDb {
     fn commit_transaction(&self, transaction_id: OpenTransactionId) -> Result<TransactionId> {
         let mut inner = self.inner.borrow_mut();
         inner.ensure_transaction_open(transaction_id)?;
-        if inner
+        if !inner
             .transactions
             .get(&transaction_id)
             .expect("transaction open checked above")
-            .writes
-            .is_empty()
+            .has_writes
         {
             return Err(JazzError::Write(
                 "transaction cannot commit without writes".to_string(),
@@ -1340,9 +1318,6 @@ impl ClientDb {
         .map_err(|error| JazzError::Write(error.to_string()))?;
         let committed_id = core_batch_id(tx_id);
         inner.write_map.insert(committed_id, tx_id);
-        for write in state.writes {
-            inner.row_tables.insert(write.row_id, write.table);
-        }
         inner
             .closed_transactions
             .insert(transaction_id, ClosedTransactionState::Committed);
@@ -1648,7 +1623,6 @@ impl ClientDbInner {
             upstream_recovery_generation: None,
             upstream_state_notify: Arc::new(tokio::sync::Notify::new()),
             write_map: HashMap::new(),
-            row_tables: HashMap::new(),
             transactions: HashMap::new(),
             closed_transactions: HashMap::new(),
             tick_driver_error: None,
@@ -1957,7 +1931,6 @@ impl ClientDbInner {
         inner: &Rc<RefCell<Self>>,
         query: crate::query::Query,
         opts: CoreReadOpts,
-        table: String,
         wait_for_coverage: bool,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
@@ -1982,7 +1955,6 @@ impl ClientDbInner {
                 .await
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
-        inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
     }
 
@@ -2090,11 +2062,11 @@ impl ClientDbInner {
         query_decoder: PublicQueryDecoder,
         query: crate::query::Query,
         opts: CoreReadOpts,
-        table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         mut cancellation: oneshot::Receiver<()>,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<()> {
+        let table = query.table.clone();
         // Register before cloning the backend or awaiting core admission. A
         // concurrent shutdown can therefore cancel and await this path even
         // when core subscription setup is still in flight.
@@ -2117,7 +2089,6 @@ impl ClientDbInner {
             stream = db.subscribe(&prepared, opts) => stream
                 .map_err(|error| JazzError::Query(error.to_string()))?,
         };
-        let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
             let _completion = completion;
             let mut stream = stream;
@@ -2301,11 +2272,6 @@ impl ClientDbInner {
                             &effective_updated,
                             &removed,
                         );
-                        let rows_for_cache = current_rows
-                            .iter()
-                            .map(|row| row.row.clone())
-                            .collect::<Vec<_>>();
-                        inner.borrow_mut().remember_rows(&table, &rows_for_cache);
                         let delta = change_delta;
                         let Ok(delta) = delta else {
                             break;
@@ -2425,16 +2391,8 @@ impl ClientDbInner {
         }
     }
 
-    fn remember_write(&mut self, row_id: ObjectId, table: &str, tx_id: CoreTxId) {
+    fn remember_write(&mut self, tx_id: CoreTxId) {
         self.write_map.insert(core_batch_id(tx_id), tx_id);
-        self.row_tables.insert(row_id, table.to_string());
-    }
-
-    fn remember_rows(&mut self, table: &str, rows: &[crate::node::CurrentRow]) {
-        for row in rows {
-            self.row_tables
-                .insert(ObjectId::from_uuid(row.row_uuid().0), table.to_string());
-        }
     }
 }
 
@@ -3717,11 +3675,10 @@ impl JazzClient {
         query: Query,
         opts: CoreReadOpts,
     ) -> Result<SubscriptionStream> {
-        let table = query.table.clone();
         let (tx, rx) = mpsc::unbounded_channel::<SubscriptionStreamItem>();
         let (cancellation, cancellation_rx) = oneshot::channel();
         self.db
-            .subscribe(query, opts, table, tx, cancellation_rx, self.read_scope()?)
+            .subscribe(query, opts, tx, cancellation_rx, self.read_scope()?)
             .await?;
         Ok(SubscriptionStream::new(rx, cancellation))
     }
@@ -3809,7 +3766,6 @@ impl JazzClient {
         query: Query,
         opts: CoreReadOpts,
     ) -> Result<Vec<QueryResult>> {
-        let table = query.table.clone();
         let rows = if let Some(transaction_id) = self
             .write_context
             .as_ref()
@@ -3819,7 +3775,7 @@ impl JazzClient {
                 .session_write_identity()?
                 .unwrap_or_else(|| self.db.inner.borrow().identity.author);
             self.db
-                .query_transaction_rows(query.clone(), opts, transaction_id, table, author)
+                .query_transaction_rows(query.clone(), opts, transaction_id, author)
                 .await?
         } else {
             // A product `Remote` read lowers to the legacy Edge tier. Both
@@ -3828,13 +3784,7 @@ impl JazzClient {
             // local maintained graph has settled that exact coverage.
             let wait_for_coverage = opts.tier >= CoreDurabilityTier::Edge;
             self.db
-                .query_rows(
-                    query.clone(),
-                    opts,
-                    table,
-                    wait_for_coverage,
-                    self.read_scope()?,
-                )
+                .query_rows(query.clone(), opts, wait_for_coverage, self.read_scope()?)
                 .await?
         };
         self.db
@@ -3918,45 +3868,41 @@ impl JazzClient {
         }
     }
 
-    /// Update a row.
+    /// Update a row in the named table.
+    ///
+    /// The row need not have appeared in a previous query result. The table and
+    /// ID identify the target; the database still applies write policies.
     pub fn update(
         &self,
+        table: &str,
         object_id: ObjectId,
         updates: Vec<(String, Value)>,
     ) -> Result<Option<TransactionId>> {
         {
-            let table = self
-                .db
-                .inner
-                .borrow()
-                .row_tables
-                .get(&object_id)
-                .cloned()
-                .ok_or_else(|| {
-                    JazzError::Write(
-                        "update requires a row created or observed by this client".to_string(),
-                    )
-                })?;
-            let cells = self.core_cells(&table, updates.into_iter().collect())?;
+            let cells = self.core_cells(table, updates.into_iter().collect())?;
             let updated_at = self.write_updated_at()?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
                 .and_then(|ctx| ctx.transaction_id)
             {
-                self.db.stage_update(transaction_id, object_id, cells)?;
+                self.db
+                    .stage_update(table, transaction_id, object_id, cells)?;
                 Ok(None)
             } else {
-                let tx_id = self
-                    .db
-                    .update(object_id, cells, self.write_identity()?, updated_at)?;
+                let tx_id =
+                    self.db
+                        .update(table, object_id, cells, self.write_identity()?, updated_at)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
     }
 
-    /// Delete a row.
-    pub fn delete(&self, object_id: ObjectId) -> Result<Option<TransactionId>> {
+    /// Delete a row in the named table.
+    ///
+    /// The row need not have appeared in a previous query result. The table and
+    /// ID identify the target; the database still applies write policies.
+    pub fn delete(&self, table: &str, object_id: ObjectId) -> Result<Option<TransactionId>> {
         {
             self.reject_updated_at_override("deletes")?;
             if let Some(transaction_id) = self
@@ -3964,10 +3910,10 @@ impl JazzClient {
                 .as_ref()
                 .and_then(|ctx| ctx.transaction_id)
             {
-                self.db.stage_delete(transaction_id, object_id)?;
+                self.db.stage_delete(table, transaction_id, object_id)?;
                 Ok(None)
             } else {
-                let tx_id = self.db.delete(object_id, self.write_identity()?)?;
+                let tx_id = self.db.delete(table, object_id, self.write_identity()?)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }

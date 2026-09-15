@@ -157,6 +157,7 @@ async fn concurrent_column_writes_merge_and_reach_a_third_subscriber_impl() {
     for status in ["status-1", "status-2", "status-3"] {
         alice
             .update(
+                "tasks",
                 task_id,
                 vec![("status".to_string(), Value::Text(status.to_string()))],
             )
@@ -181,12 +182,14 @@ async fn concurrent_column_writes_merge_and_reach_a_third_subscriber_impl() {
     // bob's write: two concurrent heads on different columns, with alice's
     // later write winning the merge ordering.
     bob.update(
+        "tasks",
         task_id,
         vec![("assignee".to_string(), Value::Text("assigned".to_string()))],
     )
     .expect("bob assignee write");
     alice
         .update(
+            "tasks",
             task_id,
             vec![("status".to_string(), Value::Text("status-4".to_string()))],
         )
@@ -294,12 +297,14 @@ async fn offline_merge_redelivers_after_reconnect_impl() {
     // other, so the server merges two concurrent heads with alice's later
     // status write winning the merge ordering.
     bob.update(
+        "tasks",
         task_id,
         vec![("assignee".to_string(), Value::Text("assigned".to_string()))],
     )
     .expect("bob assignee write while charlie is offline");
     alice
         .update(
+            "tasks",
             task_id,
             vec![("status".to_string(), Value::Text("status-1".to_string()))],
         )
@@ -425,6 +430,7 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
     alice
         .with_write_context(WriteContext::default().with_updated_at(explicit_updated_at))
         .update(
+            "tasks",
             task_id,
             vec![("status".to_string(), Value::Text("status-0".to_string()))],
         )
@@ -519,12 +525,14 @@ async fn late_subscriber_updates_merged_row_without_full_history_impl() {
     // Concurrent single-column writes create the merged row charlie will later
     // receive as his only state.
     bob.update(
+        "tasks",
         task_id,
         vec![("assignee".to_string(), Value::Text("assigned".to_string()))],
     )
     .expect("bob assignee write");
     alice
         .update(
+            "tasks",
             task_id,
             vec![("status".to_string(), Value::Text("status-1".to_string()))],
         )
@@ -559,6 +567,7 @@ async fn late_subscriber_updates_merged_row_without_full_history_impl() {
 
     charlie
         .update(
+            "tasks",
             task_id,
             vec![(
                 "status".to_string(),

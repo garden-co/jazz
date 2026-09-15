@@ -365,8 +365,15 @@ async fn create_array_ref_todo(
         .0
 }
 
-async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
-    client.update(row_id, changes).expect("update row");
+async fn update_row(
+    client: &JazzClient,
+    table_name: &str,
+    row_id: ObjectId,
+    changes: Vec<(String, Value)>,
+) {
+    client
+        .update(table_name, row_id, changes)
+        .expect("update row");
 }
 
 // -- Tests --
@@ -641,7 +648,7 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     );
 
     alice_writer
-        .delete(folder_id)
+        .delete("folders", folder_id)
         .expect("delete inherited parent folder");
     let alice_rows_after_delete = wait_for_query(
         &alice_reader,
@@ -1258,7 +1265,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     .await;
 
     alice
-        .delete(doc_id)
+        .delete("documents", doc_id)
         .expect("folder owner deletes folder-backed document");
 
     let rows_after_doc_delete = wait_for_query(
@@ -1285,7 +1292,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     .await;
 
     alice
-        .delete(folder_id)
+        .delete("folders", folder_id)
         .expect("folder owner deletes folder");
 
     let rows_after_folder_delete = wait_for_query(
@@ -1437,7 +1444,7 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
                 )
     }));
 
-    bob.delete(bob_doc_id)
+    bob.delete("documents", bob_doc_id)
         .expect("document owner deletes owned folder-backed document");
 
     let rows_after_owned_delete = wait_for_rows(
@@ -1466,7 +1473,7 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
         "only charlie's document should remain after bob deletes his own: {rows_after_owned_delete:?}"
     );
 
-    bob.delete(charlie_doc_id)
+    bob.delete("documents", charlie_doc_id)
         .expect("optimistic local delete for unauthorized attempt");
 
     let rows_after_unauthorized_delete = wait_for_query(
@@ -1789,6 +1796,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
 
     update_row(
         &alice,
+        "documents",
         doc_id,
         vec![("title".to_string(), "Edited By Folder Owner".into())],
     )
@@ -1825,6 +1833,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
 
     update_row(
         &bob,
+        "documents",
         doc_id,
         vec![("title".to_string(), "Edited By Bob".into())],
     )
@@ -1980,7 +1989,9 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     ));
 
     log.clear();
-    alice.delete(todo_id).expect("delete referencing todo");
+    alice
+        .delete("todos", todo_id)
+        .expect("delete referencing todo");
     wait_for_subscription_update(
         &mut stream,
         &mut log,
@@ -2015,6 +2026,7 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     log.clear();
     update_row(
         &alice,
+        "todos",
         todo_retarget_id,
         vec![("image".to_string(), Value::Uuid(file_b))],
     )
@@ -2111,6 +2123,7 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
 
     update_row(
         &alice,
+        "todos",
         todo_id,
         vec![(
             "images".to_string(),
@@ -2143,6 +2156,7 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
     log.clear();
     update_row(
         &alice,
+        "todos",
         todo_id,
         vec![(
             "images".to_string(),
@@ -2366,6 +2380,7 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
 
     update_row(
         &admin,
+        "folders",
         folder_id,
         vec![(
             "owners".to_string(),
@@ -2489,6 +2504,7 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
 
     update_row(
         &admin,
+        "documents",
         doc_id,
         vec![("folder_id".to_string(), Value::Uuid(hidden_folder_id))],
     )
@@ -2595,6 +2611,7 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
 
     update_row(
         &admin,
+        "documents",
         doc_id,
         vec![("folder_id".to_string(), Value::Uuid(visible_folder_id))],
     )
@@ -2883,6 +2900,7 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
 
     let update_tx = alice
         .update(
+            "files",
             file_id,
             vec![
                 ("owner_id".into(), Value::Text(super::BOB_ID.into())),
@@ -2907,7 +2925,7 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
 /// folder, but Bob cannot update that root folder. The child's update must
 /// therefore fail the inherited `allowedTo.update(parent_id)` check.
 #[tokio::test]
-#[ignore = "#1762: the public client cannot observe the update-only child row before exercising inherited WITH CHECK"]
+#[ignore = "#1762: expects synchronous inherited WITH CHECK rejection, but the update-only child write is accepted optimistically"]
 async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
     tokio::task::LocalSet::new()
         .run_until(local_update_with_check_inherits_denies_when_parent_is_not_updateable_inner())
@@ -2959,6 +2977,7 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_i
 
     let update_err = bob
         .update(
+            "folders",
             child_id,
             vec![
                 ("owner_id".into(), Value::Text(super::BOB_ID.into())),

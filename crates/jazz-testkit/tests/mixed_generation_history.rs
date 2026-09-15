@@ -151,6 +151,7 @@ async fn insert_v1_task(alice: &JazzClient) -> (ObjectId, ObjectId) {
 async fn update_task_v2(bob: &JazzClient, row_id: ObjectId) {
     let transaction_id = bob
         .update(
+            "tasks",
             row_id,
             vec![
                 ("tags".to_string(), Value::Text("sess-new".to_string())),
@@ -340,6 +341,7 @@ async fn late_write_under_prior_generation_converges_with_current_schema_update_
     // active write schema is already v2.
     let transaction_id = alice
         .update(
+            "tasks",
             row_id,
             vec![(
                 "name".to_string(),
@@ -790,6 +792,7 @@ async fn partial_current_schema_update_keeps_untouched_added_column_readable_imp
 
     let transaction_id = bob
         .update(
+            "tasks",
             row_id,
             vec![("tags".to_string(), Value::Text("sess-new".to_string()))],
         )

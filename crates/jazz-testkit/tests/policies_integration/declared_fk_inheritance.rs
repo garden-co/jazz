@@ -142,6 +142,7 @@ async fn rebac_declared_fk_inheritance_grants_update_access_inner() {
     assert!(query_ids(&alice, "files").await.contains(&file_id));
 
     let update = alice.update(
+        "files",
         file_id,
         vec![
             ("owner_id".into(), Value::Text(super::BOB_ID.into())),
@@ -283,7 +284,7 @@ async fn rebac_declared_fk_inheritance_cycle_fails_closed_inner() {
     .await;
 
     let link_tx = admin
-        .update(a_id, vec![("b_id".into(), Value::Uuid(b_id))])
+        .update("table_a", a_id, vec![("b_id".into(), Value::Uuid(b_id))])
         .expect("link table_a")
         .expect("table_a update should commit immediately");
     wait_for_edge_txs(&admin, &[link_tx]).await;
@@ -340,7 +341,11 @@ async fn rebac_declared_fk_inheritance_reacts_to_fk_updates_inner() {
         "alice should see her todo before updating its image"
     );
     let update_tx = alice
-        .update(todo_id, vec![("image".into(), Value::Uuid(file_id))])
+        .update(
+            "todos",
+            todo_id,
+            vec![("image".into(), Value::Uuid(file_id))],
+        )
         .expect("link todo image")
         .expect("todo update should commit immediately");
     wait_for_edge_txs(&alice, &[update_tx]).await;

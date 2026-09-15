@@ -571,7 +571,7 @@ async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscri
     .await;
 
     let live_delete_tx = alice
-        .delete(membership_live)
+        .delete("memberships", membership_live)
         .expect("alice deletes the online membership");
     wait_for_edge_txs(
         &alice,
@@ -588,7 +588,7 @@ async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscri
     .await;
 
     let off_delete_tx = alice
-        .delete(membership_off)
+        .delete("memberships", membership_off)
         .expect("alice deletes a membership while bob's persistent client is offline");
     wait_for_edge_txs(
         &alice,
@@ -674,7 +674,9 @@ async fn deleting_a_subscribed_row_emits_a_removal_delta_impl() {
     )
     .await;
 
-    let delete_tx = bob.delete(row_id).expect("bob deletes the document");
+    let delete_tx = bob
+        .delete("documents", row_id)
+        .expect("bob deletes the document");
     wait_for_edge_txs(
         &bob,
         &[delete_tx.expect("ordinary mutation commits immediately")],

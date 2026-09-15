@@ -71,24 +71,51 @@ async fn create_row(
     client.insert(table_name, values).expect("create row").0
 }
 
-async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
+async fn update_document_title(
+    client: &JazzClient,
+    table_name: &str,
+    document_id: ObjectId,
+    title: &str,
+) {
     client
-        .update(document_id, vec![("title".to_string(), title.into())])
+        .update(
+            table_name,
+            document_id,
+            vec![("title".to_string(), title.into())],
+        )
         .expect("update document title");
 }
 
-async fn update_document_archived(client: &JazzClient, document_id: ObjectId, archived: bool) {
+async fn update_document_archived(
+    client: &JazzClient,
+    table_name: &str,
+    document_id: ObjectId,
+    archived: bool,
+) {
     client
-        .update(document_id, vec![("archived".to_string(), archived.into())])
+        .update(
+            table_name,
+            document_id,
+            vec![("archived".to_string(), archived.into())],
+        )
         .expect("update document archived");
 }
 
-async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
-    client.update(row_id, changes).expect("update row");
+async fn update_row(
+    client: &JazzClient,
+    table_name: &str,
+    row_id: ObjectId,
+    changes: Vec<(String, Value)>,
+) {
+    client
+        .update(table_name, row_id, changes)
+        .expect("update row");
 }
 
-async fn delete_document(client: &JazzClient, document_id: ObjectId) {
-    client.delete(document_id).expect("delete document");
+async fn delete_document(client: &JazzClient, table_name: &str, document_id: ObjectId) {
+    client
+        .delete(table_name, document_id)
+        .expect("delete document");
 }
 
 fn make_priority_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
@@ -625,7 +652,7 @@ async fn update_policies_boolean_inner() {
     })
     .await;
 
-    update_document_title(&alice, update_true_id, "updated").await;
+    update_document_title(&alice, "documents_update_true", update_true_id, "updated").await;
     let query = Query::from("documents_update_true");
     let bob_rows = wait_for_rows(&bob, query, "bob sees accepted update", |rows| {
         rows.iter()
@@ -641,7 +668,7 @@ async fn update_policies_boolean_inner() {
             && *values == boolean_policy_document_values(super::ALICE_ID, "updated", false)
     }));
 
-    update_document_title(&alice, update_false_id, "blocked").await;
+    update_document_title(&alice, "documents_update_false", update_false_id, "blocked").await;
     let query = Query::from("documents_update_false");
     let bob_rows = wait_for_rows(&bob, query, "bob still sees original row", |rows| {
         rows.iter()
@@ -755,7 +782,7 @@ async fn delete_policies_boolean_inner() {
     })
     .await;
 
-    delete_document(&alice, delete_true_id).await;
+    delete_document(&alice, "documents_delete_true", delete_true_id).await;
     let query = Query::from("documents_delete_true");
     let bob_rows = wait_for_rows(&bob, query, "bob no longer sees deleted row", |rows| {
         rows.iter()
@@ -768,7 +795,7 @@ async fn delete_policies_boolean_inner() {
         "delete allowed by true policy should remove the row"
     );
 
-    delete_document(&alice, delete_false_id).await;
+    delete_document(&alice, "documents_delete_false", delete_false_id).await;
     let query = Query::from("documents_delete_false");
     let bob_rows = wait_for_rows(&bob, query, "bob still sees undeleted row", |rows| {
         rows.iter()
@@ -874,7 +901,7 @@ async fn archived_state_policies_gate_insert_update_and_delete_inner() {
 
     // This optimistic local delete should be rejected because DELETE requires
     // archived=true on the current row.
-    delete_document(&bob, active_id).await;
+    delete_document(&bob, table_name, active_id).await;
 
     let observer = connect_ready_user(
         &server,
@@ -908,7 +935,7 @@ async fn archived_state_policies_gate_insert_update_and_delete_inner() {
     // Alice's successful archive update is the causal barrier for bob's
     // earlier rejected delete: it can only apply if the incomplete row still
     // exists server-side.
-    update_document_archived(&alice, active_id, true).await;
+    update_document_archived(&alice, table_name, active_id, true).await;
     let observer_rows = wait_for_rows(
         &observer,
         query.clone(),
@@ -931,11 +958,11 @@ async fn archived_state_policies_gate_insert_update_and_delete_inner() {
 
     // This optimistic local update should be rejected because UPDATE USING is
     // checked against the old row, which is already archived=true.
-    update_document_archived(&alice, active_id, false).await;
+    update_document_archived(&alice, table_name, active_id, false).await;
 
     // Observer's delete is the causal barrier for the rejected reopen attempt: it is
     // only allowed if the row still exists server-side with archived=true.
-    delete_document(&observer, active_id).await;
+    delete_document(&observer, table_name, active_id).await;
     let observer_rows = wait_for_rows(
         &observer,
         query,
@@ -1439,12 +1466,14 @@ async fn null_predicates_on_nullable_columns_gate_reads_and_writes_inner() {
 
     update_row(
         &alice,
+        "documents_update_is_null",
         update_is_null_allowed,
         row_changes([("reviewer_id", Value::Null)]),
     )
     .await;
     update_row(
         &alice,
+        "documents_update_is_null",
         update_is_null_rejected,
         row_changes([("reviewer_id", super::BOB_ID.into())]),
     )
@@ -1725,7 +1754,7 @@ async fn read_and_write_policies_remain_independent_inner() {
     .await;
     assert_eq!(read_only_rows.len(), 1);
 
-    update_document_title(&bob, read_only_id, "blocked").await;
+    update_document_title(&bob, "documents_read_only", read_only_id, "blocked").await;
     let read_only_after = wait_for_rows(
         &admin,
         Query::from("documents_read_only"),
@@ -1758,7 +1787,7 @@ async fn read_and_write_policies_remain_independent_inner() {
         .await
         .expect("shutdown alice_hidden_reader");
 
-    update_document_archived(&alice, write_only_id, false).await;
+    update_document_archived(&alice, "documents_write_only", write_only_id, false).await;
     let alice_visible_reader = connect_ready_user(
         &server,
         &schema,
@@ -1909,7 +1938,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         .expect("shutdown verifier_after_hidden_insert");
 
     observer_log.clear();
-    update_document_title(&alice, visible_id, "visible renamed").await;
+    update_document_title(&alice, table_name, visible_id, "visible renamed").await;
     let verifier_after_visible_update = connect_ready_user(
         &server,
         &verifier_schema,
@@ -1951,7 +1980,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     )
     .await;
     observer_log.clear();
-    update_document_archived(&alice, visible_id, true).await;
+    update_document_archived(&alice, table_name, visible_id, true).await;
     let verifier_after_hide = connect_ready_user(
         &server,
         &verifier_schema,
@@ -1990,7 +2019,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         .expect("shutdown verifier_after_hide");
 
     observer_log.clear();
-    update_document_archived(&alice, hidden_id, false).await;
+    update_document_archived(&alice, table_name, hidden_id, false).await;
     let verifier_after_reveal = connect_ready_user(
         &server,
         &verifier_schema,

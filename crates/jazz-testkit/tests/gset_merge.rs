@@ -76,7 +76,7 @@ async fn merge_concurrently(
     second_value: Value,
 ) {
     let first_tx = first
-        .update(doc_id, vec![(column.to_string(), first_value)])
+        .update("docs", doc_id, vec![(column.to_string(), first_value)])
         .expect("first replica writes");
     support::wait_for_edge_txs(
         first,
@@ -85,7 +85,7 @@ async fn merge_concurrently(
     .await;
 
     let second_tx = second
-        .update(doc_id, vec![(column.to_string(), second_value)])
+        .update("docs", doc_id, vec![(column.to_string(), second_value)])
         .expect("second replica writes");
     support::wait_for_edge_txs(
         second,
@@ -497,7 +497,7 @@ async fn later_writes_cannot_remove_existing_elements_impl() {
         .insert("docs", doc_values("no-remove", &["keep"]))
         .expect("alice creates doc");
     let remove_tx = alice
-        .update(doc_id, vec![("tags".to_string(), tags_value(&[]))])
+        .update("docs", doc_id, vec![("tags".to_string(), tags_value(&[]))])
         .expect("attempted removal writes a version");
     support::wait_for_edge_txs(
         &alice,

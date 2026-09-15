@@ -331,7 +331,7 @@ async fn subscribe_all_reacts_to_scalar_fk_updates_in_projected_join_queries() {
     let team_a_key = initial_rows[0].key.clone();
 
     pair.writer
-        .update(user_id, vec![("team_id".to_string(), Value::Uuid(team_b))])
+        .update("users", user_id, vec![("team_id".to_string(), Value::Uuid(team_b))])
         .expect("move user to new team");
 
     let rows = wait_for_query_results(
@@ -418,6 +418,7 @@ async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries
 
     pair.writer
         .update(
+            "files",
             file_id,
             vec![("parts".to_string(), Value::Array(vec![Value::Uuid(part_b)]))],
         )

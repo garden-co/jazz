@@ -449,7 +449,7 @@ async fn subscribe_all_preserves_sorting_on_sort_key_changes() {
     log.clear();
 
     client
-        .update(alice_id, vec![("priority".to_string(), Value::Integer(25))])
+        .update("todos", alice_id, vec![("priority".to_string(), Value::Integer(25))])
         .expect("update the active sort key");
 
     wait_for_subscription_update(
@@ -562,7 +562,7 @@ async fn subscribe_all_offset_limited_subscription_shifts_window_when_deleting_r
     log.clear();
 
     pair.writer
-        .delete(a_id)
+        .delete("todos", a_id)
         .expect("delete row before offset window");
 
     wait_for_subscription_update(

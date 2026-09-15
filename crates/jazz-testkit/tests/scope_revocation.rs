@@ -162,6 +162,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             let revoke_tx = writer
                 .for_session(writer_session)
                 .update(
+                    "docs",
                     doc_id,
                     vec![("owner_id".to_owned(), Value::Text(alice_owner_id))],
                 )

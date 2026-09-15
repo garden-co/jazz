@@ -111,6 +111,7 @@ async fn concurrent_updates_resolve_to_lww_winner_impl() {
     let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
             )
@@ -118,6 +119,7 @@ async fn concurrent_updates_resolve_to_lww_winner_impl() {
     });
     let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
         )
@@ -328,6 +330,7 @@ async fn rapid_concurrent_updates_converge_impl() {
         let alice_handle = tokio::task::spawn_local(async move {
             alice2
                 .update(
+                    "todos",
                     todo_id,
                     vec![("title".to_string(), Value::Text(format!("alice-{i}")))],
                 )
@@ -335,6 +338,7 @@ async fn rapid_concurrent_updates_converge_impl() {
         });
         let bob_handle = tokio::task::spawn_local(async move {
             bob2.update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text(format!("bob-{i}")))],
             )
@@ -456,6 +460,7 @@ async fn fresh_client_sees_lww_winner_after_conflict_impl() {
     let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
             )
@@ -463,6 +468,7 @@ async fn fresh_client_sees_lww_winner_after_conflict_impl() {
     });
     let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
         )
@@ -630,6 +636,7 @@ async fn subscription_reflects_concurrent_update_impl() {
 
     // Bob updates
     bob.update(
+        "todos",
         todo_id,
         vec![("title".to_string(), Value::Text("bob-updated".to_string()))],
     )
@@ -780,6 +787,7 @@ async fn sequential_updates_preserve_latest_impl() {
     for version in ["v1", "v2", "v3"] {
         alice
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text(version.to_string()))],
             )
@@ -882,6 +890,7 @@ async fn concurrent_edits_on_different_fields_impl() {
     let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-title".to_string()))],
             )
@@ -890,6 +899,7 @@ async fn concurrent_edits_on_different_fields_impl() {
     // Bob updates completed only
     let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
@@ -1032,6 +1042,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
     let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-title".to_string()))],
             )
@@ -1039,6 +1050,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
     });
     let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
@@ -1064,6 +1076,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
 
     charlie
         .update(
+            "todos",
             todo_id,
             vec![(
                 "title".to_string(),
@@ -1174,6 +1187,7 @@ async fn establish_offline_reconnect_baseline(
 
     alice
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("alice-v1".to_string()))],
         )
@@ -1306,6 +1320,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     for v in ["alice-v2", "alice-v3", "alice-v4"] {
         alice
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text(v.to_string()))],
             )
@@ -1313,6 +1328,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     }
     alice
         .update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
@@ -1351,6 +1367,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
 
     let bob_offline_tx = bob_offline
         .update(
+            "todos",
             todo_id,
             vec![(
                 "title".to_string(),
@@ -1500,6 +1517,7 @@ async fn online_user_wins_on_reconnect_impl() {
 
     bob_offline
         .update(
+            "todos",
             todo_id,
             vec![(
                 "title".to_string(),
@@ -1515,6 +1533,7 @@ async fn online_user_wins_on_reconnect_impl() {
     for v in ["alice-v2", "alice-v3", "alice-v4"] {
         alice
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text(v.to_string()))],
             )

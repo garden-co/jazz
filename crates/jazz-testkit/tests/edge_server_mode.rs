@@ -134,7 +134,11 @@ async fn subscription_orders_by_unprojected_field() {
             );
 
             let tx = client
-                .update(ids[0], vec![("rank".to_owned(), Value::Integer(0))])
+                .update(
+                    "todos",
+                    ids[0],
+                    vec![("rank".to_owned(), Value::Integer(0))],
+                )
                 .expect("change only the unprojected ordering field");
             support::wait_for_edge_txs(
                 &client,
@@ -407,6 +411,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
             let promoted = tied[2];
             let tx = client
                 .update(
+                    "todos",
                     promoted,
                     vec![("title".to_owned(), Value::Text("ahead".to_owned()))],
                 )
@@ -451,6 +456,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
 
             let tx = client
                 .update(
+                    "todos",
                     promoted,
                     vec![("title".to_owned(), Value::Text("zulu".to_owned()))],
                 )

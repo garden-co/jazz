@@ -132,7 +132,11 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
                 .expect("Bob author")
                 .canonical(),
         ))
-        .update(note, vec![("title".into(), Value::Text("revised".into()))])
+        .update(
+            "notes",
+            note,
+            vec![("title".into(), Value::Text("revised".into()))],
+        )
         .expect("attributed update should succeed without a session")
         .expect("attributed update should commit immediately");
     wait_for_edge_txs(&client, &[update_tx]).await;
@@ -283,6 +287,7 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
     let update_tx = client
         .with_write_context(bob_backfill)
         .update(
+            "notes",
             note,
             vec![("title".into(), Value::Text("backfilled".into()))],
         )
@@ -414,6 +419,7 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
 
     let alice_update_tx = alice
         .update(
+            "notes",
             alice_attributed,
             vec![(
                 "title".into(),
@@ -423,7 +429,7 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
         .expect("creator should be able to update attributed rows")
         .expect("creator update should commit immediately");
     let alice_delete_tx = alice
-        .delete(alice_owned)
+        .delete("notes", alice_owned)
         .expect("creator should be able to delete her own row")
         .expect("creator delete should commit immediately");
     wait_for_edge_txs(&alice, &[alice_update_tx, alice_delete_tx]).await;

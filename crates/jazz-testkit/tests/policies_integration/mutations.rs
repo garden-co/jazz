@@ -121,6 +121,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
     // ownership check (USING) can reject this otherwise readable update.
     let transaction_id = bob
         .update(
+            "documents",
             obj_id,
             vec![
                 ("owner_id".into(), Value::Text(super::BOB_ID.into())),
@@ -237,7 +238,7 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
     .await;
 
     let bob_delete_transaction = bob
-        .delete(protected_id)
+        .delete("protected", protected_id)
         .expect("bob should accept the delete locally");
     let bob_delete = bob
         .wait_for_transaction(
@@ -266,7 +267,7 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
     .await;
 
     alice
-        .delete(protected_id)
+        .delete("protected", protected_id)
         .expect("admin soft delete should be accepted locally");
 
     wait_for_protected_rows(
