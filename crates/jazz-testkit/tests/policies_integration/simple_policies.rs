@@ -1848,8 +1848,8 @@ async fn updates_require_read_and_update_permissions_inner() {
     server.shutdown().await;
 }
 
-/// Verifies the subscription-side visibility lifecycle for a simple
-/// `SELECT archived = false` policy.
+/// Verifies subscription visibility when owners can read their own archived
+/// rows, while other readers can see only rows with `archived = false`.
 ///
 /// Actors: alice mutates rows, observer holds the live subscription, and fresh
 /// verifier clients query EdgeServer state after each step.
@@ -1862,7 +1862,6 @@ async fn updates_require_read_and_update_permissions_inner() {
 /// alice ──update true→false──────► observer stream (add ✓)
 /// ```
 #[tokio::test]
-#[ignore = "#1762: updating a row from visible to hidden is rejected locally with `read policy denied UPSERT` before removal-delta behavior can be tested"]
 async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     tokio::task::LocalSet::new()
         .run_until(authorized_mutations_emit_visibility_scoped_subscription_deltas_inner())
@@ -1870,13 +1869,18 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
 }
 
 async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner() {
+    use jazz_testkit::wait_for_edge_txs;
+
     let table_name = "documents_visibility_deltas";
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             table_name,
             permissions(|p| {
                 p.allow_insert().always();
-                p.allow_read().where_(pe::eq("archived", false));
+                p.allow_read().where_(pe::any_of([
+                    pe::eq("owner_id", pe::session(vec!["claims", "sub"])),
+                    pe::eq("archived", false),
+                ]));
                 p.allow_update().always();
             }),
         ))
@@ -1910,7 +1914,13 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         .expect("subscribe observer");
     let mut observer_log = Vec::new();
 
-    let visible_id = seed_document(&alice, table_name, super::ALICE_ID, "visible", false).await;
+    let (visible_id, _, transaction) = alice
+        .insert(
+            table_name,
+            boolean_policy_document_input(super::ALICE_ID, "visible", false),
+        )
+        .expect("insert visible document");
+    wait_for_edge_txs(&alice, &[transaction.expect("insert commits immediately")]).await;
     wait_for_subscription_update(
         &mut observer_stream,
         &mut observer_log,
@@ -1920,7 +1930,13 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     )
     .await;
 
-    let hidden_id = seed_document(&alice, table_name, super::ALICE_ID, "hidden", true).await;
+    let (hidden_id, _, transaction) = alice
+        .insert(
+            table_name,
+            boolean_policy_document_input(super::ALICE_ID, "hidden", true),
+        )
+        .expect("insert hidden document");
+    wait_for_edge_txs(&alice, &[transaction.expect("insert commits immediately")]).await;
     let verifier_after_hidden_insert = connect_ready_user(
         &server,
         &verifier_schema,
@@ -1940,7 +1956,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     );
     assert!(
         lacks_row(&rows_after_hidden_insert, hidden_id),
-        "authorized insert that fails SELECT must stay hidden: rows={rows_after_hidden_insert:?}"
+        "insert hidden by the reader's SELECT policy must stay hidden: rows={rows_after_hidden_insert:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
     assert!(
@@ -1953,7 +1969,15 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         .expect("shutdown verifier_after_hidden_insert");
 
     observer_log.clear();
-    update_document_title(&alice, table_name, visible_id, "visible renamed").await;
+    let transaction = alice
+        .update(
+            table_name,
+            visible_id,
+            row_changes([("title", "visible renamed".into())]),
+        )
+        .expect("rename visible document")
+        .expect("update commits immediately");
+    wait_for_edge_txs(&alice, &[transaction]).await;
     let verifier_after_visible_update = connect_ready_user(
         &server,
         &verifier_schema,
@@ -1995,7 +2019,15 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
     )
     .await;
     observer_log.clear();
-    update_document_archived(&alice, table_name, visible_id, true).await;
+    let transaction = alice
+        .update(
+            table_name,
+            visible_id,
+            row_changes([("archived", true.into())]),
+        )
+        .expect("hide document from other readers")
+        .expect("update commits immediately");
+    wait_for_edge_txs(&alice, &[transaction]).await;
     let verifier_after_hide = connect_ready_user(
         &server,
         &verifier_schema,
@@ -2016,7 +2048,7 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         &mut observer_stream,
         &mut observer_log,
         QUERY_TIMEOUT,
-        "visible-to-hidden scope shrink does not emit ObjectOutOfScope/remove deltas, so observer receives remove delta after row becomes hidden",
+        "observer receives remove delta after row becomes hidden",
         |log| has_removed(log, visible_id),
     )
     .await;
@@ -2034,7 +2066,15 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas_inner()
         .expect("shutdown verifier_after_hide");
 
     observer_log.clear();
-    update_document_archived(&alice, table_name, hidden_id, false).await;
+    let transaction = alice
+        .update(
+            table_name,
+            hidden_id,
+            row_changes([("archived", false.into())]),
+        )
+        .expect("reveal owned archived document")
+        .expect("update commits immediately");
+    wait_for_edge_txs(&alice, &[transaction]).await;
     let verifier_after_reveal = connect_ready_user(
         &server,
         &verifier_schema,

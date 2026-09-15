@@ -2662,21 +2662,10 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     server.shutdown().await;
 }
 
-/// Verifies that forward inheritance fails closed when the child row's policy
-/// delegates SELECT to a parent table that has no explicit SELECT policy.
-///
-/// Alice owns the parent folder row by data convention, but because `folders`
-/// does not declare a read policy, `allowedTo.read(folder_id)` must not infer
-/// access from permissive/default behavior.
+/// Verifies that server startup rejects a child SELECT policy that inherits
+/// from a parent table without an explicit read policy.
 #[tokio::test]
-#[ignore = "#1761: server schema conversion rejects INHERITS when the referenced parent has no SELECT policy"]
-async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
-    tokio::task::LocalSet::new()
-        .run_until(inherits_select_denies_when_parent_operation_policy_is_missing_inner())
-        .await;
-}
-
-async fn inherits_select_denies_when_parent_operation_policy_is_missing_inner() {
+async fn inherits_select_rejects_missing_parent_read_policy() {
     let documents_policies = permissions(|p| {
         p.allow_read().where_(pe::allowed_to_read("folder_id"));
     });
@@ -2694,85 +2683,26 @@ async fn inherits_select_denies_when_parent_operation_policy_is_missing_inner() 
                 .policies(documents_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone())
-        .await
-        .expect("start test server");
-    let admin = connect_ready_client(
-        &server,
-        &schema,
-        "inherits-admin",
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-    let alice = connect_ready_user(
-        &server,
-        &schema,
-        super::ALICE_ID,
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-
-    let (folder_id, _, folder_tx) = admin
-        .insert(
-            "folders",
-            crate::row_input!("owner_id" => super::ALICE_ID, "name" => "Shared"),
-        )
-        .expect("folder insert should succeed");
-    let (_, _, document_tx) = admin
-        .insert(
-            "documents",
-            crate::row_input!(
-                "owner_id" => super::BOB_ID,
-                "title" => "Inherited doc",
-                "folder_id" => folder_id
-            ),
-        )
-        .expect("document insert should succeed");
-    wait_for_edge_txs(
-        &admin,
-        &[
-            folder_tx.expect("folder insert should commit immediately"),
-            document_tx.expect("document insert should commit immediately"),
-        ],
-    )
-    .await;
-
-    let rows = alice
-        .query(
-            Query::from("documents").select(["title"]),
-            jazz::tools::ReadTier::Remote,
-        )
-        .await
-        .map(jazz::tools::test_support::ordinary_rows)
-        .expect("query documents as alice");
-
+    let error = match JazzServer::start_with_schema(schema).await {
+        Err(error) => error,
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("inheritance from a missing parent read policy must be rejected");
+        }
+    };
     assert!(
-        rows.is_empty(),
-        "child rows should be denied when INHERITS reaches a parent table with no explicit SELECT policy"
+        error.contains("$.documents.policies.select.using")
+            && error.contains(
+                "INHERITS via_column 'folder_id' references table 'folders' without a Select policy"
+            ),
+        "expected a missing parent read policy error, got: {error}"
     );
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
 }
 
-/// Verifies the permissive-local behavior for an INSERT policy that inherits
-/// through a parent FK.
-///
-/// In local permissive mode, the child table has an explicit INSERT policy, but
-/// the parent table has no INSERT policy. This covers the local-only branch
-/// where a missing parent operation policy is treated as allowed while
-/// evaluating `allowedTo.insert(folder_id)`.
+/// Verifies that server startup rejects a child INSERT policy that inherits
+/// from a parent table without an explicit INSERT policy.
 #[tokio::test]
-#[ignore = "#1762: permissive-local policy mode is no longer exposed by the Rust public API"]
-async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
-    tokio::task::LocalSet::new().run_until(local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local_inner()).await;
-}
-
-async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local_inner()
-{
+async fn inherits_insert_rejects_missing_parent_insert_policy() {
     let documents_policies = permissions(|p| {
         p.allow_insert().where_(pe::allowed_to_insert("folder_id"));
     });
@@ -2786,66 +2716,26 @@ async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permi
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone())
-        .await
-        .expect("start test server");
-    let admin = connect_ready_client(
-        &server,
-        &schema,
-        "inherits-admin",
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-    let alice = connect_ready_user(
-        &server,
-        &schema,
-        super::ALICE_ID,
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-
-    let (folder_id, _, folder_tx) = admin
-        .insert("folders", crate::row_input!("title" => "alice folder"))
-        .expect("seed folder row");
-    wait_for_edge_txs(
-        &admin,
-        &[folder_tx.expect("folder insert should commit immediately")],
-    )
-    .await;
-
-    let document_tx = alice
-        .insert(
-            "documents",
-            crate::row_input!("title" => "draft doc", "folder_id" => folder_id),
-        )
-        .expect(
-            "permissive local runtimes should treat missing parent INSERT policy as allow for INHERITS",
-        )
-        .2
-        .expect("document insert should commit immediately");
-    wait_for_edge_txs(&alice, &[document_tx]).await;
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
+    let error = match JazzServer::start_with_schema(schema).await {
+        Err(error) => error,
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("inheritance from a missing parent INSERT policy must be rejected");
+        }
+    };
+    assert!(
+        error.contains("$.documents.policies.insert.with_check")
+            && error.contains(
+                "INHERITS via_column 'folder_id' references table 'folders' without a Insert policy"
+            ),
+        "expected a missing parent INSERT policy error, got: {error}"
+    );
 }
 
-/// Verifies the permissive-local behavior for reverse inherited UPDATE access.
-///
-/// The `files` UPDATE policy is delegated through rows in `todos` that
-/// reference the file. `todos` intentionally has no UPDATE policy, so this
-/// covers the local-only branch where missing source-table UPDATE policy is
-/// treated as allowed for `allowedTo.updateReferencing(...)`.
+/// Verifies that server startup rejects reverse inherited UPDATE access when
+/// the referencing source table has no explicit UPDATE policy.
 #[tokio::test]
-#[ignore = "#1762: permissive-local policy mode is no longer exposed by the Rust public API"]
-async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
-    tokio::task::LocalSet::new().run_until(local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local_inner()).await;
-}
-
-async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local_inner()
- {
+async fn inherits_referencing_rejects_missing_source_update_policy() {
     let files_policies = permissions(|p| {
         p.allow_update()
             .where_old(pe::allowed_to_update_referencing("todos", "file_id"))
@@ -2866,56 +2756,18 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone())
-        .await
-        .expect("start test server");
-    let admin =
-        connect_ready_client(&server, &schema, "inherits-admin", "files", READY_TIMEOUT).await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
-
-    let (file_id, _, file_tx) = admin
-        .insert(
-            "files",
-            crate::row_input!("owner_id" => super::BOB_ID, "name" => "shared-file"),
-        )
-        .expect("seed file row");
-    let (_, _, todo_tx) = admin
-        .insert(
-            "todos",
-            crate::row_input!(
-                "owner_id" => super::ALICE_ID,
-                "title" => "todo referencing file",
-                "file_id" => file_id,
-            ),
-        )
-        .expect("seed referencing todo row");
-    wait_for_edge_txs(
-        &admin,
-        &[
-            file_tx.expect("file insert should commit immediately"),
-            todo_tx.expect("todo insert should commit immediately"),
-        ],
-    )
-    .await;
-
-    let update_tx = alice
-        .update(
-            "files",
-            file_id,
-            vec![
-                ("owner_id".into(), Value::Text(super::BOB_ID.into())),
-                ("name".into(), Value::Text("updated by alice".into())),
-            ],
-        )
-        .expect(
-            "permissive local runtimes should treat missing source UPDATE policy as allow for INHERITS_REFERENCING",
-        )
-        .expect("file update should commit immediately");
-    wait_for_edge_txs(&alice, &[update_tx]).await;
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
+    let error = match JazzServer::start_with_schema(schema).await {
+        Err(error) => error,
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("reverse inheritance from a missing source UPDATE policy must be rejected");
+        }
+    };
+    assert!(
+        error.contains("$.files.policies.update.using")
+            && error.contains("INHERITS_REFERENCING source_table 'todos' has no Update policy"),
+        "expected a missing source UPDATE policy error, got: {error}"
+    );
 }
 
 /// Verifies that inherited WITH CHECK constraints evaluate the proposed new
