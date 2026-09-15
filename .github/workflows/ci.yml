@@ -6,7 +6,7 @@ on:
   # when its base is another feature branch.
   pull_request:
   push:
-    branches: [main]
+    branches: [main, release]
 
 concurrency:
   # For pushes, this lets concurrent runs happen, so each push gets a result.
@@ -35,7 +35,7 @@ jobs:
       sccache-write: false
 
   trusted:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     permissions:
       contents: read
       id-token: write
