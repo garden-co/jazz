@@ -85,6 +85,13 @@ impl IvmRuntime {
                     .await?;
                 }
             }
+            if !table.indices.is_empty() {
+                // Repair hydration is temporary startup work, not a query
+                // warmup. Release its primary/index snapshots even when no
+                // later write advances this table's frontier (notably empty
+                // deletion tables), before recovery or user reads begin.
+                self.invalidate_table_inputs(&table.name);
+            }
         }
         Ok(())
     }

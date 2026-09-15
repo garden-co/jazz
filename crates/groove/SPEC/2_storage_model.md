@@ -685,6 +685,8 @@ replays its primary table through its existing index projection and persistence
 encoding. Primary records, history, fate records, and pending writes are untouched.
 Deletes and replay writes use batches of at most 1024 entries; hydration currently
 materializes one index snapshot, so peak memory still scales with that snapshot.
+Repair releases each repaired table's hydration memo before continuing, so
+normal recovery and reads do not inherit one-time repair snapshots.
 All index writes are flushed before the generation is written, and the generation
 is flushed before startup succeeds. A failed or interrupted attempt requires
 reopening; absent completion, it clears and rebuilds again. Matching generations
