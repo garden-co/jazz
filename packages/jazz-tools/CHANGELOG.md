@@ -1,5 +1,116 @@
 # jazz-tools
 
+## 2.0.0-alpha.55
+
+### Patch Changes
+
+- 194df87: Fix live synchronization of deleted rows protected by account-based ownership permissions, so other clients remove the deleted row without requiring a reload.
+- 5245e76: Preserve the source ordering and duplicate references when hydrating forward array foreign keys, instead of deduplicating and sorting the referenced rows by ID. Support reverse UUID-array correlations in array subqueries.
+
+  [PR #2865](https://github.com/garden-co/jazz/pull/2865).
+
+- c76144e: Persist declared-index updates with their base publication even while a subscription waits for missing content.
+- 3c228b4: Avoid copying the complete previous supporting-fact set when receiving a subscription snapshot; only changed peer facts are cloned into the local delta.
+- e897992: Build complete subscription supporting-row manifests from borrowed maintained facts without constructing an intermediate owned fact set.
+- bf942bf: Reduce validation overhead when reading inline scalar values without changing their storage encoding.
+- 9c6c465: Propagate browser worker auth-update failures to readiness and recover them on an explicit reconnect.
+- 72fad2f: Avoid full-table reads when staging browser transaction updates, and prevent failed write-merge reads from leaving patches staged for a later commit.
+- b082ff8: Reclaim obsolete IndexedDB pages during writes under exclusive ownership, and safely retire browser runtime storage handles during schema changes and reconnects. Existing unused pages are not automatically collected.
+- 9d69a5b: Fix browser startup freezing when restoring pending uploads requires a cold IndexedDB read. Recovery now yields to asynchronous storage instead of blocking its callbacks.
+- 69e26c2: Reduce browser storage lookup overhead by copying only the requested row value instead of unrelated values in the same page.
+- dd491a8: Avoid opening a competing browser worker generation when runtime startup is slow; preserve a bounded initialization deadline and explicit worker handoff.
+- f8ace50: Reject intentional WebSocket closes before server hello.
+- 2cdb74e: Reject browser reconnect readiness waiters after terminal worker failure.
+- 06314ba: Keep native transport credentials mode-exclusive across live auth transitions.
+- fa458a8: Serialize native transport retirement before admitting replacements.
+- 6fcf012: Reduce CPU work and allocations when validating nested records during local query delivery, without changing storage encoding or accepted values.
+- 0ad46d9: Keep catalogue publications equivalent across table declaration order, so persistent clients can reopen after multi-table migrations against a running authority.
+- 5245e76: Move subscription result buffering into the Rust core and remove redundant TypeScript query preparation and row caches. Preserve scoped relation reads and wait for complete recursive query results before publishing them. Direct binding consumers must adapt to removal of the Rust–TypeScript `prepareQuery` API.
+
+  [PR #2717](https://github.com/garden-co/jazz/pull/2717).
+
+- 80fe6b1: Add regression coverage for allowed and denied inserts governed by correlated relationship policies, including server validation of optimistic writes.
+- 3833c7c: Handle comparisons with null correctly inside correlated relationship policies, and cover allowed and denied deletes under those policies.
+- 178a4b8: Add regression coverage for correlated relationship policies on updates and reverse-relationship reads, including allowed and denied operations.
+- cc77ea3: Automatically rebuild declared indexes once when opening older local databases, repairing missing or stale entries while preserving primary records and pending unsynced writes.
+- a73288a: Stop deferred subscription work from rearming server ticks after activity has ended.
+- 05eea99: Fix browser subscriptions remaining stale after a transaction commits with deferred local persistence.
+- fe80d90: Reduce the work needed to recover deletion and restore witnesses when delivering locally cached rows to a subscriber, using the existing current-row indexes directly.
+- 5245e76: Register mutation waits with the Rust runtime before the upstream connection is ready, so writes made during connection startup can still settle correctly.
+
+  [Implementation](https://github.com/garden-co/jazz/commit/d084613778f01f213490a4b6f1826d8ad0cad118).
+
+- 5b64a9d: Avoid scanning every sibling version in a large transaction when validating an existing exact parent row. Preserve branch, layer, identity and incomplete-parent checks.
+- bf79ef4: Keep averages of large finite numbers finite when their intermediate sum overflows, while preserving cancellation, subscription updates and retractions.
+- b8a8d0d: Fix updates that could fail to settle after concurrent local writes by stopping redundant merges once only one underlying edit remains.
+- 82dd0e6: Fix migration stub generation for bare UUID columns, including nullable UUIDs in newly added tables.
+- 42eb629: Keep overlapping subscription hydration pending until earlier shared-node snapshots are installed, avoiding internal subscription failures while those dependencies resolve.
+- 5245e76: Copy immutable version-row wire bytes in bulk instead of rebuilding their fields during synchronization, preserving the existing encoded values.
+
+  [PR #2923](https://github.com/garden-co/jazz/pull/2923).
+
+- f93c6e0: Reduce subscription publication work for small changes by tracking changed source facts across drains and retries.
+- 5245e76: Keep standalone Node, browser, and React Native subscriptions loading until the first complete local result is ready, avoiding a premature empty snapshot when matching rows are already stored. Browser and React Native foreground databases wait for their persistent worker or relay to supply the initial inputs. Genuinely empty results still finish loading without waiting for server sync, and initialized subscriptions do not return to loading on disconnect. Preserve joined-row identities when resetting subscription inputs.
+
+  [PR #2986](https://github.com/garden-co/jazz/pull/2986).
+
+- b3d67b8: Keep Inspector admin secrets out of persisted connection state, generated configuration, and URL fragments.
+- 0afb098: Keep other clients responsive when a loopback WebSocket client is backpressured, while preserving message delivery order.
+- 5245e76: Reduce work for maintained query updates by deriving unbounded-window membership from changed records and constructing root-position maps only for outputs that use them. Reuse proven equivalent witness payloads across maintained roles while keeping incompatible executions isolated.
+
+  [PR #2921](https://github.com/garden-co/jazz/pull/2921), [PR #2922](https://github.com/garden-co/jazz/pull/2922), [Witness reuse implementation](https://github.com/garden-co/jazz/commit/611b30c4a8b9d0788a0d39d514b8002da529c48a).
+
+- a54c7e6: Preserve authored transaction identity when a persistent owner relays reads across schema migrations. Old and new schema reads retain original row bytes and authored metadata, and renamed-table witnesses retain their exact branch.
+- 020bd39: Support nested correlated relationship checks inside permission policies. Private dependency rows can authorize an operation without becoming readable to the caller.
+- d064481: Fix deployment of policies with correlated `exists` clauses nested in boolean branches.
+- 22d04ef: Allow persistent clients that missed a published migration while offline to reopen and fetch the new schema catalogue without an application-managed old-schema bootstrap. Preserve cached rows and pending edits, and keep unpublished schemas unavailable.
+- 5825187: Recover permissions publication when a schema migration is already durable but missing from the running server. Reject missing or ambiguous lineage before advancing the permissions head, so publication can be retried safely.
+- 5f5d279: Improve first sync and sequential writes by maintaining physical supporting rows directly and sending an initial snapshot followed by changes to that set.
+
+  **Sync protocol upgrade:** this release uses wire protocol v2 and cannot sync with v1 peers. Upgrade clients, native runtimes, and self-hosted Edge/Core servers together; hosted clients need a compatible server deployment.
+
+  Subscription membership and resume cursors are now kept in memory. After a process restart, remote reads obtain a fresh supporting snapshot; local-first reads can still use eligible persisted data. Existing subscription caches and cursors are discarded automatically on upgrade, while application rows, transaction history, pending local writes, and the catalogue are preserved. No manual local-storage reset is required.
+
+  Keep pending reads progressing across in-process catalogue rebuilds and cache eviction without reusing invalidated subscription answers. Local-first foreground reads continue to accept a fresh answer from their local owner while offline.
+
+  Fix native foreground reads that could stall when a refreshed subscription needed to fetch a missing row version. Host-admitted native relays now install their session scope and request the matching authenticated upstream link, preserving isolation between sessions and support for reopening existing account databases.
+
+  Bind native permission advice to the admitted foreground identity and claims. Claims changes cancel outdated advice, and server receipt revisions are no longer confused with local claims counters.
+
+- 64a449b: Avoid synchronous transaction preflight reads that can block the host while queued database work holds the owner lock.
+- e4460da: Reject null defaults for required columns during schema validation, before publishing the schema.
+- 5245e76: Require all non-nullable insert fields, including array fields that previously defaulted to `[]`. Report upsert input validation failures through `onMutationError` and the write handle’s `wait()`; transaction failures are available through `commit().wait()`. Missing upsert fields are validated asynchronously because they may be valid for an update but invalid for a new row.
+
+  [PR #2717](https://github.com/garden-co/jazz/pull/2717).
+
+- b5692a6: Preserve nullable parent correlation keys when required nested includes filter rows, avoiding collector descriptor mismatches without changing required-match eligibility.
+- 5245e76: Reject explicit table-level `id` columns in schema definitions, including at TypeScript type-check time. Every table uses its automatically generated UUID `id` as its row identity; remove authored `id` declarations before upgrading.
+
+  [PR #2873](https://github.com/garden-co/jazz/pull/2873).
+
+- b6eda5a: Reuse the complete supporting-row set during subscription publication bookkeeping instead of reconstructing it again.
+- 5ebd45f: Reuse vacant server session slots while rejecting stale handles from previous identities.
+- 409289a: Deliver local React Native writes to foreground subscriptions immediately and refresh policy-dependent subscriptions when membership data changes.
+- 681f5c9: Rebuild catalogue runtimes safely while query hydration or auxiliary chunk reads are pending, and defer catalogue ingress until in-flight publications settle.
+- 3026901: Keep replacement subscriptions live across catalogue rebuilds by scoping Groove subscription handles to their creating runtime.
+- 2359534: Avoid repeatedly reading transaction status for writes already acknowledged locally while waiting for server confirmation, improving offline bulk-write performance.
+- 13e96f8: Compare incoming supporting snapshots as sorted vectors without building temporary fact trees.
+- a26a596: Reduce cold-load and large-transaction overhead by avoiding repeated ancestry scans, record conversions, and unused query payloads. Preserve complete subscription results when recursive evaluation or data hydration resumes across runtime turns.
+
+  Check subscription completeness against its typed schema view, including views registered on an initially empty owner.
+
+  Keep provisional enum registries coherent when adopting the authority catalogue, preserving offline enum values and preventing provenance failures on subsequent reopen.
+
+- 678c2ed: Reduce transaction-status polling cost by reading fate and durability fields without decoding unrelated transaction payloads. Preserve pending-persistence and rejection checks.
+- 5245e76: Support permission policies with `EXISTS` checks that do not reference the outer row, such as checking whether the current user has an admin grant. Empty grant sets deny access, multiple matching grants do not duplicate results, and removing the last grant revokes existing subscriptions.
+
+  [PR #2880](https://github.com/garden-co/jazz/pull/2880).
+
+- Updated dependencies [5245e76]
+- Updated dependencies [060083d]
+  - jazz-wasm@2.0.0-alpha.55
+  - jazz-rn@2.0.0-alpha.55
+
 ## 2.0.0-alpha.54
 
 ### Patch Changes
