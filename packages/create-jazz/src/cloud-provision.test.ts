@@ -80,10 +80,7 @@ describe("provisionHostedApp", () => {
         expect(requestSignal).toBe(timeoutController.signal);
         expect(timeoutSpy).toHaveBeenCalledWith(8_000);
 
-        await vi.advanceTimersByTimeAsync(7_999);
-        await vi.advanceTimersByTimeAsync(1);
-
-        await expect(provisioning).rejects.toSatisfy((err: unknown) => {
+        const timeoutAssertion = expect(provisioning).rejects.toSatisfy((err: unknown) => {
           if (!(err instanceof ProvisionNetworkError)) return false;
           return (
             /timeout/i.test(err.message) &&
@@ -91,6 +88,11 @@ describe("provisionHostedApp", () => {
             err.message.includes(apiUrl)
           );
         });
+
+        await vi.advanceTimersByTimeAsync(7_999);
+        await vi.advanceTimersByTimeAsync(1);
+
+        await timeoutAssertion;
       } finally {
         timeoutSpy.mockRestore();
         vi.useRealTimers();
