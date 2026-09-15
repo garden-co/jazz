@@ -42,23 +42,9 @@ const PERMISSIONS_LIFECYCLE_NOTE =
 
 function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";
-  let schemaDir = process.cwd();
-  let jazzBin: string | undefined;
-  let strictProvenance = false;
-
-  for (let i = 1; i < args.length; i++) {
-    const arg = args[i];
-    const nextArg = args[i + 1];
-    if (arg === "--jazz-bin" && nextArg) {
-      jazzBin = nextArg;
-      i += 1;
-    } else if (arg === "--schema-dir" && nextArg) {
-      schemaDir = nextArg;
-      i += 1;
-    } else if (arg === "--strict-provenance") {
-      strictProvenance = true;
-    }
-  }
+  const schemaDir = getFlagValue(args, "--schema-dir", "last") ?? process.cwd();
+  const jazzBin = getFlagValue(args, "--jazz-bin", "last");
+  const strictProvenance = args.includes("--strict-provenance");
 
   return { command, options: { jazzBin, schemaDir, strictProvenance } };
 }
@@ -207,13 +193,19 @@ function normalizeArgs(args: string[]): { args: string[]; envFiles: string[] } {
     const arg = args[i];
     if (arg === "--env-file") {
       const value = args[i + 1];
-      if (value) {
-        envFiles.push(value);
-        i += 1;
-        continue;
+      if (!value || value.startsWith("-")) {
+        throw new Error("Missing value for --env-file.");
       }
-    } else if (arg.startsWith(prefix)) {
-      envFiles.push(arg.slice(prefix.length));
+      envFiles.push(value);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith(prefix)) {
+      const value = arg.slice(prefix.length);
+      if (!value || value.startsWith("-")) {
+        throw new Error("Missing value for --env-file.");
+      }
+      envFiles.push(value);
       continue;
     }
     normalized.push(arg);
@@ -239,21 +231,39 @@ export function resolveEnvVar(
   return undefined;
 }
 
-function getFlagValue(args: string[], flag: string): string | undefined {
+function getFlagValue(
+  args: string[],
+  flag: string,
+  selection: "first" | "last" = "first",
+): string | undefined {
+  const prefix = `${flag}=`;
+  let selected: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!arg) {
       continue;
     }
     if (arg === flag) {
-      return args[i + 1];
+      const value = args[i + 1];
+      if (!value || value.startsWith("-")) {
+        throw new Error(`Missing value for ${flag}.`);
+      }
+      if (selected === undefined || selection === "last") {
+        selected = value;
+      }
+      continue;
     }
-    const prefix = `${flag}=`;
     if (arg.startsWith(prefix)) {
-      return arg.slice(prefix.length);
+      const value = arg.slice(prefix.length);
+      if (!value || value.startsWith("-")) {
+        throw new Error(`Missing value for ${flag}.`);
+      }
+      if (selected === undefined || selection === "last") {
+        selected = value;
+      }
     }
   }
-  return undefined;
+  return selected;
 }
 
 function hasFlag(args: string[], flag: string): boolean {

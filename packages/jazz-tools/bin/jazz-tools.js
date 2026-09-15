@@ -50,7 +50,7 @@ function parseWrapperArgs(rawArgs) {
 
     if (arg === "--rust-bin") {
       const value = rawArgs[i + 1];
-      if (!value) {
+      if (!value || value.startsWith("-")) {
         fail("Missing value for --rust-bin.");
       }
       rustBinOverride = value;
@@ -61,11 +61,23 @@ function parseWrapperArgs(rawArgs) {
     const prefix = "--rust-bin=";
     if (arg.startsWith(prefix)) {
       const value = arg.slice(prefix.length);
-      if (!value) {
+      if (!value || value.startsWith("-")) {
         fail("Missing value for --rust-bin.");
       }
       rustBinOverride = value;
       continue;
+    }
+
+    if (arg === "--env-file") {
+      const value = rawArgs[i + 1];
+      if (!value || value.startsWith("-")) {
+        fail("Missing value for --env-file.");
+      }
+    } else if (arg.startsWith("--env-file=")) {
+      const value = arg.slice("--env-file=".length);
+      if (!value || value.startsWith("-")) {
+        fail("Missing value for --env-file.");
+      }
     }
 
     args.push(arg);
