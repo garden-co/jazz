@@ -181,6 +181,12 @@ whose record is publicly returned. Flat joined output is a separate target AST
 form, described in §6.4.1. Conflating these two forms would make policy
 traversal accidentally promise a public tuple shape.
 
+An explicit source-column/target-column equality may also constrain membership
+through compatible non-reference columns, such as two text columns.
+This remains an existential join: matching joined rows do not produce
+public tuples. UUID and array reference traversals retain their declared-FK
+validation, and source-lookup traversals retain their existing reference rules.
+
 ### 6.1.1 Membership and containment filters
 
 Membership and containment semantics are core-owned query semantics. Binding

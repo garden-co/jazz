@@ -1528,6 +1528,8 @@ struct PendingReachable {
 }
 
 struct LoweredRel {
+    // Compiler-only paths into `joins`; None marks an ambiguous repeated scope.
+    scope_paths: BTreeMap<String, Option<Vec<usize>>>,
     /// Row-producing relations name their output table. Scalar-key gathers do
     /// not: their projected `id` is consumed by the following access join.
     table: Option<String>,
@@ -1876,13 +1878,114 @@ fn append_exists_rel_policy_clause(
     }
 }
 
+/// Assign conjuncts to their source before converting scoped columns to local names.
+/// OR/NOT expressions must stay intact: distributing them between existence joins
+/// would change which combinations of rows can authorize the protected row.
+fn append_scoped_rel_predicate(
+    table: &TableName,
+    path: &str,
+    lowered: &mut LoweredRel,
+    predicate: &RelPredicateExpr,
+) -> Result<(), SchemaConversionError> {
+    if let RelPredicateExpr::And(children) = predicate {
+        for child in children {
+            append_scoped_rel_predicate(table, path, lowered, child)?;
+        }
+        return Ok(());
+    }
+    let mut columns = Vec::new();
+    collect_rel_predicate_columns(predicate, &mut columns);
+    let mut routes = BTreeSet::new();
+    for column in columns {
+        let route = match column.scope.as_deref() {
+            None => Vec::new(),
+            Some(scope) => match lowered.scope_paths.get(scope) {
+                Some(Some(route)) => route.clone(),
+                Some(None) => {
+                    return Err(err(
+                        format!("$.{}.{path}", table.as_str()),
+                        format!(
+                            "ExistsRel filter scope '{scope}' is ambiguous; use distinct aliases"
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(err(
+                        format!("$.{}.{path}", table.as_str()),
+                        format!("ExistsRel filter references unknown scope '{scope}'"),
+                    ));
+                }
+            },
+        };
+        routes.insert(route);
+    }
+    if routes.len() > 1 {
+        return Err(err(
+            format!("$.{}.{path}", table.as_str()),
+            "ExistsRel Boolean filters spanning multiple sources are not supported",
+        ));
+    }
+    let route = routes.into_iter().next().unwrap_or_default();
+    let filters = rel_predicate_to_policy(table, path, predicate)?;
+    if route.is_empty() {
+        lowered.filters.extend(filters);
+    } else {
+        let mut joins = &mut lowered.joins;
+        for (position, index) in route.iter().enumerate() {
+            let join = &mut joins[*index];
+            if position + 1 == route.len() {
+                for filter in filters {
+                    match (filter.column, filter.value) {
+                        (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
+                            join.correlated_filters.push(JoinCorrelation {
+                                join_column,
+                                source_column,
+                            });
+                        }
+                        _ => join.filters.push(filter.predicate),
+                    }
+                }
+                return Ok(());
+            }
+            joins = &mut join.nested_joins;
+        }
+    }
+    Ok(())
+}
+
+fn collect_rel_predicate_columns<'a>(
+    predicate: &'a RelPredicateExpr,
+    columns: &mut Vec<&'a ColumnRef>,
+) {
+    match predicate {
+        RelPredicateExpr::And(children) | RelPredicateExpr::Or(children) => {
+            for child in children {
+                collect_rel_predicate_columns(child, columns);
+            }
+        }
+        RelPredicateExpr::Not(child) => collect_rel_predicate_columns(child, columns),
+        RelPredicateExpr::Cmp { left, .. }
+        | RelPredicateExpr::Contains { left, .. }
+        | RelPredicateExpr::In { left, .. } => columns.push(left),
+        // Enum payload fields are relative to the matched record, not relation sources.
+        RelPredicateExpr::IsNull { column }
+        | RelPredicateExpr::IsNotNull { column }
+        | RelPredicateExpr::EnumMatch { column, .. } => columns.push(column),
+        RelPredicateExpr::True | RelPredicateExpr::False => {}
+    }
+}
+
 fn lower_exists_rel(
     table: &TableName,
     path: &str,
     rel: &RelExpr,
 ) -> Result<LoweredRel, SchemaConversionError> {
     match rel {
-        RelExpr::TableScan { table, .. } => Ok(LoweredRel {
+        RelExpr::TableScan { table, alias } => Ok(LoweredRel {
+            scope_paths: BTreeMap::from([(
+                alias.clone().unwrap_or_else(|| table.as_str().to_owned()),
+                Some(Vec::new()),
+            )]),
             table: Some(table.as_str().to_owned()),
             filters: Vec::new(),
             joins: Vec::new(),
@@ -1891,9 +1994,7 @@ fn lower_exists_rel(
         }),
         RelExpr::Filter { input, predicate } => {
             let mut lowered = lower_exists_rel(table, path, input)?;
-            lowered
-                .filters
-                .extend(rel_predicate_to_policy(table, path, predicate)?);
+            append_scoped_rel_predicate(table, path, &mut lowered, predicate)?;
             Ok(lowered)
         }
         RelExpr::Project { input, .. } => lower_exists_rel(table, path, input),
@@ -1959,6 +2060,9 @@ fn lower_exists_rel(
                     .access_filters
                     .extend(left.filters.iter().map(|filter| filter.predicate.clone()));
                 return Ok(LoweredRel {
+                    // Filters above this access join constrain the access rows,
+                    // not the scalar frontier produced by Gather.
+                    scope_paths: right.scope_paths,
                     table: left.table,
                     filters: Vec::new(),
                     joins: left.joins,
@@ -2007,6 +2111,17 @@ fn lower_exists_rel(
                 filters,
                 nested_joins: right.joins,
             };
+            let join_index = left.joins.len();
+            for (scope, route) in right.scope_paths {
+                let route = route.map(|mut route| {
+                    route.insert(0, join_index);
+                    route
+                });
+                left.scope_paths
+                    .entry(scope)
+                    .and_modify(|route| *route = None)
+                    .or_insert(route);
+            }
             left.joins.push(join);
             left.reachable.extend(right.reachable);
             Ok(left)
@@ -2047,6 +2162,11 @@ fn lower_gather_rel(
         }
     };
     Ok(LoweredRel {
+        scope_paths: output_table
+            .as_ref()
+            .map(|table| (table.clone(), Some(Vec::new())))
+            .into_iter()
+            .collect(),
         table: output_table,
         filters: Vec::new(),
         joins: Vec::new(),

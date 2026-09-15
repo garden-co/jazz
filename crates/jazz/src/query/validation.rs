@@ -771,6 +771,42 @@ fn validate_join(
             }
         }
     }
+    // Explicit non-reference column equalities are ordinary existence joins.
+    // Keep the declared-reference checks below for UUID/array reference traversal.
+    if join.target == JoinTarget::Column
+        && join.source_lookup.is_none()
+        && let Some(source_column) = &join.source_column
+        && !root.references.contains_key(source_column)
+        && !join_table.references.contains_key(&join.on_column)
+    {
+        let source_type = planner_column_type(root, source_column)?;
+        let target_type = planner_column_type(&join_table, &join.on_column)?;
+        if !matches!(
+            non_null_column_type(source_type),
+            ColumnType::Uuid | ColumnType::Array(_)
+        ) && !matches!(
+            non_null_column_type(target_type),
+            ColumnType::Uuid | ColumnType::Array(_)
+        ) {
+            if !column_types_comparable(source_type, target_type) {
+                return Err(QueryError::OperandTypeMismatch);
+            }
+            for correlation in &join.correlated_filters {
+                if planner_column_type(root, &correlation.source_column)?
+                    != planner_column_type(&join_table, &correlation.join_column)?
+                {
+                    return Err(QueryError::OperandTypeMismatch);
+                }
+            }
+            for predicate in &mut join.filters {
+                validate_predicate(&join_table, predicate, params)?;
+            }
+            for nested in &mut join.nested_joins {
+                validate_join(schema, &join_table, &join.table, nested, params)?;
+            }
+            return Ok(());
+        }
+    }
     let target_table = if let Some(lookup) = &join.source_lookup {
         planner_column_type(root, &lookup.row_id_source_column)?;
         let lookup_table = schema_table(schema, &lookup.table)?;

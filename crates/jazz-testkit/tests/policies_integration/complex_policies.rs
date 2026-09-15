@@ -107,38 +107,20 @@ fn scoped_column(scope: &str, column: &str) -> ColumnRef {
     }
 }
 
-fn join_membership_select_policy() -> PolicyExpr {
-    PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::TableScan {
-                    table: TableName::new("document_grants"),
-                    alias: None,
-                }),
-                right: Box::new(RelExpr::TableScan {
-                    table: TableName::new("group_memberships"),
-                    alias: None,
-                }),
-                on: vec![JoinCondition {
-                    left: scoped_column("document_grants", "group_slug"),
-                    right: scoped_column("group_memberships", "group_slug"),
-                }],
-                join_kind: JoinKind::Inner,
-            }),
-            predicate: PredicateExpr::And(vec![
-                PredicateExpr::Cmp {
-                    left: scoped_column("document_grants", "document_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::RowId(RowIdRef::Outer),
-                },
-                PredicateExpr::Cmp {
-                    left: scoped_column("group_memberships", "user_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user".to_owned()]),
-                },
-            ]),
-        },
-    }
+fn join_membership_select_policy(member_filter: PredicateExpr) -> PolicyExpr {
+    pe::exists(
+        pe::table("document_grants")
+            .alias("grants")
+            .join(
+                pe::table("group_memberships").alias("memberships"),
+                pe::rel::column("grants", "group_slug"),
+                pe::rel::column("memberships", "group_slug"),
+            )
+            .where_(pe::rel::all_of([
+                pe::rel::eq_outer(pe::rel::column("grants", "document_id"), "id"),
+                member_filter,
+            ])),
+    )
 }
 
 fn hop_membership_select_policy() -> PolicyExpr {
@@ -216,13 +198,13 @@ fn exists_share_policy_schema() -> Schema {
         .build()
 }
 
-fn exists_join_policy_schema() -> Schema {
+fn exists_join_policy_schema(select_policy: PolicyExpr) -> Schema {
     SchemaBuilder::new()
         .table(make_title_documents_schema(
             "documents",
             permissions(|p| {
                 p.allow_insert().always();
-                p.allow_read().where_(join_membership_select_policy());
+                p.allow_read().where_(select_policy);
             }),
         ))
         .table(
@@ -565,15 +547,70 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
 /// dave ──membership sales─────► query sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "#1761: read-side ExistsRel join grants never become visible in integration"]
 async fn exists_rel_join_grants_and_denies_correctly() {
     tokio::task::LocalSet::new()
-        .run_until(exists_rel_join_grants_and_denies_correctly_inner())
+        .run_until(exists_rel_join_grants_and_denies_correctly_inner(
+            pe::rel::eq_session(pe::rel::column("memberships", "user_id"), "claims.sub"),
+        ))
         .await;
 }
 
-async fn exists_rel_join_grants_and_denies_correctly_inner() {
-    let schema = exists_join_policy_schema();
+/// A post-join OR belongs to the membership source as a whole. Splitting it
+/// into independent filters would deny Bob; losing its scope can overgrant Dave.
+#[tokio::test]
+async fn exists_rel_join_preserves_same_source_or() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_join_grants_and_denies_correctly_inner(
+            pe::rel::any_of([
+                pe::rel::eq_literal(pe::rel::column("memberships", "user_id"), "absent-user"),
+                pe::rel::eq_session(pe::rel::column("memberships", "user_id"), "claims.sub"),
+            ]),
+        ))
+        .await;
+}
+
+/// A misspelled alias must fail validation instead of binding to a same-named
+/// column on the root source.
+#[tokio::test]
+async fn exists_rel_join_rejects_unknown_filter_scope() {
+    assert_join_policy_rejected(
+        join_membership_select_policy(pe::rel::eq_literal(
+            pe::rel::column("missing", "group_slug"),
+            "eng",
+        )),
+        "unknown scope 'missing'",
+    )
+    .await;
+}
+
+/// An OR across sources cannot be pushed into separate existence joins.
+#[tokio::test]
+async fn exists_rel_join_rejects_cross_source_or() {
+    assert_join_policy_rejected(
+        join_membership_select_policy(pe::rel::any_of([
+            pe::rel::eq_literal(pe::rel::column("grants", "group_slug"), "eng"),
+            pe::rel::eq_session(pe::rel::column("memberships", "user_id"), "claims.sub"),
+        ])),
+        "Boolean filters spanning multiple sources are not supported",
+    )
+    .await;
+}
+
+async fn assert_join_policy_rejected(policy: PolicyExpr, expected: &str) {
+    match JazzServer::start_with_schema(exists_join_policy_schema(policy)).await {
+        Err(error) => assert!(
+            error.contains(expected),
+            "expected {expected:?}, got {error}"
+        ),
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("invalid scoped policy must be rejected: {expected}");
+        }
+    }
+}
+
+async fn exists_rel_join_grants_and_denies_correctly_inner(member_filter: PredicateExpr) {
+    let schema = exists_join_policy_schema(join_membership_select_policy(member_filter));
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
