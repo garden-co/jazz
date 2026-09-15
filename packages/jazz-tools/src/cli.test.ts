@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { createServer, type Server } from "node:http";
 import { constants } from "node:fs";
 import {
   access,
@@ -3486,6 +3487,50 @@ function runBin(
   });
 }
 
+async function runCli(
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const { promise, resolve } = Promise.withResolvers<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+  }>();
+  const child = spawn(process.execPath, [distCliPath, ...args], {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  child.on("close", (status) => resolve({ status, stdout, stderr }));
+  return promise;
+}
+
+async function listenForDeployRequest(): Promise<{ server: Server; url: string }> {
+  const server = createServer((request, response) => {
+    response.statusCode = 400;
+    response.end(
+      `request=${request.url} secret=${request.headers["x-jazz-admin-secret"] ?? "<missing>"}`,
+    );
+  });
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  server.once("error", reject);
+  server.listen(0, "127.0.0.1", resolve);
+  await promise;
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected deploy test server to have a TCP address.");
+  }
+  return { server, url: `http://127.0.0.1:${address.port}` };
+}
+
 function hostNativeBinaryName(): string | null {
   switch (`${process.platform}-${process.arch}`) {
     case "darwin-arm64":
@@ -3502,6 +3547,39 @@ function hostNativeBinaryName(): string | null {
 }
 
 describe("bin integration", () => {
+  it.each([
+    ["before command", ["--env-file", ".env.staging", "deploy", "explicit-cli-app"]],
+    ["after command", ["deploy", "--env-file", ".env.staging", "explicit-cli-app"]],
+    ["equals before command", ["--env-file=.env.staging", "deploy", "explicit-cli-app"]],
+  ] as const)("loads an explicit env file and dispatches deploy (%s)", async (_label, args) => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    const { server, url } = await listenForDeployRequest();
+    const close = Promise.withResolvers<void>();
+
+    await writeFile(
+      join(root, ".env.staging"),
+      [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
+    );
+    const env = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
+    for (const name of [...APP_ID_ENV_VARS, ...SERVER_URL_ENV_VARS]) {
+      delete env[name];
+    }
+
+    try {
+      const result = await runCli(args, { cwd: root, env });
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
+      expect(result.stderr).toContain("request=/apps/explicit-cli-app/schemas");
+      expect(result.stderr).toContain("secret=real-secret");
+      expect(result.stderr).not.toContain("Missing app ID");
+      expect(result.stdout).not.toContain("Usage:");
+    } finally {
+      server.close((error) => (error ? close.reject(error) : close.resolve()));
+      await close.promise;
+    }
+  });
   it("routes validate through the TypeScript CLI for a root schema.ts project", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
