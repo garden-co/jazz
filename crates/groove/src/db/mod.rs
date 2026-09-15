@@ -1383,6 +1383,7 @@ pub struct Database {
     large_value_lifecycle_publications: BTreeSet<PublicationId>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
+    storage_extraction_prepared: bool,
 }
 
 /// An in-memory checkpoint of the schema-derived IVM registry.
@@ -1414,7 +1415,7 @@ enum AppliedBatchLifecycle {
 #[must_use = "an immediate publication must be persisted and settled"]
 pub struct AppliedBatch {
     publication: PublicationId,
-    storage: Rc<LayoutStorage>,
+    storage: Rc<RefCell<Option<Rc<LayoutStorage>>>>,
     operations: Rc<RefCell<StagedWriteState>>,
     resident_install_durable: Option<Rc<Cell<bool>>>,
     order: Rc<RefCell<PersistenceOrder>>,
@@ -1447,6 +1448,12 @@ impl AppliedBatch {
             AppliedBatchLifecycle::Applied,
             "an applied batch may have only one persistence attempt at a time",
         );
+        let storage = self
+            .storage
+            .borrow()
+            .as_ref()
+            .expect("an applied publication retains storage until settlement")
+            .clone();
         let mut attempt = PersistenceAttempt {
             lifecycle: Rc::clone(&self.lifecycle),
             order: Rc::clone(&self.order),
@@ -1481,7 +1488,7 @@ impl AppliedBatch {
         let outcome = match turn {
             Ok(()) => {
                 attempt.write_started = true;
-                self.storage.write_many_borrowed_outcome(operations).await
+                storage.write_many_borrowed_outcome(operations).await
             }
             Err(error) => WriteManyOutcome::Uncommitted(error),
         };
@@ -1529,6 +1536,9 @@ impl AppliedBatch {
         if let Some(waiter) = waiter {
             waiter.wake();
         }
+        if self.abandoned_application.get() {
+            wake_publication_owner(&self.order);
+        }
         PersistedBatch {
             publication: self.publication,
             result,
@@ -1542,6 +1552,7 @@ impl AppliedBatch {
                 tick: self.tick.clone(),
             },
             receipt: PersistenceReceipt {
+                storage: Rc::clone(&self.storage),
                 lifecycle: Rc::clone(&self.lifecycle),
                 order: Rc::clone(&self.order),
                 abandoned_application: Rc::clone(&self.abandoned_application),
@@ -1576,6 +1587,7 @@ impl Drop for PersistenceAttempt {
                 for (_, waiter) in waiters {
                     waiter.wake();
                 }
+                wake_publication_owner(&self.order);
             } else {
                 self.lifecycle.set(AppliedBatchLifecycle::Applied);
             }
@@ -1588,6 +1600,7 @@ impl Drop for AppliedBatch {
         if self.lifecycle.get() == AppliedBatchLifecycle::Applied {
             self.lifecycle.set(AppliedBatchLifecycle::Abandoned);
             self.abandoned_application.set(true);
+            wake_publication_owner(&self.order);
         }
     }
 }
@@ -1598,6 +1611,7 @@ impl Drop for AppliedBatch {
 #[doc(hidden)]
 #[must_use = "complete the application only after durable and runtime state agree"]
 pub struct HostApplicationGuard {
+    order: Rc<RefCell<PersistenceOrder>>,
     abandoned_application: Rc<Cell<bool>>,
     completed: bool,
 }
@@ -1613,14 +1627,23 @@ impl Drop for HostApplicationGuard {
     fn drop(&mut self) {
         if !self.completed {
             self.abandoned_application.set(true);
+            wake_publication_owner(&self.order);
         }
     }
 }
 
 struct PersistenceOrder {
+    owner_waiter: Option<Waker>,
     next: u64,
     waiters: BTreeMap<u64, Waker>,
     failure: Option<String>,
+}
+
+fn wake_publication_owner(order: &Rc<RefCell<PersistenceOrder>>) {
+    let waiter = order.borrow_mut().owner_waiter.take();
+    if let Some(waiter) = waiter {
+        waiter.wake();
+    }
 }
 
 /// Completion of one owned publication persistence operation.
@@ -1634,6 +1657,7 @@ pub struct PersistedBatch {
 }
 
 struct PersistenceReceipt {
+    storage: Rc<RefCell<Option<Rc<LayoutStorage>>>>,
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
     order: Rc<RefCell<PersistenceOrder>>,
     abandoned_application: Rc<Cell<bool>>,
@@ -1642,6 +1666,9 @@ struct PersistenceReceipt {
 impl PersistenceReceipt {
     fn finish(&self) {
         self.lifecycle.set(AppliedBatchLifecycle::Finished);
+        // A settled handle may still be retained for its id or metrics, but
+        // can never persist again. It must not pin a replaced database runtime.
+        self.storage.borrow_mut().take();
     }
 }
 
@@ -1650,6 +1677,7 @@ impl Drop for PersistenceReceipt {
         if self.lifecycle.get() == AppliedBatchLifecycle::PersistenceComplete {
             self.lifecycle.set(AppliedBatchLifecycle::Abandoned);
             self.abandoned_application.set(true);
+            wake_publication_owner(&self.order);
         }
     }
 }
@@ -1681,8 +1709,10 @@ pub enum Error {
     ImmutableBatchConflict,
     #[error("immutable batch must be rebuilt against the current database state")]
     StaleImmutableBatch,
-    #[error("database instance is poisoned after a failed atomic commit")]
+    #[error("database instance is unavailable after failure or storage extraction")]
     DatabasePoisoned,
+    #[error("database storage extraction requires all publications to be settled")]
+    UnsettledPublications,
     #[error("publication does not belong to this database: {0:?}")]
     PublicationNotFound(PublicationId),
     #[error("subscription ended")]

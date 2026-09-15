@@ -402,6 +402,17 @@ const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) fn is_catalogue_mutation(message: &SyncMessage) -> bool {
+    matches!(
+        message,
+        SyncMessage::CatalogueSnapshot(_)
+            | SyncMessage::PublishSchema { .. }
+            | SyncMessage::PublishSchemaWithLens { .. }
+            | SyncMessage::PublishLens { .. }
+            | SyncMessage::SetCurrentWriteSchema { .. }
+    )
+}
+
 fn next_groove_runtime_token() -> u64 {
     NEXT_GROOVE_RUNTIME_TOKEN.fetch_add(1, Ordering::Relaxed)
 }

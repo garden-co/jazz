@@ -294,3 +294,27 @@ conflated.
   no longer open: immediate local updates publish resident work before
   persistence, while durability-before-publication remains available for
   explicitly durable operations.
+
+## Runtime retirement and replacement
+
+A live catalogue replacement first waits for externally owned publications to
+settle, before changing the catalogue. Waiting preserves the old usable runtime
+and retains the ingress frame in order. The owner wake is registered with the
+pending check; settlement, failure, and abandoned persistence wake that owner.
+A failed database cannot register another settlement wait.
+
+Retirement then makes the old runtime unavailable and finishes captured durable
+writes in queue order through the existing write-outcome guards. It does not
+wait for query chunks or deliver pending subscription output. Cancellation or
+write failure leaves the old instance unavailable; only completed preparation
+permits runtime replacement. Reconstructible hydration and query evaluation are
+cancelled when the retired runtime is dropped. Resident publication index writes
+already belong to their original atomic publication, not this retirement flush.
+
+Runtime replacement retains the same layout storage, chunk services, and large
+value lifecycle mutex while installing one fresh semantic runtime. Independently
+suspended auxiliary local chunk reads may finish against that same storage;
+they do not prevent a catalogue replacement. A replacement schema error leaves
+the retired facade owned and unavailable. The separate raw `into_storage` API
+requires unique external storage ownership and is not used for live Jazz runtime
+replacement.

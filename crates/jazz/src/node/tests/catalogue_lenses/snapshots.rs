@@ -2232,3 +2232,28 @@ fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reop
     assert_eq!(reopened.catalogue_schemas().len(), 2);
     assert_eq!(reopened.current_write_schema().unwrap().revision, 1);
 }
+
+/// Alice owns an unpersisted transaction while Bob offers a catalogue snapshot.
+/// The direct node API leaves its catalogue usable and returns a retryable busy
+/// result; after Alice settles, replay succeeds without a runtime failure.
+#[test]
+fn catalogue_snapshot_waits_for_external_publication_without_mutating_catalogue() {
+    let (_dir, mut alice) = open_node_with_schema(node(0x75), schema());
+    let snapshot = alice.catalogue_snapshot().unwrap();
+    let before = alice.groove_runtime_token();
+    let published = alice.commit_mergeable(
+        MergeableCommit::new("todos", row(0x76), 1_000)
+            .made_by(AuthorSubject::SYSTEM)
+            .cells(BTreeMap::from([("title".to_owned(), Value::String("preserved".to_owned()))])),
+    ).unwrap();
+    let result = crate::db::block_on(alice.apply_trusted_catalogue_snapshot(snapshot.clone()));
+    assert!(matches!(result, Err(Error::Groove(groove::db::Error::UnsettledPublications))));
+    assert!(!alice.catalogue_activation_failed);
+    assert_eq!(alice.groove_runtime_token(), before);
+    assert!(alice.defer_catalogue_for_persistence(None).unwrap());
+    settle_published(&mut alice, published).unwrap();
+    assert!(!alice.defer_catalogue_for_persistence(None).unwrap());
+    alice.apply_trusted_catalogue_snapshot_settled(snapshot).unwrap();
+    assert!(!alice.catalogue_activation_failed);
+    assert_eq!(alice.query_all_versions().unwrap().len(), 1);
+}

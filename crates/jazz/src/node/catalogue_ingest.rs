@@ -217,6 +217,10 @@ where
     where
         S: ReopenableStorage,
     {
+        self.database.ensure_usable()?;
+        if self.database.has_unsettled_publications() {
+            return Err(groove::db::Error::UnsettledPublications.into());
+        }
         let bootstrap_uninitialized =
             self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized;
         let plan = self.plan_trusted_catalogue_snapshot(snapshot)?;

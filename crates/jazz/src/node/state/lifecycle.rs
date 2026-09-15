@@ -1715,25 +1715,20 @@ where
         // Parking is in-memory delivery state, not derivable from storage, so a
         // live refresh must retain it for the caller to drain afterwards.
         let parking = self.parking.clone();
-        let old_database = self.database.take();
-        let storage = old_database.into_storage();
-        let mut database = Self::open_full_database(
-            &self.catalogue.schema,
+        self.database.prepare_for_storage_extraction().await?;
+        let mut lowered = self.catalogue.schema.lower_to_groove();
+        lowered.tables.extend(physical_version_storage_tables(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
-            storage,
-        )
-        .await?;
-        database.set_missing_chunk_resolver(self.chunk_resolver.clone());
-        self.content_runtime_provider = database.owned_chunk_provider();
-        // Existing peer I/O pumps retain clones of this local-only lookup
-        // service. Retarget all of them before dropping the rebuilt facade's
-        // temporary reader, rather than leaving a live browser/socket link on
-        // OrderedChunkStorage's deliberately weak old storage handle.
+        )?);
+        self.database.rebuild(lowered)?;
+        self.database.set_missing_chunk_resolver(self.chunk_resolver.clone());
+        self.content_runtime_provider = self.database.owned_chunk_provider();
+        // Existing peer I/O pumps retain this local-only lookup service.
+        // Both new and already-started reads use the preserved storage owner.
         self.local_chunk_reader
-            .refresh_from(&database.local_chunk_reader());
-        self.database.replace(database);
+            .refresh_from(&self.database.local_chunk_reader());
         // A catalogue rebuild must register the same frozen derived indexes as
         // ordinary open before compiling live query graphs against them.
         self.synchronize_physical_version_tables().await?;

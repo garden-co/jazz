@@ -663,7 +663,45 @@ impl EvaluationWorkQueue {
     }
 }
 
-impl IncrementalEvaluation<'_> {
+impl<'a> IncrementalEvaluation<'a> {
+    fn poll_storage_flush(
+        &mut self,
+        indeterminate: &Rc<Cell<bool>>,
+        extraction_storage: Option<OwnedStorage<'a>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        if self.persist_flush.is_none() && !self.durable_writes.borrow().is_empty() {
+            let operations =
+                std::mem::take(&mut *self.durable_writes.borrow_mut()).into_operations();
+            let storage = extraction_storage.unwrap_or_else(|| self.storage.clone());
+            let indeterminate = Rc::clone(indeterminate);
+            self.persist_flush = Some(Box::pin(async move {
+                let mut attempt = PersistFlushAttempt {
+                    indeterminate,
+                    completed: false,
+                };
+                let result = match storage.as_ref().write_many_outcome(operations).await {
+                    WriteManyOutcome::Committed => Ok(()),
+                    WriteManyOutcome::Uncommitted(error) => Err(error.into()),
+                    WriteManyOutcome::PossiblyCommitted(error) => {
+                        attempt.indeterminate.set(true);
+                        Err(error.into())
+                    }
+                };
+                attempt.completed = true;
+                result
+            }));
+        }
+        if let Some(flush) = &mut self.persist_flush {
+            match flush.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => self.persist_flush = None,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+
     /// Base-table frontiers describe resident row visibility, not completion
     /// of every dependent evaluator branch. Publish them monotonically when
     /// this evaluation parks so independent snapshots cannot reuse an old
@@ -1136,34 +1174,9 @@ impl IncrementalEvaluation<'_> {
         }
 
         drop(evaluator);
-        if self.persist_flush.is_none() && !self.durable_writes.borrow().is_empty() {
-            let operations =
-                std::mem::take(&mut *self.durable_writes.borrow_mut()).into_operations();
-            let storage = self.storage.clone();
-            let indeterminate = Rc::clone(&runtime.persistence_indeterminate);
-            self.persist_flush = Some(Box::pin(async move {
-                let mut attempt = PersistFlushAttempt {
-                    indeterminate,
-                    completed: false,
-                };
-                let result = match storage.as_ref().write_many_outcome(operations).await {
-                    WriteManyOutcome::Committed => Ok(()),
-                    WriteManyOutcome::Uncommitted(error) => Err(error.into()),
-                    WriteManyOutcome::PossiblyCommitted(error) => {
-                        attempt.indeterminate.set(true);
-                        Err(error.into())
-                    }
-                };
-                attempt.completed = true;
-                result
-            }));
-        }
-        if let Some(flush) = &mut self.persist_flush {
-            match flush.as_mut().poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                Poll::Ready(Ok(())) => self.persist_flush = None,
-            }
+        match self.poll_storage_flush(&runtime.persistence_indeterminate, None, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(result) => result?,
         }
         self.install(runtime);
         runtime
@@ -2216,6 +2229,40 @@ impl IvmRuntime {
             self.collect_unretained_ephemeral_nodes();
         }
         result
+    }
+
+    /// Finish already-prepared durable writes in temporal order without
+    /// advancing query roots or waiting for their missing chunks. Durable nodes
+    /// are fully evaluated before an incremental session enters this queue.
+    pub(crate) fn poll_storage_extraction(
+        &mut self,
+        storage: &OwnedStorage<'static>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        let mut pending = self.pending_incremental.0.borrow_mut();
+        let order = pending.order.iter().copied().collect::<Vec<_>>();
+        for id in order {
+            if let Some(PendingEvaluation::Incremental(evaluation)) =
+                pending.evaluations.get_mut(&id)
+            {
+                match evaluation.poll_storage_flush(
+                    &self.persistence_indeterminate,
+                    Some(storage.clone()),
+                    cx,
+                ) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(result) => result?,
+                }
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    pub(crate) fn has_pending_storage_writes(&self) -> bool {
+        self.pending_incremental.0.borrow().evaluations.values().any(|evaluation| {
+            matches!(evaluation, PendingEvaluation::Incremental(evaluation)
+                if evaluation.persist_flush.is_some() || !evaluation.durable_writes.borrow().is_empty())
+        })
     }
 
     pub(crate) fn has_pending_incremental(&self) -> bool {

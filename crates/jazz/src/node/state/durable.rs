@@ -963,6 +963,15 @@ where
         Ok(total)
     }
 
+    /// All peer connections share the cached database-owner wake. Check and
+    /// register under the owner lock so settlement cannot race registration.
+    pub(crate) fn defer_catalogue_for_persistence(
+        &self,
+        waker: Option<&std::task::Waker>,
+    ) -> Result<bool, Error> {
+        Ok(self.database.wait_for_publication_settlement(waker)?)
+    }
+
     pub(crate) fn groove_runtime_token(&self) -> u64 {
         self.groove_runtime_token
     }

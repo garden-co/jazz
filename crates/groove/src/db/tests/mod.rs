@@ -39,6 +39,7 @@ mod persistence;
 mod publication_indices;
 mod queries;
 mod schema;
+mod storage_extraction;
 mod subscriptions;
 mod support;
 

@@ -2756,12 +2756,17 @@ where
                                     )
                                     .await?;
                                 }
-                                let outcome = self
-                                    .node
-                                    .lock()
-                                    .await
-                                    .apply_trusted_catalogue_snapshot(*snapshot)
-                                    .await?;
+                                let mut catalogue_owner = self.node.lock().await;
+                                if catalogue_owner.defer_catalogue_for_persistence(progress_waker.as_ref())? {
+                                    drop(catalogue_owner);
+                                    self.staged_inbound.push_front(StagedInboundMessage {
+                                        message: SyncMessage::CatalogueSnapshot(snapshot),
+                                        authority_receipt_eligible,
+                                    });
+                                    break;
+                                }
+                                let outcome = catalogue_owner.apply_trusted_catalogue_snapshot(*snapshot).await?;
+                                drop(catalogue_owner);
                                 let requested = self.open_schema_admission.borrow()
                                     .as_ref().map(|pending| pending.schema);
                                 if let Some(requested) = requested {
@@ -3657,34 +3662,29 @@ where
                                     )
                                     .await?;
                                 }
+                                let mut ingress_owner = self.node.lock().await;
+                                if crate::node::is_catalogue_mutation(&message)
+                                    && ingress_owner.defer_catalogue_for_persistence(progress_waker.as_ref())?
+                                {
+                                    drop(ingress_owner);
+                                    self.staged_inbound.push_front(StagedInboundMessage { message, authority_receipt_eligible });
+                                    break;
+                                }
                                 if *local_receiver {
                                     match message {
                                         SyncMessage::CommitUnit { tx, versions } => {
-                                            self.node
-                                                .lock()
-                                                .await
-                                                .ingest_relay_commit_unit_with_encoder_trust(tx, versions, true)
-                                                .await?;
+                                            ingress_owner.ingest_relay_commit_unit_with_encoder_trust(tx, versions, true).await?;
                                         }
                                         other => {
-                                            let outcome = self
-                                                .node
-                                                .lock()
-                                                .await
-                                                .apply_sync_message_with_ingest_context(other, None)
-                                                .await?;
+                                            let outcome = ingress_owner.apply_sync_message_with_ingest_context(other, None).await?;
                                             publications.extend(outcome.publications);
                                         }
                                     }
                                 } else {
-                                    let outcome = self
-                                        .node
-                                        .lock()
-                                        .await
-                                        .apply_sync_message_with_ingest_context(message, None)
-                                        .await?;
+                                    let outcome = ingress_owner.apply_sync_message_with_ingest_context(message, None).await?;
                                     publications.extend(outcome.publications);
                                 }
+                                drop(ingress_owner);
                                 if let Some((tx_id, fate)) = routed_fate {
                                     let authority = *expected_scope_authority;
                                     let mut routes = self.edge_fate_routes.borrow_mut();
@@ -3984,7 +3984,7 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
-                    let (message, parked_policy_binding) = if let Some(message) = self.transport.try_recv() {
+                    let (message, parked_policy_binding) = if let Some(message) = self.staged_inbound.pop_front().map(|staged| staged.message).or_else(|| self.transport.try_recv()) {
                         (Box::new(message), None)
                     } else {
                         let ready = pending_catalogue_subscriptions.iter().find_map(|(key, pending)| {
@@ -4008,6 +4008,7 @@ where
                         drop_peer_request(&self.node);
                         continue;
                     }
+                    let previously_applied_inbound = applied_inbound;
                     applied_inbound = true;
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(
@@ -5299,6 +5300,7 @@ where
                             // the subscriber owner-loop does not retain those
                             // compiler states while serving unrelated control
                             // messages or maintained-view updates.
+                            let mut catalogue_deferred = false;
                             let should_continue = Box::pin(async {
                             if matches!(other, SyncMessage::SessionClaims { .. })
                                 && matches!(
@@ -5353,7 +5355,17 @@ where
                             // responses (e.g. fate updates) flow back to the
                             // subscriber.
                             let maintenance_now_ms = self.upload_retry_clock.borrow().now_ms();
-                            let outcome = dispatch_admitted_subscriber_message(
+                            let outcome = if crate::node::is_catalogue_mutation(&other) {
+                                let mut owner = self.node.lock().await;
+                                if owner.defer_catalogue_for_persistence(progress_waker.as_ref())? {
+                                    drop(owner);
+                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, authority_receipt_eligible: false });
+                                    catalogue_deferred = true;
+                                    return Ok::<bool, Error>(false);
+                                }
+                                owner.apply_sync_message_with_ingest_context(other, Some(*ingest_context)).await?
+                            } else {
+                            dispatch_admitted_subscriber_message(
                                 &self.node,
                                 peer,
                                 *local_receiver,
@@ -5368,7 +5380,8 @@ where
                                 maintenance_now_ms,
                                 other,
                             )
-                            .await?;
+                            .await?
+                            };
                             let (responses, changed, published) = finish_peer_publication_outcome_with_refresh(
                                 &self.node,
                                 &self.subscriptions,
@@ -5430,6 +5443,10 @@ where
                             Ok::<bool, Error>(false)
                             })
                             .await?;
+                            if catalogue_deferred {
+                                applied_inbound = previously_applied_inbound;
+                                break;
+                            }
                             if should_continue {
                                 continue;
                             }

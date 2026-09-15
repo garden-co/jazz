@@ -67,6 +67,14 @@ where
     where
         S: ReopenableStorage,
     {
+        if crate::node::is_catalogue_mutation(&message) {
+            if let Err(error) = self.database.ensure_usable() {
+                return Box::pin(async move { Err(error.into()) });
+            }
+            if self.database.has_unsettled_publications() {
+                return Box::pin(async { Err(groove::db::Error::UnsettledPublications.into()) });
+            }
+        }
         // Dispatch the commit before constructing the general message future.
         // A commit's policy evaluation must not keep the inactive catalogue,
         // chunk-upload and other message arms on the executor's stack.

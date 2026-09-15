@@ -1,9 +1,5 @@
-//! Temporary ownership of the Groove database during node rebuilds.
-//!
-//! Rebuilding a [`super::NodeState`] needs to move the database out while its
-//! catalogue-derived layouts are reconstructed. Keeping that transition in a
-//! dedicated slot makes the `Option` invariant local and leaves the node core
-//! focused on node state and lifecycle.
+//! Ownership of the Groove database during node construction and extraction.
+//! Live catalogue rebuilds replace the runtime in place.
 
 use std::ops::{Deref, DerefMut};
 
@@ -24,11 +20,6 @@ impl DatabaseSlot {
         self.database
             .take()
             .expect("node database slot must be populated outside rebuild")
-    }
-
-    pub(super) fn replace(&mut self, database: Database) {
-        debug_assert!(self.database.is_none());
-        self.database = Some(database);
     }
 
     pub(super) fn into_inner(mut self) -> Database {

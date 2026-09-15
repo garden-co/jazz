@@ -406,7 +406,7 @@ impl Database {
         }
         Ok(AppliedBatch {
             publication,
-            storage: Rc::clone(&self.storage),
+            storage: Rc::new(RefCell::new(Some(Rc::clone(&self.storage)))),
             operations: staged_state,
             resident_install_durable: Some(resident_install_durable),
             order: Rc::clone(&self.publication_persistence),
@@ -422,6 +422,17 @@ impl Database {
     /// Install one persistence result and advance only the contiguous durable
     /// publication frontier.
     pub fn finish_persistence(
+        &mut self,
+        persistence: PersistedBatch,
+    ) -> Result<PublicationId, Error> {
+        let result = self.finish_persistence_inner(persistence);
+        if result.is_err() || self.resident_publications.is_empty() {
+            wake_publication_owner(&self.publication_persistence);
+        }
+        result
+    }
+
+    fn finish_persistence_inner(
         &mut self,
         persistence: PersistedBatch,
     ) -> Result<PublicationId, Error> {
