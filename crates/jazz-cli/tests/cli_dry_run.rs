@@ -1231,6 +1231,39 @@ fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
     wait_for_successful_exit(&mut second, Duration::from_secs(10));
 }
 
+/// Alice starts a persistent jazz-tools server, establishes its public HTTP
+/// storage path, and sends SIGINT only to the child PID. The child must finish
+/// controlled shutdown successfully and release the storage directory.
+///
+/// ```text
+/// alice ──HTTP schema publish──► jazz-tools child
+/// alice ──SIGINT(child PID)────► jazz-tools child ──controlled exit──► success
+/// ```
+#[cfg(unix)]
+#[test]
+fn jazz_tools_server_sigint_exits_cleanly_and_releases_storage() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let first_port_file = temp_dir.path().join("first-port");
+    let (mut first, first_port) = start_jazz_tools_server(&data_dir, &first_port_file);
+    publish_empty_schema_and_wait_for_live_core(first_port, &data_dir);
+
+    // SAFETY: `first.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(first.id() as libc::pid_t, libc::SIGINT) };
+    assert_eq!(result, 0, "send SIGINT to jazz-tools server");
+    wait_for_successful_exit(&mut first, Duration::from_secs(10));
+
+    // Reopening the same RocksDB directory proves controlled shutdown released
+    // the process-local storage lock rather than merely stopping the listener.
+    let second_port_file = temp_dir.path().join("second-port");
+    let (mut second, _second_port) = start_jazz_tools_server(&data_dir, &second_port_file);
+    assert!(data_dir.join("server-shell.rocksdb").is_dir());
+    // SAFETY: `second.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(second.id() as libc::pid_t, libc::SIGINT) };
+    assert_eq!(result, 0, "send SIGINT to restarted jazz-tools server");
+    wait_for_successful_exit(&mut second, Duration::from_secs(10));
+}
+
 /// Bound-port readiness accepts only one complete newline-terminated numeric record.
 ///
 /// This internal parser test is necessary because a process test can observe the
