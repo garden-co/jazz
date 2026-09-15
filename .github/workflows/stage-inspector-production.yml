@@ -1,0 +1,74 @@
+name: Stage Inspector production
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact-run-id:
+        description: "Successful package-build workflow run containing inspector-prebuilt"
+        required: true
+        type: string
+      source-sha:
+        description: "Exact source SHA built by that workflow run"
+        required: true
+        type: string
+      source-branch:
+        description: "Source branch used by the production promotion lookup"
+        required: true
+        default: release
+        type: string
+
+jobs:
+  stage:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SOURCE_SHA: ${{ inputs.source-sha }}
+      SOURCE_BRANCH: ${{ inputs.source-branch }}
+      ARTIFACT_RUN_ID: ${{ inputs.artifact-run-id }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_INSPECTOR_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Verify artifact run identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "${SOURCE_SHA}" =~ ^[a-f0-9]{40}$ ]]
+          [[ "${ARTIFACT_RUN_ID}" =~ ^[0-9]+$ ]]
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${ARTIFACT_RUN_ID}" > "${RUNNER_TEMP}/inspector-run.json"
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const run = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/inspector-run.json"));
+            if (run.status !== "completed" || run.conclusion !== "success" || run.head_sha !== process.env.SOURCE_SHA || run.head_branch !== process.env.SOURCE_BRANCH || run.head_repository?.full_name !== process.env.GITHUB_REPOSITORY) throw new Error("Inspector artifact run must be successful and match the exact repository, source SHA and branch");'
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.artifact-run-id }}
+          name: inspector-prebuilt
+          path: target/inspector-prebuilt
+
+      - name: Verify complete output and stage without assigning domains
+        run: |
+          node dev/scripts/inspector-prebuilt.mjs verify target/inspector-prebuilt "${SOURCE_SHA}"
+          for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing ${name}. Configure the matching Vercel Inspector GitHub secret."
+              exit 1
+            fi
+          done
+          cd target/inspector-prebuilt
+          node --input-type=module -e 'import fs from "node:fs"; fs.writeFileSync(".vercel/project.json", JSON.stringify({orgId: process.env.VERCEL_ORG_ID, projectId: process.env.VERCEL_PROJECT_ID}));'
+          npx --yes vercel@latest deploy --prebuilt --prod --skip-domain --yes \
+            --token="${VERCEL_TOKEN}" --scope="${VERCEL_ORG_ID}" \
+            --meta "githubCommitSha=${SOURCE_SHA}" --meta "githubCommitRef=${SOURCE_BRANCH}"

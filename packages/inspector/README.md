@@ -51,3 +51,30 @@ pnpm build:embedded
 
 The Jazz Vite and SvelteKit development integrations serve the embedded inspector as an in-app
 overlay by default. Set their `inspector` option to `false` to disable it.
+
+## Staging a release on Vercel
+
+The package-build workflow builds the web app against its already verified Jazz
+Tools/WASM artifacts, then uploads `inspector-prebuilt`. Its receipt binds every
+output file (including Vercel routing) to the exact source SHA. It avoids another
+native compilation on Vercel.
+
+Run **Stage Inspector production** with the successful package-build run ID,
+source SHA, and branch. The workflow checks that run's repository, branch, SHA and
+success, verifies every downloaded output hash, then deploys with `--prebuilt
+--prod --skip-domain`. This does not assign production domains. Run **Promote
+inspector production** with that same SHA and branch after staging acceptance;
+it resolves and promotes those exact bytes without rebuilding. Do not use a
+preview-to-production source redeploy, which can change install/build settings.
+The prebuilt artifact requires no Git checkout or Vercel-side install step.
+
+For a local recovery from the downloaded artifact, first run
+`node dev/scripts/inspector-prebuilt.mjs verify DIRECTORY SOURCE_SHA`. Only use an
+artifact from the trusted successful workflow run for that SHA; the receipt is an
+integrity check, not a signature. Keep the output intact and use the same prebuilt
+staging flags and `githubCommitSha` / `githubCommitRef` metadata as the workflow.
+
+The three `VERCEL_INSPECTOR_*` GitHub secrets must identify one project and team
+and a token with access to both deployment lookup and deployment/promotion. A 403
+requires repairing this configuration; local CLI access does not establish that
+the GitHub token works. Never remove the exact-SHA promotion check to recover.
