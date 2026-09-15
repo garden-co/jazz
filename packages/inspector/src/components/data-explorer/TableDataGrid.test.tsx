@@ -505,13 +505,19 @@ describe("TableDataGrid", () => {
         nullable: false,
       },
     ];
-    currentRows = currentRows.map((row) => ({ ...row, ranks: [9007199254740993n] }));
+    currentRows = currentRows.map((row, index) => ({
+      ...row,
+      ranks: index === 0 ? [9007199254740993n] : row.ranks,
+    }));
 
     const { rerender } = renderGrid();
 
     expect(screen.getByText("[9007199254740993]")).not.toBeNull();
 
-    currentRows = currentRows.map((row) => ({ ...row, ranks: [-9223372036854775808n] }));
+    currentRows = currentRows.map((row, index) => ({
+      ...row,
+      ranks: index === 0 ? [-9223372036854775808n] : row.ranks,
+    }));
     rerender(renderGridUi());
 
     const changedCell = getContainingCell(screen.getByText("[-9223372036854775808]"));

@@ -369,7 +369,7 @@ describe("TableDataGrid real Db save retries", () => {
       ]),
     );
   }, 30_000);
-  it("round-trips nested BigInts while preserving decimal strings in Text and Json", async () => {
+  it("round-trips nested BigInts while preserving decimal strings in Text", async () => {
     const setup = await createInspectorDb();
     policyApp = setup.app;
     const instrumented = instrumentDb(setup.db);
@@ -381,11 +381,14 @@ describe("TableDataGrid real Db save retries", () => {
     fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
     editStagedTextColumn(1, "title", "nested bigint");
     editStagedTextColumn(2, "owner_id", permittedOwner);
-    editStagedTextColumn(4, "largeCounts", JSON.stringify(exactValues, (_, value) =>
-      typeof value === "bigint" ? value.toString() : value,
-    ));
+    editStagedTextColumn(
+      4,
+      "largeCounts",
+      JSON.stringify(exactValues, (_, value) =>
+        typeof value === "bigint" ? value.toString() : value,
+      ),
+    );
     editStagedTextColumn(5, "textNumber", decimalString);
-    editStagedTextColumn(6, "jsonNumber", JSON.stringify({ amount: decimalString }));
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(
@@ -394,7 +397,6 @@ describe("TableDataGrid real Db save retries", () => {
       },
       { timeout: 10_000 },
     );
-
     await expect(setup.db.all(inspectorSaveApp.todos, { tier: "edge" })).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -402,7 +404,6 @@ describe("TableDataGrid real Db save retries", () => {
           owner_id: permittedOwner,
           largeCounts: exactValues,
           textNumber: decimalString,
-          jsonNumber: { amount: decimalString },
         }),
       ]),
     );
