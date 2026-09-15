@@ -978,7 +978,7 @@ where
         self.groove_runtime_token = crate::node::next_groove_runtime_token();
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(crate) async fn rebuild_groove_runtime_for_test(&mut self) -> Result<(), Error> {
         self.rebuild_database_slot().await
     }
