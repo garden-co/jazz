@@ -60,7 +60,7 @@ fn validate_binding_values(
             });
         }
     }
-    let canonical = canonical_binding_bytes(&values);
+    let canonical = canonical_binding_bytes(&values)?;
     Ok(Binding { values, canonical })
 }
 
@@ -88,11 +88,13 @@ impl Binding {
     }
 }
 
-pub(crate) fn binding_id_for_values(values: &BTreeMap<String, Value>) -> BindingId {
-    BindingId(uuid::Uuid::new_v5(
+pub(crate) fn binding_id_for_values(
+    values: &BTreeMap<String, Value>,
+) -> Result<BindingId, QueryError> {
+    Ok(BindingId(uuid::Uuid::new_v5(
         &QUERY_NAMESPACE,
-        &canonical_binding_bytes(values),
-    ))
+        &canonical_binding_bytes(values)?,
+    )))
 }
 
 /// Query validation error.
@@ -1541,7 +1543,7 @@ fn operand_type(
 ) -> Result<Option<ColumnType>, QueryError> {
     match operand {
         Operand::Column(column) => Ok(Some(planner_column_type(table, column)?.clone())),
-        Operand::Literal(value) => Ok(Some(value_type(value))),
+        Operand::Literal(value) => value_type(value).map(Some),
         Operand::Param(name) => Ok(params.get(name).cloned()),
         Operand::Claim(name) => claim_type(name),
     }
