@@ -1,5 +1,6 @@
 import { auth } from "$lib/auth";
 import { svelteKitHandler } from "better-auth/svelte-kit";
+import { isAPIError } from "better-auth/api";
 import { building } from "$app/environment";
 import { redirect, type Handle } from "@sveltejs/kit";
 
@@ -11,9 +12,14 @@ export const handle: Handle = async ({ event, resolve }) => {
   if (!path.startsWith("/api/auth")) {
     const needsSession = path === "/" || path.startsWith("/dashboard");
     if (needsSession) {
-      const session = await auth.api.getSession({
-        headers: event.request.headers,
-      });
+      const session = await auth.api
+        .getSession({
+          headers: event.request.headers,
+        })
+        .catch((error) => {
+          if (isAPIError(error) && error.status === "UNAUTHORIZED") return null;
+          throw error;
+        });
       if (path === "/" && session) {
         throw redirect(303, "/dashboard");
       }
