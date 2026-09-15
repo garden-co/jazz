@@ -2127,3 +2127,48 @@ async fn declared_index_generation_rejects_unknown_marker_without_writing() {
         );
     }
 }
+
+// Primary-only installation emulates an older database with a broken unique
+// index; duplicates across replay batches must fail closed without marking done.
+#[futures_test::test]
+async fn declared_index_generation_rejects_duplicate_unique_owners_across_batches() {
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    for id in 0..1025 {
+        let title = if id == 1024 {
+            "title-0".into()
+        } else {
+            format!("title-{id}")
+        };
+        batch.insert("albums", vec![Value::U64(id), Value::String(title)]);
+    }
+    database.commit_batch(batch).await.unwrap();
+    drop(database);
+    let before = storage.prefix("albums".into(), Vec::new()).await.unwrap();
+    let mut database = Database::new(unique_indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        database.ensure_declared_index_generation(1).await,
+        Err(Error::IvmRuntime(
+            IvmRuntimeError::UniqueIndexViolation { .. }
+        ))
+    ));
+    assert_eq!(
+        storage
+            .get(
+                "indices".into(),
+                b"\0groove-declared-index-generation".to_vec()
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        storage.prefix("albums".into(), Vec::new()).await.unwrap(),
+        before
+    );
+}

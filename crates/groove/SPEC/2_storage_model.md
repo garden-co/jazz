@@ -671,7 +671,7 @@ Schema indices are persisted in the `"indices"` record store under
 `("key": Bytes, "value": Bytes)`. `DatabaseSchema::column_families()` includes
 `"indices"` whenever any table declares an `IndexSchema` (`INV-STORAGE-21`).
 
-Jazz startup repairs declared indexes using one database-wide generation record
+Jazz startup repairs declared indexes (`INV-STORAGE-36`) using one database-wide generation record
 in logical `indices`: key bytes `00` followed by ASCII
 `groove-declared-index-generation`, value exactly eight bytes encoding an unsigned
 64-bit big-endian generation. Alpha55 uses generation 1 (`00 00 00 00 00 00 00
