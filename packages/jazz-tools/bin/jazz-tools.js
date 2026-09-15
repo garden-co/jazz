@@ -74,6 +74,26 @@ function parseWrapperArgs(rawArgs) {
   return { args, rustBinOverride };
 }
 
+// Look past global env-file flags only to choose the TypeScript or native
+// implementation. The original argv is passed through unchanged so the
+// selected implementation owns loading and normalization.
+function findCommand(args) {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === "--env-file") {
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith("--env-file=")) {
+      index += 1;
+      continue;
+    }
+    return arg;
+  }
+  return undefined;
+}
+
 function exitWithSpawnResult(result, name) {
   if (result.error) {
     fail(`Failed to execute ${name}: ${result.error.message}`);
@@ -113,11 +133,10 @@ function printWrapperHelp() {
   console.log("Options:");
   console.log("  -h, --help            Print help");
 }
-
 const here = dirname(fileURLToPath(import.meta.url));
 
 const { args, rustBinOverride } = parseWrapperArgs(process.argv.slice(2));
-const command = args[0];
+const command = findCommand(args);
 
 if (!command || command === "--help" || command === "-h") {
   printWrapperHelp();
@@ -137,7 +156,7 @@ if (!command || command === "--help" || command === "-h") {
     fail(`TypeScript schema CLI missing: ${tsCliPath}`);
   }
 
-  const tsCommandResult = spawnSync(process.execPath, [tsCliPath, ...args], {
+  const tsCommandResult = spawnSync(process.execPath, ["--", tsCliPath, ...args], {
     stdio: "inherit",
     env: process.env,
   });

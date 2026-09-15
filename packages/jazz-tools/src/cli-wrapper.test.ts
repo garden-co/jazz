@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,10 +7,30 @@ import { describe, expect, it } from "vitest";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const wrapper = join(packageRoot, "bin", "jazz-tools.js");
 
-function runWrapper(args: string[]): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, [wrapper, ...args], {
-    encoding: "utf8",
+async function runWrapper(
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const { promise, resolve } = Promise.withResolvers<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+  }>();
+  const child = spawn(process.execPath, ["--no-warnings", wrapper, ...args], {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  child.on("close", (status) => resolve({ status, stdout, stderr }));
+  return promise;
 }
 
 describe("jazz-tools wrapper", () => {
@@ -32,8 +52,8 @@ describe("jazz-tools wrapper", () => {
     ["--rust-bin followed by --help", ["--rust-bin", "--help"]],
     ["--rust-bin with no following value", ["--rust-bin"]],
     ["--rust-bin with an empty value", ["--rust-bin", ""]],
-  ])("rejects %s before routing to native Rust", (_description, args) => {
-    const result = runWrapper(args);
+  ])("rejects %s before routing to native Rust", async (_description, args) => {
+    const result = await runWrapper(args);
 
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");

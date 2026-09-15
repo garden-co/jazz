@@ -3479,13 +3479,56 @@ function runBin(
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, [binPath, ...args], {
+  return spawnSync(process.execPath, ["--no-warnings", binPath, ...args], {
     encoding: "utf8",
     cwd: options.cwd,
     env: options.env ?? process.env,
   });
 }
 
+async function runCli(
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const { promise, resolve } = Promise.withResolvers<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+  }>();
+  const child = spawn(process.execPath, ["--no-warnings", distCliPath, ...args], {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  child.on("close", (status) => resolve({ status, stdout, stderr }));
+  return promise;
+}
+
+async function listenForDeployRequest(): Promise<{ server: Server; url: string }> {
+  const server = createServer((request, response) => {
+    response.statusCode = 400;
+    response.end(
+      `request=${request.url} secret=${request.headers["x-jazz-admin-secret"] ?? "<missing>"}`,
+    );
+  });
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  server.once("error", reject);
+  server.listen(0, "127.0.0.1", resolve);
+  await promise;
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected deploy test server to have a TCP address.");
+  }
+  return { server, url: `http://127.0.0.1:${address.port}` };
+}
 function hostNativeBinaryName(): string | null {
   switch (`${process.platform}-${process.arch}`) {
     case "darwin-arm64":
