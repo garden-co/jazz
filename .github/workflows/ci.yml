@@ -42,7 +42,9 @@ jobs:
       packages: read
     uses: ./.github/workflows/ci-suite.yml
     with:
-      trusted-cache: true
+      # Release branch OIDC trust has not been enabled in the external cache roles.
+      # Keep ordinary GitHub caches without attempting credentialed cross-ref reads.
+      trusted-cache: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
       sccache-write: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     secrets: inherit
 

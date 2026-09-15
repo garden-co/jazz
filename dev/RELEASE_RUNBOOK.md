@@ -207,5 +207,7 @@ The Changesets workflow explicitly dispatches CI and preview because PRs created
 with `GITHUB_TOKEN` do not automatically trigger PR workflows. It checks the PR
 and branch head before and after dispatch. If either moves, rerun Changesets on
 `release`; required checks attach to the actual executed commit and cannot satisfy
-a different head. Release pushes receive trusted cache reads; only main pushes
-may write the shared sccache cache.
+a different head. Release pushes run the trusted suite with credentialed caches
+disabled, retaining ordinary GitHub caches until external branch OIDC trust is
+explicitly enabled. Main pushes retain shared-cache writes; trusted same-repository
+PRs retain shared-cache reads. This setup requires no external IAM change.

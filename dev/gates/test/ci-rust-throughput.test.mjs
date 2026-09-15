@@ -214,15 +214,16 @@ const cacheAccessFor = ({ eventName, ref, sameRepository = false, authorAssociat
   const trusted =
     (eventName === "push" && ["refs/heads/main", "refs/heads/release"].includes(ref)) ||
     trustedPullRequest;
+  const credentialedCache = trusted && (eventName !== "push" || ref === "refs/heads/main");
   return {
     invocation: trusted ? "trusted" : "untrusted",
     idToken: trusted ? "write" : "none",
-    sccache: trusted
+    sccache: credentialedCache
       ? eventName === "push" && ref === "refs/heads/main"
         ? "writer"
         : "reader"
       : "none",
-    turbo: trusted,
+    turbo: credentialedCache,
   };
 };
 const workflowDocumentFor = (source) => {
@@ -268,7 +269,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(trusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(trusted.with, {
     "sccache-write": "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
-    "trusted-cache": true,
+    "trusted-cache": "${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}",
   });
   assert.equal(trusted.secrets, "inherit");
 
@@ -1207,7 +1208,7 @@ test("shared Rust cache writes are main-only while trusted PRs receive read acce
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
 });
 
-test("entry workflow grants credentialed cross-ref caches to main, release and trusted stacked PRs", () => {
+test("entry workflow grants credentialed cross-ref caches only to main and trusted stacked PRs", () => {
   const cases = [
     [
       "main push",
@@ -1217,7 +1218,7 @@ test("entry workflow grants credentialed cross-ref caches to main, release and t
     [
       "release push",
       { eventName: "push", ref: "refs/heads/release" },
-      { invocation: "trusted", idToken: "write", sccache: "reader", turbo: true },
+      { invocation: "trusted", idToken: "write", sccache: "none", turbo: false },
     ],
     [
       "feature push",
