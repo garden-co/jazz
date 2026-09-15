@@ -79,6 +79,7 @@ describe("App", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     localStorage.clear();
     cleanup();
   });
@@ -259,6 +260,51 @@ describe("App", () => {
     );
     expect(staging).not.toHaveProperty("adminSecret");
     expect(await screen.findByText("Inspector ready")).not.toBeNull();
+  });
+
+  it("keeps the selected connection in memory when storage cannot persist a switch", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "local",
+        connections: [
+          {
+            id: "local",
+            name: "Local dev",
+            serverUrl: "http://localhost:19879",
+            appId: "local-app-id",
+            env: "dev",
+            schemaHash: "hash-a",
+          },
+          {
+            id: "staging",
+            name: "Staging",
+            serverUrl: "https://staging.example.com",
+            appId: "staging-app-id",
+            env: "dev",
+            schemaHash: "hash-b",
+          },
+        ],
+      }),
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
+
+    vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Staging" }));
+
+    expect(await screen.findByRole("heading", { name: "Add connection" })).not.toBeNull();
+    expect(screen.getByLabelText("Server URL")).toHaveProperty(
+      "value",
+      "https://staging.example.com",
+    );
+    expect(screen.getByLabelText("App ID")).toHaveProperty("value", "staging-app-id");
   });
 
   it("adds a named connection from the connection manager", async () => {
