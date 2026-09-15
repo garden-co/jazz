@@ -1209,3 +1209,202 @@ fn uninitialized_catalogue_source_keeps_admitted_session_pending() {
     tick_offline_catalogue_connection(&connection);
     assert!(receiver.try_recv().is_none());
 }
+
+/// Alice owns an external publication while Bob sends catalogue metadata and a
+/// following frame. Each link retains only its head frame, waits without polling
+/// itself, and resumes the FIFO after Alice settles. Detach discards only that
+/// connection's frames; the publication remains Alice's responsibility.
+#[test]
+fn catalogue_ingress_defers_without_busy_loop_and_resumes_after_settlement() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct WakeCount(AtomicUsize);
+    impl futures::task::ArcWake for WakeCount {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct Scheduler {
+        calls: RefCell<Vec<TickUrgency>>,
+        wake: Arc<WakeCount>,
+    }
+    impl TickScheduler for Scheduler {
+        fn schedule_tick(&self, urgency: TickUrgency) {
+            self.calls.borrow_mut().push(urgency);
+        }
+        fn schedule_tick_after(&self, _delay_ms: u64) {
+            self.calls.borrow_mut().push(TickUrgency::Deferred);
+        }
+        fn query_runtime_waker(&self) -> Option<std::task::Waker> {
+            Some(futures::task::waker(self.wake.clone()))
+        }
+    }
+    for (upstream, detach) in [(true, false), (false, false), (true, true)] {
+        let alice = open_db(0x91, AuthorSubject::SYSTEM, &schema());
+        let scheduler = Rc::new(Scheduler {
+            calls: RefCell::new(Vec::new()),
+            wake: Arc::new(WakeCount(AtomicUsize::new(0))),
+        });
+        alice.set_tick_scheduler(Some(scheduler.clone()));
+        let snapshot = alice.node.node.borrow().catalogue_snapshot().unwrap();
+        let (transport, mut bob) = duplex();
+        let connection = if upstream {
+            block_on(alice.connect_upstream(transport))
+        } else {
+            alice.node.accept_subscriber_with_trust(
+                transport,
+                AuthorSubject::SYSTEM,
+                CommitUnitTrust::TrustedBackend,
+            )
+        };
+        block_on(connection.borrow_mut().tick()).unwrap();
+        let published = block_on(async {
+            alice
+                .node
+                .node
+                .lock()
+                .await
+                .commit_mergeable(
+                    crate::node::MergeableCommit::new(
+                        "todos",
+                        RowUuid::from_bytes([0x92; 16]),
+                        1_000,
+                    )
+                    .made_by(AuthorSubject::SYSTEM)
+                    .cells(BTreeMap::from([(
+                        "title".to_owned(),
+                        Value::String("preserved".to_owned()),
+                    )])),
+                )
+                .await
+        })
+        .unwrap();
+        let frame = if upstream {
+            SyncMessage::CatalogueSnapshot(Box::new(snapshot.clone()))
+        } else {
+            SyncMessage::PublishSchema {
+                author: AuthorSubject::SYSTEM,
+                schema: Box::new(snapshot.schemas[0].clone()),
+            }
+        };
+        bob.send(frame.clone()).unwrap();
+        bob.send(frame).unwrap();
+        scheduler.calls.borrow_mut().clear();
+        for _ in 0..3 {
+            block_on(connection.borrow_mut().tick()).unwrap();
+            assert_eq!(connection.borrow().staged_inbound.len(), 1);
+            assert!(
+                scheduler.calls.borrow_mut().drain(..).next().is_none(),
+                "a deferred catalogue must not self-schedule"
+            );
+        }
+        let wake_before = scheduler.wake.0.load(Ordering::SeqCst);
+        if detach {
+            block_on(alice.detach_connection_async(&connection)).unwrap();
+        }
+        let tx_id = published.tx_id();
+        let persistence = block_on(published.persist());
+        alice
+            .node
+            .node
+            .borrow_mut()
+            .settle_published_transaction(tx_id, persistence)
+            .unwrap();
+        drop(published);
+        assert!(
+            scheduler.wake.0.load(Ordering::SeqCst) > wake_before,
+            "settlement wakes the shared owner even if a deferred link detached"
+        );
+        if !detach {
+            block_on(connection.borrow_mut().tick()).unwrap();
+            assert!(connection.borrow().staged_inbound.is_empty());
+        }
+        let query = alice.prepare_query(&Query::from("todos")).unwrap();
+        let rows = block_on(alice.all(&query, ReadOpts::default())).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+}
+
+/// Bob sends competing root commits and a catalogue in one owner turn. Alice
+/// must settle the generated merge after deferring the catalogue, then replay it.
+/// The internal peer boundary makes the between-frames ownership visible.
+#[test]
+fn catalogue_after_same_turn_merge_resumes_after_local_settlement() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .policies(
+                    public_legacy_write_policy(PublicPolicyExpr::True)
+                        .with_select(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let alice = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xa1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let writer = open_db(0xa2, AuthorSubject::SYSTEM, &schema);
+    let (_, unit) = block_on(async {
+        writer.node.node.lock().await.commit_mergeable_unit_settled(
+            crate::node::MergeableCommit::new("todos", RowUuid::from_bytes([0xa3; 16]), 1_000)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("same turn".to_owned()),
+                )])),
+        )
+    })
+    .unwrap();
+    let second_writer = open_db(0xa4, AuthorSubject::SYSTEM, &schema);
+    let (_, competing_unit) = second_writer
+        .node
+        .node
+        .borrow_mut()
+        .commit_mergeable_unit_settled(
+            crate::node::MergeableCommit::new("todos", RowUuid::from_bytes([0xa3; 16]), 1_001)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("competing root".to_owned()),
+                )])),
+        )
+        .unwrap();
+    let snapshot = writer.node.node.borrow().catalogue_snapshot().unwrap();
+    let (transport, mut bob) = duplex();
+    let connection = block_on(alice.connect_upstream(transport));
+    block_on(connection.borrow_mut().tick()).unwrap();
+    bob.send(unit).unwrap();
+    bob.send(competing_unit).unwrap();
+    bob.send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
+        .unwrap();
+    block_on(connection.borrow_mut().tick()).unwrap();
+    let responses = std::iter::from_fn(|| bob.try_recv()).collect::<Vec<_>>();
+    assert_eq!(
+        connection.borrow().staged_inbound.len(),
+        1,
+        "catalogue must wait for the commit accepted earlier in this turn; responses={responses:?}"
+    );
+    assert!(
+        !alice
+            .node
+            .node
+            .borrow()
+            .defer_catalogue_for_persistence(None)
+            .unwrap()
+    );
+    block_on(connection.borrow_mut().tick()).unwrap();
+    assert!(connection.borrow().staged_inbound.is_empty());
+    let query = alice.prepare_query(&Query::from("todos")).unwrap();
+    assert_eq!(
+        block_on(alice.all(&query, ReadOpts::default()))
+            .unwrap()
+            .len(),
+        1
+    );
+}
