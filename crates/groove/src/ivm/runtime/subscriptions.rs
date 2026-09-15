@@ -16,9 +16,13 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-/// Stable handle returned to callers for subscription management.
+/// Runtime-scoped handle returned to callers for subscription management.
+/// Handles from a replaced runtime cannot address its replacement subscriptions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SubscriptionId(pub(super) u64);
+pub struct SubscriptionId {
+    runtime_namespace: u64,
+    sequence: u64,
+}
 
 /// Monotone identity of one resident database publication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -71,7 +75,7 @@ impl std::error::Error for SubscriptionError {}
 
 impl SubscriptionId {
     pub(super) fn retainer_key(self) -> String {
-        self.0.to_string()
+        self.sequence.to_string()
     }
 }
 
@@ -4118,7 +4122,10 @@ impl IvmRuntime {
     }
 
     pub(super) fn next_subscription_id(&mut self) -> SubscriptionId {
-        let id = SubscriptionId(self.next_subscription_id);
+        let id = SubscriptionId {
+            runtime_namespace: self.input_source_runtime_namespace,
+            sequence: self.next_subscription_id,
+        };
         self.next_subscription_id += 1;
         id
     }

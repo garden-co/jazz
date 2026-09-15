@@ -4047,8 +4047,9 @@ where
                         .map(LocalMaintainedViewSubscription::subscription_id),
                 }
             };
-            // The Jazz runtime token invalidates prepared plans, while the
-            // Groove runtime itself remains alive. Retire the old maintained
+            // Jazz plan invalidation can leave the Groove runtime alive.
+            // Runtime-scoped IDs also make this safe after a full rebuild.
+            // Retire the old maintained
             // handle before installing its replacement so two descriptor
             // generations cannot consume the next physical delta.
             if let Some(subscription_id) = stale_subscription_id {

@@ -978,6 +978,11 @@ where
         self.groove_runtime_token = crate::node::next_groove_runtime_token();
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) async fn rebuild_groove_runtime_for_test(&mut self) -> Result<(), Error> {
+        self.rebuild_database_slot().await
+    }
+
     /// Return metrics for the most recent committed storage batch, if any.
     pub fn last_commit_metrics(&self) -> Option<&CommitMetrics> {
         self.database.last_commit_metrics()
