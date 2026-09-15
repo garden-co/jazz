@@ -14,7 +14,27 @@ import {
   loadStarterSchema,
 } from "./run-starter.js";
 
-import { getStarterConfig } from "./starters.js";
+import { getStarterConfig, KNOWN_STARTERS } from "./starters.js";
+
+test("production admission origin matches each starter's Playwright server", () => {
+  for (const starter of KNOWN_STARTERS) {
+    const config = getStarterConfig(starter);
+    const source = fs.readFileSync(
+      path.resolve(import.meta.dirname, "../../../starters", starter, "playwright.config.ts"),
+      "utf8",
+    );
+    // The first URL is the production BASE_URL (before the dev alternative).
+    const productionOrigin = source.match(
+      /const BASE_URL = (?:PROD \? )?"(http:\/\/localhost:\d+)"/,
+    )?.[1];
+    assert.ok(productionOrigin, `${starter}: production BASE_URL must be explicit`);
+    assert.equal(
+      config.appOrigin,
+      productionOrigin,
+      `${starter}: admission JWKS must reach the production server`,
+    );
+  }
+});
 
 function missingTarballDir(): string {
   return path.join(os.tmpdir(), `create-jazz-e2e-missing-${randomUUID()}`);
