@@ -160,9 +160,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
     Ok(())
 }
 
-fn validate_converted_references(
-    tables: &[CoreTableSchema],
-) -> Result<(), SchemaConversionError> {
+fn validate_converted_references(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
     let table_names = tables
         .iter()
         .map(|table| table.name.as_str())
