@@ -4783,7 +4783,8 @@ pub struct SchemaLineagePublication {
     pub physical_identities: PhysicalIdentityManifest,
 }
 
-// Table declarations are multisets in the v1 content ID and durable encoding.
+// Declaration order is immaterial to the v1 content ID and durable encoding.
+// Equality preserves multiplicity; validation still rejects duplicate declarations.
 // Compare the full payload, never just its claimed (or recomputed) digest.
 impl PartialEq for SchemaLineagePublication {
     fn eq(&self, other: &Self) -> bool {
