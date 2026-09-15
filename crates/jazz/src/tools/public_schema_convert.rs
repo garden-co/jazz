@@ -517,6 +517,12 @@ fn convert_table(
                 "column name uses the reserved aggregate-output namespace",
             ));
         }
+        if column.name.as_str().starts_with('$') {
+            return Err(err(
+                format!("$.{}.columns.{}", name.as_str(), column.name.as_str()),
+                "column names starting with \"$\" are reserved for magic columns",
+            ));
+        }
         let converted = convert_column(name, column)?;
         let strategy = column
             .merge_strategy
