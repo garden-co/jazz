@@ -469,6 +469,9 @@ where
             Ok(payload) => payload,
             Err(message) => return Err(TransportError::Failed(message)),
         };
+        if let Err(message) = validate_logical_message_len(payload.len()) {
+            return Err(TransportError::Failed(message));
+        }
         let active_features = (negotiated_features
             & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD))
             | self.outbound_stream.active_feature();
