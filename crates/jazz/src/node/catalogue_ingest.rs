@@ -217,10 +217,15 @@ where
     where
         S: ReopenableStorage,
     {
-        if self.catalogue_activation_failed {
-            return Err(Error::CatalogueActivationFailed);
-        }
-        self.database.ensure_usable()?;
+        // A rolled-back activation can retry while its old runtime is usable.
+        // Failed persistence retains the catalogue-specific terminal error.
+        self.database.ensure_usable().map_err(|error| {
+            if self.catalogue_activation_failed {
+                Error::CatalogueActivationFailed
+            } else {
+                error.into()
+            }
+        })?;
         if self.database.has_unsettled_publications() {
             return Err(groove::db::Error::UnsettledPublications.into());
         }
