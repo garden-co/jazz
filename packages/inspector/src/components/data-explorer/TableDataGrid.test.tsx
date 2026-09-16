@@ -1180,6 +1180,23 @@ describe("TableDataGrid", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("leaves an untouched nullable Boolean without a default null when inserting", async () => {
+    mockWasmSchema.todos.columns = initialMockTodoColumns.map((column) =>
+      column.name === "maybe_done" ? { ...column, default: undefined } : column,
+    );
+    renderGrid();
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    const stagedCells = getCellsInRowContaining("staged");
+    expect(within(stagedCells[3] as HTMLElement).getByText("<null>")).not.toBeNull();
+    fireEvent.doubleClick(stagedCells[1] as HTMLElement);
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "new todo" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockInsert).toHaveBeenCalledTimes(1));
+    expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("maybe_done");
+    expect(mockInsert.mock.calls[0]?.[1]).toMatchObject({ title: "new todo", done: false });
+  });
+
   it("appends a staged insert row and inserts it from the banner", async () => {
     renderGrid();
 

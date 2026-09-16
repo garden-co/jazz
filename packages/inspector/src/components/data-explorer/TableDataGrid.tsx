@@ -537,7 +537,7 @@ function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): Queu
       continue;
     }
 
-    if (column.column_type.type === "Boolean") {
+    if (!column.nullable && column.column_type.type === "Boolean") {
       edits[column.name] = {
         text: "false",
         isNull: false,
