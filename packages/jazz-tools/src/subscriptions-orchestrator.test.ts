@@ -784,6 +784,72 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("cleans up at the first unused deadline despite continuous deltas", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const off = entry.subscribe({});
+      harness.emit(0, makeDelta([makeTodo("opening")]));
+      off();
+      for (let index = 0; index < 2; index++) {
+        await vi.advanceTimersByTimeAsync(10_000);
+        harness.emit(0, makeDelta([makeTodo(`update-${index}`)]));
+        expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("a returning listener owns the entry until its own unused deadline", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      entry.subscribe({})();
+      await vi.advanceTimersByTimeAsync(20_000);
+      const onfulfilled = vi.fn();
+      const off = entry.subscribe({ onfulfilled });
+      await vi.advanceTimersByTimeAsync(60_000);
+      harness.emit(0, makeDelta([makeTodo("slow-opening")]));
+      expect(onfulfilled).toHaveBeenCalledWith([makeTodo("slow-opening")]);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      off();
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("lets an uncommitted Suspense reader receive a delayed first result", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { key, entry } = harness.makeEntry();
+      const pendingRead = entry.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      harness.emit(0, makeDelta([makeTodo("delayed")]));
+      await expect(pendingRead).resolves.toEqual([makeTodo("delayed")]);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(harness.manager.getCacheEntry(key)).toBe(entry);
+      const onfulfilled = vi.fn();
+      const off = entry.subscribe({ onfulfilled });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onfulfilled).toHaveBeenCalledWith([makeTodo("delayed")]);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      off();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U16 resubscribe before timeout cancels cleanup", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness();
