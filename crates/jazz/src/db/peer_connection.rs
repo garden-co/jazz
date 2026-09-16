@@ -1927,11 +1927,18 @@ where
                 }
             }
         }
-        while let Some(message) = self.transport.try_recv() {
-            self.staged_inbound.push_back(StagedInboundMessage {
-                message,
-                authority_receipt_eligible: false,
-            });
+        loop {
+            match self.transport.try_recv_result() {
+                Ok(Some(message)) => self.staged_inbound.push_back(StagedInboundMessage {
+                    message,
+                    authority_receipt_eligible: false,
+                }),
+                Ok(None) => break,
+                Err(error) => {
+                    self.startup_error = Some(transport_error(error));
+                    break;
+                }
+            }
         }
     }
 
@@ -2609,17 +2616,25 @@ where
                     let mut publications = Vec::new();
                     let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
                     let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
-                    while let Some(StagedInboundMessage {
-                        message,
-                        authority_receipt_eligible,
-                    }) = self.staged_inbound.pop_front().or_else(|| {
-                        self.transport
-                            .try_recv()
-                            .map(|message| StagedInboundMessage {
-                                message,
-                                authority_receipt_eligible: true,
-                            })
-                    }) {
+                    loop {
+                        let next = match self.staged_inbound.pop_front() {
+                            Some(staged) => Some(staged),
+                            None => self
+                                .transport
+                                .try_recv_result()
+                                .map_err(transport_error)?
+                                .map(|message| StagedInboundMessage {
+                                    message,
+                                    authority_receipt_eligible: true,
+                                }),
+                        };
+                        let Some(StagedInboundMessage {
+                            message,
+                            authority_receipt_eligible,
+                        }) = next
+                        else {
+                            break;
+                        };
                         let write_state_tx_id = write_state_update_tx_id(&message);
                         #[cfg(feature = "sync-autopsy")]
                         sync_autopsy::record(format!(
@@ -3984,17 +3999,36 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
-                    let (message, parked_policy_binding) = if let Some(message) = self.staged_inbound.pop_front().map(|staged| staged.message).or_else(|| self.transport.try_recv()) {
-                        (Box::new(message), None)
-                    } else {
-                        let ready = pending_catalogue_subscriptions.iter().find_map(|(key, pending)| {
-                            self.node.borrow().registered_shape(pending.subscribe.shape_id)
-                                .is_some().then_some(*key)
-                        });
-                        let Some(key) = ready else { break; };
-                        let pending = pending_catalogue_subscriptions.remove(&key).expect("selected pending request");
-                        (Box::new(SyncMessage::Subscribe(pending.subscribe)), Some(pending.policy_binding))
-                    };
+                    let (message, parked_policy_binding) =
+                        if let Some(message) =
+                            self.staged_inbound.pop_front().map(|staged| staged.message)
+                        {
+                            (Box::new(message), None)
+                        } else if let Some(message) =
+                            self.transport.try_recv_result().map_err(transport_error)?
+                        {
+                            (Box::new(message), None)
+                        } else {
+                            let ready = pending_catalogue_subscriptions.iter().find_map(
+                                |(key, pending)| {
+                                    self.node
+                                        .borrow()
+                                        .registered_shape(pending.subscribe.shape_id)
+                                        .is_some()
+                                        .then_some(*key)
+                                },
+                            );
+                            let Some(key) = ready else {
+                                break;
+                            };
+                            let pending = pending_catalogue_subscriptions
+                                .remove(&key)
+                                .expect("selected pending request");
+                            (
+                                Box::new(SyncMessage::Subscribe(pending.subscribe)),
+                                Some(pending.policy_binding),
+                            )
+                        };
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.

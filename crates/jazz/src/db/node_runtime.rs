@@ -5378,13 +5378,25 @@ pub(super) fn route_upstream_subscription_rejection(
 /// ones with [`Transport::try_recv`]; the binding owns the actual socket and
 /// scheduling and bridges these to real I/O on its own runtime. Both methods are
 /// non-blocking — `try_recv` returning `None` means "nothing staged right now,"
-/// not "closed" (a disconnect surface lands with a later B slice). This is the
-/// single seam that keeps the async boundary *between* nodes, never inside `Db`.
+/// not "closed." `try_recv_result` is the fallible servicing seam used by
+/// [`PeerConnection`]: transport implementations can surface a sticky terminal
+/// failure discovered while flushing an accepted outbound backlog, while the
+/// default preserves the historical Option-only behavior for semantic adapters.
+/// This is the single seam that keeps the async boundary *between* nodes, never
+/// inside `Db`.
 pub trait Transport {
     /// Hand an outbound message to the binding's wire.
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
+    /// Fallible receive poll for connection servicing.
+    ///
+    /// `Ok(None)` is idle, `Err(Backpressure)` is recoverable, and
+    /// `Err(Failed(_))` is terminal for the transport. Implementations that do
+    /// not expose transport failures retain the Option-only behavior.
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        Ok(self.try_recv())
+    }
 
     /// Assign encoder trust from the locally admitted connection role.
     /// Semantic transports have no byte decoder to configure.
