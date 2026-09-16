@@ -1,4 +1,4 @@
-import type { ForwardRelationName } from "./relation-names.js";
+import type { Relationships, ForwardRelationship, ReverseRelationship } from "./relationships.js";
 import type {
   AnyTypedColumnBuilder,
   ColumnBuilderHasDefault,
@@ -29,11 +29,15 @@ export type TableDefinition = Record<string, AnyTypedColumnBuilder> & NoExplicit
 
 // Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
 // without changing the column-level schema representation the runtime uses today.
-export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
+export class DefinedTable<
+  TColumns extends TableDefinition = TableDefinition,
+  TRelations extends Relationships = Relationships,
+> {
   public readonly __jazzTableDefinition = true as const;
 
   constructor(
     public readonly columns: TColumns,
+    public readonly relations: TRelations,
     public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
     public readonly branchColumns?: readonly Extract<keyof TColumns, string>[],
   ) {
@@ -45,7 +49,7 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
       Extract<keyof TColumns, string>,
       ...Extract<keyof TColumns, string>[],
     ],
-  >(columns: TColumnsForIndex): DefinedTable<TColumns> {
+  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
     const normalizedColumns = [...columns] as Extract<keyof TColumns, string>[];
     for (const column of normalizedColumns) {
       if (!(column in this.columns)) {
@@ -53,23 +57,23 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
       }
     }
 
-    return new DefinedTable(this.columns, normalizedColumns, this.branchColumns);
+    return new DefinedTable(this.columns, this.relations, normalizedColumns, this.branchColumns);
   }
 
   branchBy<const TBranchColumn extends Extract<keyof TColumns, string>>(
     column: TBranchColumn,
-  ): DefinedTable<TColumns>;
+  ): DefinedTable<TColumns, TRelations>;
   branchBy<
     const TBranchColumns extends readonly [
       Extract<keyof TColumns, string>,
       ...Extract<keyof TColumns, string>[],
     ],
-  >(columns: TBranchColumns): DefinedTable<TColumns>;
+  >(columns: TBranchColumns): DefinedTable<TColumns, TRelations>;
   branchBy(
     columns:
       | Extract<keyof TColumns, string>
       | readonly [Extract<keyof TColumns, string>, ...Extract<keyof TColumns, string>[]],
-  ): DefinedTable<TColumns> {
+  ): DefinedTable<TColumns, TRelations> {
     const normalizedColumns = (Array.isArray(columns) ? [...columns] : [columns]) as Extract<
       keyof TColumns,
       string
@@ -80,7 +84,7 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
       }
     }
 
-    return new DefinedTable(this.columns, this.indexedColumns, normalizedColumns);
+    return new DefinedTable(this.columns, this.relations, this.indexedColumns, normalizedColumns);
   }
 }
 
@@ -99,17 +103,63 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
  * export const app: s.App<AppSchema> = s.defineApp(schema);
  * ```
  */
-export function defineTable<const TColumns extends TableDefinition>(
+declare const tableRelationsBrand: unique symbol;
+type RelationColumns<T extends TableDefinition> = {
+  [K in keyof T & string]: ColumnBuilderSqlType<T[K]> extends
+    | "UUID"
+    | { kind: "ARRAY"; element: "UUID" }
+    ? K
+    : never;
+}[keyof T & string];
+type ValidateLocalRelations<C extends TableDefinition, R extends Relationships> = {
+  [K in keyof R]: K extends keyof C | "id"
+    ? never
+    : R[K] extends ForwardRelationship<string, infer Col>
+      ? Col extends RelationColumns<C>
+        ? R[K]
+        : never
+      : R[K];
+};
+export function defineTable<
+  const TColumns extends TableDefinition,
+  const TRelations extends Relationships,
+>(
   columns: TColumns,
-): DefinedTable<TColumns> {
-  return new DefinedTable(columns);
+  relations: TRelations & ValidateLocalRelations<TColumns, TRelations>,
+): DefinedTable<TColumns, TRelations> {
+  if (!relations || typeof relations !== "object" || Array.isArray(relations))
+    throw new Error(
+      "s.table(columns, relations) requires a relationship map; use {} for no relationships.",
+    );
+  for (const [name, relation] of Object.entries(relations)) {
+    if (name === "id" || Object.hasOwn(columns, name))
+      throw new Error(`Relationship "${name}" collides with a column.`);
+    if (!relation || !["forward", "reverse"].includes(relation.kind))
+      throw new Error(`Invalid relationship "${name}"; use s.rel(...) or s.reverse(...).`);
+    if (relation.kind === "forward") {
+      const column = columns[relation.column]?._build(relation.column);
+      if (!column)
+        throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
+      if (
+        column.sqlType !== "UUID" &&
+        !(
+          typeof column.sqlType === "object" &&
+          column.sqlType.kind === "ARRAY" &&
+          column.sqlType.element === "UUID"
+        )
+      )
+        throw new Error(
+          `Relationship "${name}" requires a UUID or UUID[] column; "${relation.column}" is not one.`,
+        );
+    }
+  }
+  return new DefinedTable(columns, relations);
 }
 
 type TableSource<TColumns extends TableDefinition = any> = TColumns | DefinedTable<TColumns>;
-
 type NormalizeTableDefinition<TTable extends TableSource> =
-  TTable extends DefinedTable<infer TColumns>
-    ? Simplify<TColumns>
+  TTable extends DefinedTable<infer TColumns, infer TRelations>
+    ? Simplify<TColumns & { readonly [tableRelationsBrand]: TRelations }>
     : TTable extends TableDefinition
       ? Simplify<TTable>
       : never;
@@ -161,13 +211,38 @@ type InvalidRefTargetEntries<TSchema extends SchemaDefinition> = {
   }[Extract<keyof SchemaColumns<TSchema>[TTable], string>];
 }[Extract<keyof SchemaColumns<TSchema>, string>];
 
+type SourceRelations<T> =
+  T extends DefinedTable<any, infer R>
+    ? R
+    : T extends { readonly [tableRelationsBrand]: infer R extends Relationships }
+      ? R
+      : {};
+type InvalidRelationshipEntries<S extends SchemaDefinition> = {
+  [T in keyof S & string]: {
+    [N in keyof SourceRelations<S[T]> & string]: SourceRelations<S[T]>[N] extends infer R extends
+      Relationships[string]
+      ? R["table"] extends keyof S
+        ? R extends ReverseRelationship<infer Target, infer Forward>
+          ? Forward extends keyof SourceRelations<S[Target]>
+            ? SourceRelations<S[Target]>[Forward] extends ForwardRelationship<T, string>
+              ? never
+              : {
+                  table: T;
+                  relation: N;
+                  error: "Reverse must name a forward relation targeting this table";
+                }
+            : { table: T; relation: N; error: "Unknown forward relation" }
+          : never
+        : { table: T; relation: N; error: "Unknown target table" }
+      : never;
+  }[keyof SourceRelations<S[T]> & string];
+}[keyof S & string];
 type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
-  InvalidRefTargetEntries<TSchema>,
+  InvalidRelationshipEntries<TSchema>,
 ] extends [never]
   ? unknown
   : {
-      readonly __schemaRefValidationError__: "Schema refs must point at declared table names";
-      readonly __invalidRefTargets__: InvalidRefTargetEntries<TSchema>;
+      readonly __relationshipValidationError__: InvalidRelationshipEntries<TSchema>;
     };
 
 type NormalizedSchema<TSchema extends SchemaLike> =
@@ -412,40 +487,41 @@ type IsArrayRelation<TBuilder extends AnyTypedColumnBuilder> =
     ? true
     : false;
 
-type ForwardRelationEntry<
+type DeclaredRelations<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
-  TColumn extends ColumnName<TSchema, TTable>,
-> =
-  ColumnBuilderReferences<BuilderForColumn<TSchema, TTable, TColumn>> extends infer TRef
-    ? TRef extends TableName<TSchema>
-      ? {
-          name: ForwardRelationName<TColumn>;
-          toTable: TRef;
-          isArray: IsArrayRelation<BuilderForColumn<TSchema, TTable, TColumn>>;
-          nullable: ColumnBuilderOptional<BuilderForColumn<TSchema, TTable, TColumn>>;
-        }
+> = NormalizedSchema<TSchema>[TTable] extends {
+  readonly [tableRelationsBrand]: infer R extends Relationships;
+}
+  ? R
+  : {};
+type ForwardRelationEntries<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [N in keyof DeclaredRelations<TSchema, TTable> & string]: DeclaredRelations<
+    TSchema,
+    TTable
+  >[N] extends ForwardRelationship<infer Target, infer Col>
+    ? Target extends TableName<TSchema>
+      ? Col extends ColumnName<TSchema, TTable>
+        ? {
+            name: N;
+            toTable: Target;
+            isArray: IsArrayRelation<BuilderForColumn<TSchema, TTable, Col>>;
+            nullable: ColumnBuilderOptional<BuilderForColumn<TSchema, TTable, Col>>;
+          }
+        : never
       : never
     : never;
-
-type ForwardRelationEntries<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [TColumn in ColumnName<TSchema, TTable>]: ForwardRelationEntry<TSchema, TTable, TColumn>;
-}[ColumnName<TSchema, TTable>];
-
+}[keyof DeclaredRelations<TSchema, TTable> & string];
 type ReverseRelationEntryUnion<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
-  [TSourceTable in TableName<TSchema>]: {
-    [TColumn in ColumnName<TSchema, TSourceTable>]: ColumnBuilderReferences<
-      BuilderForColumn<TSchema, TSourceTable, TColumn>
-    > extends TTable
-      ? {
-          name: `${TSourceTable}Via${Capitalize<ForwardRelationName<TColumn>>}`;
-          toTable: TSourceTable;
-          isArray: true;
-          nullable: false;
-        }
-      : never;
-  }[ColumnName<TSchema, TSourceTable>];
-}[TableName<TSchema>];
+  [N in keyof DeclaredRelations<TSchema, TTable> & string]: DeclaredRelations<
+    TSchema,
+    TTable
+  >[N] extends ReverseRelationship<infer Target, string>
+    ? Target extends TableName<TSchema>
+      ? { name: N; toTable: Target; isArray: true; nullable: false }
+      : never
+    : never;
+}[keyof DeclaredRelations<TSchema, TTable> & string];
 
 type ForwardRelationMap<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TRelation in ForwardRelationEntries<TSchema, TTable> as TRelation["name"]]: Omit<
@@ -1596,6 +1672,7 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
       return {
         name: tableName,
         columns: definitionToColumns(tableDefinition),
+        relations: tableDefinition instanceof DefinedTable ? tableDefinition.relations : {},
         ...(indexedColumns ? { indexedColumns } : {}),
         ...(branchColumns ? { branchBy: branchColumns } : {}),
       };
@@ -1611,6 +1688,7 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
       assertUserTableColumnNameAllowed(column);
     }
   }
+  schemaToWasm(definitionToSchema(definition));
   return definition as unknown as Schema<TSchema>;
 }
 
@@ -1664,7 +1742,7 @@ export function defineSliceableApp<const TSchema extends Schema<any>>(
   definition: TSchema,
 ): SliceableApp<TSchema>;
 export function defineSliceableApp<const TSchema extends SchemaDefinition>(
-  definition: TSchema & ValidateSchemaColumnNames<TSchema>,
+  definition: TSchema & ValidateSchemaRefs<TSchema> & ValidateSchemaColumnNames<TSchema>,
 ): SliceableApp<Schema<TSchema>>;
 export function defineSliceableApp(
   definition: SchemaDefinition | Schema<any>,

@@ -295,6 +295,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
 
     tables[table.name] = {
       columns,
+      ...(table.relations ? { relations: table.relations } : {}),
       ...(table.indexedColumns ? { indexed_columns: [...table.indexedColumns] } : {}),
       ...(table.branchBy ? { branchBy: [...table.branchBy] } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
@@ -304,6 +305,19 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   // Relation names become keys in the public row shape when an include is
   // materialized. Validate their namespace while compiling a schema rather
   // than allowing consumers to discover a collision later during lowering.
+  for (const [tableName, table] of Object.entries(tables)) {
+    for (const [name, relation] of Object.entries(table.relations ?? {})) {
+      if (relation.kind !== "forward") continue;
+      const column = table.columns.find((c) => c.name === relation.column);
+      if (!column)
+        throw new Error(
+          `Relationship "${tableName}.${name}" references unknown column "${relation.column}".`,
+        );
+      if (column.references && column.references !== relation.table)
+        throw new Error(`Conflicting relationship targets for "${tableName}.${column.name}".`);
+      column.references = relation.table;
+    }
+  }
   analyzeRelations(tables);
   return tables;
 }
