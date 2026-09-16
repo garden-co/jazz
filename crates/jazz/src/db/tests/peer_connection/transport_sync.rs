@@ -89,7 +89,11 @@ impl Transport for BackpressureDuringHandoffTransport {
             self.blocked = false;
             return Err(TransportError::Backpressure);
         }
-        self.inner.try_recv_result()
+        let message = self.inner.try_recv_result()?;
+        if matches!(message, Some(SyncMessage::ViewUpdate(_))) {
+            self.blocked = true;
+        }
+        Ok(message)
     }
 }
 
@@ -139,7 +143,7 @@ fn handoff_receive_backpressure_keeps_queued_view_ineligible() {
     });
     let wrapped = BackpressureDuringHandoffTransport {
         inner: client_transport,
-        blocked: true,
+        blocked: false,
     };
     let upstream = block_on(client.connect_upstream(Box::new(wrapped)));
     let subscriber = server.accept_subscriber(server_transport, alice);
@@ -187,6 +191,10 @@ fn handoff_receive_backpressure_keeps_queued_view_ineligible() {
     client
         .tick()
         .expect("handoff receive backpressure remains recoverable");
+    assert!(
+        !upstream.borrow().inbound_authority_receipt_quarantine,
+        "handoff receive quarantine clears after the queued backlog drains"
+    );
     assert_eq!(
         client
             .node

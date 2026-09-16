@@ -1934,10 +1934,14 @@ where
                     message,
                     authority_receipt_eligible: false,
                 }),
-                Ok(None) => break,
+                Ok(None) => {
+                    self.inbound_authority_receipt_quarantine = false;
+                    break;
+                }
                 Err(error)
                     if handle_transport_backpressure(&self.node, &self.scheduler, &error) =>
                 {
+                    self.inbound_authority_receipt_quarantine = true;
                     break;
                 }
                 Err(error) => {
@@ -2627,11 +2631,15 @@ where
                         let next = match self.staged_inbound.pop_front() {
                             Some(staged) => Some(staged),
                             None => match self.transport.try_recv_result() {
-                                Ok(message) => message.map(|message| StagedInboundMessage {
+                                Ok(Some(message)) => Some(StagedInboundMessage {
                                     message,
                                     authority_receipt_eligible:
                                         !self.inbound_authority_receipt_quarantine,
                                 }),
+                                Ok(None) => {
+                                    self.inbound_authority_receipt_quarantine = false;
+                                    None
+                                }
                                 Err(error)
                                     if handle_transport_backpressure(
                                         &self.node,
