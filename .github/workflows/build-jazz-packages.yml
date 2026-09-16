@@ -473,6 +473,40 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  verify-linux-napi-consumer:
+    name: Verify packed Linux NAPI (${{ matrix.platform }})
+    needs: assemble-packages
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: blacksmith-4vcpu-ubuntu-2404
+            platform: linux-x64-gnu
+          - os: blacksmith-4vcpu-ubuntu-2404-arm
+            platform: linux-arm64-gnu
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+      - name: Execute packed memory and persistence receipts on AL2023
+        run: dev/artifacts/linux-napi/run-packed-smoke.sh ${{ matrix.platform }} "${RUNNER_TEMP}/packed-linux-napi"
+
   assemble-jazz-rn:
     name: Assemble jazz-rn npm package
     needs:

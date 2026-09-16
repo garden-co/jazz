@@ -34,4 +34,5 @@ docker run --rm --platform "linux/$docker_arch" \
     node dev/artifacts/build.mjs napi release --target "$1"
     node dev/artifacts/provenance.mjs verify napi release --target "$1"
     node dev/artifacts/stage-napi-loader.mjs "$2"
+    node dev/artifacts/linux-napi/verify-elf.mjs "crates/jazz-napi/jazz-napi.$2.node" "$2"
   ' -- "$target" "$platform"
