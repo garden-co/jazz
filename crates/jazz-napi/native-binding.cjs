@@ -36,12 +36,18 @@ try {
     seen.add(cause);
     causes.push(cause);
   }
-  const incompatible = causes.find((cause) => cause.code === "ERR_DLOPEN_FAILED");
-  const failure = incompatible || causes[causes.length - 1];
-  const missing =
-    !incompatible &&
-    causes.some((cause) => cause.code === "MODULE_NOT_FOUND") &&
-    causes.every((cause) => !cause.code || cause.code === "MODULE_NOT_FOUND");
+  // Exclude only napi-rs's generic summary, not uncoded candidate errors:
+  // a package version mismatch is uncoded and must not become "missing".
+  const candidates =
+    causes.length > 1 && error.message?.startsWith("Cannot find native binding.")
+      ? causes.slice(1)
+      : causes;
+  const incompatible = candidates.find((cause) => cause.code === "ERR_DLOPEN_FAILED");
+  const failure =
+    incompatible ||
+    candidates.find((cause) => cause.code !== "MODULE_NOT_FOUND") ||
+    candidates[candidates.length - 1];
+  const missing = candidates.every((cause) => cause.code === "MODULE_NOT_FOUND");
   const message = incompatible
     ? "Jazz NAPI binary was found but could not be loaded. Check that the installed binary is compatible with this operating system, architecture, and system libraries. "
     : missing
