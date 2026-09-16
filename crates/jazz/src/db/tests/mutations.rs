@@ -1446,6 +1446,41 @@ fn large_string_json_pointer_rejects_malformed_trailing_text_like_inline() {
 }
 
 #[test]
+fn large_string_json_pointer_matches_inline_for_leading_zero_array_index() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let inline_source = r#"[["first","second"]]"#;
+    let large_source = format!(
+        r#"[["first","second"],"{}"]"#,
+        "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES)
+    );
+    assert!(large_source.len() > groove::large_values::INLINE_VALUE_MAX_BYTES);
+
+    let inline_row = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells(inline_source, false),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let large_row = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&large_source, false),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+
+    let pointer = "/0/01";
+    let inline_value =
+        block_on(db.read_json_pointer("todos", inline_row, "title", pointer)).unwrap();
+    let large_value = block_on(db.read_json_pointer("todos", large_row, "title", pointer)).unwrap();
+    assert_eq!(inline_value, None);
+    assert_eq!(large_value, inline_value);
+}
+
+#[test]
 fn partial_value_update_publishes_text_splice_and_ordinary_patch_atomically() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
