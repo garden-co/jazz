@@ -4,7 +4,6 @@
 
 import type {
   Schema,
-  Column,
   ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,

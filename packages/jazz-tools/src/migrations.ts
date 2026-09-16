@@ -4,7 +4,6 @@ import type {
   ColumnBuilderReferences,
   ColumnBuilderSqlType,
 } from "./dsl.js";
-import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { assertUserTableColumnNameAllowed } from "./magic-columns.js";
 import type {
   AddOp,
@@ -13,7 +12,6 @@ import type {
   RenameOp,
   RenameTableFromOp,
   Schema as SchemaAst,
-  Table as SchemaAstTable,
   TSTypeFromSqlType,
   TableLens,
 } from "./schema.js";
@@ -24,7 +22,11 @@ import type {
   Simplify,
   TableDefinition,
 } from "./typed-app.js";
-import { DefinedTable, unwrapTableDefinition } from "./typed-app.js";
+import {
+  DefinedTable,
+  unwrapTableDefinition,
+  definitionToSchema as compileSchemaDefinition,
+} from "./typed-app.js";
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
@@ -522,34 +524,6 @@ export interface DefinedMigration<
   readonly forward: Lens[];
 }
 
-function tableDefinitionToAst(
-  tableName: string,
-  definition: TableDefinition | DefinedTable<TableDefinition>,
-): SchemaAstTable {
-  const columnsDefinition = unwrapTableDefinition(definition);
-  const indexedColumns =
-    definition instanceof DefinedTable && definition.indexedColumns
-      ? [...definition.indexedColumns]
-      : undefined;
-  const branchBy =
-    definition instanceof DefinedTable && definition.branchColumns
-      ? [...definition.branchColumns]
-      : undefined;
-  return {
-    name: tableName,
-    columns: Object.entries(columnsDefinition).map(([columnName, builder]) => {
-      assertUserTableColumnNameAllowed(columnName);
-      const column = builder._build(columnName);
-      if (hasExternalProvenanceNameAllowance(builder)) {
-        column.allowExternalProvenanceName = true;
-      }
-      return column;
-    }),
-    ...(indexedColumns ? { indexedColumns } : {}),
-    ...(branchBy ? { branchBy } : {}),
-  };
-}
-
 function normalizeSchemaDefinition(
   definition: SchemaDefinition | AppSchema<any>,
 ): Record<string, TableDefinition | DefinedTable<TableDefinition>> {
@@ -562,12 +536,7 @@ function normalizeSchemaDefinition(
 }
 
 function definitionToSchema(definition: SchemaDefinition): SchemaAst {
-  const normalizedDefinition = normalizeSchemaDefinition(definition);
-  return {
-    tables: Object.entries(normalizedDefinition).map(([tableName, tableDefinition]) =>
-      tableDefinitionToAst(tableName, tableDefinition),
-    ),
-  };
+  return compileSchemaDefinition(definition);
 }
 
 export function renameTableFrom<const TOldName extends string>(
@@ -755,11 +724,30 @@ function tableMatchesAfterApplyingColumnOperations(
 function unwrapSchemaTables<TSchema extends SchemaLike>(
   definition: NormalizedSchema<TSchema>,
 ): Record<string, Record<string, AnyTypedColumnBuilder>> {
+  const ast = compileSchemaDefinition(definition as SchemaDefinition);
   return Object.fromEntries(
-    Object.entries(definition).map(([tableName, tableDefinition]) => [
-      tableName,
-      unwrapTableDefinition(tableDefinition as TableDefinition | DefinedTable<TableDefinition>),
-    ]),
+    Object.entries(definition).map(([tableName, tableDefinition]) => {
+      const columns = unwrapTableDefinition(
+        tableDefinition as TableDefinition | DefinedTable<TableDefinition>,
+      );
+      const lowered = ast.tables.find((table) => table.name === tableName)!;
+      return [
+        tableName,
+        Object.fromEntries(
+          Object.entries(columns).map(([name, builder]) => {
+            const references = lowered.columns.find((column) => column.name === name)?.references;
+            // Preserve the caller's builder and methods while presenting its effective stored reference
+            // metadata to the existing column-shape comparison (including renamed columns).
+            const effective = Object.create(builder) as AnyTypedColumnBuilder;
+            effective._build = (columnName: string) => ({
+              ...builder._build(columnName),
+              references,
+            });
+            return [name, effective];
+          }),
+        ),
+      ];
+    }),
   );
 }
 
@@ -796,6 +784,33 @@ function buildForwardLenses<
     renamedSources,
   );
 
+  const sourceTables = unwrapSchemaTables(fromDefinition);
+  const targetTables = unwrapSchemaTables(toDefinition);
+  for (const [targetName, targetColumns] of Object.entries(targetTables)) {
+    const sourceName = renameTableMap.get(targetName) ?? targetName;
+    const sourceColumns = sourceTables[sourceName];
+    if (!sourceColumns || addedTableSet.has(targetName)) continue;
+    const operations =
+      (migrate as Record<string, Record<string, AddOp | DropOp | RenameOp>> | undefined)?.[
+        targetName
+      ] ?? {};
+    for (const [columnName, targetBuilder] of Object.entries(targetColumns)) {
+      const operation = operations[columnName];
+      if (operation?._type === "add") continue;
+      const sourceColumn = operation?._type === "rename" ? operation.oldName : columnName;
+      const sourceBuilder = sourceColumns[sourceColumn];
+      if (
+        sourceBuilder &&
+        sourceBuilder._build(sourceColumn).references !==
+          targetBuilder._build(columnName).references
+      ) {
+        throw new Error(
+          `Column "${targetName}.${columnName}" must keep the same reference target in a migration.`,
+        );
+      }
+    }
+  }
+
   if (
     !migrate &&
     renameTableMap.size === 0 &&
@@ -814,9 +829,6 @@ function buildForwardLenses<
       ...Object.keys(migrate ?? {}),
     ]),
   ];
-  const sourceTables = unwrapSchemaTables(fromDefinition);
-  const targetTables = unwrapSchemaTables(toDefinition);
-
   for (const tableName of orderedTableNames) {
     const added = addedTableSet.has(tableName) ? true : undefined;
     const removed = removedTableSet.has(tableName) ? true : undefined;

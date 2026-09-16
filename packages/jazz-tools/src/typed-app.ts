@@ -3,7 +3,6 @@ import type {
   AnyTypedColumnBuilder,
   ColumnBuilderHasDefault,
   ColumnBuilderOptional,
-  ColumnBuilderReferences,
   ColumnBuilderSqlType,
   ColumnBuilderValue,
   ColumnTransform,
@@ -111,12 +110,28 @@ type RelationColumns<T extends TableDefinition> = {
     ? K
     : never;
 }[keyof T & string];
+type ConflictingTargets<R extends Relationships, C extends string, T extends string> = {
+  [N in keyof R]: R[N] extends ForwardRelationship<infer OtherTarget, C>
+    ? OtherTarget extends T
+      ? never
+      : N
+    : never;
+}[keyof R];
 type ValidateLocalRelations<C extends TableDefinition, R extends Relationships> = {
-  [K in keyof R]: K extends keyof C | "id"
+  [K in keyof R]: K extends
+    | keyof C
+    | "id"
+    | "__proto__"
+    | "constructor"
+    | "prototype"
+    | ""
+    | `$${string}`
     ? never
-    : R[K] extends ForwardRelationship<string, infer Col>
+    : R[K] extends ForwardRelationship<infer Target, infer Col>
       ? Col extends RelationColumns<C>
-        ? R[K]
+        ? [ConflictingTargets<R, Col, Target>] extends [never]
+          ? R[K]
+          : never
         : never
       : R[K];
 };
@@ -131,13 +146,26 @@ export function defineTable<
     throw new Error(
       "s.table(columns, relations) requires a relationship map; use {} for no relationships.",
     );
+  const targets = new Map<string, string>();
   for (const [name, relation] of Object.entries(relations)) {
-    if (name === "id" || Object.hasOwn(columns, name))
+    if (
+      !name ||
+      ["__proto__", "constructor", "prototype"].includes(name) ||
+      name.startsWith("$") ||
+      name === "id" ||
+      Object.hasOwn(columns, name)
+    )
       throw new Error(`Relationship "${name}" collides with a column.`);
     if (!relation || !["forward", "reverse"].includes(relation.kind))
       throw new Error(`Invalid relationship "${name}"; use s.rel(...) or s.reverse(...).`);
     if (relation.kind === "forward") {
-      const column = columns[relation.column]?._build(relation.column);
+      const previous = targets.get(relation.column);
+      if (previous && previous !== relation.table)
+        throw new Error(`Conflicting relationship targets for column "${relation.column}".`);
+      targets.set(relation.column, relation.table);
+      const column = Object.hasOwn(columns, relation.column)
+        ? columns[relation.column]?._build(relation.column)
+        : undefined;
       if (!column)
         throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
       if (
@@ -157,9 +185,21 @@ export function defineTable<
 }
 
 type TableSource<TColumns extends TableDefinition = any> = TColumns | DefinedTable<TColumns>;
+type ExplicitColumnTarget<R extends Relationships, C extends string> = {
+  [N in keyof R]: R[N] extends ForwardRelationship<infer T, C> ? T : never;
+}[keyof R];
+type ColumnsWithReferences<C extends TableDefinition, R extends Relationships> = {
+  [K in keyof C]: K extends string
+    ? [ExplicitColumnTarget<R, K>] extends [never]
+      ? C[K]
+      : Omit<C[K], "__jazzReferences"> & { readonly __jazzReferences: ExplicitColumnTarget<R, K> }
+    : C[K];
+};
 type NormalizeTableDefinition<TTable extends TableSource> =
   TTable extends DefinedTable<infer TColumns, infer TRelations>
-    ? Simplify<TColumns & { readonly [tableRelationsBrand]: TRelations }>
+    ? Simplify<
+        ColumnsWithReferences<TColumns, TRelations> & { readonly [tableRelationsBrand]: TRelations }
+      >
     : TTable extends TableDefinition
       ? Simplify<TTable>
       : never;
@@ -182,35 +222,6 @@ export interface Schema<TSchema extends SchemaDefinition = SchemaDefinition> {
 export type DefinedSchema<TSchema extends SchemaDefinition = SchemaDefinition> = Schema<TSchema>;
 
 type SchemaLike = SchemaDefinition | Schema<any>;
-type SchemaColumns<TSchema extends SchemaDefinition> = CompactSchema<TSchema>;
-type InvalidRefTargetEntries<TSchema extends SchemaDefinition> = {
-  [TTable in Extract<keyof SchemaColumns<TSchema>, string>]: {
-    [TColumn in Extract<
-      keyof SchemaColumns<TSchema>[TTable],
-      string
-    >]: SchemaColumns<TSchema>[TTable][TColumn] extends infer TBuilder extends AnyTypedColumnBuilder
-      ? ColumnBuilderSqlType<TBuilder> extends
-          | "UUID"
-          | {
-              kind: "ARRAY";
-              element: "UUID";
-            }
-        ? ColumnBuilderReferences<TBuilder> extends infer TRef
-          ? TRef extends string
-            ? TRef extends Extract<keyof SchemaColumns<TSchema>, string>
-              ? never
-              : {
-                  table: TTable;
-                  column: TColumn;
-                  ref: TRef;
-                }
-            : never
-          : never
-        : never
-      : never;
-  }[Extract<keyof SchemaColumns<TSchema>[TTable], string>];
-}[Extract<keyof SchemaColumns<TSchema>, string>];
-
 type SourceRelations<T> =
   T extends DefinedTable<any, infer R>
     ? R
@@ -1625,6 +1636,24 @@ function tableBranchColumns(
   return undefined;
 }
 
+function tableRelationships(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): Relationships {
+  if (
+    typeof definition === "object" &&
+    definition !== null &&
+    definition.__jazzTableDefinition === true
+  ) {
+    const relations = (definition as DefinedTable).relations;
+    if (!relations || typeof relations !== "object" || Array.isArray(relations))
+      throw new Error(
+        "s.table(columns, relations) requires a relationship map; use {} for no relationships.",
+      );
+    return relations;
+  }
+  return {};
+}
+
 function definitionToColumns(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): Column[] {
@@ -1635,6 +1664,15 @@ function definitionToColumns(
     const column = builder._build(columnName);
     if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;
     columns.push(column);
+  }
+  for (const [name, relation] of Object.entries(tableRelationships(definition))) {
+    if (relation.kind !== "forward") continue;
+    const column = columns.find((candidate) => candidate.name === relation.column);
+    if (!column)
+      throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
+    if (column.references && column.references !== relation.table)
+      throw new Error(`Conflicting relationship targets for column "${relation.column}".`);
+    column.references = relation.table;
   }
   return columns;
 }
@@ -1664,7 +1702,9 @@ function columnTransformsForSchema(definition: SchemaDefinition): ColumnTransfor
   return registry;
 }
 
-function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchema): SchemaAst {
+export function definitionToSchema<TSchema extends SchemaDefinition>(
+  definition: TSchema,
+): SchemaAst {
   return {
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
       const indexedColumns = tableIndexedColumns(tableDefinition);
@@ -1672,7 +1712,7 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
       return {
         name: tableName,
         columns: definitionToColumns(tableDefinition),
-        relations: tableDefinition instanceof DefinedTable ? tableDefinition.relations : {},
+        relations: tableRelationships(tableDefinition),
         ...(indexedColumns ? { indexedColumns } : {}),
         ...(branchColumns ? { branchBy: branchColumns } : {}),
       };

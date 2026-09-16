@@ -553,63 +553,6 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
   }
 }
 
-// ============================================================================
-// Ref Builder (for foreign key references in schema context)
-// ============================================================================
-
-class RefBuilder implements ColumnBuilder {
-  private _nullable = false;
-  private _default: unknown = undefined;
-  private _mergeStrategy: ColumnMergeStrategy | undefined;
-  _transform?: ColumnTransform<unknown, unknown>;
-
-  constructor(private _targetTable: string) {}
-
-  optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error(
-        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
-      );
-    }
-    this._nullable = true;
-    return this;
-  }
-
-  default(value: unknown): this {
-    this._default = value;
-    return this;
-  }
-
-  merge(strategy: ColumnMergeStrategyName): this {
-    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
-    return this;
-  }
-
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
-    return this;
-  }
-
-  _build(name: string): Column {
-    return {
-      name,
-      sqlType: this._sqlType,
-      nullable: this._nullable,
-      ...(this._default === undefined ? {} : { default: this._default }),
-      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
-      references: this._references,
-    };
-  }
-
-  get _sqlType(): SqlType {
-    return "UUID";
-  }
-
-  get _references(): string | undefined {
-    return this._targetTable;
-  }
-}
-
 class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;

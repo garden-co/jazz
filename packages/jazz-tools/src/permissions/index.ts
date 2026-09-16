@@ -7,12 +7,7 @@ import type {
   TablePolicies,
 } from "../schema.js";
 import type { WasmSchema } from "../drivers/types.js";
-import {
-  AmbiguousRelationNameError,
-  DuplicateColumnNameError,
-  analyzeRelations,
-  type Relation,
-} from "../codegen/relation-analyzer.js";
+import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import type {
   RelColumnRef,
   RelExpr,

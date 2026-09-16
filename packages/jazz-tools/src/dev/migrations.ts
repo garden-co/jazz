@@ -84,7 +84,7 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
     case "EnumPayload":
       throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
-      return references ? `s.ref(${JSON.stringify(references)})` : "s.uuid()";
+      return "s.uuid()";
     case "Array":
       return `s.array(${baseBuilderExpression(columnType.element, references)})`;
     case "BigInt":
@@ -113,7 +113,25 @@ function renderSchemaWitness(schema: WasmSchema): string {
       const columnLines = tableSchema.columns.map(
         (column) => `${JSON.stringify(column.name)}: ${builderExpressionForColumn(column)},`,
       );
-      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n})`;
+      const relations = { ...tableSchema.relations };
+      for (const column of tableSchema.columns) {
+        if (
+          !column.references ||
+          Object.values(relations).some((r) => r.kind === "forward" && r.column === column.name)
+        )
+          continue;
+        const alias = `${column.name}Relation`;
+        if (Object.hasOwn(relations, alias) || tableSchema.columns.some((c) => c.name === alias))
+          throw new Error(
+            `Cannot render migration witness: relationship "${tableName}.${alias}" collides with an existing name.`,
+          );
+        relations[alias] = { kind: "forward", table: column.references, column: column.name };
+      }
+      const relationLines = Object.entries(relations).map(
+        ([name, relation]) =>
+          `${JSON.stringify(name)}: s.${relation.kind === "forward" ? "rel" : "reverse"}(${JSON.stringify(relation.table)}, ${JSON.stringify(relation.kind === "forward" ? relation.column : relation.relation)}),`,
+      );
+      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})`;
     });
 
   if (tableEntries.length === 0) {

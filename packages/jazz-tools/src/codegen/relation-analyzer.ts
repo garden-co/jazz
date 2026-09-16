@@ -43,7 +43,13 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
     }
     result.set(tableName, []);
     for (const name of Object.keys(table.relations ?? {})) {
-      if (name === "id" || columns.has(name))
+      if (
+        !name ||
+        ["__proto__", "constructor", "prototype"].includes(name) ||
+        name.startsWith("$") ||
+        name === "id" ||
+        columns.has(name)
+      )
         throw new AmbiguousRelationNameError(
           `Relationship "${tableName}.${name}" collides with a stored/public output column.`,
         );
@@ -85,18 +91,16 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
         throw new Error(
           `Relationship "${tableName}.${name}" conflicts with column reference target "${column.references}".`,
         );
-      result
-        .get(tableName)!
-        .push({
-          name,
-          type: declaration.kind,
-          fromTable: tableName,
-          toTable: declaration.table,
-          fromColumn: declaration.kind === "forward" ? forward.column : "id",
-          toColumn: declaration.kind === "forward" ? "id" : forward.column,
-          isArray: declaration.kind === "reverse" || array,
-          nullable: declaration.kind === "forward" && column.nullable,
-        });
+      result.get(tableName)!.push({
+        name,
+        type: declaration.kind,
+        fromTable: tableName,
+        toTable: declaration.table,
+        fromColumn: declaration.kind === "forward" ? forward.column : "id",
+        toColumn: declaration.kind === "forward" ? "id" : forward.column,
+        isArray: declaration.kind === "reverse" || array,
+        nullable: declaration.kind === "forward" && column.nullable,
+      });
     }
   }
   return result;
