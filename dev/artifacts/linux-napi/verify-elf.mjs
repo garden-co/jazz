@@ -40,9 +40,8 @@ export function verifyElf(path, platform) {
     if (!allowedLibraries.has(library))
       throw new Error(`unsupported runtime dependency ${library}`);
   const versions = {};
-  for (const line of read("--dyn-syms").split("\n")) {
-    if (!/\bUND\b/.test(line)) continue;
-    for (const [, family, version] of line.matchAll(/@(GLIBCXX|GLIBC|CXXABI)_([\w.]+)/g)) {
+  for (const line of read("--version-info").split("\n")) {
+    for (const [, family, version] of line.matchAll(/Name:\s+(GLIBCXX|GLIBC|CXXABI)_([\w.]+)/g)) {
       if (!/^\d+(\.\d+)+$/.test(version) || newer(version, ceilings[family]))
         throw new Error(
           `${platform} requires ${family}_${version}, exceeding ${family}_${ceilings[family]}: ${line.trim()}`,
