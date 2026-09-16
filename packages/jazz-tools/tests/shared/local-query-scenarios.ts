@@ -3,29 +3,41 @@ import { schema } from "../../src/index.js";
 import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 
 export const app = schema.defineApp({
-  orgs: schema.table({ name: schema.string() }),
-  teams: schema.table({
-    name: schema.string(),
-    org_id: schema.ref("orgs").optional(),
-    parent_id: schema.ref("teams").optional(),
-  }),
-  users: schema.table({
-    name: schema.string(),
-    team_id: schema.ref("teams").optional(),
-  }),
-  todos: schema.table({
-    title: schema.string(),
-    done: schema.boolean(),
-    priority: schema.int().optional(),
-    owner_id: schema.ref("users").optional(),
-    tags: schema.array(schema.string()),
-    payload: schema.bytes().optional(),
-  }),
-  bundle_items: schema.table({ label: schema.string() }),
-  bundles: schema.table({
-    name: schema.string(),
-    items: schema.array(schema.ref("bundle_items")),
-  }),
+  orgs: schema.table({ name: schema.string() }, {}),
+  teams: schema.table(
+    {
+      name: schema.string(),
+      org_id: schema.ref("orgs").optional(),
+      parent_id: schema.ref("teams").optional(),
+    },
+    {},
+  ),
+  users: schema.table(
+    {
+      name: schema.string(),
+      team_id: schema.ref("teams").optional(),
+    },
+    {},
+  ),
+  todos: schema.table(
+    {
+      title: schema.string(),
+      done: schema.boolean(),
+      priority: schema.int().optional(),
+      owner_id: schema.ref("users").optional(),
+      tags: schema.array(schema.string()),
+      payload: schema.bytes().optional(),
+    },
+    {},
+  ),
+  bundle_items: schema.table({ label: schema.string() }, {}),
+  bundles: schema.table(
+    {
+      name: schema.string(),
+      items: schema.array(schema.ref("bundle_items")),
+    },
+    {},
+  ),
 });
 
 export const { orgs, teams, users, todos, bundle_items: bundleItems, bundles } = app;

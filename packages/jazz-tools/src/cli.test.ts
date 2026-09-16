@@ -2350,6 +2350,7 @@ export default s.defineMigration({
       if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           memberships: {
+            relations: { owner: { kind: "forward" as const, table: "users", column: "ownerId" } },
             columns: [
               {
                 name: "ownerId",
@@ -2365,6 +2366,7 @@ export default s.defineMigration({
       if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse({
           memberships: {
+            relations: { owner: { kind: "forward" as const, table: "people", column: "ownerId" } },
             columns: [
               {
                 name: "ownerId",

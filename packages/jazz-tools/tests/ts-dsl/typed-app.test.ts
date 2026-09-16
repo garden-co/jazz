@@ -15,41 +15,66 @@ interface TodoTitleRecord {
 }
 
 const schema = {
-  users: s.table({
-    name: s.string(),
-  }),
-  projects: s.table({
-    name: s.string(),
-  }),
+  users: s.table(
+    {
+      name: s.string(),
+    },
+    { todosViaOwner: s.reverse("todos", "ownerRelation") },
+  ),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todosViaProject: s.reverse("todos", "projectRelation") },
+  ),
   todos: s
-    .table({
-      title: s.string(),
-      done: s.boolean(),
-      tags: s.array(s.string()),
-      attachment: s.bytes(),
-      project: s.ref("projects"),
-      owner: s.ref("users").optional(),
-    })
+    .table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        tags: s.array(s.string()),
+        attachment: s.bytes(),
+        project: s.uuid(),
+        owner: s.uuid().optional(),
+      },
+      { projectRelation: s.rel("projects", "project"), ownerRelation: s.rel("users", "owner") },
+    )
     .indexOnly(["done"]),
 };
 type AppSchema = s.Schema<typeof schema>;
 const app: s.App<AppSchema> = s.defineApp(schema);
 
 const defaultedSchema = {
-  users: s.table({
-    name: s.string(),
-  }),
-  projects: s.table({
-    name: s.string(),
-  }),
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean().default(false),
-    tags: s.array(s.string()).default([]),
-    projectId: s.ref("projects"),
-    ownerId: s.ref("users").optional().default(null),
-    assigneesIds: s.array(s.ref("users")).default([]),
-  }),
+  users: s.table(
+    {
+      name: s.string(),
+    },
+    {
+      todosViaOwner: s.reverse("todos", "ownerRelation"),
+      todosViaAssignees: s.reverse("todos", "assignees"),
+    },
+  ),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todosViaProject: s.reverse("todos", "projectRelation") },
+  ),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean().default(false),
+      tags: s.array(s.string()).default([]),
+      projectId: s.uuid(),
+      ownerId: s.uuid().optional().default(null),
+      assigneesIds: s.array(s.uuid()).default([]),
+    },
+    {
+      projectRelation: s.rel("projects", "projectId"),
+      ownerRelation: s.rel("users", "ownerId"),
+      assignees: s.rel("users", "assigneesIds"),
+    },
+  ),
 };
 type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
 const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
@@ -57,69 +82,122 @@ const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
 type Urgency = "low" | "high";
 
 const transformedColumnSchema = {
-  tasks: s.table({
-    title: s.string(),
-    urgency: s.int().transform<Urgency>({
-      from: (value) => (value > 5 ? "high" : "low"),
-      to: (value) => (value === "high" ? 10 : 1),
-    }),
-  }),
+  tasks: s.table(
+    {
+      title: s.string(),
+      urgency: s.int().transform<Urgency>({
+        from: (value) => (value > 5 ? "high" : "low"),
+        to: (value) => (value === "high" ? 10 : 1),
+      }),
+    },
+    {},
+  ),
 };
 type TransformedColumnAppSchema = s.Schema<typeof transformedColumnSchema>;
 const transformedColumnApp: s.App<TransformedColumnAppSchema> =
   s.defineApp(transformedColumnSchema);
 
 const graphSchema = {
-  teams: s.table({
-    name: s.string(),
-  }),
-  team_edges: s.table({
-    child_team: s.ref("teams"),
-    parent_team: s.ref("teams"),
-  }),
+  teams: s.table(
+    {
+      name: s.string(),
+    },
+    {
+      team_edgesViaChild_team: s.reverse("team_edges", "child_teamRelation"),
+      team_edgesViaParent_team: s.reverse("team_edges", "parent_teamRelation"),
+    },
+  ),
+  team_edges: s.table(
+    {
+      child_team: s.uuid(),
+      parent_team: s.uuid(),
+    },
+    {
+      child_teamRelation: s.rel("teams", "child_team"),
+      parent_teamRelation: s.rel("teams", "parent_team"),
+    },
+  ),
 };
 type GraphAppSchema = s.Schema<typeof graphSchema>;
 const graphApp: s.App<GraphAppSchema> = s.defineApp(graphSchema);
 
 const largeValueUpdateSchema = {
-  documents: s.table({
-    title: s.string(),
-    payload: s.bytes(),
-    metadata: s.json(),
-    done: s.boolean(),
-  }),
+  documents: s.table(
+    {
+      title: s.string(),
+      payload: s.bytes(),
+      metadata: s.json(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 type LargeValueUpdateAppSchema = s.Schema<typeof largeValueUpdateSchema>;
 const largeValueUpdateApp: s.App<LargeValueUpdateAppSchema> = s.defineApp(largeValueUpdateSchema);
 
 const largeSchema = {
-  accounts: s.table({
-    name: s.string(),
-  }),
-  workspaces: s.table({
-    name: s.string(),
-    accountId: s.ref("accounts"),
-  }),
-  catalog_items: s.table({
-    title: s.string(),
-    workspaceId: s.ref("workspaces"),
-  }),
-  orders: s.table({
-    number: s.string(),
-    catalogItemId: s.ref("catalog_items"),
-    buyerId: s.ref("users"),
-  }),
-  shipments: s.table({
-    trackingCode: s.string(),
-    orderId: s.ref("orders"),
-  }),
-  users: s.table({
-    name: s.string(),
-  }),
-  support_tickets: s.table({
-    workspaceId: s.ref("workspaces"),
-    requesterId: s.ref("users"),
-  }),
+  accounts: s.table(
+    {
+      name: s.string(),
+    },
+    { workspacesViaAccount: s.reverse("workspaces", "account") },
+  ),
+  workspaces: s.table(
+    {
+      name: s.string(),
+      accountId: s.uuid(),
+    },
+    {
+      account: s.rel("accounts", "accountId"),
+      catalog_itemsViaWorkspace: s.reverse("catalog_items", "workspace"),
+      support_ticketsViaWorkspace: s.reverse("support_tickets", "workspace"),
+    },
+  ),
+  catalog_items: s.table(
+    {
+      title: s.string(),
+      workspaceId: s.uuid(),
+    },
+    {
+      workspace: s.rel("workspaces", "workspaceId"),
+      ordersViaCatalogItem: s.reverse("orders", "catalogItem"),
+    },
+  ),
+  orders: s.table(
+    {
+      number: s.string(),
+      catalogItemId: s.uuid(),
+      buyerId: s.uuid(),
+    },
+    {
+      catalogItem: s.rel("catalog_items", "catalogItemId"),
+      buyer: s.rel("users", "buyerId"),
+      shipmentsViaOrder: s.reverse("shipments", "order"),
+    },
+  ),
+  shipments: s.table(
+    {
+      trackingCode: s.string(),
+      orderId: s.uuid(),
+    },
+    { order: s.rel("orders", "orderId") },
+  ),
+  users: s.table(
+    {
+      name: s.string(),
+    },
+    {
+      ordersViaBuyer: s.reverse("orders", "buyer"),
+      support_ticketsViaRequester: s.reverse("support_tickets", "requester"),
+    },
+  ),
+  support_tickets: s.table(
+    {
+      workspaceId: s.uuid(),
+      requesterId: s.uuid(),
+    },
+    { workspace: s.rel("workspaces", "workspaceId"), requester: s.rel("users", "requesterId") },
+  ),
 };
 
 describe("typed app prototype", () => {
@@ -134,10 +212,12 @@ describe("typed app prototype", () => {
   });
 
   it("serializes select/include metadata without codegen", () => {
-    expect(JSON.parse(app.todos.select("title").include({ project: true })._build())).toEqual({
+    expect(
+      JSON.parse(app.todos.select("title").include({ projectRelation: true })._build()),
+    ).toEqual({
       table: "todos",
       conditions: [],
-      includes: { project: true },
+      includes: { projectRelation: true },
       select: ["title"],
       orderBy: [],
       hops: [],
@@ -241,10 +321,12 @@ describe("typed app prototype", () => {
   });
 
   it("serializes gather seeded from the current relation", () => {
-    const directParents = graphApp.team_edges.where({ child_team: "team-a" }).hopTo("parent_team");
+    const directParents = graphApp.team_edges
+      .where({ child_team: "team-a" })
+      .hopTo("parent_teamRelation");
     const reachableTeams = directParents.gather({
       step: ({ current }) =>
-        graphApp.team_edges.where({ child_team: current }).hopTo("parent_team"),
+        graphApp.team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
       maxDepth: 0,
     });
 
@@ -258,28 +340,30 @@ describe("typed app prototype", () => {
         seed: {
           table: "team_edges",
           conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
-          hops: ["parent_team"],
+          hops: ["parent_teamRelation"],
         },
         max_depth: 0,
         step_table: "team_edges",
         step_current_column: "child_team",
         step_conditions: [],
-        step_hops: ["parent_team"],
+        step_hops: ["parent_teamRelation"],
       },
     });
   });
 
   it("serializes union gather seeds", () => {
-    const directParents = graphApp.team_edges.where({ child_team: "team-a" }).hopTo("parent_team");
+    const directParents = graphApp.team_edges
+      .where({ child_team: "team-a" })
+      .hopTo("parent_teamRelation");
     const adminReachableTeams = graphApp.teams.gather({
       start: { name: "admins" },
       step: ({ current }) =>
-        graphApp.team_edges.where({ child_team: current }).hopTo("parent_team"),
+        graphApp.team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
       maxDepth: 2,
     });
     const reachableTeams = graphApp.union([directParents, adminReachableTeams]).gather({
       step: ({ current }) =>
-        graphApp.team_edges.where({ child_team: current }).hopTo("parent_team"),
+        graphApp.team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
       maxDepth: 4,
     });
 
@@ -294,15 +378,15 @@ describe("typed app prototype", () => {
           union: {
             inputs: [
               {
-                label: "derived:1305159ebbe387ef62c9b24b7ee2823fe2181cb4e1c6be16282ff393c7fe2fbf",
+                label: "derived:1c44bf1d4071d2a3afc5366664fa381c051f854cf0386c214c8cd9155d618f5e",
                 input: {
                   table: "team_edges",
                   conditions: [{ column: "child_team", op: "eq", value: "team-a" }],
-                  hops: ["parent_team"],
+                  hops: ["parent_teamRelation"],
                 },
               },
               {
-                label: "derived:1b79e5056c01cd288d096b23cbc4e17bf07f6484e03cfc14ded25553810026fe",
+                label: "derived:107bcfc3905e1cbe15814d71882c4e518afdcf4d1137d36dd28e58ed8d8ac8d9",
                 input: {
                   table: "teams",
                   conditions: [],
@@ -312,7 +396,7 @@ describe("typed app prototype", () => {
                     step_table: "team_edges",
                     step_current_column: "child_team",
                     step_conditions: [],
-                    step_hops: ["parent_team"],
+                    step_hops: ["parent_teamRelation"],
                   },
                 },
               },
@@ -323,13 +407,13 @@ describe("typed app prototype", () => {
         step_table: "team_edges",
         step_current_column: "child_team",
         step_conditions: [],
-        step_hops: ["parent_team"],
+        step_hops: ["parent_teamRelation"],
       },
     });
   });
 
   it("infers rows, init payloads, where inputs, and include names from schema literals", () => {
-    const todoWithProjectQuery = app.todos.include({ project: true });
+    const todoWithProjectQuery = app.todos.include({ projectRelation: true });
     const projectWithTitlesQuery = app.projects.include({
       todosViaProject: app.todos.select("title"),
     });
@@ -417,11 +501,11 @@ describe("typed app prototype", () => {
     // @ts-expect-error null is not a valid membership value
     app.todos.where({ owner: { notIn: [null] } });
 
-    const projectRecord: ProjectRecord | null = todoWithProject.project;
+    const projectRecord: ProjectRecord | null = todoWithProject.projectRelation;
     expectTypeOf(todoWithProject.owner).toEqualTypeOf<string | null>();
     const todoTitleRecords: TodoTitleRecord[] = projectWithTitles.todosViaProject;
     const queryContract: QueryBuilder<TodoWithProject> = todoWithProjectQuery;
-    const typedQueryContract: Query<"todos", { project: true }, any, AppSchema> =
+    const typedQueryContract: Query<"todos", { projectRelation: true }, any, AppSchema> =
       todoWithProjectQuery;
     const tableProxyContract: TableProxy<TodoRow, TodoInsert> = app.todos;
     const tableContract: Table<"todos", AppSchema> = app.todos;
@@ -462,24 +546,36 @@ describe("typed app prototype", () => {
       app.users.include({ todosViaProject: true });
 
       const invalidScalarRefSchema = {
-        users: s.table({
-          name: s.string(),
-        }),
-        todos: s.table({
-          owner: s.ref("accounts"),
-        }),
+        users: s.table(
+          {
+            name: s.string(),
+          },
+          {},
+        ),
+        todos: s.table(
+          {
+            owner: s.uuid(),
+          },
+          { ownerRelation: s.rel("accounts", "owner") },
+        ),
       };
 
       // @ts-expect-error invalid ref target table name
       s.defineApp(invalidScalarRefSchema);
 
       const invalidArrayRefSchema = {
-        users: s.table({
-          name: s.string(),
-        }),
-        groups: s.table({
-          members: s.array(s.ref("accounts")),
-        }),
+        users: s.table(
+          {
+            name: s.string(),
+          },
+          {},
+        ),
+        groups: s.table(
+          {
+            members: s.array(s.uuid()),
+          },
+          { membersRelation: s.rel("accounts", "members") },
+        ),
       };
 
       // @ts-expect-error invalid ref target table name inside array ref

@@ -99,7 +99,7 @@ describe("startLocalJazzServer via JazzServer", () => {
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
       const app = s.defineApp({
-        todos: s.table({ title: s.string(), done: s.boolean() }),
+        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
       });
       const sources = [
         app,

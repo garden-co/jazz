@@ -5,16 +5,19 @@ import { renderMigrationStub } from "./migrations.js";
 describe("migration stub generation", () => {
   it("generates additive table witnesses with bare, nullable, and referenced UUIDs", () => {
     const from = {
-      users: s.table({ name: s.string() }),
+      users: s.table({ name: s.string() }, {}),
     };
     const to = {
       ...from,
-      records: s.table({
-        externalId: s.uuid(),
-        previousId: s.uuid().optional(),
-        ownerId: s.ref("users"),
-        reviewerId: s.ref("users").optional(),
-      }),
+      records: s.table(
+        {
+          externalId: s.uuid(),
+          previousId: s.uuid().optional(),
+          ownerId: s.uuid(),
+          reviewerId: s.uuid().optional(),
+        },
+        { owner: s.rel("users", "ownerId"), reviewer: s.rel("users", "reviewerId") },
+      ),
     };
     const source = renderMigrationStub({
       fromHash: "aaaaaaaaaaaa",

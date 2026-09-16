@@ -7,18 +7,24 @@ import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
 
 const oldSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 
 const newSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    tags: s.array(s.string()).default([]),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      tags: s.array(s.string()).default([]),
+    },
+    {},
+  ),
 };
 
 type OldAppSchema = s.Schema<typeof oldSchema>;

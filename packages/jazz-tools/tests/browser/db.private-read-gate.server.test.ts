@@ -24,54 +24,81 @@ import {
 import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
 
 const app = schema.defineApp({
-  chats: schema.table({
-    title: schema.string(),
-    visibility: schema.string(),
-    owner_id: schema.uuid(),
-  }),
-  chat_members: schema.table({
-    chat_id: schema.ref("chats"),
-    user_id: schema.uuid(),
-  }),
-  messages: schema.table({
-    chat_id: schema.ref("chats"),
-    body: schema.string(),
-    author_id: schema.uuid(),
-    owner_id: schema.uuid(),
-  }),
-  announcements: schema.table({
-    title: schema.string(),
-  }),
+  chats: schema.table(
+    {
+      title: schema.string(),
+      visibility: schema.string(),
+      owner_id: schema.uuid(),
+    },
+    {},
+  ),
+  chat_members: schema.table(
+    {
+      chat_id: schema.ref("chats"),
+      user_id: schema.uuid(),
+    },
+    {},
+  ),
+  messages: schema.table(
+    {
+      chat_id: schema.ref("chats"),
+      body: schema.string(),
+      author_id: schema.uuid(),
+      owner_id: schema.uuid(),
+    },
+    {},
+  ),
+  announcements: schema.table(
+    {
+      title: schema.string(),
+    },
+    {},
+  ),
 });
 
 const camelChatApp = schema.defineApp({
-  chats: schema.table({
-    name: schema.string().optional(),
-    isPublic: schema.boolean(),
-    createdBy: schema.string(),
-    joinCode: schema.string().optional(),
-  }),
-  profiles: schema.table({
-    userId: schema.string(),
-    name: schema.string(),
-    avatar: schema.string().optional(),
-  }),
-  chatMembers: schema.table({
-    chatId: schema.ref("chats"),
-    userId: schema.string(),
-    joinCode: schema.string().optional(),
-  }),
-  messages: schema.table({
-    chatId: schema.ref("chats"),
-    senderId: schema.ref("profiles"),
-    text: schema.string(),
-    createdAt: schema.timestamp(),
-  }),
-  reactions: schema.table({
-    messageId: schema.ref("messages"),
-    userId: schema.string(),
-    emoji: schema.string(),
-  }),
+  chats: schema.table(
+    {
+      name: schema.string().optional(),
+      isPublic: schema.boolean(),
+      createdBy: schema.string(),
+      joinCode: schema.string().optional(),
+    },
+    {},
+  ),
+  profiles: schema.table(
+    {
+      userId: schema.string(),
+      name: schema.string(),
+      avatar: schema.string().optional(),
+    },
+    {},
+  ),
+  chatMembers: schema.table(
+    {
+      chatId: schema.ref("chats"),
+      userId: schema.string(),
+      joinCode: schema.string().optional(),
+    },
+    {},
+  ),
+  messages: schema.table(
+    {
+      chatId: schema.ref("chats"),
+      senderId: schema.ref("profiles"),
+      text: schema.string(),
+      createdAt: schema.timestamp(),
+    },
+    {},
+  ),
+  reactions: schema.table(
+    {
+      messageId: schema.ref("messages"),
+      userId: schema.string(),
+      emoji: schema.string(),
+    },
+    {},
+  ),
 });
 
 const permissions = schema.definePermissions(app, ({ policy, anyOf, session }) => [
@@ -207,10 +234,13 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
 );
 
 const createdByApp = schema.defineApp({
-  todos: schema.table({
-    title: schema.string(),
-    done: schema.boolean(),
-  }),
+  todos: schema.table(
+    {
+      title: schema.string(),
+      done: schema.boolean(),
+    },
+    {},
+  ),
 });
 
 const createdByPermissions = schema.definePermissions(createdByApp, ({ policy, session }) => {

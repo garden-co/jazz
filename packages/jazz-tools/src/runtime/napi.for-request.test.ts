@@ -14,12 +14,15 @@ import { startLocalJazzServer } from "../testing/index.js";
 // Inline schema + permissions
 // ---------------------------------------------------------------------------
 const todoApp = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    description: s.string().optional(),
-    owner_id: s.uuid(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      owner_id: s.uuid(),
+    },
+    {},
+  ),
 });
 
 const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) => {
@@ -883,10 +886,13 @@ it.each(["table", "relation"] as const)(
     const backendSecret = "request-scope-backend";
     const adminSecret = "request-scope-admin";
     const app = s.defineApp({
-      rooms: s.table({ title: s.string(), code: s.string() }),
-      links: s.table({ room: s.ref("rooms") }),
+      rooms: s.table(
+        { title: s.string(), code: s.string() },
+        { linksViaRoom: s.reverse("links", "roomRelation") },
+      ),
+      links: s.table({ room: s.uuid() }, { roomRelation: s.rel("rooms", "room") }),
     });
-    const query = kind === "relation" ? app.links.hopTo("room") : app.rooms;
+    const query = kind === "relation" ? app.links.hopTo("roomRelation") : app.rooms;
     const permissions = s.definePermissions(app, ({ policy, session }) => {
       policy.rooms.allowRead.where({ code: session.claims["join_code"] });
       policy.links.allowRead.where({});
@@ -1064,7 +1070,7 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
   const appId = randomUUID();
   const backendSecret = "shared-transport-backend";
   const adminSecret = "shared-transport-admin";
-  const app = s.defineApp({ notes: s.table({ title: s.string() }) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
   const permissions = s.definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.where({});
   });
@@ -1121,7 +1127,7 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
   const appId = randomUUID();
   const backendSecret = "shutdown-transport-backend";
   const adminSecret = "shutdown-transport-admin";
-  const app = s.defineApp({ notes: s.table({ title: s.string() }) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
   const permissions = s.definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.where({});
   });

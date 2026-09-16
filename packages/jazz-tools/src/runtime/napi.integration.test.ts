@@ -126,10 +126,13 @@ const TEST_SCHEMA: WasmSchema = {
 };
 
 const publicUnionApp = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 });
 
 const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) => {
@@ -140,10 +143,13 @@ const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) 
 });
 
 const publicUnionBigIntApp = s.defineApp({
-  metrics: s.table({
-    label: s.string(),
-    value: s.bigint(),
-  }),
+  metrics: s.table(
+    {
+      label: s.string(),
+      value: s.bigint(),
+    },
+    {},
+  ),
 });
 
 const TIMESTAMP_SCHEMA: WasmSchema = {

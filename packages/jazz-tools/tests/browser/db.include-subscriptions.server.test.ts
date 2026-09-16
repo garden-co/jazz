@@ -17,22 +17,34 @@ import {
 import { getJazzServerInfo } from "./testing-server.js";
 
 const app = schema.defineApp({
-  orgs: schema.table({
-    name: schema.string(),
-  }),
-  todos: schema.table({
-    title: schema.string(),
-    org_id: schema.ref("orgs"),
-  }),
-  user_checks: schema.table({
-    org_id: schema.ref("orgs"),
-    todo_id: schema.ref("todos"),
-  }),
-  check_notes: schema.table({
-    body: schema.string(),
-    org_id: schema.ref("orgs"),
-    user_check_id: schema.ref("user_checks"),
-  }),
+  orgs: schema.table(
+    {
+      name: schema.string(),
+    },
+    {},
+  ),
+  todos: schema.table(
+    {
+      title: schema.string(),
+      org_id: schema.ref("orgs"),
+    },
+    {},
+  ),
+  user_checks: schema.table(
+    {
+      org_id: schema.ref("orgs"),
+      todo_id: schema.ref("todos"),
+    },
+    {},
+  ),
+  check_notes: schema.table(
+    {
+      body: schema.string(),
+      org_id: schema.ref("orgs"),
+      user_check_id: schema.ref("user_checks"),
+    },
+    {},
+  ),
 });
 
 const permissions = schema.definePermissions(app, ({ policy }) => [
