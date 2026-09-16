@@ -1,14 +1,17 @@
 mod common;
 
 use jazz::block_on;
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions};
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{CurrentWriteSchema, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, ObjectId, SchemaBuilder, TableSchemaBuilder, Value as PublicValue};
+use jazz::tools::{
+    ColumnType, ObjectId, OpenTransactionId, SchemaBuilder, TableSchemaBuilder,
+    Value as PublicValue,
+};
 use jazz_storage_rocksdb::RocksDbStorage;
 use std::collections::BTreeMap;
 
@@ -125,8 +128,8 @@ fn assert_rows<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>, ex
         );
     }
     for column in ["target", "optional", "many"] {
-        // Reverse traversal requires newly declared reference metadata and the
-        // reference index to find rows authored before that index existed.
+        // Reverse traversal becomes available through the new reference metadata
+        // and must find rows authored before publication.
         let query = db
             .prepare_query(&Query::from("targets").join_via("sources", column, []))
             .unwrap();
@@ -142,6 +145,7 @@ fn assert_rows<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>, ex
             ]
         );
     }
+    // Constrained reads require admission of the reference-derived physical index.
     let query = db
         .prepare_query(&Query::from("sources").filter(eq(col("target"), lit(Value::Uuid(id(1).0)))))
         .unwrap();
@@ -160,6 +164,19 @@ async fn migrate<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>) 
     .unwrap();
     insert_source(db, 2, false).await;
     insert_source(db, 3, true).await;
+    let pending = OpenTransactionId::new();
+    db.begin_mergeable(pending).await.unwrap();
+    db.mergeable_tx_ref(pending)
+        .insert(
+            "sources",
+            source_cells(false),
+            InsertOptions {
+                row_id: Some(id(6)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let old = schema(false);
     let new = SchemaVersion::new(schema(true));
     assert_ne!(old.version_id(), new.id);
@@ -197,10 +214,12 @@ async fn migrate<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>) 
     .await
     .unwrap();
     assert!(db.catalogue_lens(lens_id).is_some());
-    assert_eq!(db.catalogue_schema(old.version_id()), Some(old));
+    assert_eq!(db.catalogue_schema(old.version_id()), Some(old.clone()));
     assert_rows(db, &[2, 3]);
+    db.commit_mergeable_handle(pending).await.unwrap();
+    assert_rows(db, &[2, 3, 6]);
     insert_source(db, 4, false).await;
-    assert_rows(db, &[2, 3, 4]);
+    assert_rows(db, &[2, 3, 4, 6]);
 }
 
 #[test]
@@ -253,9 +272,19 @@ fn reference_metadata_and_old_rows_survive_rocksdb_reopen() {
             db.catalogue_schema(schema(true).version_id()),
             Some(schema(true))
         );
-        assert_rows(&db, &[2, 3, 4]);
+        assert_rows(&db, &[2, 3, 4, 6]);
+        let old_view = db.register_schema_view(schema(false)).await.unwrap();
+        let old_query = old_view.prepare_query(&Query::from("sources")).unwrap();
+        let old_rows = old_view.read(&old_query).unwrap();
+        assert_eq!(old_rows.len(), 4);
+        assert!(
+            old_rows
+                .iter()
+                .all(|row| row.cell_at(0) == Some(Value::Uuid(id(1).0)))
+        );
+        drop(old_view);
         insert_source(&db, 5, false).await;
-        assert_rows(&db, &[2, 3, 4, 5]);
+        assert_rows(&db, &[2, 3, 4, 5, 6]);
         db.close().await.unwrap();
     });
 }
