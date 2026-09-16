@@ -204,8 +204,10 @@ fn value_rejects_fractional_float_timestamp() {
 #[test]
 fn row_descriptor_hash_changes_when_merge_strategy_changes() {
     let lww = RowDescriptor::new(vec![ColumnDescriptor::new("count", ColumnType::Integer)]);
-    let counter = RowDescriptor::new(vec![ColumnDescriptor::new("count", ColumnType::Integer)
-        .merge_strategy(ColumnMergeStrategy::Counter)]);
+    let counter = RowDescriptor::new(vec![
+        ColumnDescriptor::new("count", ColumnType::Integer)
+            .merge_strategy(ColumnMergeStrategy::Counter),
+    ]);
 
     assert_ne!(
         lww.content_hash(),
@@ -685,10 +687,12 @@ fn explicit_table_id_columns_are_rejected() {
     let source = SchemaBuilder::new()
         .table(TableSchema::builder("items").nullable_column("id", ColumnType::Uuid))
         .build();
-    assert!(crate::schema::JazzSchema::new(&source)
-        .unwrap_err()
-        .to_string()
-        .contains("reserved"));
+    assert!(
+        crate::schema::JazzSchema::new(&source)
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
 }
 
 #[test]
@@ -725,8 +729,10 @@ fn ordinary_created_at_column_is_accepted() {
         .iter()
         .find(|table| table.name == "items")
         .expect("items table is present");
-    assert!(table
-        .columns
-        .iter()
-        .any(|column| column.name == "createdAt"));
+    assert!(
+        table
+            .columns
+            .iter()
+            .any(|column| column.name == "createdAt")
+    );
 }
