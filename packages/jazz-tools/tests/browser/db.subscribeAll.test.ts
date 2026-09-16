@@ -1032,7 +1032,7 @@ describe("internal subscription delta browser integration", () => {
       getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<BundleItem>("bundles", {
           conditions: [{ column: "id", op: "eq", value: bundleId }],
-          hops: ["items"],
+          hops: ["itemsRelation"],
         }),
         (delta) => deltas.push(delta),
       ),
