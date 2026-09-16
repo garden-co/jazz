@@ -3264,22 +3264,6 @@ where
             current = projection_node;
         }
 
-        if query
-            .relation
-            .as_ref()
-            .is_some_and(|relation| crate::query::relation_union_parts(&relation.rel).is_none())
-        {
-            let project_node = RowSetNodeId("relation:output".to_owned());
-            nodes.insert(
-                project_node.clone(),
-                RowSetExpr::Project {
-                    input: current,
-                    columns: relation_row_projection(schema, query, &root_source)?,
-                },
-            );
-            current = project_node;
-        }
-
         for (index, subquery) in query.array_subqueries.iter().enumerate() {
             current = normalize_array_subquery(
                 &mut nodes,
@@ -3322,6 +3306,24 @@ where
                 },
             );
             current = slice_node;
+        }
+        // Relation output aliases are a terminal presentation concern. Keep
+        // source-bound ordering and pagination above this projection so their
+        // keys still resolve against the source descriptor.
+        if query
+            .relation
+            .as_ref()
+            .is_some_and(|relation| crate::query::relation_union_parts(&relation.rel).is_none())
+        {
+            let project_node = RowSetNodeId("relation:output".to_owned());
+            nodes.insert(
+                project_node.clone(),
+                RowSetExpr::Project {
+                    input: current,
+                    columns: relation_row_projection(schema, query, &root_source)?,
+                },
+            );
+            current = project_node;
         }
 
         if let Some(marker) = unsupported_policy_branch {

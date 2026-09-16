@@ -3319,11 +3319,16 @@ fn lower_order_key(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<TopByOrder, UnsupportedReason> {
-    // Preserve source qualification validation before binding the exact carrier.
     let lowered = lower_field_ref(&key.value, plan, source, request, "order key")?;
-    let field = match collect_window_source_field(source, &key.value) {
-        Some(field) => FieldRef::stored_name(field.name.clone().expect("window fields are named")),
-        None => FieldRef::name(lowered),
+    let field = match &key.value {
+        NormalizedValueRef::SourceField { .. } => FieldRef::resolved(
+            resolved_source_descriptor_index(source, &lowered).ok_or_else(|| {
+                UnsupportedReason::Operator(format!(
+                    "resolved order key field {lowered:?} is missing from the source descriptor"
+                ))
+            })?,
+        ),
+        _ => FieldRef::name(lowered),
     };
     Ok(TopByOrder {
         field,
