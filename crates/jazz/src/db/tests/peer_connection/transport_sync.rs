@@ -2,6 +2,75 @@
 
 use super::*;
 
+struct BackpressureAfterViewUpdateTransport {
+    inner: Box<dyn Transport>,
+    saw_view_update: bool,
+}
+
+impl Transport for BackpressureAfterViewUpdateTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        if self.saw_view_update {
+            return Err(TransportError::Backpressure);
+        }
+        let message = self.inner.try_recv();
+        if matches!(message, Some(SyncMessage::ViewUpdate(_))) {
+            self.saw_view_update = true;
+        }
+        Ok(message)
+    }
+}
+
+#[test]
+fn receive_backpressure_finalizes_consumed_view_update() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xf1; 16]);
+    let server = open_core(0xf2, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xf3, alice, &schema);
+    let (client_transport, server_transport, server_sent) = duplex_with_server_outbound_tap();
+    let wrapped = BackpressureAfterViewUpdateTransport {
+        inner: client_transport,
+        saw_view_update: false,
+    };
+    let _upstream = block_on(client.connect_upstream(Box::new(wrapped)));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let mut subscription =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    assert!(
+        server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+    );
+
+    client
+        .tick()
+        .expect("receive backpressure defers after finalizing the consumed view update");
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(SubscriptionEvent::Delta { reset: true, .. })
+    ));
+}
+
 #[test]
 fn unordered_supporting_snapshots_preserve_public_subscription_rows() {
     let schema = schema();
