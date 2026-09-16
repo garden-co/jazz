@@ -8,8 +8,8 @@ const schema = {
       name: s.string(),
     },
     {
-      workspaceMembersViaWorkspace: s.reverse("workspaceMembers", "workspace"),
-      documentsViaWorkspace: s.reverse("documents", "workspace"),
+      members: s.reverse("workspaceMembers", "workspace"),
+      documents: s.reverse("documents", "workspace"),
     },
   ),
   workspaceMembers: s.table(

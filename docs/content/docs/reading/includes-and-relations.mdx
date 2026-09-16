@@ -41,8 +41,7 @@ Declare reverse relations explicitly on the target table. For example, if `todos
 `project: s.rel("projects", "projectId")`, `projects` can declare
 `todos: s.reverse("todos", "project")` and load it with `include({ todos: true })`.
 The reverse relation returns matching source rows as an array. Its name is your choice;
-Jazz does not generate an inverse or infer names from UUID columns. Existing examples may
-retain names such as `todosViaProject` through explicit declarations.
+Jazz does not generate an inverse or infer names from UUID columns.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -155,7 +154,7 @@ a source row if one of those required targets is unavailable.
 </Tabs>
 
 `requireIncludes()` only filters non-nullable forward references (FK &rarr; row). Nullable forward
-references and reverse relations (`todosViaOwner`, etc.) are unaffected. When used inside a nested
+references and reverse relations (such as `authoredPosts`) are unaffected. When used inside a nested
 `include`, it applies at that nesting level only.
 
 In Rust, set the corresponding correlated `ArraySubquery` to

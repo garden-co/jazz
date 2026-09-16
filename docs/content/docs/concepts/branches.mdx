@@ -86,9 +86,9 @@ const schema = {
       status: s.enum(["open", "approved", "archived"]),
     },
     {
-      base_branch: s.rel("branches", "base_branch_id"),
-      branchesViaBase_branch: s.reverse("branches", "base_branch"),
-      documentsViaBranch: s.reverse("documents", "branch"),
+      baseBranch: s.rel("branches", "base_branch_id"),
+      derivedBranches: s.reverse("branches", "baseBranch"),
+      documents: s.reverse("documents", "branch"),
     },
   ),
   documents: s

@@ -6,8 +6,8 @@ const schema = {
   chats: s.table(
     {},
     {
-      chatMembersViaChat: s.reverse("chatMembers", "chat"),
-      chatInvitesViaChat: s.reverse("chatInvites", "chat"),
+      members: s.reverse("chatMembers", "chat"),
+      invites: s.reverse("chatInvites", "chat"),
     },
   ),
   chatMembers: s.table(

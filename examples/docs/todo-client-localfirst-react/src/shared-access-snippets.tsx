@@ -8,7 +8,7 @@ const schema = {
       title: s.string(),
       done: s.boolean(),
     },
-    { todoSharesViaTodo: s.reverse("todoShares", "todo") },
+    { shares: s.reverse("todoShares", "todo") },
   ),
   todoShares: s.table(
     {

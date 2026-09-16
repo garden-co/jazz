@@ -23,7 +23,7 @@ export default s.defineMigration({
       },
       {
         parent: s.rel("todos", "parentId"),
-        todosViaParent: s.reverse("todos", "parent"),
+        children: s.reverse("todos", "parent"),
         project: s.rel("projects", "projectId"),
       },
     ),
@@ -40,7 +40,7 @@ export default s.defineMigration({
       },
       {
         parent: s.rel("todos", "parentId"),
-        todosViaParent: s.reverse("todos", "parent"),
+        children: s.reverse("todos", "parent"),
         project: s.rel("projects", "projectId"),
       },
     ),

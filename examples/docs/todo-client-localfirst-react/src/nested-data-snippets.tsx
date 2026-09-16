@@ -7,7 +7,7 @@ const schema = {
     {
       name: s.string(),
     },
-    { tasksViaProject: s.reverse("tasks", "project") },
+    { tasks: s.reverse("tasks", "project") },
   ),
   tasks: s.table(
     {
@@ -15,7 +15,7 @@ const schema = {
       done: s.boolean(),
       projectId: s.uuid(),
     },
-    { project: s.rel("projects", "projectId"), commentsViaTask: s.reverse("comments", "task") },
+    { project: s.rel("projects", "projectId"), comments: s.reverse("comments", "task") },
   ),
   comments: s.table(
     {

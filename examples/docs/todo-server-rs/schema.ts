@@ -5,7 +5,7 @@ const schema = {
     {
       name: s.string(),
     },
-    { todosViaProject: s.reverse("todos", "projectRelation") },
+    { todos: s.reverse("todos", "projectRelation") },
   ),
   todos: s.table(
     {
@@ -18,7 +18,7 @@ const schema = {
     },
     {
       parentRelation: s.rel("todos", "parent"),
-      todosViaParent: s.reverse("todos", "parentRelation"),
+      children: s.reverse("todos", "parentRelation"),
       projectRelation: s.rel("projects", "project"),
     },
   ),
