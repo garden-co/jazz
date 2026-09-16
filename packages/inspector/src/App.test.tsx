@@ -534,6 +534,34 @@ describe("App", () => {
     expect(store.connections.find((c: { id: string }) => c.id === "saved").appId).toBe("saved-app");
   });
 
+  it("removes legacy credentials when storage reads and removal work but migration writes fail", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "saved",
+        connections: [
+          {
+            id: "saved",
+            name: "Saved",
+            serverUrl: "https://saved.example.com",
+            appId: "saved-app",
+            adminSecret: "legacy-secret",
+            env: "dev",
+            schemaHash: "hash-a",
+          },
+        ],
+      }),
+    );
+    vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new Error("storage quota exceeded");
+    });
+    render(<App />);
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    expect(createJazzClientMock).not.toHaveBeenCalled();
+  });
+
   it("scrubs secrets even when one stored connection is invalid", () => {
     localStorage.setItem(
       STORAGE_KEY,

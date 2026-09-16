@@ -507,7 +507,8 @@ function readStoredConnections(): StoredConnections {
       localStorage.removeItem(STORAGE_KEY);
       return emptyConnectionStore();
     }
-    writeStoredConnections(migrated);
+    // Migration must remove legacy credentials even when rewriting storage fails.
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
     return migrated;
   } catch {
     try {
