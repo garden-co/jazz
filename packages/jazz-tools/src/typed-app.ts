@@ -1,3 +1,4 @@
+import type { ForwardRelationName } from "./relation-names.js";
 import type {
   AnyTypedColumnBuilder,
   ColumnBuilderHasDefault,
@@ -402,22 +403,6 @@ type DefaultSelection<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
 > = BaseColumnName<TSchema, TTable>;
-
-type StripRefSuffix<TColumn extends string> = TColumn extends `${infer TPrefix}_ids`
-  ? TPrefix
-  : TColumn extends `${infer TPrefix}Ids`
-    ? TPrefix
-    : TColumn extends `${infer TPrefix}_id`
-      ? TPrefix
-      : TColumn extends `${infer TPrefix}Id`
-        ? TPrefix
-        : TColumn;
-
-type MaybePluralize<TName extends string> = TName extends `${string}s` ? TName : `${TName}s`;
-
-type ForwardRelationName<TColumn extends string> = TColumn extends `${string}_ids` | `${string}Ids`
-  ? MaybePluralize<StripRefSuffix<TColumn>>
-  : StripRefSuffix<TColumn>;
 
 type IsArrayRelation<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends {

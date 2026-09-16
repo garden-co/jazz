@@ -3,7 +3,7 @@
  */
 
 import type { WasmSchema } from "../drivers/types.js";
-import pluralize from "pluralize-esm";
+import { forwardRelationName } from "../relation-names.js";
 
 /**
  * A relation between two tables (forward or reverse).
@@ -100,12 +100,6 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function forwardRefNameFromFK(columnName: string): string {
-  const withoutIdSuffix = columnName.replace(/(?:_ids|Ids|_id|Id)$/, "");
-  const requiresPluralization = columnName.endsWith("s");
-  return requiresPluralization ? pluralize.plural(withoutIdSuffix) : withoutIdSuffix;
-}
-
 /**
  * Analyze a WasmSchema and derive all forward and reverse relations.
  *
@@ -147,7 +141,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
         const isForwardArray =
           col.column_type.type === "Array" && col.column_type.element.type === "Uuid";
 
-        const forwardName = forwardRefNameFromFK(col.name);
+        const forwardName = forwardRelationName(col.name);
         const forwardRelation: Relation = {
           name: forwardName,
           type: "forward",
