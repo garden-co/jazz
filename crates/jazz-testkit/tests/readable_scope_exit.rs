@@ -51,6 +51,7 @@ async fn local_rows(client: &JazzClient, query: Query) -> Vec<(ObjectId, Vec<Val
             },
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("inspect local cache")
 }
 
@@ -135,6 +136,7 @@ async fn run_readable_exit(relayed: bool) {
     let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
     staged
         .update(
+            "tasks",
             task,
             vec![
                 ("done".into(), Value::Boolean(true)),
@@ -144,6 +146,7 @@ async fn run_readable_exit(relayed: bool) {
         .unwrap();
     staged
         .update(
+            "tasks",
             sibling,
             vec![("title".into(), Value::Text("sibling after".into()))],
         )
@@ -203,7 +206,7 @@ async fn run_readable_exit(relayed: bool) {
 
     let start = local_log.len();
     let tx = bob
-        .update(task, vec![("done".into(), Value::Boolean(false))])
+        .update("tasks", task, vec![("done".into(), Value::Boolean(false))])
         .unwrap()
         .unwrap();
     jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
@@ -216,7 +219,7 @@ async fn run_readable_exit(relayed: bool) {
     )
     .await;
     let start = local_log.len();
-    let tx = bob.delete(task).unwrap().unwrap();
+    let tx = bob.delete("tasks", task).unwrap().unwrap();
     jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
     wait_for_subscription_update(
         &mut local,
@@ -418,12 +421,16 @@ async fn run_revoked_exit_shared_case(
     ];
     if let Some(grant) = grant {
         staged
-            .update(grant, vec![("owner".into(), Value::Text("bob".into()))])
+            .update(
+                "grants",
+                grant,
+                vec![("owner".into(), Value::Text("bob".into()))],
+            )
             .unwrap();
     } else {
         changes.push(("owner".into(), Value::Text("bob".into())));
     }
-    staged.update(task, changes).unwrap();
+    staged.update("tasks", task, changes).unwrap();
     jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     wait_for_subscription_update(
         &mut remote,
@@ -452,6 +459,7 @@ async fn run_revoked_exit_shared_case(
     let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
     staged
         .update(
+            "tasks",
             task,
             vec![
                 ("done".into(), Value::Boolean(false)),
@@ -462,7 +470,11 @@ async fn run_revoked_exit_shared_case(
         .unwrap();
     if let Some(grant) = grant {
         staged
-            .update(grant, vec![("owner".into(), Value::Text("alice".into()))])
+            .update(
+                "grants",
+                grant,
+                vec![("owner".into(), Value::Text("alice".into()))],
+            )
             .unwrap();
     }
     jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
@@ -587,6 +599,7 @@ async fn run_reconnect_scalar_query(count: usize) {
             for task in &tasks {
                 staged
                     .update(
+                        "tasks",
                         *task,
                         vec![
                             ("done".into(), Value::Boolean(true)),
@@ -776,14 +789,19 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
             ];
             if dependency {
                 staged
-                    .update(grants[0], vec![("owner".into(), Value::Text("bob".into()))])
+                    .update(
+                        "grants",
+                        grants[0],
+                        vec![("owner".into(), Value::Text("bob".into()))],
+                    )
                     .unwrap();
             } else {
                 revoked.push(("owner".into(), Value::Text("bob".into())));
             }
-            staged.update(tasks[0], revoked).unwrap();
+            staged.update("tasks", tasks[0], revoked).unwrap();
             staged
                 .update(
+                    "tasks",
                     tasks[1],
                     vec![
                         ("done".into(), Value::Boolean(true)),
@@ -884,6 +902,7 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
             if dependency {
                 staged
                     .update(
+                        "grants",
                         grants[0],
                         vec![("owner".into(), Value::Text("alice".into()))],
                     )
@@ -891,6 +910,7 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
             }
             staged
                 .update(
+                    "tasks",
                     tasks[0],
                     vec![
                         ("owner".into(), Value::Text("alice".into())),

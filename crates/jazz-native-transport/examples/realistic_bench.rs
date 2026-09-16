@@ -6,8 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jazz::query::{OrderDirection, col, eq, lit};
 use jazz::tools::{
-    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder,
-    TableSchema, Value,
+    AppContext, AppId, ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -644,7 +643,9 @@ async fn run_w1_interactive(
                     ))
                     .order_by("updated_at", OrderDirection::Desc)
                     .limit(200);
-                let _ = client.query(query, None).await?;
+                let _ = client
+                    .query(query, jazz::tools::ReadTier::LocalFirst)
+                    .await?;
             }
             "query_my_work" => {
                 let user_idx = rng.next_usize(seed.users.len());
@@ -653,7 +654,9 @@ async fn run_w1_interactive(
                     .filter(eq(col("status"), lit("in_progress")))
                     .order_by("updated_at", OrderDirection::Desc)
                     .limit(200);
-                let _ = client.query(query, None).await?;
+                let _ = client
+                    .query(query, jazz::tools::ReadTier::LocalFirst)
+                    .await?;
             }
             "query_task_detail" => {
                 let task_idx = rng.next_usize(seed.tasks.len());
@@ -663,19 +666,24 @@ async fn run_w1_interactive(
                     .filter(eq(col("task_id"), lit(*task.id.uuid())))
                     .order_by("created_at", OrderDirection::Desc)
                     .limit(200);
-                let _ = client.query(comments, None).await?;
+                let _ = client
+                    .query(comments, jazz::tools::ReadTier::LocalFirst)
+                    .await?;
 
                 let activity = jazz::query::Query::from("activity_events")
                     .filter(eq(col("task_id"), lit(*task.id.uuid())))
                     .order_by("created_at", OrderDirection::Desc)
                     .limit(200);
-                let _ = client.query(activity, None).await?;
+                let _ = client
+                    .query(activity, jazz::tools::ReadTier::LocalFirst)
+                    .await?;
             }
             "update_task_status" => {
                 let task_idx = rng.next_usize(seed.tasks.len());
                 let task = &seed.tasks[task_idx];
                 let assignee = seed.users[rng.next_usize(seed.users.len())];
                 client.update(
+                    "tasks",
                     task.id,
                     vec![
                         (
@@ -708,6 +716,7 @@ async fn run_w1_interactive(
             "update_project_meta" => {
                 let project_idx = rng.next_usize(seed.projects.len());
                 client.update(
+                    "projects",
                     seed.projects[project_idx],
                     vec![
                         (
@@ -810,7 +819,7 @@ async fn run_w3_offline_reconnect(
         let query = jazz::query::Query::from("task_comments")
             .filter(eq(col("task_id"), lit(*target_task_id.uuid())));
         let rows = online_client
-            .query(query, Some(DurabilityTier::EdgeServer))
+            .query(query, jazz::tools::ReadTier::Remote)
             .await?;
         observed_count = rows.len();
         polls += 1;
@@ -911,7 +920,9 @@ async fn run_w4_cold_start(
             .order_by("updated_at", OrderDirection::Desc)
             .limit(200);
         let query_started = Instant::now();
-        let _ = client.query(query, None).await?;
+        let _ = client
+            .query(query, jazz::tools::ReadTier::LocalFirst)
+            .await?;
         let first_query_elapsed_ms = query_started.elapsed().as_secs_f64() * 1000.0;
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         open_latencies.push(open_elapsed_ms);

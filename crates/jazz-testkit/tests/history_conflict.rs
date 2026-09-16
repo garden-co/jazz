@@ -94,7 +94,7 @@ async fn concurrent_updates_resolve_to_lww_winner_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees alice's todo",
         |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
@@ -111,6 +111,7 @@ async fn concurrent_updates_resolve_to_lww_winner_impl() {
     let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
             )
@@ -118,6 +119,7 @@ async fn concurrent_updates_resolve_to_lww_winner_impl() {
     });
     let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
         )
@@ -138,12 +140,14 @@ async fn concurrent_updates_resolve_to_lww_winner_impl() {
             let query = query.clone();
             async move {
                 let alice_rows = alice
-                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                    .query(query.clone(), jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .ok()?;
                 let bob_rows = bob
-                    .query(query, Some(DurabilityTier::EdgeServer))
+                    .query(query, jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .ok()?;
 
                 if alice_rows.len() == 1 && bob_rows.len() == 1 {
@@ -236,7 +240,7 @@ async fn concurrent_creates_both_survive_impl() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees 2 todos",
         |rows| (rows.len() == 2).then_some(()),
@@ -246,7 +250,7 @@ async fn concurrent_creates_both_survive_impl() {
     wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees 2 todos",
         |rows| (rows.len() == 2).then_some(()),
@@ -311,7 +315,7 @@ async fn rapid_concurrent_updates_converge_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees todo",
         |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
@@ -328,6 +332,7 @@ async fn rapid_concurrent_updates_converge_impl() {
         let alice_handle = tokio::task::spawn_local(async move {
             alice2
                 .update(
+                    "todos",
                     todo_id,
                     vec![("title".to_string(), Value::Text(format!("alice-{i}")))],
                 )
@@ -335,6 +340,7 @@ async fn rapid_concurrent_updates_converge_impl() {
         });
         let bob_handle = tokio::task::spawn_local(async move {
             bob2.update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text(format!("bob-{i}")))],
             )
@@ -355,12 +361,14 @@ async fn rapid_concurrent_updates_converge_impl() {
             let query = query.clone();
             async move {
                 let alice_rows = alice
-                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                    .query(query.clone(), jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .ok()?;
                 let bob_rows = bob
-                    .query(query, Some(DurabilityTier::EdgeServer))
+                    .query(query, jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .ok()?;
 
                 if alice_rows.len() == 1 && bob_rows.len() == 1 {
@@ -440,7 +448,7 @@ async fn fresh_client_sees_lww_winner_after_conflict_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees todo",
         |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
@@ -456,6 +464,7 @@ async fn fresh_client_sees_lww_winner_after_conflict_impl() {
     let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
             )
@@ -463,6 +472,7 @@ async fn fresh_client_sees_lww_winner_after_conflict_impl() {
     });
     let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
         )
@@ -484,12 +494,14 @@ async fn fresh_client_sees_lww_winner_after_conflict_impl() {
             let query = query.clone();
             async move {
                 let alice_rows = alice
-                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                    .query(query.clone(), jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .ok()?;
                 let bob_rows = bob
-                    .query(query, Some(DurabilityTier::EdgeServer))
+                    .query(query, jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .ok()?;
 
                 if alice_rows.len() == 1 && bob_rows.len() == 1 {
@@ -520,7 +532,7 @@ async fn fresh_client_sees_lww_winner_after_conflict_impl() {
     let charlie_title = wait_for_query(
         &charlie,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "charlie sees converged title",
         |rows| {
@@ -605,7 +617,7 @@ async fn subscription_reflects_concurrent_update_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees todo",
         |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
@@ -630,6 +642,7 @@ async fn subscription_reflects_concurrent_update_impl() {
 
     // Bob updates
     bob.update(
+        "todos",
         todo_id,
         vec![("title".to_string(), Value::Text("bob-updated".to_string()))],
     )
@@ -661,7 +674,7 @@ async fn subscription_reflects_concurrent_update_impl() {
     wait_for_query(
         &alice,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice reads Bob's delivered title",
         |rows| {
@@ -765,7 +778,7 @@ async fn sequential_updates_preserve_latest_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees v0",
         |rows| {
@@ -780,6 +793,7 @@ async fn sequential_updates_preserve_latest_impl() {
     for version in ["v1", "v2", "v3"] {
         alice
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text(version.to_string()))],
             )
@@ -790,7 +804,7 @@ async fn sequential_updates_preserve_latest_impl() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees v3",
         |rows| (rows.len() == 1 && rows[0].1[0] == Value::Text("v3".to_string())).then_some(()),
@@ -800,7 +814,7 @@ async fn sequential_updates_preserve_latest_impl() {
     let bob_rows = wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees v3",
         |rows| {
@@ -865,7 +879,7 @@ async fn concurrent_edits_on_different_fields_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees todo",
         |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
@@ -882,6 +896,7 @@ async fn concurrent_edits_on_different_fields_impl() {
     let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-title".to_string()))],
             )
@@ -890,6 +905,7 @@ async fn concurrent_edits_on_different_fields_impl() {
     // Bob updates completed only
     let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
@@ -910,12 +926,14 @@ async fn concurrent_edits_on_different_fields_impl() {
             let query = query.clone();
             async move {
                 let alice_rows = alice
-                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                    .query(query.clone(), jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .ok()?;
                 let bob_rows = bob
-                    .query(query, Some(DurabilityTier::EdgeServer))
+                    .query(query, jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .ok()?;
 
                 if alice_rows.len() == 1 && bob_rows.len() == 1 {
@@ -1009,7 +1027,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees todo",
         |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
@@ -1018,7 +1036,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
     wait_for_query(
         &charlie,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "charlie sees todo",
         |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
@@ -1032,6 +1050,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
     let alice_handle = tokio::task::spawn_local(async move {
         alice2
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text("alice-title".to_string()))],
             )
@@ -1039,6 +1058,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
     });
     let bob_handle = tokio::task::spawn_local(async move {
         bob2.update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
@@ -1051,7 +1071,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
     wait_for_query(
         &charlie,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "charlie sees merged preview",
         |rows| {
@@ -1064,6 +1084,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
 
     charlie
         .update(
+            "todos",
             todo_id,
             vec![(
                 "title".to_string(),
@@ -1076,7 +1097,7 @@ async fn post_conflict_update_rebases_on_merged_preview_impl() {
         wait_for_query(
             client,
             query.clone(),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
             QUERY_TIMEOUT,
             "client sees rebased merged row",
             |rows| {
@@ -1160,7 +1181,7 @@ async fn establish_offline_reconnect_baseline(
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees created todo before alice-v1",
         |rows| {
@@ -1174,6 +1195,7 @@ async fn establish_offline_reconnect_baseline(
 
     alice
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("alice-v1".to_string()))],
         )
@@ -1182,7 +1204,7 @@ async fn establish_offline_reconnect_baseline(
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees alice-v1",
         |rows| {
@@ -1241,8 +1263,9 @@ async fn persistent_peer_reloads_synced_state_before_offline_editing_impl() {
         .expect("bob reconnects offline");
 
     let bob_rows = bob_offline
-        .query(query, None)
+        .query(query, jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("bob offline query from persistent storage");
     assert_eq!(bob_rows.len(), 1, "bob should have 1 persisted todo");
     assert_eq!(
@@ -1306,6 +1329,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     for v in ["alice-v2", "alice-v3", "alice-v4"] {
         alice
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text(v.to_string()))],
             )
@@ -1313,6 +1337,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     }
     alice
         .update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
@@ -1321,7 +1346,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees v4 at edge",
         |rows| {
@@ -1339,8 +1364,9 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
         .expect("bob connects offline");
 
     let bob_stale = bob_offline
-        .query(query.clone(), None)
+        .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("bob offline query to hydrate from Fjall");
     assert_eq!(bob_stale.len(), 1, "bob should have 1 todo from Fjall");
     assert_eq!(
@@ -1351,6 +1377,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
 
     let bob_offline_tx = bob_offline
         .update(
+            "todos",
             todo_id,
             vec![(
                 "title".to_string(),
@@ -1362,8 +1389,9 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
 
     // Verify bob sees his own edit locally
     let bob_local = bob_offline
-        .query(query.clone(), None)
+        .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("bob local query");
     assert_eq!(
         bob_local[0].1[0],
@@ -1391,12 +1419,14 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
         let query = query.clone();
         async move {
             let alice_rows = alice
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .ok()?;
             let bob_rows = bob
-                .query(query, Some(DurabilityTier::EdgeServer))
+                .query(query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .ok()?;
 
             if alice_rows.len() == 1
@@ -1488,8 +1518,9 @@ async fn online_user_wins_on_reconnect_impl() {
 
     // Hydrate from Fjall before writing
     let bob_stale = bob_offline
-        .query(query.clone(), None)
+        .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("bob offline query");
     assert_eq!(bob_stale.len(), 1, "bob has 1 todo in Fjall");
     assert_eq!(
@@ -1500,6 +1531,7 @@ async fn online_user_wins_on_reconnect_impl() {
 
     bob_offline
         .update(
+            "todos",
             todo_id,
             vec![(
                 "title".to_string(),
@@ -1515,6 +1547,7 @@ async fn online_user_wins_on_reconnect_impl() {
     for v in ["alice-v2", "alice-v3", "alice-v4"] {
         alice
             .update(
+                "todos",
                 todo_id,
                 vec![("title".to_string(), Value::Text(v.to_string()))],
             )
@@ -1524,7 +1557,7 @@ async fn online_user_wins_on_reconnect_impl() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees alice-v4 at edge",
         |rows| {
@@ -1545,7 +1578,7 @@ async fn online_user_wins_on_reconnect_impl() {
     wait_for_query(
         &bob_online,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees alice-v4 after reconnect",
         |rows| {
@@ -1555,8 +1588,9 @@ async fn online_user_wins_on_reconnect_impl() {
     .await;
 
     let alice_rows = alice
-        .query(query, Some(DurabilityTier::EdgeServer))
+        .query(query, jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("alice final query");
     assert_eq!(
         alice_rows[0].1[0],

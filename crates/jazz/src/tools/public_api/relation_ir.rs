@@ -20,6 +20,18 @@ impl ColumnRef {
     }
 }
 
+impl From<String> for ColumnRef {
+    fn from(column: String) -> Self {
+        Self::unscoped(column)
+    }
+}
+
+impl From<&str> for ColumnRef {
+    fn from(column: &str) -> Self {
+        Self::unscoped(column)
+    }
+}
+
 /// Value references that predicates can compare against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValueRef {

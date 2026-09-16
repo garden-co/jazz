@@ -191,7 +191,7 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
     // A raw worker-port identity is always untrusted; a valid canonical
     // reserved identity must not bypass its issuer guard.
     assert!(db
-        .accept_subscriber(claimed_author.as_bytes().to_vec(), JsValue::NULL)
+        .accept_subscriber(claimed_author.as_bytes().to_vec(), JsValue::NULL, None)
         .is_err());
 
     await_promise(
@@ -200,6 +200,7 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
             token.clone(),
             app_id.to_owned(),
             claimed_author.clone(),
+            None,
         )
         .expect("the exact verified proof admits the local worker follower"),
     )
@@ -210,6 +211,7 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
             token,
             "wrong-app".to_owned(),
             claimed_author,
+            None,
         )
         .is_err());
 }

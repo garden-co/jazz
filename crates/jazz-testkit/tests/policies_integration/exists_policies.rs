@@ -20,7 +20,7 @@ async fn wait_for_protected_row(
         Query::from("protected")
             .filter(eq(col("id"), lit(*protected_id.uuid())))
             .select(["data"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         WAIT_TIMEOUT,
         description,
         |rows| (rows == [(protected_id, vec![Value::Text(expected_data.into())])]).then_some(()),
@@ -38,7 +38,7 @@ async fn wait_for_protected_row_absent(
         Query::from("protected")
             .filter(eq(col("id"), lit(*protected_id.uuid())))
             .select(["data"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         WAIT_TIMEOUT,
         description,
         |rows| rows.is_empty().then_some(()),
@@ -52,7 +52,7 @@ async fn wait_for_admin_row(client: &JazzClient, admin_id: ObjectId, user_id: &s
         Query::from("admins")
             .filter(eq(col("id"), lit(*admin_id.uuid())))
             .select(["user_id"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         WAIT_TIMEOUT,
         format!("{user_id} admin row becomes visible"),
         |rows| (rows == [(admin_id, vec![Value::Text(user_id.into())])]).then_some(()),
@@ -202,6 +202,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
 
     let bob_transaction_id = bob
         .update(
+            "protected",
             protected_id,
             vec![("data".into(), Value::Text("hacked by bob".into()))],
         )
@@ -234,6 +235,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
 
     alice
         .update(
+            "protected",
             protected_id,
             vec![("data".into(), Value::Text("updated by admin alice".into()))],
         )
@@ -303,6 +305,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
     let bob_err = client
         .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("bob update".into()))],
         )
@@ -312,6 +315,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
     client
         .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("alice update".into()))],
         )

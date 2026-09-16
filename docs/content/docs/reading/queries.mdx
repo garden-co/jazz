@@ -120,13 +120,6 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the full reference,
 You can select and filter on Jazz's magic columns just like other columns. They are omitted from
 `select("*")`, so opt in explicitly when you want them.
 
-### Permission introspection columns
-
-- `$canRead`&hairsp;—&hairsp;whether the current session can read the row
-- `$canEdit`&hairsp;—&hairsp;whether the current session can update the row
-- `$canDelete`&hairsp;—&hairsp;whether the current session can delete the row
-- Without a session, all three return `null`
-
 ### Edit metadata columns
 
 - `$createdBy`&hairsp;—&hairsp;the Jazz principal that created the row
