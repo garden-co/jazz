@@ -1934,6 +1934,11 @@ where
                     authority_receipt_eligible: false,
                 }),
                 Ok(None) => break,
+                Err(error)
+                    if handle_transport_backpressure(&self.node, &self.scheduler, &error) =>
+                {
+                    break;
+                }
                 Err(error) => {
                     self.startup_error = Some(transport_error(error));
                     break;
@@ -2619,14 +2624,22 @@ where
                     loop {
                         let next = match self.staged_inbound.pop_front() {
                             Some(staged) => Some(staged),
-                            None => self
-                                .transport
-                                .try_recv_result()
-                                .map_err(transport_error)?
-                                .map(|message| StagedInboundMessage {
+                            None => match self.transport.try_recv_result() {
+                                Ok(message) => message.map(|message| StagedInboundMessage {
                                     message,
                                     authority_receipt_eligible: true,
                                 }),
+                                Err(error)
+                                    if handle_transport_backpressure(
+                                        &self.node,
+                                        &self.scheduler,
+                                        &error,
+                                    ) =>
+                                {
+                                    return Ok(true);
+                                }
+                                Err(error) => return Err(transport_error(error)),
+                            },
                         };
                         let Some(StagedInboundMessage {
                             message,
@@ -4004,30 +4017,41 @@ where
                             self.staged_inbound.pop_front().map(|staged| staged.message)
                         {
                             (Box::new(message), None)
-                        } else if let Some(message) =
-                            self.transport.try_recv_result().map_err(transport_error)?
-                        {
-                            (Box::new(message), None)
                         } else {
-                            let ready = pending_catalogue_subscriptions.iter().find_map(
-                                |(key, pending)| {
-                                    self.node
-                                        .borrow()
-                                        .registered_shape(pending.subscribe.shape_id)
-                                        .is_some()
-                                        .then_some(*key)
-                                },
-                            );
-                            let Some(key) = ready else {
-                                break;
-                            };
-                            let pending = pending_catalogue_subscriptions
-                                .remove(&key)
-                                .expect("selected pending request");
-                            (
-                                Box::new(SyncMessage::Subscribe(pending.subscribe)),
-                                Some(pending.policy_binding),
-                            )
+                            match self.transport.try_recv_result() {
+                                Ok(Some(message)) => (Box::new(message), None),
+                                Err(error)
+                                    if handle_transport_backpressure(
+                                        &self.node,
+                                        &self.scheduler,
+                                        &error,
+                                    ) =>
+                                {
+                                    return Ok(true);
+                                }
+                                Err(error) => return Err(transport_error(error)),
+                                Ok(None) => {
+                                    let ready = pending_catalogue_subscriptions.iter().find_map(
+                                        |(key, pending)| {
+                                            self.node
+                                                .borrow()
+                                                .registered_shape(pending.subscribe.shape_id)
+                                                .is_some()
+                                                .then_some(*key)
+                                        },
+                                    );
+                                    let Some(key) = ready else {
+                                        break;
+                                    };
+                                    let pending = pending_catalogue_subscriptions
+                                        .remove(&key)
+                                        .expect("selected pending request");
+                                    (
+                                        Box::new(SyncMessage::Subscribe(pending.subscribe)),
+                                        Some(pending.policy_binding),
+                                    )
+                                }
+                            }
                         };
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
