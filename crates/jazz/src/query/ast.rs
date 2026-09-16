@@ -261,11 +261,13 @@ pub enum RelationCmpOp {
     Ge,
 }
 
-#[allow(missing_docs)]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+/// A relation-query column reference.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
 pub struct RelationColumnRef {
+    /// Optional relation scope or table alias.
     #[serde(default)]
     pub scope: Option<String>,
+    /// Referenced column name.
     pub column: String,
 }
 
@@ -279,9 +281,8 @@ pub enum RelationValueRef {
     FrontierColumn(RelationColumnRef),
     RowId(RelationRowIdRef),
 }
-
 #[allow(missing_docs)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum RelationRowIdRef {
     Current,
     Outer,
@@ -303,21 +304,21 @@ pub struct RelationJoinCondition {
 }
 
 #[allow(missing_docs)]
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum RelationKeyRef {
     Column(RelationColumnRef),
     RowId(RelationRowIdRef),
 }
 
 #[allow(missing_docs)]
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum RelationProjectExpr {
     Column(RelationColumnRef),
     RowId(RelationRowIdRef),
 }
 
 #[allow(missing_docs)]
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct RelationProjectColumn {
     pub alias: String,
     pub expr: RelationProjectExpr,

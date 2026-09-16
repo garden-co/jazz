@@ -4,6 +4,7 @@ struct RelationFacadePlan {
     filters_by_scope: BTreeMap<String, Vec<Predicate>>,
     joins: Vec<RelationFacadeJoin>,
     output_scope: Option<String>,
+    output_projection: Option<Vec<RelationProjectColumn>>,
     order_by: Vec<(String, OrderDirection)>,
     limit: Option<usize>,
     offset: usize,
@@ -93,19 +94,21 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
         .get(&output_scope)
         .cloned()
         .ok_or_else(|| relation_unification_error("relation query output scope is unknown"))?;
-    let mut query = Query::from(output_table);
+    let relation = query.clone();
+    let mut output_query = Query::from(output_table);
+    output_query.relation = Some(relation);
 
     for filter in plan
         .filters_by_scope
         .remove(&output_scope)
         .unwrap_or_default()
     {
-        query = query.filter(filter);
+        output_query = output_query.filter(filter);
     }
 
     if !plan.joins.is_empty() {
         let join = relation_path_join_from_output(&mut plan, &output_scope)?;
-        query.joins.push(join);
+        output_query.joins.push(join);
     }
 
     if !plan.filters_by_scope.is_empty() {
@@ -115,15 +118,87 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
     }
 
     for (column, direction) in plan.order_by {
-        query = query.order_by(column, direction);
+        output_query = output_query.order_by(column, direction);
     }
     if let Some(limit) = plan.limit {
-        query = query.limit(limit);
+        output_query = output_query.limit(limit);
     }
     if plan.offset != 0 {
-        query = query.offset(plan.offset);
+        output_query = output_query.offset(plan.offset);
     }
-    Ok(query)
+    Ok(output_query)
+}
+
+/// Return the terminal relation projection and its source scope.
+///
+/// Relation projections are deliberately kept separate from `Query::select`:
+/// their aliases and source expressions are part of the relation row-set
+pub(crate) fn relation_output_projection(
+    relation: &RelationQuery,
+) -> Result<(String, Vec<RelationProjectColumn>), QueryError> {
+    if relation_union_parts(&relation.rel).is_some() {
+        let (scope, columns) = relation_projection_from_expr(&relation.rel)?.ok_or_else(|| {
+            relation_unification_error("relation query must define an output projection")
+        })?;
+        validate_relation_projection_aliases(&columns)?;
+        return Ok((scope, columns));
+    }
+    let mut plan = RelationFacadePlan::default();
+    collect_relation_facade(&relation.rel, &mut plan)?;
+    let scope = plan.output_scope.ok_or_else(|| {
+        relation_unification_error("relation query must end in a project over one output table")
+    })?;
+    let columns = plan.output_projection.ok_or_else(|| {
+        relation_unification_error("relation query must define an output projection")
+    })?;
+    Ok((scope, columns))
+}
+
+fn relation_projection_from_expr(
+    expr: &RelationExpr,
+) -> Result<Option<(String, Vec<RelationProjectColumn>)>, QueryError> {
+    match expr {
+        RelationExpr::Project { input, columns } => {
+            let scope = columns.iter().find_map(|column| match &column.expr {
+                RelationProjectExpr::Column(column) => column.scope.clone(),
+                RelationProjectExpr::RowId(_) => None,
+            });
+            if let Some(scope) = scope {
+                return Ok(Some((scope, columns.clone())));
+            }
+            relation_projection_from_expr(input)
+        }
+        RelationExpr::Filter { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => relation_projection_from_expr(input),
+        RelationExpr::Union { inputs } => inputs
+            .first()
+            .map(|arm| relation_projection_from_expr(&arm.input))
+            .transpose()
+            .map(|value| value.flatten()),
+        RelationExpr::TableScan { .. }
+        | RelationExpr::Join { .. }
+        | RelationExpr::Gather { .. }
+        | RelationExpr::Distinct { .. } => Ok(None),
+    }
+}
+
+fn validate_relation_projection_aliases(
+    columns: &[RelationProjectColumn],
+) -> Result<(), QueryError> {
+    let mut aliases = BTreeSet::new();
+    if columns.iter().any(|column| {
+        column.alias == "row_uuid"
+            || !aliases.insert(column.alias.clone())
+            || column.alias.is_empty()
+            || column.alias.contains('\0')
+    }) {
+        return Err(relation_unification_error(
+            "relation project aliases must be non-empty, NUL-free, unique, and not row_uuid",
+        ));
+    }
+    Ok(())
 }
 
 /// The order used when materializing a retained public UNION ALL result set.
@@ -766,7 +841,17 @@ fn collect_relation_facade(
         RelationExpr::Project { input, columns } => {
             collect_relation_facade(input, plan)?;
             let mut output_scope = None::<String>;
+            let mut aliases = BTreeSet::new();
             for column in columns {
+                if column.alias == "row_uuid"
+                    || !aliases.insert(column.alias.clone())
+                    || column.alias.is_empty()
+                    || column.alias.contains('\0')
+                {
+                    return Err(relation_unification_error(
+                        "relation project aliases must be non-empty, NUL-free, unique, and not row_uuid",
+                    ));
+                }
                 let scope = match &column.expr {
                     RelationProjectExpr::Column(column) => relation_scope(column)?,
                     RelationProjectExpr::RowId(RelationRowIdRef::Current) => continue,
@@ -787,6 +872,7 @@ fn collect_relation_facade(
                 }
             }
             plan.output_scope = output_scope;
+            plan.output_projection = Some(columns.clone());
             Ok(())
         }
         RelationExpr::OrderBy { input, terms } => {
@@ -830,7 +916,7 @@ fn collect_relation_facade(
     }
 }
 
-fn relation_scope(column: &RelationColumnRef) -> Result<String, QueryError> {
+pub(crate) fn relation_scope(column: &RelationColumnRef) -> Result<String, QueryError> {
     column.scope.clone().ok_or_else(|| {
         relation_unification_error("relation column refs must be scoped for unified lowering")
     })
