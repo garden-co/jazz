@@ -287,8 +287,12 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
 
     // Local state survived: row is visible immediately from local storage.
     let local_rows = reconnected
-        .query(jazz::query::Query::from("todos"), None)
+        .query(
+            jazz::query::Query::from("todos"),
+            jazz::tools::ReadTier::LocalFirst,
+        )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("local query after reconnect");
     assert!(
         has_row(&local_rows, todo_id, &expected_values),
@@ -397,7 +401,7 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
             let columns = ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"];
             let complete = tokio::time::timeout(
                 Duration::from_secs(10),
-                alice.query_with_read_tier(
+                alice.query(
                     jazz::query::Query::from("todos").select(columns),
                     jazz::tools::ReadTier::Remote,
                 ),
@@ -405,6 +409,7 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
             .await
             .expect("complete provenance arrives")
             .expect("complete provenance query");
+            let complete = jazz::tools::test_support::ordinary_rows(complete);
             assert_eq!(complete.len(), 1);
             assert_eq!(complete[0].0, row_id);
             assert_eq!(complete[0].1[0], author.clone());
@@ -415,7 +420,7 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
             for (index, column) in columns.iter().enumerate() {
                 let selected = tokio::time::timeout(
                     Duration::from_secs(10),
-                    alice.query_with_read_tier(
+                    alice.query(
                         jazz::query::Query::from("todos").select([*column]),
                         jazz::tools::ReadTier::Remote,
                     ),
@@ -423,6 +428,7 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
                 .await
                 .expect("single provenance field arrives")
                 .expect("single provenance field query");
+                let selected = jazz::tools::test_support::ordinary_rows(selected);
                 assert_eq!(
                     selected,
                     vec![(row_id, vec![complete[0].1[index].clone()])],

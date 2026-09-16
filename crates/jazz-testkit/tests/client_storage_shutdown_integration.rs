@@ -40,8 +40,9 @@ async fn shutdown_releases_persistent_storage_for_reopen_impl() {
     client.shutdown().await.expect("shutdown persistent client");
 
     let error = retained_clone
-        .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+        .query(Query::from("todos"), ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect_err("a retained JazzClient clone must not revive a shut-down context");
     assert!(
         error.to_string().contains("client is shut down"),

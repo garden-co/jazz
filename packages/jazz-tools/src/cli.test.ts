@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { createServer, type Server } from "node:http";
 import { constants } from "node:fs";
 import {
   access,
@@ -3486,6 +3487,56 @@ function runBin(
   });
 }
 
+async function runCli(
+  args: readonly string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  let resolve!: (value: { status: number | null; stdout: string; stderr: string }) => void;
+  const promise = new Promise<{ status: number | null; stdout: string; stderr: string }>(
+    (resolvePromise) => {
+      resolve = resolvePromise;
+    },
+  );
+  const child = spawn(process.execPath, ["--no-warnings", distCliPath, ...args], {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  child.on("close", (status) => resolve({ status, stdout, stderr }));
+  return promise;
+}
+
+async function listenForDeployRequest(): Promise<{ server: Server; url: string }> {
+  const server = createServer((request, response) => {
+    response.statusCode = 400;
+    response.end(
+      `request=${request.url} secret=${request.headers["x-jazz-admin-secret"] ?? "<missing>"}`,
+    );
+  });
+  let resolveListening!: () => void;
+  let rejectListening!: (reason?: unknown) => void;
+  const listening = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolveListening = resolvePromise;
+    rejectListening = rejectPromise;
+  });
+  server.once("error", rejectListening);
+  server.listen(0, "127.0.0.1", resolveListening);
+  await listening;
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected deploy test server to have a TCP address.");
+  }
+  return { server, url: `http://127.0.0.1:${address.port}` };
+}
+
 function hostNativeBinaryName(): string | null {
   switch (`${process.platform}-${process.arch}`) {
     case "darwin-arm64":
@@ -3502,6 +3553,44 @@ function hostNativeBinaryName(): string | null {
 }
 
 describe("bin integration", () => {
+  it.each([
+    ["before command", ["--env-file", ".env.staging", "deploy", "explicit-cli-app"]],
+    ["after command", ["deploy", "--env-file", ".env.staging", "explicit-cli-app"]],
+    ["equals before command", ["--env-file=.env.staging", "deploy", "explicit-cli-app"]],
+  ] as const)("loads an explicit env file and dispatches deploy (%s)", async (_label, args) => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    const { server, url } = await listenForDeployRequest();
+    let resolveClose!: () => void;
+    let rejectClose!: (reason?: unknown) => void;
+    const close = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolveClose = resolvePromise;
+      rejectClose = rejectPromise;
+    });
+
+    await writeFile(
+      join(root, ".env.staging"),
+      [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
+    );
+    const env: NodeJS.ProcessEnv = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
+    for (const name of [...APP_ID_ENV_VARS, ...SERVER_URL_ENV_VARS]) {
+      delete env[name];
+    }
+
+    try {
+      const result = await runCli(args, { cwd: root, env });
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
+      expect(result.stderr).toContain("request=/apps/explicit-cli-app/schemas");
+      expect(result.stderr).toContain("secret=real-secret");
+      expect(result.stderr).not.toContain("Missing app ID");
+      expect(result.stdout).not.toContain("Usage:");
+    } finally {
+      server.close((error) => (error ? rejectClose(error) : resolveClose()));
+      await close;
+    }
+  });
   it("routes validate through the TypeScript CLI for a root schema.ts project", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
