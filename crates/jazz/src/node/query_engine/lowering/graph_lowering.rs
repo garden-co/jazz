@@ -752,7 +752,7 @@ fn union_branch_plans_with_labels<'a>(
         .map(|branch| {
             let label = prefix.map_or_else(
                 || branch.label.clone(),
-                |prefix| compose_union_arm_path(prefix, &branch.label),
+                |prefix| crate::query::compose_union_arm_path(prefix, &branch.label),
             );
             (&branch.plan, label)
         })
@@ -760,11 +760,12 @@ fn union_branch_plans_with_labels<'a>(
     while let Some((plan, label)) = pending.pop() {
         match plan {
             RelationInputPlan::Union(nested) => {
-                pending.extend(
-                    nested.branches.iter().rev().map(|branch| {
-                        (&branch.plan, compose_union_arm_path(&label, &branch.label))
-                    }),
-                )
+                pending.extend(nested.branches.iter().rev().map(|branch| {
+                    (
+                        &branch.plan,
+                        crate::query::compose_union_arm_path(&label, &branch.label),
+                    )
+                }))
             }
             RelationInputPlan::Linear(_) | RelationInputPlan::Recursive(_) => {
                 leaves.push((plan, label))
@@ -772,13 +773,6 @@ fn union_branch_plans_with_labels<'a>(
         }
     }
     leaves
-}
-
-/// Encode a nested semantic-arm path without relying on a separator that a
-/// user label could contain. The opaque carrier remains stable when siblings
-/// are inserted or reordered and is never derived from traversal position.
-fn compose_union_arm_path(prefix: &str, label: &str) -> String {
-    format!("{}:{prefix}{}:{label}", prefix.len(), label.len())
 }
 
 fn lower_union_plan(

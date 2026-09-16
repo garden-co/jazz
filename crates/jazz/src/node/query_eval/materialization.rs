@@ -296,7 +296,7 @@ where
             .materialize_local_maintained_view_result_member_unbound(local, member)
             .await?;
         if let Some(row) = &mut row {
-            if let Some(columns) = &local.result_relation_projection {
+            if let Some(columns) = local.relation_projection_for_member(member)? {
                 let table = self.table(local.result_table.as_str())?.clone();
                 *row = row.project_relation(&table, columns)?;
                 Self::bind_app_row_schema_fields(
@@ -485,7 +485,7 @@ where
                 payload,
                 local.terminal_schemas.current_payload_schema()?,
             )?;
-            if let Some(columns) = &local.result_relation_projection {
+            if let Some(columns) = local.relation_projection_for_member(member)? {
                 row = row.project_relation(&table, columns)?;
                 Self::bind_app_row_schema_fields(
                     &mut row,
@@ -1336,7 +1336,28 @@ where
         if query.aggregate.is_some() || query.flat_join.is_some() {
             return Ok(true);
         }
+        let relation_projection = query
+            .relation
+            .as_ref()
+            .map(crate::query::relation_output_projection)
+            .transpose()
+            .map_err(|error| Error::QueryCapability(error.to_string()))?
+            .map(|(_, columns)| columns);
         for (index, row) in snapshot.rows.iter().enumerate() {
+            if index < snapshot.root_count
+                && row.table() == query.table
+                && let Some(columns) = relation_projection.as_deref()
+            {
+                if !columns.iter().all(|column| {
+                    matches!(
+                        row.raw_field(&column.alias),
+                        Some(value) if !matches!(value, Value::Nullable(None))
+                    )
+                }) {
+                    return Ok(false);
+                }
+                continue;
+            }
             let table = self.table_in_schema_ref(row.table(), shape.schema_version())?;
             let projection = (index < snapshot.root_count && row.table() == query.table)
                 .then_some(query.select.as_deref())
@@ -1436,7 +1457,16 @@ where
                 &mut root_occurrence_ids,
             )?;
         }
-        if let Some(columns) = &local.result_relation_projection {
+        if local.result_relation_projections.is_some() {
+            let table = self.table(local.result_table.as_str())?.clone();
+            let schema = local.terminal_schemas.direct_app_row_schema()?;
+            for (row, occurrence) in rows.iter_mut().zip(&root_occurrence_ids) {
+                if let Some(columns) = local.relation_projection_for_occurrence(occurrence)? {
+                    *row = row.project_relation(&table, columns)?;
+                    Self::bind_app_row_schema_fields(row, schema)?;
+                }
+            }
+        } else if let Some(columns) = &local.result_relation_projection {
             let table = self.table(local.result_table.as_str())?.clone();
             let schema = local.terminal_schemas.direct_app_row_schema()?;
             for row in &mut rows {
