@@ -225,11 +225,9 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
             bob_transaction_id.expect("permissive update should commit immediately"),
             DurabilityTier::EdgeServer,
         )
-        .await;
-    assert!(
-        rejected.is_err(),
-        "bob's update should be rejected by EXISTS in USING policy on sync"
-    );
+        .await
+        .expect_err("bob's update should be rejected by EXISTS in USING policy on sync");
+    assert_transaction_policy_denied(rejected);
 
     wait_for_protected_row(
         &alice,
@@ -329,8 +327,9 @@ async fn explicit_session_update_using_exists_policy_allows_admin_and_denies_non
         .expect("update commits immediately");
     let rejection = client
         .wait_for_transaction(bob_transaction, DurabilityTier::EdgeServer)
-        .await;
-    assert!(rejection.is_err(), "server must reject Bob's update");
+        .await
+        .expect_err("server must reject Bob's update");
+    assert_transaction_policy_denied(rejection);
     wait_for_protected_row(&client, protected, "initial", "Bob's update is rolled back").await;
 
     let alice_transaction = client

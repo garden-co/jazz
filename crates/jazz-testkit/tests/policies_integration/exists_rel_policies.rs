@@ -505,15 +505,14 @@ async fn uncorrelated_exists_rel_insert_uses_private_grants_inner() {
     let (_, _, bob_tx) = bob
         .insert("projects", crate::row_input!("name" => "bob project"))
         .expect("stage Bob's optimistic insert");
-    assert!(
-        bob.wait_for_transaction(
+    let rejection = bob
+        .wait_for_transaction(
             bob_tx.expect("Bob transaction"),
-            jazz::tools::DurabilityTier::EdgeServer
+            jazz::tools::DurabilityTier::EdgeServer,
         )
         .await
-        .is_err(),
-        "server must reject Bob without a matching grant",
-    );
+        .expect_err("server must reject Bob without a matching grant");
+    assert_transaction_policy_denied(rejection);
     let (_, _, alice_tx) = alice
         .insert("projects", crate::row_input!("name" => "alice project"))
         .expect("stage Alice's insert");
