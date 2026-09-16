@@ -33,8 +33,12 @@ async fn public_native_client_requires_enrollment_and_cannot_choose_another_acco
                 .unwrap();
             wait_for_edge_txs(&client, &[tx.unwrap()]).await;
             let rows = client
-                .query(Query::from("notes").select(["title", "$createdBy"]), None)
+                .query(
+                    Query::from("notes").select(["title", "$createdBy"]),
+                    jazz::tools::ReadTier::LocalFirst,
+                )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(

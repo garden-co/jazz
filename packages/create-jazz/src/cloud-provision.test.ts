@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   provisionHostedApp,
   ProvisionHttpError,
@@ -47,6 +47,56 @@ describe("provisionHostedApp", () => {
           return err.message.includes(cause.message) && err.message.includes(apiUrl);
         },
       );
+    });
+  });
+
+  describe("request timeout", () => {
+    it("aborts a stalled fetch and reports a timed-out network error", async () => {
+      vi.useFakeTimers();
+      const apiUrl = "https://example.com/api/apps/generate";
+      const timeoutReason = new DOMException(
+        "The operation was aborted due to timeout",
+        "TimeoutError",
+      );
+      const timeoutController = new AbortController();
+      const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation((delay) => {
+        setTimeout(() => timeoutController.abort(timeoutReason), delay);
+        return timeoutController.signal;
+      });
+      let requestSignal: AbortSignal | undefined;
+
+      const stalledFetch: typeof globalThis.fetch = async (_url, init) => {
+        requestSignal = init?.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), {
+            once: true,
+          });
+        });
+      };
+
+      try {
+        const provisioning = provisionHostedApp({ apiUrl, fetch: stalledFetch });
+
+        expect(requestSignal).toBe(timeoutController.signal);
+        expect(timeoutSpy).toHaveBeenCalledWith(8_000);
+
+        const timeoutAssertion = expect(provisioning).rejects.toSatisfy((err: unknown) => {
+          if (!(err instanceof ProvisionNetworkError)) return false;
+          return (
+            /timeout/i.test(err.message) &&
+            err.cause === timeoutReason &&
+            err.message.includes(apiUrl)
+          );
+        });
+
+        await vi.advanceTimersByTimeAsync(7_999);
+        await vi.advanceTimersByTimeAsync(1);
+
+        await timeoutAssertion;
+      } finally {
+        timeoutSpy.mockRestore();
+        vi.useRealTimers();
+      }
     });
   });
 

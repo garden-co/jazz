@@ -3,7 +3,7 @@ name: Changesets Release PR
 on:
   push:
     branches:
-      - main
+      - release
   workflow_dispatch:
 
 permissions:
@@ -12,11 +12,12 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: changesets-release-pr
+  group: changesets-release-pr-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   release-pr:
+    if: github.ref == 'refs/heads/release'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -45,12 +46,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Trigger release preview workflow
+      - name: Trigger release CI and preview workflows
         if: steps.changesets.outputs.hasChangesets == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_BRANCH: ${{ github.ref_name }}
         run: |
           RELEASE_BRANCH="changeset-release/${BASE_BRANCH}"
           PR_NUMBER=$(gh pr list --repo "${REPO}" --head "${RELEASE_BRANCH}" --base "${BASE_BRANCH}" --state open --json number -q '.[0].number')
@@ -60,5 +61,20 @@ jobs:
             exit 0
           fi
 
+          RELEASE_SHA=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json headRefOid -q .headRefOid)
+          assert_release_head() {
+            CURRENT_SHA=$(gh api "repos/${REPO}/git/ref/heads/${RELEASE_BRANCH}" --jq .object.sha)
+            PR_SHA=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json headRefOid -q .headRefOid)
+            if [ "${CURRENT_SHA}" != "${RELEASE_SHA}" ] || [ "${PR_SHA}" != "${RELEASE_SHA}" ]; then
+              echo "::error::Release PR head changed during dispatch; rerun Changesets on release."
+              exit 1
+            fi
+          }
+          assert_release_head
+          # GITHUB_TOKEN-created PRs do not trigger pull_request workflows.
+          # Dispatch explicitly so protected release receives CI on this head.
+          gh workflow run ci.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
+          assert_release_head
           gh workflow run preview-jazz-tools-alpha-release.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
-          echo "Dispatched release preview workflow for ${RELEASE_BRANCH} (PR #${PR_NUMBER})."
+          assert_release_head
+          echo "Dispatched release CI and preview for ${RELEASE_BRANCH} at ${RELEASE_SHA} (PR #${PR_NUMBER})."

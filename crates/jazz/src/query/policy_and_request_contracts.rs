@@ -1001,7 +1001,44 @@ pub(crate) fn provider_claim_operand_key(name: &str) -> String {
     format!("{PROVIDER_CLAIM_PREFIX}{name}")
 }
 
+// ProviderClaimPathV1: UTF-8 byte-length-prefixed segments in a namespace
+// disjoint from raw provider names. Existing single-key operands are unchanged.
+const PROVIDER_CLAIM_PATH_V1: &str = "\0claim-path-v1:";
+
+pub(crate) fn provider_claim_path_operand_key(segments: &[String]) -> String {
+    if let [name] = segments {
+        return provider_claim_operand_key(name);
+    }
+    let mut key = PROVIDER_CLAIM_PATH_V1.to_owned();
+    for segment in segments {
+        key.push_str(&format!("{}:{segment}", segment.len()));
+    }
+    key
+}
+
 pub(crate) fn operand_claim_path(name: &str) -> Vec<String> {
+    if let Some(mut rest) = name.strip_prefix(PROVIDER_CLAIM_PATH_V1) {
+        let mut segments = vec!["claims".to_owned()];
+        while !rest.is_empty() {
+            let Some((length, tail)) = rest.split_once(':') else {
+                break;
+            };
+            let Ok(length) = length.parse::<usize>() else {
+                break;
+            };
+            let Some(segment) = tail.get(..length) else {
+                break;
+            };
+            segments.push(segment.to_owned());
+            rest = &tail[length..];
+        }
+        if rest.is_empty()
+            && segments.len() > 2
+            && provider_claim_path_operand_key(&segments[1..]) == name
+        {
+            return segments;
+        }
+    }
     if matches!(
         name,
         "user.account" | "user.identity" | "user.identity.issuer" | "user.identity.subject"
@@ -1026,10 +1063,4 @@ pub fn author_claim_path_key(path: &[String]) -> Option<String> {
             | "user.identity.subject"
     );
     (valid && path.iter().all(|part| !part.contains('.'))).then_some(name)
-}
-
-pub(crate) fn operand_claim_storage_key(name: &str) -> String {
-    name.strip_prefix(PROVIDER_CLAIM_PREFIX)
-        .map(provider_claim_key)
-        .unwrap_or_else(|| name.to_owned())
 }
