@@ -19,6 +19,7 @@ use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
+use jazz::tools::test_support::AllowAll;
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
 use jazz_sim::fixture::{apply_sync_message_settled, settle_outcome};
@@ -445,7 +446,8 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
     let v1 = compile_public_schema(
         SchemaBuilder::new()
             .table(PublicTableSchema::builder("todos").column("title", PublicColumnType::Text))
-            .build(),
+            .build()
+            .allow_all(),
     );
     let v2 = compile_public_schema(
         SchemaBuilder::new()
@@ -454,12 +456,14 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     .column("title", PublicColumnType::Text)
                     .column("body", PublicColumnType::Text),
             )
-            .build(),
+            .build()
+            .allow_all(),
     );
     let v3 = compile_public_schema(
         SchemaBuilder::new()
             .table(PublicTableSchema::builder("todos").column("name", PublicColumnType::Text))
-            .build(),
+            .build()
+            .allow_all(),
     );
     let v4 = compile_public_schema(
         SchemaBuilder::new()
@@ -468,7 +472,8 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     .column("name", PublicColumnType::Text)
                     .column("search_name", PublicColumnType::Text),
             )
-            .build(),
+            .build()
+            .allow_all(),
     );
     let lenses = vec![
         MigrationLens::new(

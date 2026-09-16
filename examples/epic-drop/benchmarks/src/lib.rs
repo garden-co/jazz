@@ -11,6 +11,7 @@ use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
+use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -146,7 +147,8 @@ fn schema() -> JazzSchema {
                     .column("contents", ColumnType::Bytea)
                     .index_only(["folder_id"]),
             )
-            .build(),
+            .build()
+            .allow_all(),
     )
     .expect("EpicDrop benchmark schema compiles")
 }

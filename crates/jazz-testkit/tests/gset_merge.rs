@@ -37,7 +37,7 @@ fn gset_schema() -> Schema {
         ColumnDescriptor::new("name", ColumnType::Text),
         tags,
     ]));
-    Schema::from([(TableName::new("docs"), docs)])
+    Schema::from([(TableName::new("docs"), docs)]).allow_all()
 }
 
 fn doc_values(name: &str, tags: &[&str]) -> HashMap<String, Value> {
@@ -635,7 +635,7 @@ fn gset_float_schema() -> Schema {
         ColumnDescriptor::new("name", ColumnType::Text),
         scores,
     ]));
-    Schema::from([(TableName::new("docs"), docs)])
+    Schema::from([(TableName::new("docs"), docs)]).allow_all()
 }
 
 fn score_doc_values(name: &str, scores: &[f64]) -> HashMap<String, Value> {
