@@ -7,6 +7,9 @@ const identity = { issuer: "https://issuer.example", subject: "test-user" };
 const assignment = { account: "00000000-0000-4000-8000-000000000001", identity };
 const token = `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject }))}.signature`;
 const registry = "https://core.example/apps/test/accounts";
+// A single broad signature remains assignable to the DOM, Node and RN fetch
+// overloads; Vitest Mock<typeof fetch> retains only the last overload.
+type TestFetch = (input: unknown, init?: unknown) => Promise<Response>;
 const never = () => new Promise<never>(() => {});
 
 afterEach(() => vi.useRealTimers());
@@ -17,7 +20,7 @@ describe("account HTTP deadlines", () => {
     async (phase) => {
       vi.useFakeTimers();
       const fetcher = vi
-        .fn<typeof fetch>()
+        .fn<TestFetch>()
         .mockImplementationOnce(async () => {
           if (phase === "headers") return never();
           return { ok: phase === "json", json: never, text: never } as unknown as Response;
@@ -28,7 +31,7 @@ describe("account HTTP deadlines", () => {
       ).rejects.toMatchObject({ code: "account_request_timeout" });
       await vi.advanceTimersByTimeAsync(30_000);
       await failed;
-      expect(fetcher.mock.calls[0]![1]!.signal!.aborted).toBe(true);
+      expect(fetcher.mock.calls[0]![1]).toMatchObject({ signal: { aborted: true } });
       await expect(
         requestAccountRegistry(registry, "login", token, undefined, fetcher),
       ).resolves.toEqual(assignment);
@@ -39,7 +42,7 @@ describe("account HTTP deadlines", () => {
   it("preserves an independent fetch cancellation", async () => {
     vi.useFakeTimers();
     const cancelled = new DOMException("Caller cancelled", "AbortError");
-    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(cancelled);
+    const fetcher = vi.fn<TestFetch>().mockRejectedValue(cancelled);
     await expect(requestAccountRegistry(registry, "login", token, undefined, fetcher)).rejects.toBe(
       cancelled,
     );
@@ -51,7 +54,7 @@ describe("account HTTP deadlines", () => {
     async (action) => {
       vi.useFakeTimers();
       const fetcher = vi
-        .fn<typeof fetch>()
+        .fn<TestFetch>()
         .mockImplementationOnce(never)
         .mockResolvedValueOnce(new Response(JSON.stringify(assignment)));
       const accounts = createAccountManagerWithRuntime({
