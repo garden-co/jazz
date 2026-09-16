@@ -181,20 +181,25 @@ fn handoff_receive_backpressure_keeps_queued_view_ineligible() {
         .borrow()
         .applied_authority_result_generation(&authority_result);
 
-    let staged = upstream
-        .borrow_mut()
-        .transport
-        .try_recv_result()
-        .unwrap()
-        .expect("authority must leave a view update on the transport");
-    assert!(matches!(staged, SyncMessage::ViewUpdate(_)));
-    upstream
-        .borrow_mut()
-        .staged_inbound
-        .push_back(crate::db::StagedInboundMessage {
-            message: staged,
-            authority_receipt_eligible: true,
-        });
+    loop {
+        let message = upstream
+            .borrow_mut()
+            .transport
+            .try_recv_result()
+            .unwrap()
+            .expect("authority must leave the view update on the transport");
+        let is_view_update = matches!(message, SyncMessage::ViewUpdate(_));
+        upstream
+            .borrow_mut()
+            .staged_inbound
+            .push_back(crate::db::StagedInboundMessage {
+                message,
+                authority_receipt_eligible: true,
+            });
+        if is_view_update {
+            break;
+        }
+    }
 
     upstream
         .borrow_mut()

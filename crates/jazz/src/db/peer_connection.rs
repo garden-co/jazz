@@ -1898,6 +1898,10 @@ where
     /// receipt. The next transport arrival is therefore the first receipt
     /// candidate after selection.
     pub(super) fn stage_inbound_without_authority_receipt(&mut self) {
+        for staged in &mut self.staged_inbound {
+            staged.authority_receipt_eligible = false;
+        }
+
         if let ConnectionLink::Upstream(UpstreamConnectionState {
             pending_row_version_repairs,
             sent_subscriptions,
