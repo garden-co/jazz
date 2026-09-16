@@ -1733,6 +1733,34 @@ fn lower_linear_plan_steps_cached(
                 // pre-projection physical row/version fields needed to encode
                 // the admitted source occurrence. Capture the exact fields
                 // available at this boundary before the facade aliases them.
+                // Bind source order while the graph still has the source
+                // descriptor. A relation output projection may narrow or
+                // rename those fields, and unbounded order still determines
+                // the observable row sequence when no Slice follows.
+                if let Some(order) = pending_order.take() {
+                    graph = lower_window(
+                        graph,
+                        &order,
+                        &[],
+                        &available_route_fields,
+                        None,
+                        0,
+                        &[NormalizedValueRef::RowId(RowIdRef::Source(
+                            plan.root
+                                .source()
+                                .ok_or_else(|| {
+                                    UnsupportedReason::Operator(
+                                        "order fallback must be a source".to_owned(),
+                                    )
+                                })?
+                                .clone(),
+                        ))],
+                        plan,
+                        root_source,
+                        request,
+                    )?;
+                }
+
                 let retained_contributor_fields = (retain_final_project_input_fields
                     && step_index + 1 == plan.steps.len())
                 .then(|| fields.clone());
