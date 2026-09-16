@@ -18,7 +18,9 @@ use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
 pub const OWNERS: usize = 100;
 pub const OWNERS_PER_ORG: usize = 4;
-pub const QUERY_OWNER: usize = 3;
+// Owner 3 has newer rows, so the member's organization page exercises inherited
+// access, not just the direct-owner arm of the OR policy.
+pub const QUERY_OWNER: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
@@ -132,7 +134,7 @@ impl Fixture {
                 BTreeMap::from([
                     (
                         "member_id".into(),
-                        Value::Uuid(user(org * OWNERS_PER_ORG + 3).test_uuid()),
+                        Value::Uuid(user(org * OWNERS_PER_ORG + QUERY_OWNER).test_uuid()),
                     ),
                     ("name".into(), Value::String(format!("org-{org}"))),
                 ]),

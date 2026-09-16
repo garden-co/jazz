@@ -2,7 +2,7 @@
 
 A small native example workload: 100 document owners, grouped into 25
 organizations of four owners. Every document has an owner, organization,
-completion flag, unique update timestamp, and title. The last owner in each
+completion flag, unique update timestamp, and title. The third owner in each
 organization is its admitted member. The other owners can still read their own
 documents under the direct-owner branch of the policy.
 
@@ -16,7 +16,7 @@ fixture data, not an adopter schema. See
 
 Each sample reads the first page of 50 documents ordered by descending
 `updated_at`, with a literal equality on `owner_id` or `org_id`. All reads use
-the same admitted non-SYSTEM identity (owner 3), Global tier, deferred local
+the same admitted non-SYSTEM identity (owner 2), Global tier, deferred local
 updates, LocalOnly propagation, and exclude deleted rows. The database is
 history-complete. No transport or subscription delivery is measured.
 
@@ -24,6 +24,8 @@ Compare identical data, indexes and queries across no document policy,
 owner-only policy, and owner OR inherited organization membership. The owner
 query returns 50 rows in all three arms; the org query has a matched policy-free
 and inherited-policy pair. Organization membership is fixed as scale grows.
+Owner 3 owns the newest documents in organization 0, so the measured organization
+page requires inherited access; it cannot pass through ownership alone.
 The declared indexes on owner, organization and timestamp are independent
 single-column indexes, **not** an ordered compound index. A requested page size
 is not evidence of bounded scan work.
