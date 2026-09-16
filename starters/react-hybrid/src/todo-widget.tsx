@@ -87,7 +87,8 @@ export function TodoWidget() {
   async function remove(todoId: string, title: string) {
     const lifecycle = deleteLifecycle.current;
     deleteFailures.current.delete(todoId);
-    setDeleteStatus("Deleting…");
+    const retainedFailure = deleteFailures.current.values().next().value as string | undefined;
+    setDeleteStatus(retainedFailure ?? "Deleting…");
 
     let write: DeleteWriteHandle;
     try {

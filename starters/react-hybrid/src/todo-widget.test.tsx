@@ -3,6 +3,7 @@ import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 
+type Todo = { id: string; title: string; done: boolean };
 type MutationErrorEvent = { transaction: { transactionId: string } };
 type DeleteWrite = {
   txId: Promise<string>;
