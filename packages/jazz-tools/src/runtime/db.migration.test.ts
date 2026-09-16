@@ -145,3 +145,94 @@ describe("schema migrations", () => {
     ]);
   }, 60_000);
 });
+
+it("publishes UUID reference identity lenses and relates rows written before publication", async () => {
+  const columns = {
+    ownerId: s.uuid(),
+    memberIds: s.array(s.uuid()),
+    reviewerId: s.uuid().optional(),
+  };
+  const users = s.table({ name: s.string() }, {});
+  const before = { users, records: s.table(columns, {}) };
+  const after = {
+    users,
+    records: s.table(columns, {
+      owner: s.rel("users", "ownerId"),
+      members: s.rel("users", "memberIds"),
+      reviewer: s.rel("users", "reviewerId"),
+    }),
+  };
+  const beforeApp = s.defineApp(before),
+    afterApp = s.defineApp(after);
+  const permissionsBefore = s.definePermissions(beforeApp, ({ policy }) => [
+    policy.users.allowRead.always(),
+    policy.users.allowInsert.always(),
+    policy.records.allowRead.always(),
+    policy.records.allowInsert.always(),
+  ]);
+  const permissionsAfter = s.definePermissions(afterApp, ({ policy }) => [
+    policy.users.allowRead.always(),
+    policy.users.allowInsert.always(),
+    policy.records.allowRead.always(),
+    policy.records.allowInsert.always(),
+  ]);
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let oldDb: Db | undefined, newDb: Db | undefined;
+  try {
+    const { appId, adminSecret, url: serverUrl } = server;
+    await deploy({
+      appId,
+      adminSecret,
+      serverUrl,
+      schema: beforeApp,
+      permissions: permissionsBefore,
+    });
+    oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
+    const owner = await oldDb
+      .insert(beforeApp.users, { name: "Existing owner" })
+      .wait({ tier: "edge" });
+    const record = await oldDb
+      .insert(beforeApp.records, {
+        ownerId: owner.id,
+        memberIds: [owner.id, owner.id],
+        reviewerId: null,
+      })
+      .wait({ tier: "edge" });
+    const migration = s.defineMigration({ from: before, to: after });
+    expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
+    await deploy({
+      appId,
+      adminSecret,
+      serverUrl,
+      schema: afterApp,
+      permissions: permissionsAfter,
+      migration,
+    });
+    newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
+    const rows = await waitForRows(
+      newDb,
+      afterApp.records
+        .where({ id: record.id })
+        .include({ owner: true, members: true, reviewer: true }),
+      (rows) => rows.length === 1 && rows[0]?.owner?.name === "Existing owner",
+    );
+    expect(rows).toEqual([
+      {
+        id: record.id,
+        ownerId: owner.id,
+        memberIds: [owner.id, owner.id],
+        reviewerId: null,
+        owner: { id: owner.id, name: "Existing owner" },
+        members: [
+          { id: owner.id, name: "Existing owner" },
+          { id: owner.id, name: "Existing owner" },
+        ],
+        reviewer: null,
+      },
+    ]);
+  } finally {
+    await newDb?.shutdown();
+    await oldDb?.shutdown();
+    await server.stop();
+  }
+}, 60_000);

@@ -14,6 +14,12 @@ Most migration systems are one-way: rewrite every row to the new shape, then cut
 
 Jazz keeps every schema version usable and translates rows between them on read and write. Clients on different versions stay interoperable, and nothing on disk is rewritten when you ship a new schema.
 
+## Adding relations to existing UUID columns
+
+Adding `s.rel("users", "ownerId")` to an existing `s.uuid()` column changes its reference metadata without changing the stored UUID values. The same applies to optional UUID columns and UUID arrays. Generate and publish the migration through the normal workflow: Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
+
+The generated schema witnesses include the referenced tables. Existing rows become available through the relation's index when read under the new schema. Changing only a relation alias does not require a row lens. Removing or retargeting a reference, or renaming its column in the same migration, is not supported by this automatic path.
+
 ## Schemas and lenses
 
 Every unique version of your `schema.ts` has a hash which can be used to refer to it. When creating migrations, you describe the changes required to move between two schema versions. This is known as a 'lens'. Fetching all intermediate lenses allows clients with any published schema version to read data created with any other published schema version.

@@ -376,7 +376,18 @@ function renderMigrationBody(
           ),
       );
       lines.push(
-        referenceAddition
+        referenceAddition &&
+          fromTable.columns.length === toTable.columns.length &&
+          fromTable.columns.every((source) =>
+            toTable.columns.some(
+              (column) =>
+                column.name === source.name &&
+                (!source.references || source.references === column.references) &&
+                source.nullable === column.nullable &&
+                source.merge_strategy === column.merge_strategy &&
+                columnTypeSignature(source.column_type) === columnTypeSignature(column.column_type),
+            ),
+          )
           ? "  // Add reference metadata with an identity lens; existing UUID values are preserved."
           : "  // TODO: No safe migration steps were inferred automatically.",
       );

@@ -175,6 +175,26 @@ type BuildersEqual<TLeft extends AnyTypedColumnBuilder, TRight extends AnyTypedC
     : false
   : false;
 
+type SharedBuildersCompatible<
+  TLeft extends AnyTypedColumnBuilder,
+  TRight extends AnyTypedColumnBuilder,
+> =
+  BuildersEqual<TLeft, TRight> extends true
+    ? true
+    : ColumnBuilderReferences<TLeft> extends undefined
+      ? [ColumnBuilderSqlType<TLeft>, ColumnBuilderOptional<TLeft>] extends [
+          ColumnBuilderSqlType<TRight>,
+          ColumnBuilderOptional<TRight>,
+        ]
+        ? [ColumnBuilderSqlType<TRight>, ColumnBuilderOptional<TRight>] extends [
+            ColumnBuilderSqlType<TLeft>,
+            ColumnBuilderOptional<TLeft>,
+          ]
+          ? true
+          : false
+        : false
+      : false;
+
 type AddOperationForBuilder<TBuilder extends AnyTypedColumnBuilder> = AddOp<
   ColumnBuilderSqlType<TBuilder>,
   DefaultValueForBuilder<TBuilder>
@@ -424,7 +444,7 @@ type UnsupportedSharedColumnChanges<
       TTo,
       TTable,
       SourceColumnName<TFrom, TTo, TRenameTables, TTable>
-    >]: BuildersEqual<
+    >]: SharedBuildersCompatible<
       BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TColumn>,
       BuilderForTargetColumn<TTo, TTable, TColumn>
     > extends true
@@ -656,19 +676,52 @@ function buildRemovedTableSet(
   return set;
 }
 
-function columnShapeSignature(builder: AnyTypedColumnBuilder): string {
+function columnShapeSignature(builder: AnyTypedColumnBuilder, omitReference = false): string {
   const column = builder._build("__migration_shape__");
   return JSON.stringify({
     sqlType: column.sqlType,
     nullable: column.nullable,
-    references: column.references ?? null,
+    references: omitReference ? null : (column.references ?? null),
   });
+}
+
+function migrationDefaultsEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (left instanceof Date || right instanceof Date) {
+    return left instanceof Date && right instanceof Date && left.getTime() === right.getTime();
+  }
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  if (Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) return false;
+  if (Array.isArray(left) && Array.isArray(right) && left.length !== right.length) return false;
+  const leftKeys = Object.keys(left),
+    rightKeys = Object.keys(right);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        Object.hasOwn(right, key) &&
+        migrationDefaultsEqual(
+          (left as Record<string, unknown>)[key],
+          (right as Record<string, unknown>)[key],
+        ),
+    )
+  );
+}
+
+function columnMetadataEqual(left: AnyTypedColumnBuilder, right: AnyTypedColumnBuilder): boolean {
+  const source = left._build("__migration_shape__"),
+    target = right._build("__migration_shape__");
+  return (
+    source.mergeStrategy === target.mergeStrategy &&
+    migrationDefaultsEqual(source.default, target.default)
+  );
 }
 
 function tableMatchesAfterApplyingColumnOperations(
   sourceTable: Record<string, AnyTypedColumnBuilder>,
   targetTable: Record<string, AnyTypedColumnBuilder>,
   tableOps: Record<string, AddOp | DropOp | RenameOp>,
+  allowReferenceAdditions = false,
 ): boolean {
   const transformed = new Map<string, AnyTypedColumnBuilder>(Object.entries(sourceTable));
 
@@ -713,7 +766,12 @@ function tableMatchesAfterApplyingColumnOperations(
     if (!sourceBuilder) {
       return false;
     }
-    if (columnShapeSignature(sourceBuilder) !== columnShapeSignature(targetBuilder)) {
+    if (allowReferenceAdditions && !columnMetadataEqual(sourceBuilder, targetBuilder)) return false;
+    const omitReference = allowReferenceAdditions && !sourceBuilder._build(columnName).references;
+    if (
+      columnShapeSignature(sourceBuilder, omitReference) !==
+      columnShapeSignature(targetBuilder, omitReference)
+    ) {
       return false;
     }
   }
@@ -804,14 +862,13 @@ function buildForwardLenses<
       const source = sourceBuilder._build(sourceColumn);
       const target = targetBuilder._build(columnName);
       if (source.references === target.references) continue;
-      const { references: _sourceReference, ...sourceShape } = source;
-      const { references: _targetReference, ...targetShape } = target;
       if (
         !source.references &&
         target.references &&
         !operation &&
         !renameTableMap.has(targetName) &&
-        JSON.stringify(sourceShape) === JSON.stringify(targetShape)
+        columnShapeSignature(sourceBuilder, true) === columnShapeSignature(targetBuilder, true) &&
+        columnMetadataEqual(sourceBuilder, targetBuilder)
       ) {
         if (!targetTables[target.references]) {
           throw new Error(
@@ -937,6 +994,20 @@ function buildForwardLenses<
           break;
         }
       }
+    }
+
+    if (
+      referenceAdditionTables.has(tableName) &&
+      !tableMatchesAfterApplyingColumnOperations(
+        sourceTables[sourceTableName]!,
+        targetTables[tableName]!,
+        tableOps,
+        true,
+      )
+    ) {
+      throw new Error(
+        `Reference additions for table "${tableName}" require unchanged column shapes after applying column migrations.`,
+      );
     }
 
     if (renamedFrom) {
