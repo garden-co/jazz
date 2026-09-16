@@ -786,6 +786,7 @@ function buildForwardLenses<
 
   const sourceTables = unwrapSchemaTables(fromDefinition);
   const targetTables = unwrapSchemaTables(toDefinition);
+  const referenceAdditionTables = new Set<string>();
   for (const [targetName, targetColumns] of Object.entries(targetTables)) {
     const sourceName = renameTableMap.get(targetName) ?? targetName;
     const sourceColumns = sourceTables[sourceName];
@@ -799,13 +800,28 @@ function buildForwardLenses<
       if (operation?._type === "add") continue;
       const sourceColumn = operation?._type === "rename" ? operation.oldName : columnName;
       const sourceBuilder = sourceColumns[sourceColumn];
+      if (!sourceBuilder) continue;
+      const source = sourceBuilder._build(sourceColumn);
+      const target = targetBuilder._build(columnName);
+      if (source.references === target.references) continue;
+      const { references: _sourceReference, ...sourceShape } = source;
+      const { references: _targetReference, ...targetShape } = target;
       if (
-        sourceBuilder &&
-        sourceBuilder._build(sourceColumn).references !==
-          targetBuilder._build(columnName).references
+        !source.references &&
+        target.references &&
+        !operation &&
+        !renameTableMap.has(targetName) &&
+        JSON.stringify(sourceShape) === JSON.stringify(targetShape)
       ) {
+        if (!targetTables[target.references]) {
+          throw new Error(
+            `Reference addition for "${targetName}.${columnName}" requires target table "${target.references}" in the destination schema witness.`,
+          );
+        }
+        referenceAdditionTables.add(targetName);
+      } else {
         throw new Error(
-          `Column "${targetName}.${columnName}" must keep the same reference target in a migration.`,
+          `Column "${targetName}.${columnName}" must keep the same reference target in a migration unless adding a reference to an unchanged column.`,
         );
       }
     }
@@ -813,6 +829,7 @@ function buildForwardLenses<
 
   if (
     !migrate &&
+    referenceAdditionTables.size === 0 &&
     renameTableMap.size === 0 &&
     addedTableSet.size === 0 &&
     removedTableSet.size === 0
@@ -827,6 +844,7 @@ function buildForwardLenses<
       ...Object.keys(dropTables ?? {}),
       ...Object.keys(renameTables ?? {}),
       ...Object.keys(migrate ?? {}),
+      ...referenceAdditionTables,
     ]),
   ];
   for (const tableName of orderedTableNames) {
@@ -938,7 +956,13 @@ function buildForwardLenses<
       }
     }
 
-    if (added || removed || renamedFrom || operations.length > 0) {
+    if (
+      added ||
+      removed ||
+      renamedFrom ||
+      operations.length > 0 ||
+      referenceAdditionTables.has(tableName)
+    ) {
       forward.push({
         table: tableName,
         added,

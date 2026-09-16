@@ -44,4 +44,52 @@ describe("migration stub generation", () => {
     )(s);
     expect(migration.forward).toEqual([{ table: "records", added: true, operations: [] }]);
   });
+  it("executes a generated UUID reference addition as an explicit identity lens", () => {
+    const users = s.table({ name: s.string() }, {});
+    const columns = {
+      ownerId: s.uuid(),
+      reviewerId: s.uuid().optional(),
+      memberIds: s.array(s.uuid()),
+    };
+    const from = { users, records: s.table(columns, {}) };
+    const to = {
+      users,
+      records: s.table(columns, {
+        owner: s.rel("users", "ownerId"),
+        reviewer: s.rel("users", "reviewerId"),
+        members: s.rel("users", "memberIds"),
+      }),
+    };
+    const source = renderMigrationStub({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      fromSchema: s.defineApp(from).wasmSchema,
+      toSchema: s.defineApp(to).wasmSchema,
+    });
+    expect(source).not.toContain("TODO");
+    const migration = new Function(
+      "s",
+      source
+        .replace('import { schema as s } from "jazz-tools";', "")
+        .replace("export default", "return"),
+    )(s);
+    expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
+    expect(Object.keys(migration.from)).toEqual(["records", "users"]);
+    expect(Object.keys(migration.to)).toEqual(["records", "users"]);
+    expect(s.defineMigration({ from, to }).forward).toEqual([{ table: "records", operations: [] }]);
+    expect(
+      s.defineMigration({
+        from: to,
+        to: {
+          users,
+          records: s.table(columns, {
+            author: s.rel("users", "ownerId"),
+            reviewer: s.rel("users", "reviewerId"),
+            members: s.rel("users", "memberIds"),
+          }),
+        },
+      }).forward,
+    ).toEqual([]);
+    expect(() => s.defineMigration({ from: to, to: from })).toThrow("same reference target");
+  });
 });

@@ -47,7 +47,15 @@ function detectPossibleTableRenames(
 }
 
 function pickWitnessSchema(schema: WasmSchema, tableNames: readonly string[]): WasmSchema {
-  const uniqueTableNames = [...new Set(tableNames)];
+  const visited = new Set(tableNames);
+  for (const tableName of visited) {
+    const table = schema[tableName];
+    for (const column of table?.columns ?? []) {
+      if (column.references) visited.add(column.references);
+    }
+    for (const relation of Object.values(table?.relations ?? {})) visited.add(relation.table);
+  }
+  const uniqueTableNames = [...visited];
   return Object.fromEntries(
     uniqueTableNames
       .filter((tableName) => schema[tableName])
@@ -324,8 +332,22 @@ function renderMigrationBody(
     witnessFromTables.push(renameSuggestion.oldTableName);
     witnessToTables.push(renameSuggestion.newTableName);
   }
-  const witnessFrom = pickWitnessSchema(fromSchema, witnessFromTables);
-  const witnessTo = pickWitnessSchema(toSchema, witnessToTables);
+  // Include dependencies on both sides so unchanged referenced tables are not
+  // mistaken for newly created or removed tables by the public migration DSL.
+  const dependencies = new Set([
+    ...Object.keys(pickWitnessSchema(fromSchema, witnessFromTables)),
+    ...Object.keys(pickWitnessSchema(toSchema, witnessToTables)),
+  ]);
+  let count: number;
+  do {
+    count = dependencies.size;
+    for (const name of Object.keys(pickWitnessSchema(fromSchema, [...dependencies])))
+      dependencies.add(name);
+    for (const name of Object.keys(pickWitnessSchema(toSchema, [...dependencies])))
+      dependencies.add(name);
+  } while (dependencies.size !== count);
+  const witnessFrom = pickWitnessSchema(fromSchema, [...dependencies]);
+  const witnessTo = pickWitnessSchema(toSchema, [...dependencies]);
   const lines: string[] = [];
 
   for (const tableName of migratableTables) {
@@ -341,7 +363,23 @@ function renderMigrationBody(
       lines.push(`  ${property}`);
     }
     if (suggestion.comments.length === 0 && suggestion.properties.length === 0) {
-      lines.push("  // TODO: No safe migration steps were inferred automatically.");
+      const referenceAddition = toTable.columns.some(
+        (column) =>
+          column.references &&
+          fromTable.columns.some(
+            (source) =>
+              source.name === column.name &&
+              !source.references &&
+              source.nullable === column.nullable &&
+              source.merge_strategy === column.merge_strategy &&
+              columnTypeSignature(source.column_type) === columnTypeSignature(column.column_type),
+          ),
+      );
+      lines.push(
+        referenceAddition
+          ? "  // Add reference metadata with an identity lens; existing UUID values are preserved."
+          : "  // TODO: No safe migration steps were inferred automatically.",
+      );
     }
     lines.push("},");
     lines.push("");
