@@ -727,13 +727,46 @@ where
                 })?;
                 Ok(value.pointer(pointer).cloned())
             }
-            Value::Large(value_ref) => Ok(self
-                .node
-                .node
-                .lock()
-                .await
-                .read_large_json_pointer(&value_ref, pointer)
-                .await?),
+            Value::Large(value_ref) => {
+                let node = self.node.node.lock().await;
+                match node.read_large_json_pointer(&value_ref, pointer).await {
+                    Ok(value) => Ok(value),
+                    Err(
+                        error @ crate::node::Error::Groove(groove::db::Error::IvmRuntime(
+                            groove::ivm::runtime::IvmRuntimeError::LargeValue(
+                                groove::large_values::Error::InvalidJson,
+                            ),
+                        )),
+                    ) if value_ref.kind == groove::large_values::LargeValueKind::String => {
+                        // Groove reports malformed String JSON through its
+                        // kind-neutral error. Reparse only this error path to
+                        // preserve the inline String error's exact detail;
+                        // valid JSON with a malformed pointer keeps the
+                        // existing Groove error conversion.
+                        let source = match node
+                            .read_large_value_range(&value_ref, 0..value_ref.byte_length)
+                            .await
+                        {
+                            Ok(source) => source,
+                            Err(read_error) => {
+                                return Err(read_error.into());
+                            }
+                        };
+                        let source = match String::from_utf8(source) {
+                            Ok(source) => source,
+                            Err(_) => return Err(error.into()),
+                        };
+                        match serde_json::from_str::<serde_json::Value>(&source) {
+                            Ok(_) => Err(error.into()),
+                            Err(parse_error) => Err(Error::new(
+                                ErrorCode::Query,
+                                format!("invalid stored JSON: {parse_error}"),
+                            )),
+                        }
+                    }
+                    Err(error) => Err(error.into()),
+                }
+            }
             _ => Err(large_value_cell_type_error(table, column)),
         }
     }

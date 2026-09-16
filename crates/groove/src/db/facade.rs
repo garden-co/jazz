@@ -1950,6 +1950,34 @@ impl Database {
             )
             .into());
         }
+        if value.kind == crate::large_values::LargeValueKind::String {
+            // Ordinary String cells must retain inline String semantics: the
+            // complete UTF-8 source is validated and parsed before traversal,
+            // so malformed trailing JSON cannot be hidden by an early stop.
+            let source = self
+                .read_large_value_range(value, 0..value.byte_length)
+                .await?;
+            let source = String::from_utf8(source).map_err(|_| {
+                crate::ivm::runtime::IvmRuntimeError::from(crate::large_values::Error::InvalidUtf8)
+            })?;
+            let json: serde_json::Value = serde_json::from_str(&source).map_err(|_| {
+                crate::ivm::runtime::IvmRuntimeError::from(crate::large_values::Error::InvalidJson)
+            })?;
+            return match crate::large_values::json_pointer_prefix(source.as_bytes(), pointer)
+                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?
+            {
+                crate::large_values::JsonPointerPrefix::Found(value) => Ok(value),
+                crate::large_values::JsonPointerPrefix::RequiresFullDocument => {
+                    Ok(json.pointer(pointer).cloned())
+                }
+                crate::large_values::JsonPointerPrefix::NeedMore => {
+                    Err(crate::ivm::runtime::IvmRuntimeError::from(
+                        crate::large_values::Error::InvalidJson,
+                    )
+                    .into())
+                }
+            };
+        }
         // JSON validity is a write-admission invariant. Reads deliberately do
         // not revalidate an unread suffix: they parse only the source demanded
         // by the pointer and fail safely if that demanded portion is invalid.
