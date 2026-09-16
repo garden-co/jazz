@@ -136,3 +136,64 @@ upgrading: names outside this convention may change. Stored column names,
 reference targets, schema hashes, and existing data are unchanged; no storage
 migration is involved. Ambiguous aliases and aliases that shadow another stored
 column continue to be rejected.
+
+### Inferring relation APIs from authored schemas
+
+Keep the schema, app, and permissions in separate modules if helpful. No generated
+relation file or build step is required:
+
+```ts
+// schema.ts
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  people: s.table({ name: s.string() }),
+  records: s.table({
+    personIds: s.array(s.ref("people")),
+    address: s.ref("people").optional(),
+  }),
+});
+```
+
+```ts
+// app.ts
+import { schema as s } from "jazz-tools";
+import { schema } from "./schema.js";
+
+export const app: s.App<typeof schema> = s.defineApp(schema);
+export const recordsWithPeople = app.records.include({ people: true, address: true });
+export type RecordWithPeople = s.RowOf<typeof recordsWithPeople>;
+// people: Array<{ id: string; name: string }>
+// address: { id: string; name: string } | null
+
+export const peopleWithRecords = app.people.include({ recordsViaPeople: true });
+export const relatedPeople = app.records.hopTo("people");
+export const relatedRecords = app.people.hopTo("recordsViaPeople");
+```
+
+```ts
+// permissions.ts
+import { schema as s } from "jazz-tools";
+import { app } from "./app.js";
+
+export default s.definePermissions(app, ({ policy }) => [policy.people.allowRead.where({})]);
+```
+
+The normal `jazz-tools validate --schema-dir .` command loads `schema.ts` and
+`permissions.ts`; permissions can import the independently authored app.
+A raw definition also works: declare `type AppSchema = s.Schema<typeof definition>`
+and `const app: s.App<AppSchema> = s.defineApp(definition)`.
+
+`RowOf` preserves scalar/array cardinality. `.requireIncludes()` refines a
+non-nullable scalar reference's included row from `Row | null` to `Row` and
+requires its match; nullable references such as `address` stay nullable. Required
+array includes require all referenced matches and remain arrays. Reverse includes
+remain arrays. These APIs infer their relation names directly from the authored
+schema, so there is no separate catalogue to generate, pass, or check for staleness.
+
+For a smaller typed surface, use
+`s.defineSliceableApp(schema).slice("records", "people")`. Only selected tables
+and relations between them are exposed in TypeScript; references outside a slice
+remain scalar IDs or ID arrays. Slices retain the full structural schema for
+query planning and schema identity. A slice is a typing convenience, not an
+authorization boundary; permission policies still control access.
