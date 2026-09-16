@@ -952,6 +952,148 @@ fn relation_query_one_shot_project_selects_alias_without_unselected_columns() {
     );
     assert_eq!(returned.raw_field("user_secret"), None);
 }
+/// Relation ordering must use source-bound fields before the terminal projection
+/// narrows rows to their public aliases.
+#[test]
+fn relation_query_one_shot_orders_by_unselected_source_column() {
+    let schema = relation_schema();
+    let db = open_db(0xc3, AuthorSubject::for_test_bytes([0xc3; 16]), &schema);
+    let first = row(0xa1);
+    let second = row(0xb1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(first),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(second),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = RelationQuery {
+        rel: RelationExpr::OrderBy {
+            input: Box::new(RelationExpr::Project {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "users".to_owned(),
+                    alias: Some("source".to_owned()),
+                }),
+                columns: vec![crate::query::RelationProjectColumn {
+                    alias: "displayName".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("source".to_owned()),
+                        column: "name".to_owned(),
+                    }),
+                }],
+            }),
+            terms: vec![RelationOrderBy {
+                column: RelationColumnRef {
+                    scope: Some("source".to_owned()),
+                    column: "name".to_owned(),
+                },
+                direction: OrderDirection::Desc,
+            }],
+        },
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![second, first]);
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .map(|returned| returned
+                .encoded_record()
+                .0
+                .bind(returned.encoded_record().1)
+                .get("displayName"))
+            .collect::<Vec<_>>(),
+        vec![
+            Ok(Value::String("zulu".to_owned())),
+            Ok(Value::String("alpha".to_owned())),
+        ]
+    );
+    for returned in &snapshot.rows {
+        assert_eq!(
+            returned
+                .binding_field_names()
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            vec!["displayName"]
+        );
+        assert_eq!(
+            returned.cell(&schema.tables[0], "name"),
+            None,
+            "the source order key must remain internal to the relation result"
+        );
+        assert_eq!(returned.raw_field("name"), None);
+    }
+}
+
+/// Union arms may use independent local aliases while exposing one public
+/// output contract.
+#[test]
+fn relation_union_all_accepts_arm_local_projection_scopes() {
+    let schema = relation_schema();
+    let db = open_db(0xc4, AuthorSubject::for_test_bytes([0xc4; 16]), &schema);
+    let first = row(0xa1);
+    let second = row(0xb1);
+    for (row_id, name) in [(first, "alpha"), (second, "zulu")] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let arm = |label: &str, scope: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: Some(scope.to_owned()),
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "displayName".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some(scope.to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![arm("left", "left_source"), arm("right", "right_source")],
+        },
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default()))
+        .expect("union arms with equivalent public output contracts should validate");
+    assert_eq!(snapshot.rows.len(), 4);
+    assert!(
+        snapshot.rows.iter().all(|returned| {
+            returned
+                .binding_field_names()
+                .into_iter()
+                .flatten()
+                .eq(["displayName"])
+        }),
+        "each arm must publish the shared public alias"
+    );
+}
 
 /// Internal relation-IR construction is necessary here because the Rust DB
 /// integration surface is the public relation-query API exercised by WASM and
