@@ -336,7 +336,7 @@ async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_n
 /// allow-all fixtures exercise the same operations as a positive control.
 #[tokio::test]
 async fn missing_operation_policies_deny_reads_and_writes() {
-    use jazz::tools::test_support::AllowAllForTesting;
+    use jazz::tools::test_support::AllowAll;
     use jazz::tools::{ReadTier, TablePolicies};
     use jazz_testkit::connect_ready_client;
 
@@ -349,11 +349,11 @@ async fn missing_operation_policies_deny_reads_and_writes() {
                 }
                 let mut builder = SchemaBuilder::new().table(notes);
                 if case == "other_table" {
-                    builder = builder.table(TableSchema::builder("other").allow_all_for_testing());
+                    builder = builder.table(TableSchema::builder("other").allow_all());
                 }
                 let mut schema = builder.build();
                 if case == "allow_all" {
-                    schema = schema.allow_all_for_testing();
+                    schema = schema.allow_all();
                 }
                 let server = JazzServer::start_with_schema(schema.clone()).await.unwrap();
                 let admin =

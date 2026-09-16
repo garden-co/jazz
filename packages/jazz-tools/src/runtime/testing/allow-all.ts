@@ -10,7 +10,7 @@ const grants = s.definePermissions(s.defineApp({ fixture: s.table({}) }), ({ pol
 }).fixture;
 
 /** Internal fixture opt-in. Replaces existing policies on every table. */
-export function allowAllForTesting(schema: WasmSchema): WasmSchema {
+export function allowAll(schema: WasmSchema): WasmSchema {
   return mergePermissionsIntoWasmSchema(
     schema,
     Object.fromEntries(Object.keys(schema).map((name) => [name, grants])),

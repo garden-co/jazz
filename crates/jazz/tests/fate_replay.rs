@@ -32,7 +32,7 @@ fn row(byte: u8) -> RowUuid {
 /// `count` uses the counter merge strategy so a reprocessed commit unit would
 /// be observable as a doubled delta instead of an unchanged current row.
 fn schema() -> JazzSchema {
-    use jazz::tools::test_support::AllowAllForTesting;
+    use jazz::tools::test_support::AllowAll;
     let source = Schema::from([(
         TableName::new("tasks"),
         TableSchema::new(RowDescriptor::new(vec![
@@ -41,7 +41,7 @@ fn schema() -> JazzSchema {
                 .merge_strategy(ColumnMergeStrategy::Counter),
         ])),
     )]);
-    JazzSchema::new(&source.allow_all_for_testing()).expect("fate replay public schema compiles")
+    JazzSchema::new(&source.allow_all()).expect("fate replay public schema compiles")
 }
 
 async fn open_node(

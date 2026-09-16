@@ -16,7 +16,7 @@ pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
 pub(crate) const NO_DELTA_WINDOW: Duration = Duration::from_millis(500);
 
 pub(crate) fn subscription_schema() -> Schema {
-    use jazz::tools::test_support::AllowAllForTesting;
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(TableSchema::builder("orgs").column("name", ColumnType::Text))
         .table(
@@ -70,7 +70,7 @@ pub(crate) fn subscription_schema() -> Schema {
                     },
                 ),
         )
-        .allow_all_for_testing()
+        .allow_all()
         .build()
 }
 

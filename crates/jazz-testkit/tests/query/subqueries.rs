@@ -26,7 +26,7 @@ macro_rules! local_tokio_test {
 }
 
 fn subquery_schema() -> Schema {
-    use jazz::tools::test_support::AllowAllForTesting;
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(TableSchema::builder("users").column("name", ColumnType::Text))
         .table(
@@ -51,7 +51,7 @@ fn subquery_schema() -> Schema {
                 .column("name", ColumnType::Text)
                 .array_fk_column("parts", "file_parts"),
         )
-        .allow_all_for_testing()
+        .allow_all()
         .build()
 }
 

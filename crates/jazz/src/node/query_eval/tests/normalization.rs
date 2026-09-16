@@ -107,12 +107,12 @@ fn predicate_params_collects_every_operand_position_and_operator() {
 /// authority-local.
 #[test]
 fn policy_branch_query_keeps_explicit_inherited_parent_contribution() {
-    use crate::tools::test_support::AllowAllForTesting;
+    use crate::tools::test_support::AllowAll;
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("parents").column("state", PublicColumnType::Text))
             .table(PublicTableSchemaBuilder::new("children").fk_column("parent", "parents"))
-            .allow_all_for_testing(),
+            .allow_all(),
     );
     let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x24; 16]), schema.clone());
     let mut query = Query::from("children").inherits("parent");

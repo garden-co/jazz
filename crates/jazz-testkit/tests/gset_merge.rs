@@ -25,7 +25,7 @@ async fn lock_gset_suite() -> tokio::sync::MutexGuard<'static, ()> {
 
 /// `docs` table with a `tags` array column that merges as a grow-only set.
 fn gset_schema() -> Schema {
-    use jazz::tools::test_support::AllowAllForTesting;
+    use jazz::tools::test_support::AllowAll;
     let tags = ColumnDescriptor::new(
         "tags",
         ColumnType::Array {
@@ -623,7 +623,7 @@ async fn empty_and_non_empty_sets_union_in_both_propagation_orders_impl() {
 
 /// `docs` table with a `scores` float-array column merging as a grow-only set.
 fn gset_float_schema() -> Schema {
-    use jazz::tools::test_support::AllowAllForTesting;
+    use jazz::tools::test_support::AllowAll;
     let scores = ColumnDescriptor::new(
         "scores",
         ColumnType::Array {

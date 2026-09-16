@@ -1,4 +1,4 @@
-import { allowAllForTesting } from "../testing/allow-all-for-testing.js";
+import { allowAll } from "../testing/allow-all.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,7 +23,7 @@ const schema: WasmSchema = {
     ],
   },
 };
-const allowedSchema = allowAllForTesting(schema);
+const allowedSchema = allowAll(schema);
 
 function normalizeTestDelta(delta: RuntimeSubscriptionDelta, _testSchema: WasmSchema) {
   return [
@@ -57,7 +57,7 @@ function resultId(sourceId: string, occurrenceKey: Uint8Array): string {
   return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-const arraySchema = allowAllForTesting({
+const arraySchema = allowAll({
   arrays: {
     columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
   },

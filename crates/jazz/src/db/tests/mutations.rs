@@ -922,8 +922,8 @@ fn full_row_replacement_cannot_bless_an_inherited_large_value_descriptor() {
 
 #[test]
 fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
-    use crate::tools::test_support::AllowAllForTesting;
-    let schema = doctest_support::schema().allow_all_for_testing();
+    use crate::tools::test_support::AllowAll;
+    let schema = doctest_support::schema().allow_all();
     let db = open_db(0x11, AuthorSubject::for_test_bytes([0xa1; 16]), &schema);
     let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
     block_on(async {
