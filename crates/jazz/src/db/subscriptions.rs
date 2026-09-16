@@ -949,24 +949,13 @@ where
             && opts.local_updates == LocalUpdates::Immediate;
         let mut owner = self.node.node.lock().await;
         let mut node = prepared.scoped_node(&mut owner, author)?;
-        node.ensure_peer_maintained_subscription_view_supported(
-            &prepared.shape,
-            &prepared.binding,
-            read_tier,
-            author,
-            &opts.read_view,
-            authorization_mode,
-        )
-        .await?;
-        let (local_shape, local_binding, _local_plan) = node
-            .prepare_query_binding_for_link_in_authorization_mode(
-                &prepared.shape,
-                &prepared.binding,
-                read_tier,
-                author,
-                authorization_mode,
-            )
-            .await?;
+        // The actual maintained opener below compiles and validates this exact
+        // read view, authorization scope, receiver inputs and pending overlay.
+        // Do not compile a throwaway support-check program or an AppRows plan:
+        // neither is executed by the maintained subscription. Its installed
+        // MultisinkSubscription owns the live graph independently of a plan.
+        let (local_shape, local_binding) =
+            node.query_binding_for_link(&prepared.shape, &prepared.binding)?;
         // The subscription opener performs one bounded IVM poll. Keep the
         // current host scheduler as the cold-storage continuation owner,
         // rather than the short-lived foreground future opening this stream.
@@ -978,7 +967,7 @@ where
                 author,
                 read_tier,
                 &opts.read_view,
-                Some(_local_plan),
+                None,
                 authorization_mode,
                 pending_overlay,
                 progress_waker.as_ref(),
@@ -1032,16 +1021,11 @@ where
                 (state_shape.clone(), state_binding.clone())
             } else {
                 let mut owner = self.node.node.lock().await;
-                let mut node = prepared.scoped_node(&mut owner, author)?;
-                let (shape, binding, _) = node
-                    .prepare_query_binding_for_link_in_authorization_mode(
-                        &prepared.shape,
-                        &prepared.binding,
-                        upstream_opts.tier,
-                        author,
-                        authorization_mode,
-                    )
-                    .await?;
+                let node = prepared.scoped_node(&mut owner, author)?;
+                // Binding normalization is tier-independent. Upstream coverage
+                // retains its own capability check in the destination context.
+                let (shape, binding) =
+                    node.query_binding_for_link(&prepared.shape, &prepared.binding)?;
                 (shape, binding)
             };
             state_shape = shape.clone();

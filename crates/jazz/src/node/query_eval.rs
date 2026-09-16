@@ -258,6 +258,7 @@ pub(crate) use local_authority_reconciliation::LocalAuthorityReconciliation;
 
 #[cfg(feature = "testing")]
 pub(crate) use maintained_views::LocalMaintainedViewSubscriptionFootprint;
+#[cfg(test)]
 use maintained_views::SubscriptionPreparedPlan;
 pub(crate) use maintained_views::{
     CoveredInputReceiver, LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
@@ -2529,6 +2530,7 @@ where
         Ok((shape, binding, plan))
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_query_binding_for_link_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -2549,6 +2551,7 @@ where
         }
     }
 
+    #[cfg(test)]
     async fn prepare_client_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
@@ -2571,6 +2574,7 @@ where
         ))
     }
 
+    #[cfg(test)]
     async fn prepare_trusted_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
@@ -2591,6 +2595,7 @@ where
         ))
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_query_binding_for_link_with_shared_claim_fragments(
         &mut self,
         shape: &ValidatedQuery,
