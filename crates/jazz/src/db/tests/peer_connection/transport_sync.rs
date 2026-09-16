@@ -70,6 +70,133 @@ fn receive_backpressure_finalizes_consumed_view_update() {
         Some(SubscriptionEvent::Delta { reset: true, .. })
     ));
 }
+struct BackpressureDuringHandoffTransport {
+    inner: Box<dyn Transport>,
+    blocked: bool,
+}
+
+impl Transport for BackpressureDuringHandoffTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        if self.blocked {
+            self.blocked = false;
+            return Err(TransportError::Backpressure);
+        }
+        self.inner.try_recv_result()
+    }
+}
+
+struct TapTransport {
+    inner: Box<dyn Transport>,
+    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+}
+
+impl Transport for TapTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message.clone())?;
+        self.outbound.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        self.inner.try_recv_result()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+}
+
+#[test]
+fn handoff_receive_backpressure_keeps_queued_view_ineligible() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xf4; 16]);
+    let server = open_core(0xf5, AuthorSubject::SYSTEM, &schema);
+    server.server.set_permissions_ready(true).unwrap();
+    let client = open_db(0xf6, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xf6; 16]),
+        1,
+        NodeUuid::from_bytes([0xf5; 16]),
+        1,
+    );
+    let server_sent = Rc::new(RefCell::new(VecDeque::new()));
+    let server_transport = Box::new(TapTransport {
+        inner: server_transport,
+        outbound: Rc::clone(&server_sent),
+    });
+    let wrapped = BackpressureDuringHandoffTransport {
+        inner: client_transport,
+        blocked: true,
+    };
+    let upstream = block_on(client.connect_upstream(Box::new(wrapped)));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let _subscription =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    let subscription = server_sent
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update.subscription),
+            _ => None,
+        })
+        .expect("authority must queue a view update before handoff staging");
+    let authority_result = client
+        .node
+        .node
+        .borrow()
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let receipt_before = client
+        .node
+        .node
+        .borrow()
+        .applied_authority_result_generation(&authority_result);
+
+    upstream
+        .borrow_mut()
+        .stage_inbound_without_authority_receipt();
+    assert!(
+        upstream.borrow().inbound_authority_receipt_quarantine,
+        "recoverable handoff flush must quarantine the next inbound frame"
+    );
+    client
+        .tick()
+        .expect("handoff receive backpressure remains recoverable");
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .applied_authority_result_generation(&authority_result),
+        receipt_before,
+        "a queued handoff snapshot must not become an eligible authority receipt"
+    );
+}
 
 #[test]
 fn unordered_supporting_snapshots_preserve_public_subscription_rows() {

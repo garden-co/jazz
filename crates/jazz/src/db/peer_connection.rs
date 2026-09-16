@@ -640,6 +640,7 @@ where
     pub(super) fail_next_subscription_refresh: Cell<bool>,
     pub(super) observed_subscriber_dirty_epoch: Cell<u64>,
     pub(super) observed_session_claim_revision: Cell<u64>,
+    pub(super) inbound_authority_receipt_quarantine: bool,
     /// Fresh non-resumable epoch binding authorization receipts to this link.
     pub(super) connection_epoch: u64,
     pub(super) startup_error: Option<Error>,
@@ -2628,7 +2629,8 @@ where
                             None => match self.transport.try_recv_result() {
                                 Ok(message) => message.map(|message| StagedInboundMessage {
                                     message,
-                                    authority_receipt_eligible: true,
+                                    authority_receipt_eligible:
+                                        !self.inbound_authority_receipt_quarantine,
                                 }),
                                 Err(error)
                                     if handle_transport_backpressure(
