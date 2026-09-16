@@ -1220,6 +1220,69 @@ fn relation_union_all_preserves_labeled_same_row_derivations() {
     );
 }
 
+/// A maintained root UNION must retain source version metadata after each
+/// arm's public projection narrows the physical row.
+#[test]
+fn relation_union_all_maintained_opening_retains_source_metadata() {
+    let schema = relation_schema();
+    let db = open_db(0xcf, AuthorSubject::for_test_bytes([0xcf; 16]), &schema);
+    let alice = row(0xa1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(alice),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let arm = |label: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: None,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::Value::String("alice".to_owned())),
+            },
+        },
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Union {
+                inputs: vec![arm("first"), arm("second")],
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "name".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+    let mut subscription = block_on(db.subscribe_relation_query(&query, ReadOpts::default()))
+        .expect("maintained root union should open");
+    let SubscriptionEvent::Delta { added, .. } =
+        subscription.try_next_event().expect("opening event")
+    else {
+        panic!("subscription opening must be a delta");
+    };
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![alice, alice]
+    );
+}
+
 #[test]
 fn relation_query_one_shot_hop_accepts_runtime_uuid_literal_filter() {
     let schema = relation_schema();
