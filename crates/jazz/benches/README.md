@@ -12,6 +12,7 @@ the facade-level Criterion and realistic lanes, including:
 
 - `observer_write_path`
 - `db_benchmark`
+- `query_source_measurement`
 - `authorization_scope_benchmark`
 - `realistic_phase1`
 - `insert_benchmark`
@@ -64,6 +65,19 @@ constant. Fixture seeding, reopening, preparation, and an exact result/read-
 bound validation pass are outside the timed closure. The full JSONL read-count
 receipt, including its 1M-row diagnostic rung, remains available by setting
 `JAZZ_SELECTIVE_HYDRATION_RECEIPT=1`.
+
+`query_source_measurement` is a standalone baseline receipt for issue #3056.
+Run it with:
+
+```bash
+cargo bench -p jazz --bench query_source_measurement --features testing
+```
+
+It emits JSONL for an independent first all-rows read, a repeated all-rows
+read, and a `done=true` → `done=false` → all-rows sequence over a seeded
+non-nullable boolean column. Each receipt includes the `Db::read_profiled`
+phase timings, result count, and logical storage reads/ranges. These storage
+counters do not identify physical I/O, unique rows, or source decode counts.
 
 ## Intended next ports
 

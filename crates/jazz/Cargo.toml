@@ -134,6 +134,10 @@ harness = false
 [[bench]]
 name = "db_benchmark"
 harness = false
+[[bench]]
+name = "query_source_measurement"
+harness = false
+required-features = ["testing"]
 
 [[bench]]
 name = "authorization_scope_benchmark"
