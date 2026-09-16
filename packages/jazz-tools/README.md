@@ -107,3 +107,32 @@ this alpha: the default persistent configuration and the proposal-only
 `sqliteStorage` option both fail before opening a driver. Explicit memory mode
 has only been exercised by Node-based wiring tests, not Metro/Hermes or a device,
 and is not a supported persistence alternative.
+
+### Relation naming convention
+
+Relations use a bounded identifier convention, without generated application or
+library code. Scalar reference names strip a final `Id` or `_id`. A final `Ids`
+or `_ids` additionally pluralizes the remaining name. Names without these exact
+suffixes stay unchanged, including `status` and `analysis`. Reverse names remain
+`<sourceTable>Via<CapitalizedForwardName>`.
+
+Pluralization recognizes terminal `person/people`, `child/children`, `mouse/mice`,
+`goose/geese`, `tooth/teeth`, `foot/feet`, `analysis/analyses`, `status/statuses`,
+`alias/aliases`, and `bus/buses`. Equipment, news, information, software, data,
+series, species, fish, and sheep are invariant. These dictionary suffixes match
+lowercase, Titlecase, or UPPERCASE, preserving any prefix (`ownerPersonIds` →
+`ownerPeople`, `owner_person_ids` → `owner_people`). Existing dictionary plurals
+stay unchanged. Otherwise consonant + `y` becomes `ies`; `ss`, `sh`, `ch`, `x`,
+and `z` gain `es`; an existing final `s` stays; all other names gain `s`.
+Regular endings are uppercase only when the entire stem is uppercase. Empty
+stems stay empty (normal relation collision validation still applies). This is
+not a general English inflector: unusual words or mixed-case dictionary spellings
+follow the regular rules. Runtime aliases and literal TypeScript names use the
+same rules; a widened `string` remains `string`.
+
+This replaces the previous runtime English inflector and simpler TypeScript
+rules. Review include keys, reverse relation names, and permission hops when
+upgrading: names outside this convention may change. Stored column names,
+reference targets, schema hashes, and existing data are unchanged; no storage
+migration is involved. Ambiguous aliases and aliases that shadow another stored
+column continue to be rejected.
