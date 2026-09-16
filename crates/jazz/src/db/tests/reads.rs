@@ -875,6 +875,83 @@ fn relation_query_one_shot_hop_uses_unified_query_path() {
     let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
     assert_eq!(row_ids(&snapshot.rows), vec![row(0x11)]);
 }
+/// A public relation projection must expose only its selected output under the
+/// requested alias, while retaining the source row identity. The relation IR
+/// is constructed directly because this is the public Rust seam used by the
+/// WASM and NAPI relation APIs; the assertion remains on the one-shot result.
+#[test]
+fn relation_query_one_shot_project_selects_alias_without_unselected_columns() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("projects")
+                .column("name", PublicColumnType::Text)
+                .column("secret", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0xc2, AuthorSubject::for_test_bytes([0xc2; 16]), &schema);
+    let project = row(0x31);
+    db.insert(
+        "projects",
+        BTreeMap::from([
+            (
+                "name".to_owned(),
+                Value::String("Visible project".to_owned()),
+            ),
+            (
+                "secret".to_owned(),
+                Value::String("do not expose".to_owned()),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(project),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "projects".to_owned(),
+                alias: Some("source".to_owned()),
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "displayName".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("source".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(snapshot.root_count, 1);
+    assert_eq!(snapshot.rows.len(), 1);
+    let returned = &snapshot.rows[0];
+    assert_eq!(returned.table(), "projects");
+    assert_eq!(returned.row_uuid(), project);
+    assert_eq!(
+        returned
+            .binding_field_names()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+        vec!["displayName"],
+        "the relation result must publish exactly the selected alias"
+    );
+    let (descriptor, raw) = returned.encoded_record();
+    assert_eq!(
+        descriptor.bind(raw).get("displayName"),
+        Ok(Value::String("Visible project".to_owned()))
+    );
+    assert_eq!(
+        returned.cell(&schema.tables[0], "secret"),
+        None,
+        "an unselected source column must not be visible in the relation result"
+    );
+    assert_eq!(returned.raw_field("user_secret"), None);
+}
 
 /// Internal relation-IR construction is necessary here because the Rust DB
 /// integration surface is the public relation-query API exercised by WASM and
