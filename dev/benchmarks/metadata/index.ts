@@ -3,6 +3,7 @@ import { permissionedBenchmarks } from "../../../examples/permissioned-resources
 import { bigLabelBenchmarks } from "../../../examples/big-label/benchmarks/metadata.ts";
 import { w1Benchmarks } from "../../../examples/benchmarks/w1/metadata.ts";
 import { coreBenchmarks } from "../../../crates/jazz/benches/metadata.ts";
+import { policyDocumentBenchmarks } from "../../../examples/policy-scoped-documents/benchmarks/metadata.ts";
 export { metadataRevision, throughput, type BenchmarkMetadata } from "./types.ts";
 
 export const benchmarkMetadata = [
@@ -11,6 +12,7 @@ export const benchmarkMetadata = [
   ...bigLabelBenchmarks,
   ...w1Benchmarks,
   ...coreBenchmarks,
+  ...policyDocumentBenchmarks,
 ];
 const byName = new Map(benchmarkMetadata.map((metadata) => [metadata.name, metadata]));
 if (byName.size !== benchmarkMetadata.length) throw new Error("Duplicate benchmark metadata name");

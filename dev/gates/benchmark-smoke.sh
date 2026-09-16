@@ -38,12 +38,14 @@ if [[ "${1:-}" == "--ci" && $# == 1 ]]; then
   run_phase legacy-benchmark-correctness \
     cargo test -p jazz --features testing --test legacy_benchmark_smoke
   run_phase jazz-sim-scenario-correctness cargo test -p jazz-sim --test scenario_smoke
+  run_phase policy-document-pages cargo test -p jazz-example-policy-scoped-documents-benchmark --test pages
   exit 0
 fi
 
 if [[ "${1:-}" == "--compile-ci" && $# == 1 ]]; then
   run_phase jazz-benchmark-api cargo check -p jazz --benches --features testing
   run_phase jazz-sim-benchmark-api cargo check -p jazz-sim --benches
+  run_phase policy-document-benchmark-api cargo check -p jazz-example-policy-scoped-documents-benchmark --all-targets
   exit 0
 fi
 

@@ -2195,6 +2195,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-policy-scoped-documents-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "jazz-storage-rocksdb",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-poster-shop-benchmark"
 version = "0.1.0"
 dependencies = [
