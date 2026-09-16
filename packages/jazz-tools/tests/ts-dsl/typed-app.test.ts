@@ -53,28 +53,285 @@ const defaultedSchema = {
 };
 type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
 const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
- 
+
 const irregularRelationSchema = {
   categories: s.table({ label: s.string() }),
   people: s.table({ name: s.string() }),
   analyses: s.table({ summary: s.string() }),
   statuses: s.table({ label: s.string() }),
+  teams: s.table({
+    category_id: s.ref("categories"),
+  }),
   records: s.table({
+    category_id: s.ref("categories"),
+    personId: s.ref("people"),
+    team_id: s.ref("teams"),
+    teamIds: s.array(s.ref("teams")),
+    address: s.ref("people").optional(),
     category_ids: s.array(s.ref("categories")),
     person_ids: s.array(s.ref("people")),
     analysis_ids: s.array(s.ref("analyses")),
     status_ids: s.array(s.ref("statuses")),
   }),
 };
+const namespaceTableDefinition: s.TableDefinition = { label: s.string() };
+const namespaceSchemaDefinition: s.SchemaDefinition = {
+  categories: s.table(namespaceTableDefinition),
+};
 type IrregularRelationAppSchema = s.Schema<typeof irregularRelationSchema>;
-const irregularRelationApp: s.App<IrregularRelationAppSchema> = s.defineApp(
-  irregularRelationSchema,
+const irregularRelationBaseApp: s.App<IrregularRelationAppSchema> =
+  s.defineApp(irregularRelationSchema);
+const irregularRelationCatalogueBase = s.createRelationCatalogue(
+  irregularRelationBaseApp.wasmSchema,
 );
-
+const irregularRelationCatalogue = {
+  version: irregularRelationCatalogueBase.version,
+  schemaHash: irregularRelationCatalogueBase.schemaHash,
+  relations: {
+    categories: [
+      {
+        name: "teamsViaCategory",
+        type: "reverse",
+        fromTable: "categories",
+        toTable: "teams",
+        fromColumn: "id",
+        toColumn: "category_id",
+        isArray: true,
+        nullable: false,
+      },
+      {
+        name: "recordsViaCategory",
+        type: "reverse",
+        fromTable: "categories",
+        toTable: "records",
+        fromColumn: "id",
+        toColumn: "category_id",
+        isArray: true,
+        nullable: false,
+      },
+      {
+        name: "recordsViaCategories",
+        type: "reverse",
+        fromTable: "categories",
+        toTable: "records",
+        fromColumn: "id",
+        toColumn: "category_ids",
+        isArray: true,
+        nullable: false,
+      },
+    ],
+    people: [
+      {
+        name: "recordsViaPerson",
+        type: "reverse",
+        fromTable: "people",
+        toTable: "records",
+        fromColumn: "id",
+        toColumn: "personId",
+        isArray: true,
+        nullable: false,
+      },
+      {
+        name: "recordsViaAddresses",
+        type: "reverse",
+        fromTable: "people",
+        toTable: "records",
+        fromColumn: "id",
+        toColumn: "address",
+        isArray: true,
+        nullable: false,
+      },
+      {
+        name: "recordsViaPeople",
+        type: "reverse",
+        fromTable: "people",
+        toTable: "records",
+        fromColumn: "id",
+        toColumn: "person_ids",
+        isArray: true,
+        nullable: false,
+      },
+    ],
+    analyses: [
+      {
+        name: "recordsViaAnalyses",
+        type: "reverse",
+        fromTable: "analyses",
+        toTable: "records",
+        fromColumn: "id",
+        toColumn: "analysis_ids",
+        isArray: true,
+        nullable: false,
+      },
+    ],
+    statuses: [
+      {
+        name: "recordsViaStatuses",
+        type: "reverse",
+        fromTable: "statuses",
+        toTable: "records",
+        fromColumn: "id",
+        toColumn: "status_ids",
+        isArray: true,
+        nullable: false,
+      },
+    ],
+    teams: [
+      {
+        name: "category",
+        type: "forward",
+        fromTable: "teams",
+        toTable: "categories",
+        fromColumn: "category_id",
+        toColumn: "id",
+        isArray: false,
+        nullable: false,
+      },
+      {
+        name: "recordsViaTeam",
+        type: "reverse",
+        fromTable: "teams",
+        toTable: "records",
+        fromColumn: "id",
+        toColumn: "team_id",
+        isArray: true,
+        nullable: false,
+      },
+      {
+        name: "recordsViaTeams",
+        type: "reverse",
+        fromTable: "teams",
+        toTable: "records",
+        fromColumn: "id",
+        toColumn: "teamIds",
+        isArray: true,
+        nullable: false,
+      },
+    ],
+    records: [
+      {
+        name: "category",
+        type: "forward",
+        fromTable: "records",
+        toTable: "categories",
+        fromColumn: "category_id",
+        toColumn: "id",
+        isArray: false,
+        nullable: false,
+      },
+      {
+        name: "person",
+        type: "forward",
+        fromTable: "records",
+        toTable: "people",
+        fromColumn: "personId",
+        toColumn: "id",
+        isArray: false,
+        nullable: false,
+      },
+      {
+        name: "team",
+        type: "forward",
+        fromTable: "records",
+        toTable: "teams",
+        fromColumn: "team_id",
+        toColumn: "id",
+        isArray: false,
+        nullable: false,
+      },
+      {
+        name: "teams",
+        type: "forward",
+        fromTable: "records",
+        toTable: "teams",
+        fromColumn: "teamIds",
+        toColumn: "id",
+        isArray: true,
+        nullable: false,
+      },
+      {
+        name: "addresses",
+        type: "forward",
+        fromTable: "records",
+        toTable: "people",
+        fromColumn: "address",
+        toColumn: "id",
+        isArray: false,
+        nullable: true,
+      },
+      {
+        name: "categories",
+        type: "forward",
+        fromTable: "records",
+        toTable: "categories",
+        fromColumn: "category_ids",
+        toColumn: "id",
+        isArray: true,
+        nullable: false,
+      },
+      {
+        name: "people",
+        type: "forward",
+        fromTable: "records",
+        toTable: "people",
+        fromColumn: "person_ids",
+        toColumn: "id",
+        isArray: true,
+        nullable: false,
+      },
+      {
+        name: "analyses",
+        type: "forward",
+        fromTable: "records",
+        toTable: "analyses",
+        fromColumn: "analysis_ids",
+        toColumn: "id",
+        isArray: true,
+        nullable: false,
+      },
+      {
+        name: "statuses",
+        type: "forward",
+        fromTable: "records",
+        toTable: "statuses",
+        fromColumn: "status_ids",
+        toColumn: "id",
+        isArray: true,
+        nullable: false,
+      },
+    ],
+  },
+} as const satisfies s.RelationCatalogue;
+const irregularRelationApp = s.defineApp(irregularRelationSchema, irregularRelationCatalogue);
 const irregularQuery = irregularRelationApp.records
   .include({ categories: true, people: true, analyses: true, statuses: true })
   .requireIncludes();
+const irregularSuffixQuery = irregularRelationApp.records
+  .include({
+    category: true,
+    person: true,
+    team: true,
+    teams: true,
+    addresses: true,
+  })
+  .requireIncludes();
+type IrregularSuffixRecord = s.RowOf<typeof irregularSuffixQuery>;
+const irregularOutsideReverseQuery = irregularRelationApp.categories
+  .include({ teamsViaCategory: true })
+  .requireIncludes();
+const irregularReverseQuery = irregularRelationApp.categories
+  .include({ recordsViaCategories: true })
+  .requireIncludes();
+const irregularHopQuery = irregularRelationApp.records.hopTo("categories");
+const irregularSliceableApp = s.defineSliceableApp(
+  irregularRelationSchema,
+  irregularRelationCatalogue,
+);
+const irregularSlice = irregularSliceableApp.slice("records", "categories");
+type IrregularReverseRecord = s.RowOf<typeof irregularReverseQuery>;
 type IrregularRecord = s.RowOf<typeof irregularQuery>;
+const irregularSliceQuery = irregularSlice.records.include({ categories: true });
+type IrregularSliceRecord = s.RowOf<typeof irregularSliceQuery>;
 
 it("uses canonical plural relation names for irregular array references", () => {
   expect(JSON.parse(irregularQuery._build()).includes).toEqual({
@@ -91,7 +348,71 @@ it("uses canonical plural relation names for irregular array references", () => 
     Array<{ id: string; summary: string }>
   >();
   expectTypeOf<IrregularRecord["statuses"]>().toEqualTypeOf<Array<{ id: string; label: string }>>();
+  expect(JSON.parse(irregularSuffixQuery._build()).includes).toEqual({
+    category: true,
+    person: true,
+    team: true,
+    teams: true,
+    addresses: true,
+  });
+  expectTypeOf<IrregularSuffixRecord["category"]>().toEqualTypeOf<{
+    id: string;
+    label: string;
+  }>();
+  expectTypeOf<IrregularSuffixRecord["person"]>().toEqualTypeOf<{
+    id: string;
+    name: string;
+  }>();
+  expectTypeOf<IrregularSuffixRecord["team"]>().toEqualTypeOf<{
+    id: string;
+    category_id: string;
+  }>();
+  expectTypeOf<IrregularSuffixRecord["teams"]>().toEqualTypeOf<
+    Array<{ id: string; category_id: string }>
+  >();
+  expectTypeOf<IrregularSuffixRecord["addresses"]>().toEqualTypeOf<{
+    id: string;
+    name: string;
+  } | null>();
+  expect(JSON.parse(irregularReverseQuery._build()).includes).toEqual({
+    recordsViaCategories: true,
+  });
+  expect(JSON.parse(irregularOutsideReverseQuery._build()).includes).toEqual({
+    teamsViaCategory: true,
+  });
+  expectTypeOf<IrregularReverseRecord["recordsViaCategories"]>().toEqualTypeOf<
+    Array<{
+      id: string;
+      category_id: string;
+      personId: string;
+      team_id: string;
+      teamIds: string[];
+      address: string | null;
+      category_ids: string[];
+      person_ids: string[];
+      analysis_ids: string[];
+      status_ids: string[];
+    }>
+  >();
+  expect(JSON.parse(irregularHopQuery._build()).hops).toEqual(["categories"]);
+  expect(
+    JSON.parse(irregularSlice.records.include({ categories: true })._build()).includes,
+  ).toEqual({
+    categories: true,
+  });
 });
+
+if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+  expectTypeOf<IrregularSliceRecord["categories"]>().toEqualTypeOf<
+    Array<{ id: string; label: string }>
+  >();
+  // @ts-expect-error A slice excludes reverse relations sourced from unselected tables.
+  irregularSlice.categories.include({ teamsViaCategory: true });
+  // @ts-expect-error A slice excludes relation targets outside its selected tables.
+  irregularSlice.records.include({ people: true });
+  // @ts-expect-error A slice excludes relation targets outside its selected tables.
+  irregularSlice.records.hopTo("analyses");
+}
 
 type Urgency = "low" | "high";
 

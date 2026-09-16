@@ -43,6 +43,17 @@ export interface LoadedSchemaProject {
   wasmSchema: WasmSchema;
 }
 
+export interface LoadCompiledSchemaOptions {
+  /**
+   * Load only the authored schema export. This is used by relation catalogue
+   * generation so a generated app can import the catalogue without creating a
+   * schema-loading cycle.
+   */
+  authoredSchemaOnly?: boolean;
+  /** Skip permissions.ts and inline permission discovery. */
+  loadPermissions?: boolean;
+}
+
 type LoadedTsModule = {
   module: Record<string, unknown>;
   collectedSchema: Schema;
@@ -343,8 +354,13 @@ type LoadedSchemaInput = {
 function schemaFromLoadedModule(
   loaded: Record<string, unknown>,
   collected: Schema,
+  authoredSchemaOnly = false,
 ): LoadedSchemaInput | null {
-  const candidates = [loaded.schema, loaded.schemaDef, loaded.default, loaded.app].filter(
+  const candidates = [
+    loaded.schema,
+    loaded.schemaDef,
+    ...(authoredSchemaOnly ? [] : [loaded.default, loaded.app]),
+  ].filter(
     (candidate): candidate is Record<string, unknown> =>
       typeof candidate === "object" && candidate !== null,
   );
@@ -373,9 +389,16 @@ function schemaFromLoadedModule(
   return null;
 }
 
-async function loadSchemaInput(filePath: string): Promise<LoadedSchemaInput> {
+async function loadSchemaInput(
+  filePath: string,
+  authoredSchemaOnly = false,
+): Promise<LoadedSchemaInput> {
   const loaded = await loadTsModule(filePath);
-  const directSchema = schemaFromLoadedModule(loaded.module, loaded.collectedSchema);
+  const directSchema = schemaFromLoadedModule(
+    loaded.module,
+    loaded.collectedSchema,
+    authoredSchemaOnly,
+  );
   if (directSchema) {
     return directSchema;
   }
@@ -384,7 +407,7 @@ async function loadSchemaInput(filePath: string): Promise<LoadedSchemaInput> {
     `Could not find a schema in ${filePath}. ` +
       `Define tables with side-effect table(...) calls at module scope, ` +
       `or export const schema / app / default. ` +
-      `By convention, schema.ts (and permissions.ts) live at the project root ` +
+      `By convention, schema.ts (and, optionally, permissions.ts) live at the project root ` +
       `(or src/lib/ for SvelteKit). See https://jazz.tools/docs/schemas/defining-tables.`,
   );
 }
@@ -506,7 +529,10 @@ export async function hasRootSchema(schemaDir: string): Promise<boolean> {
   return resolveRootSchemaFiles(schemaDir) !== null;
 }
 
-export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchemaProject> {
+export async function loadCompiledSchema(
+  schemaDir: string,
+  options: LoadCompiledSchemaOptions = {},
+): Promise<LoadedSchemaProject> {
   const resolved = resolveRootSchemaFiles(schemaDir);
   if (!resolved) {
     throw new Error(
@@ -517,8 +543,8 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
     );
   }
 
-  const loadedSchema = await loadSchemaInput(resolved.schemaFile);
-  let schema = loadedSchema.schema;
+  const loadedSchema = await loadSchemaInput(resolved.schemaFile, options.authoredSchemaOnly);
+  const schema = loadedSchema.schema;
   const tablesWithInlinePolicies = findInlinePolicyTables(schema);
   if (tablesWithInlinePolicies.length > 0 && !loadedSchema.wasmSchema) {
     throw new Error(
@@ -531,14 +557,15 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
   const permissionsFile = join(resolved.rootDir, "permissions.ts");
   let permissions: CompiledPermissionsMap | undefined;
   let resolvedPermissionsFile: string | undefined;
-  if (await pathExists(permissionsFile)) {
+  const loadPermissions = options.loadPermissions !== false;
+  if (loadPermissions && (await pathExists(permissionsFile))) {
     resolvedPermissionsFile = permissionsFile;
     permissions = await loadPermissionsModule(permissionsFile);
     validatePermissionsAgainstSchema(
       schema.tables.map((table) => table.name),
       permissions,
     );
-  } else {
+  } else if (loadPermissions) {
     const schemaModulePermissions = await tryLoadPermissionsFromSchemaModule(resolved.schemaFile);
     if (schemaModulePermissions) {
       resolvedPermissionsFile = resolved.schemaFile;

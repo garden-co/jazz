@@ -100,6 +100,9 @@ function printWrapperHelp() {
   console.log(
     "  schema export         Print structural schema JSON from schema.ts or a schema hash",
   );
+  console.log(
+    "  schema relations      Emit a schema-bound relation catalogue (use --output relation-catalogue.ts)",
+  );
   console.log("  deploy                Publish the current schema and permissions to the server");
   console.log("  permissions status    Show the current server permissions head for this app");
   console.log(

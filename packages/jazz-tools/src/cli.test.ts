@@ -4,8 +4,8 @@ import {
   access,
   chmod,
   copyFile,
-  mkdtemp,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
   rm,
@@ -14,7 +14,11 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { hostname, tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { build } from "esbuild";
+import { col } from "./dsl.js";
+import type { RelationCatalogue } from "./codegen/relation-analyzer.js";
+import { defineApp } from "./typed-app.js";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
 import { createMigration as createCatalogueMigration } from "./dev/catalogue-project.js";
@@ -31,6 +35,7 @@ import {
   pushMigration as rawPushMigration,
   resolveEnvVar,
   schemaHash as rawSchemaHash,
+  schemaRelations as rawSchemaRelations,
   validate,
 } from "./cli.js";
 
@@ -42,7 +47,6 @@ const binPath = fileURLToPath(new URL("../bin/jazz-tools.js", import.meta.url));
 const bootstrapVerifierPath = fileURLToPath(
   new URL("../scripts/verify-packed-runtime-bootstrap.mjs", import.meta.url),
 );
-
 const packageRoot = dirname(fileURLToPath(import.meta.url));
 const tmpBase = join(tmpdir(), "jazz-tools-cli-tests");
 const tempRoots: string[] = [];
@@ -1033,6 +1037,86 @@ describe("cli schema hash", () => {
 
     expect(logs.some((line) => /[0-9a-f]{12}/i.test(line))).toBe(true);
     expect(await fileExists(join(root, "migrations", "snapshots"))).toBe(false);
+  });
+});
+
+describe("cli schema relations", () => {
+  it("generates, rejects, and regenerates a catalogue consumed by an app module", async () => {
+    const { root } = await createWorkspace();
+    const output = join(root, "relation-catalogue.ts");
+    const appPath = join(root, "app.ts");
+    const consumerPath = join(root, "app-consumer.mjs");
+    const authoredSchema = (withExtraColumn: boolean) => `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export const schema = {
+  categories: s.table({ label: s.string() }),
+  records: s.table({
+    category_ids: s.array(s.ref("categories")),
+    ${withExtraColumn ? "label: s.string()," : ""}
+  }),
+};
+`;
+    await writeFile(join(root, "schema.ts"), authoredSchema(false));
+    await writeFile(
+      join(root, "permissions.ts"),
+      'throw new Error("permissions.ts must not be evaluated while generating relation catalogues");\n',
+    );
+    await writeFile(
+      appPath,
+      'import relationCatalogue from "./relation-catalogue.ts";\nexport const appCatalogue = relationCatalogue;\n',
+    );
+
+    const authoredDefinition = {
+      categories: { label: col.string() },
+      records: { category_ids: col.array(col.ref("categories")) },
+    };
+    const changedDefinition = {
+      categories: { label: col.string() },
+      records: {
+        category_ids: col.array(col.ref("categories")),
+        label: col.string(),
+      },
+    };
+
+    await rawSchemaRelations({ schemaDir: root, output });
+    await build({
+      entryPoints: [appPath],
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      outfile: consumerPath,
+    });
+    const initialConsumer = (await import(`${pathToFileURL(consumerPath).href}?initial`)) as {
+      appCatalogue: RelationCatalogue;
+    };
+    expect(
+      initialConsumer.appCatalogue.relations.records?.map((relation) => relation.name),
+    ).toEqual(["categories"]);
+    expect(() => defineApp(authoredDefinition, initialConsumer.appCatalogue)).not.toThrow();
+
+    await writeFile(join(root, "schema.ts"), authoredSchema(true));
+    expect(() => defineApp(changedDefinition, initialConsumer.appCatalogue)).toThrow(
+      "Relation catalogue is stale",
+    );
+
+    await rawSchemaRelations({ schemaDir: root, output });
+    await build({
+      entryPoints: [appPath],
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      outfile: consumerPath,
+    });
+    const regeneratedConsumer = (await import(
+      `${pathToFileURL(consumerPath).href}?regenerated`
+    )) as {
+      appCatalogue: RelationCatalogue;
+    };
+    expect(
+      regeneratedConsumer.appCatalogue.relations.records?.map((relation) => relation.name),
+    ).toEqual(["categories"]);
+    expect(() => defineApp(changedDefinition, regeneratedConsumer.appCatalogue)).not.toThrow();
   });
 });
 
@@ -3513,6 +3597,25 @@ describe("bin integration", () => {
     expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
   });
 
+  it("routes schema relations through the wrapper CLI", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(
+      join(root, "schema.ts"),
+      `import { schema as s } from ${JSON.stringify(distIndexPath)};
+export const schema = {
+  categories: s.table({ label: s.string() }),
+  records: s.table({ category_ids: s.array(s.ref("categories")) }),
+};
+`,
+    );
+
+    const result = runBin(["schema", "relations", "--schema-dir", root]);
+
+    expect(result.status).toBe(0);
+    const catalogue = JSON.parse(result.stdout) as RelationCatalogue;
+    expect(catalogue.relations.records?.map((relation) => relation.name)).toEqual(["categories"]);
+  });
+
   it("loads root permissions.ts through the validate command", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
@@ -3889,7 +3992,7 @@ exit 0
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("validate");
     expect(result.stdout).toContain("schema export");
-    expect(result.stdout).toContain("deploy");
+    expect(result.stdout).toContain("schema relations");
     expect(result.stdout).toContain("migrations push");
     expect(result.stdout).toContain("server");
     expect(result.stdout).toContain("create");
