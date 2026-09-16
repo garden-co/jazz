@@ -376,7 +376,8 @@ export class SubscriptionsOrchestrator {
   }
 
   private scheduleCleanup(entry: InternalCacheEntry<any>): void {
-    this.cancelCleanup(entry);
+    // Updates do not renew ownership: preserve the first unused deadline.
+    if (entry.listeners.size > 0 || entry.cleanupTimeoutId !== null) return;
     entry.cleanupTimeoutId = setTimeout(() => {
       if (entry.listeners.size === 0) {
         this.destroyEntry(entry);
