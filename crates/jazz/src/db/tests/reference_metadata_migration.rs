@@ -1,14 +1,26 @@
-mod common;
+//! Direct Db tests deliberately live beside the implementation: precise catalogue
+//! publication, an open author batch, and a persistent reopen must be controlled
+//! independently. They use public Db/schema/query APIs and real Memory/RocksDB
+//! storage; server-facing end-to-end migration is covered by the TS server suite.
 
-use jazz::block_on;
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps};
-use jazz::groove::records::Value;
-use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
-use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::protocol::{CurrentWriteSchema, MigrationLens, SchemaVersion, TableLens};
-use jazz::query::{Query, col, eq, lit};
-use jazz::schema::JazzSchema;
-use jazz::tools::{
+fn allow_all_policies() -> crate::tools::TablePolicies {
+    use crate::tools::{PolicyExpr, TablePolicies};
+    TablePolicies::new()
+        .with_select(PolicyExpr::True)
+        .with_insert(PolicyExpr::True)
+        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+        .with_delete(PolicyExpr::True)
+}
+
+use crate::block_on;
+use crate::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps};
+use crate::groove::records::Value;
+use crate::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
+use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
+use crate::protocol::{CurrentWriteSchema, MigrationLens, SchemaVersion, TableLens};
+use crate::query::{Query, col, eq, lit};
+use crate::schema::JazzSchema;
+use crate::tools::{
     ColumnType, ObjectId, OpenTransactionId, SchemaBuilder, TableSchemaBuilder,
     Value as PublicValue,
 };
@@ -33,20 +45,21 @@ fn schema(references: bool) -> JazzSchema {
                 },
             )
     };
-    common::compile_schema(
+    JazzSchema::new(
         &SchemaBuilder::new()
             .table(
                 sources
                     .index_only(Vec::<String>::new())
-                    .policies(common::allow_all_policies()),
+                    .policies(allow_all_policies()),
             )
             .table(
                 TableSchemaBuilder::new("targets")
                     .column("label", ColumnType::Text)
-                    .policies(common::allow_all_policies()),
+                    .policies(allow_all_policies()),
             )
             .build(),
     )
+    .unwrap()
 }
 
 fn identity() -> DbIdentity {
@@ -76,7 +89,7 @@ fn cells(input: std::collections::HashMap<String, PublicValue>) -> BTreeMap<Stri
 fn source_cells(nullable: bool) -> BTreeMap<String, Value> {
     let target = PublicValue::Uuid(ObjectId::from_uuid(id(1).0));
     let mut result = cells(
-        jazz::row_input!("target" => target.clone(), "optional" => if nullable { PublicValue::Null } else { target.clone() }, "many" => PublicValue::Array(vec![target])),
+        crate::row_input!("target" => target.clone(), "optional" => if nullable { PublicValue::Null } else { target.clone() }, "many" => PublicValue::Array(vec![target])),
     );
     if !nullable {
         result.insert(
@@ -90,7 +103,7 @@ async fn insert_source<S: OrderedKvStorage + ReopenableStorage + 'static>(
     db: &Db<S>,
     n: u8,
     nullable: bool,
-) {
+) -> crate::db::WriteHandle<S> {
     db.insert(
         "sources",
         source_cells(nullable),
@@ -100,7 +113,7 @@ async fn insert_source<S: OrderedKvStorage + ReopenableStorage + 'static>(
         },
     )
     .await
-    .unwrap();
+    .unwrap()
 }
 fn assert_rows<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>, expected: &[u8]) {
     let query = db.prepare_query(&Query::from("sources")).unwrap();
@@ -154,7 +167,7 @@ fn assert_rows<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>, ex
 async fn migrate<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>) {
     db.insert(
         "targets",
-        cells(jazz::row_input!("label" => "existing target")),
+        cells(crate::row_input!("label" => "existing target")),
         InsertOptions {
             row_id: Some(id(1)),
             ..Default::default()
@@ -177,6 +190,15 @@ async fn migrate<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>) 
         )
         .await
         .unwrap();
+    publish_reference_schema(db).await;
+    assert_rows(db, &[2, 3]);
+    db.commit_mergeable_handle(pending).await.unwrap();
+    assert_rows(db, &[2, 3, 6]);
+    insert_source(db, 4, false).await;
+    assert_rows(db, &[2, 3, 4, 6]);
+}
+
+async fn publish_reference_schema<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>) {
     let old = schema(false);
     let new = SchemaVersion::new(schema(true));
     assert_ne!(old.version_id(), new.id);
@@ -214,14 +236,11 @@ async fn migrate<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>) 
     .await
     .unwrap();
     assert!(db.catalogue_lens(lens_id).is_some());
-    assert_eq!(db.catalogue_schema(old.version_id()), Some(old.clone()));
-    assert_rows(db, &[2, 3]);
-    db.commit_mergeable_handle(pending).await.unwrap();
-    assert_rows(db, &[2, 3, 6]);
-    insert_source(db, 4, false).await;
-    assert_rows(db, &[2, 3, 4, 6]);
+    assert_eq!(db.catalogue_schema(old.version_id()), Some(old));
 }
 
+/// Alice keeps existing UUID/null/array cells and an open author batch while
+/// explicitly adding reference metadata: old writes -> publish lens -> new joins.
 #[test]
 fn explicit_identity_lens_adds_references_to_existing_uuid_columns() {
     block_on(async {
@@ -239,6 +258,8 @@ fn explicit_identity_lens_adds_references_to_existing_uuid_columns() {
     });
 }
 
+/// Alice closes and reopens RocksDB after migration; old/new schema views and
+/// writes remain usable: migrate -> close -> reopen -> query both views -> write.
 #[test]
 fn reference_metadata_and_old_rows_survive_rocksdb_reopen() {
     block_on(async {
@@ -286,5 +307,81 @@ fn reference_metadata_and_old_rows_survive_rocksdb_reopen() {
         insert_source(&db, 5, false).await;
         assert_rows(&db, &[2, 3, 4, 5, 6]);
         db.close().await.unwrap();
+    });
+}
+
+/// Alice uploads old rows to Bob's Core authority before Bob adds references.
+/// alice -> globally accepted rows -> bob publishes lens -> indexed old-row read.
+#[test]
+fn reference_migration_backfills_authority_settled_rows() {
+    block_on(async {
+        let old = schema(false);
+        let families = old.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let core = Db::open_history_complete(DbConfig::new(
+            old.clone(),
+            MemoryStorage::new(&refs).unwrap(),
+            identity(),
+        ))
+        .await
+        .unwrap();
+        let writer = Db::open(DbConfig::new(
+            old,
+            MemoryStorage::new(&refs).unwrap(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x72; 16]),
+                author: AuthorSubject::for_test_bytes([0x73; 16]),
+            },
+        ))
+        .await
+        .unwrap();
+        let (client_transport, server_transport) = super::support::duplex();
+        core.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x73; 16]));
+        writer.connect_upstream(client_transport).await;
+        let target = writer
+            .insert(
+                "targets",
+                cells(crate::row_input!("label" => "existing target")),
+                InsertOptions {
+                    row_id: Some(id(1)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let first = insert_source(&writer, 2, false).await;
+        let nullable = insert_source(&writer, 3, true).await;
+        for _ in 0..8 {
+            writer.tick().await.unwrap();
+            core.tick().await.unwrap();
+        }
+        for write in [target, first, nullable] {
+            write.wait(crate::tx::DurabilityTier::Global).await.unwrap();
+        }
+        publish_reference_schema(&core).await;
+        assert_rows(&core, &[2, 3]);
+        let query = core
+            .prepare_query(
+                &Query::from("sources").filter(eq(col("target"), lit(Value::Uuid(id(1).0)))),
+            )
+            .unwrap();
+        let rows = core
+            .all_for_identity(
+                &query,
+                crate::db::ReadOpts {
+                    tier: crate::tx::DurabilityTier::Global,
+                    local_updates: crate::db::LocalUpdates::Deferred,
+                    propagation: crate::db::Propagation::LocalOnly,
+                    ..Default::default()
+                },
+                AuthorSubject::for_test_bytes([0x73; 16]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "new reference index must backfill existing authority-settled rows"
+        );
     });
 }
