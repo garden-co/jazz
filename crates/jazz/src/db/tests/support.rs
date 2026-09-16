@@ -1,6 +1,7 @@
 //! Shared test transports, fixtures, and assertion helpers.
 
 use super::*;
+use crate::tools::test_support::AllowAllForTesting;
 
 /// Receive the next subscriber payload relevant to direct protocol assertions.
 /// A subscriber begins by publishing its trusted catalogue prerequisite; tests
@@ -1038,12 +1039,14 @@ pub(super) fn public_legacy_write_policy(expr: PublicPolicyExpr) -> PublicTableP
 
 pub(super) fn schema() -> JazzSchema {
     build_public_db_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("title", PublicColumnType::Text)
-                .column("done", PublicColumnType::Boolean)
-                .column("owner", PublicColumnType::Uuid),
-        ),
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column("owner", PublicColumnType::Uuid),
+            )
+            .allow_all_for_testing(),
     )
 }
 
@@ -1197,11 +1200,13 @@ pub(super) fn owner_id_read_schema() -> JazzSchema {
 
 pub(super) fn owner_id_public_schema() -> JazzSchema {
     build_public_db_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("messages")
-                .column("body", PublicColumnType::Text)
-                .column("owner_id", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("messages")
+                    .column("body", PublicColumnType::Text)
+                    .column("owner_id", PublicColumnType::Text),
+            )
+            .allow_all_for_testing(),
     )
 }
 
@@ -1252,11 +1257,6 @@ pub(super) fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
     );
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
-            .table(public_resource_table_builder(
-                "res_a",
-                resource_policy,
-                false,
-            ))
             .table(PublicTableSchemaBuilder::new("group").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("group_access_edges")
@@ -1264,6 +1264,12 @@ pub(super) fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
                     .column("user_id", PublicColumnType::Uuid)
                     .column("role", PublicColumnType::Text),
             )
+            .allow_all_for_testing()
+            .table(public_resource_table_builder(
+                "res_a",
+                resource_policy,
+                false,
+            ))
             .table(public_resource_access_table_builder(
                 "res_a_access_edges",
                 "res_a",
@@ -1304,6 +1310,7 @@ fn public_resource_access_table_builder(
     resource_table: &str,
 ) -> PublicTableSchemaBuilder {
     PublicTableSchemaBuilder::new(name)
+        .allow_all_for_testing()
         .fk_column("resource", resource_table)
         .fk_column("team", "group")
         .column("grant_role", PublicColumnType::Text)
@@ -1312,6 +1319,7 @@ fn public_resource_access_table_builder(
 
 fn public_group_entry_table_builder() -> PublicTableSchemaBuilder {
     PublicTableSchemaBuilder::new("group_entry")
+        .allow_all_for_testing()
         .fk_column("member_id", "group")
         .fk_column("target_id", "group")
         .column("administrator", PublicColumnType::Boolean)
@@ -1597,7 +1605,8 @@ pub(super) fn relation_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("comments")
                     .column("body", PublicColumnType::Text)
                     .fk_column("todo_id", "todos"),
-            ),
+            )
+            .allow_all_for_testing(),
     )
 }
 
@@ -1696,6 +1705,7 @@ pub(super) fn relation_hop_schema() -> JazzSchema {
 }
 
 pub(super) fn access_edge_include_schema() -> JazzSchema {
+    use crate::tools::test_support::AllowAllForTesting;
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
@@ -1703,14 +1713,19 @@ pub(super) fn access_edge_include_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("team_access_edges")
                     .fk_column("resource_id", "teams")
                     .fk_column("team_id", "teams"),
-            ),
+            )
+            .allow_all_for_testing(),
     )
 }
 
 pub(super) fn policy_relation_schema() -> JazzSchema {
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
-            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .allow_all_for_testing()
+                    .column("title", PublicColumnType::Text),
+            )
             .table(
                 PublicTableSchemaBuilder::new("comments")
                     .column("body", PublicColumnType::Text)
@@ -1753,6 +1768,7 @@ pub(super) fn cells(title: &str, done: bool, owner: AuthorSubject) -> RowCells {
 }
 
 pub(super) fn issue_schema() -> JazzSchema {
+    use crate::tools::test_support::AllowAllForTesting;
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
@@ -1775,7 +1791,8 @@ pub(super) fn issue_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("issue_tags")
                     .fk_column("issue", "issues")
                     .column("tag", PublicColumnType::Text),
-            ),
+            )
+            .allow_all_for_testing(),
     )
 }
 

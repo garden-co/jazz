@@ -245,7 +245,8 @@ fn prepared_maintained_owner_or_editor_policy_keeps_union_arm_occurrences() {
                     .column("title", PublicColumnType::Text)
                     .column("owner_match", PublicColumnType::Boolean)
                     .column("editor_match", PublicColumnType::Boolean),
-            ),
+            )
+            .allow_all_for_testing(),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
@@ -262,23 +263,30 @@ fn prepared_maintained_owner_or_editor_policy_keeps_union_arm_occurrences() {
     query.filters = vec![crate::query::Predicate::Any(Vec::new())];
     query.policy_branches = vec![
         crate::query::PolicyBranch {
-            filters: vec![eq(col("owner_match"), lit(true)), eq(col("title"), param("title"))],
+            filters: vec![
+                eq(col("owner_match"), lit(true)),
+                eq(col("title"), param("title")),
+            ],
             joins: Vec::new(),
             reachable: Vec::new(),
             inherits: Vec::new(),
         },
         crate::query::PolicyBranch {
-            filters: vec![eq(col("editor_match"), lit(true)), eq(col("title"), param("title"))],
+            filters: vec![
+                eq(col("editor_match"), lit(true)),
+                eq(col("title"), param("title")),
+            ],
             joins: Vec::new(),
             reachable: Vec::new(),
             inherits: Vec::new(),
         },
     ];
-    let shape = query
-        .validate_runtime(&core.catalogue.schema)
-        .unwrap();
+    let shape = query.validate_runtime(&core.catalogue.schema).unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("title".to_owned(), Value::String("shared".to_owned()))]))
+        .bind(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("shared".to_owned()),
+        )]))
         .unwrap();
     let mut peer = PeerState::client_link(reader);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
@@ -416,11 +424,13 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
 
 #[test]
 fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas_without_full_recompute()
-{
+ {
+    use crate::tools::test_support::AllowAllForTesting;
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
                 PublicTableSchemaBuilder::new("sharedTodos")
+                    .allow_all_for_testing()
                     .column("title", PublicColumnType::Text)
                     .fk_column("owner", "members"),
             )
@@ -428,13 +438,12 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
                 PublicTableSchemaBuilder::new("members")
                     .column("name", PublicColumnType::Text)
                     .column("userID", PublicColumnType::Uuid)
-                    .policies(
-                        PublicTablePolicies::new()
-                            .with_select(PublicPolicyExpr::eq_session(
-                                "userID",
-                                vec!["claims".to_owned(), "user_id".to_owned()],
-                            )),
-                    ),
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
+                            "userID",
+                            vec!["claims".to_owned(), "user_id".to_owned()],
+                        ),
+                    )),
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
@@ -489,9 +498,9 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     assert_eq!(
         canonical_view_update_rows(&grant),
         vec![
-                ("members".to_owned().into(), member_row, visible_member_tx),
-                ("sharedTodos".to_owned().into(), todo_row, todo_tx),
-            ]
+            ("members".to_owned().into(), member_row, visible_member_tx),
+            ("sharedTodos".to_owned().into(), todo_row, todo_tx),
+        ]
     );
     assert_view_update_only_references_rows(&grant, BTreeSet::from([member_row, todo_row]));
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
@@ -818,6 +827,7 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
 
 #[test]
 fn maintained_subscription_view_explicit_include_keeps_other_implicit_references() {
+    use crate::tools::test_support::AllowAllForTesting;
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -826,10 +836,8 @@ fn maintained_subscription_view_explicit_include_keeps_other_implicit_references
                     .fk_column("primary", "targets")
                     .fk_column("secondary", "targets"),
             )
-            .table(
-                PublicTableSchemaBuilder::new("targets")
-                    .column("name", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("targets").column("name", PublicColumnType::Text))
+            .allow_all_for_testing(),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let included = row(0x11);

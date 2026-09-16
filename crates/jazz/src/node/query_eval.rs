@@ -1847,10 +1847,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Option<BindingViewKey>, Error> {
-        if self.is_history_complete()
-            || !self.can_use_prepared_current_query_plan(shape)
-            || self.query_uses_heterogeneous_physical_lineage(shape)
-        {
+        if self.is_history_complete() || self.query_uses_heterogeneous_physical_lineage(shape) {
             return Ok(None);
         }
         let binding_view_key = BindingViewKey::new(
@@ -1927,28 +1924,14 @@ where
     }
 
     fn required_include_membership_is_identity_sensitive(&self, shape: &ValidatedQuery) -> bool {
-        for include in &shape.query().includes {
-            if !include.require && include.join_mode != crate::query::JoinMode::Inner {
-                continue;
-            }
-            let mut table_name = shape.query().table.clone();
-            for segment in include.path.split('.') {
-                let Ok(table) = self.table_in_schema(&table_name, shape.schema_version()) else {
-                    return true;
-                };
-                let Some(target_name) = table.references.get(segment) else {
-                    return true;
-                };
-                let Ok(target) = self.table_in_schema(target_name, shape.schema_version()) else {
-                    return true;
-                };
-                if target.read_policy.is_some() {
-                    return true;
-                }
-                table_name = target_name.clone();
-            }
-        }
-        false
+        // Even a target without SELECT is identity-sensitive: ordinary users
+        // see no rows while SYSTEM bypasses policy. Never share that required
+        // membership through the policy-independent prepared shortcut.
+        shape
+            .query()
+            .includes
+            .iter()
+            .any(|include| include.require || include.join_mode == crate::query::JoinMode::Inner)
     }
 
     #[cfg(test)]
@@ -4274,6 +4257,7 @@ where
 
 mod bindings;
 
+pub(super) use bindings::authorization_query_from_read_policy;
 use bindings::*;
 fn local_maintained_view_content_witness<'a>(
     versions: &'a [VersionRow],

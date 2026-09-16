@@ -978,6 +978,7 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
 
 #[test]
 fn composed_read_policy_grants_and_revokes_incrementally() {
+    use crate::tools::test_support::AllowAllForTesting;
     let invited = user(0xa1);
     let spy = user(0xb2);
     let canvas_row = row(8);
@@ -992,18 +993,20 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
-                PublicTableSchemaBuilder::new("canvases").column("title", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("shapes")
-                    .fk_column("canvas", "canvases")
-                    .column("title", PublicColumnType::Text)
-                    .policies(PublicTablePolicies::new().with_select(shape_policy)),
+                PublicTableSchemaBuilder::new("canvases")
+                    .column("title", PublicColumnType::Text),
             )
             .table(
                 PublicTableSchemaBuilder::new("canvasInvites")
                     .fk_column("canvas", "canvases")
                     .column("userID", PublicColumnType::Uuid),
+            )
+            .allow_all_for_testing()
+            .table(
+                PublicTableSchemaBuilder::new("shapes")
+                    .fk_column("canvas", "canvases")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(shape_policy)),
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);

@@ -922,7 +922,9 @@ fn full_row_replacement_cannot_bless_an_inherited_large_value_descriptor() {
 
 #[test]
 fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    use crate::tools::test_support::AllowAllForTesting;
+    let schema = doctest_support::schema().allow_all_for_testing();
+    let db = open_db(0x11, AuthorSubject::for_test_bytes([0xa1; 16]), &schema);
     let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
     block_on(async {
         db.node.node.lock().await.set_chunk_storage(chunks.clone());
@@ -2160,7 +2162,15 @@ fn queued_validation_failure_waits_until_the_following_turn_for_fallback() {
 /// it must never manufacture a second row version or become unobservable.
 #[test]
 fn queued_empty_update_aliases_current_transaction_without_publishing() {
-    let schema = schema();
+    // This is a local scheduling fixture; no authority grant is needed.
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid),
+        ),
+    );
     let author = AuthorSubject::for_test_bytes([0xc0; 16]);
     let db = open_db(0xc0, author, &schema);
     let row = row(0xc1);

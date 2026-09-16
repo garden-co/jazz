@@ -602,7 +602,8 @@ fn client_fast_cursor_requires_retained_matching_authorization_progress() {
 
 #[test]
 fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x91));
+    use crate::tools::test_support::AllowAllForTesting;
+    let (_dir, mut core) = open_node_with_schema(node(0x91), schema().allow_all_for_testing());
     let live = row(0x31);
     let live_tx = core
         .commit_mergeable_settled(
@@ -610,7 +611,9 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
         )
         .unwrap();
     accept_global(&mut core, live_tx, 1);
-    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let shape = Query::from("todos")
+        .validate(&schema().allow_all_for_testing())
+        .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let subscription = subscription_key(&shape, &binding);
     let known = |position, authorization_progress| {
@@ -684,7 +687,8 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
 
 #[test]
 fn duplicate_structured_query_authorization_mismatch_forces_reset() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x92));
+    use crate::tools::test_support::AllowAllForTesting;
+    let (_dir, mut core) = open_node_with_schema(node(0x92), schema().allow_all_for_testing());
     for (index, title) in ["one", "two"].into_iter().enumerate() {
         let tx = core
             .commit_mergeable_settled(
@@ -696,7 +700,7 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
     }
     let shape = Query::from("todos")
         .aggregate([Aggregate::count()])
-        .validate(&schema())
+        .validate(&schema().allow_all_for_testing())
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let canonical = subscription_key(&shape, &binding);

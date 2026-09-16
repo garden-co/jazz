@@ -16,16 +16,18 @@ pub(super) enum PreparedClaimBindingMode {
     FailClosedAuthorizationSupport,
 }
 
-pub(super) fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
+pub(in crate::node) fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
     let Some(policy) = &table.read_policy else {
         let mut query = crate::query::Query::from(table.name.as_str());
-        // A table becomes closed as soon as it declares any policy.  An
-        // omitted read clause is therefore an explicit empty read authority,
-        // not the policy-free table default.  Express it as the smallest
-        // ordinary query graph (a constant-false root predicate) so current,
-        // historical, maintained, and advice paths all lower through the same
-        // authorization machinery.
-        if access_edge_parent_reference(table).is_none() && table.has_any_policy() {
+        // Generated access edges inherit their parent's explicit read grant.
+        // All other absent SELECT policies are empty read authority.
+        if let Some(parent_column) = access_edge_parent_reference(table) {
+            query.inherits.push(crate::query::InheritsVia {
+                parent_column,
+                operation: crate::query::InheritsOperation::Select,
+                max_depth: None,
+            });
+        } else {
             query.filters.push(Predicate::Any(Vec::new()));
         }
         return query;

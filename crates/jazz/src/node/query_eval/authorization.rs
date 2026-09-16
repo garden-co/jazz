@@ -137,6 +137,8 @@ fn authorization_policy_queries(
     operation: AuthorizationScopeOperation,
 ) -> Vec<JazzQuery> {
     match operation {
+        // No dependency data can prove an absent read grant. Admission still
+        // evaluates the constant-false read policy; no support scope is needed.
         AuthorizationScopeOperation::Read
             if table.read_policy.is_none() && access_edge_parent_reference(table).is_none() =>
         {
@@ -1400,10 +1402,8 @@ where
         _operation: AuthorizationScopeOperation,
     ) -> SchemaVersionId {
         let write_schema = self.catalogue.current_write_schema.schema;
-        let has_operation_policy = self
-            .table_in_schema(table, write_schema)
-            .is_ok_and(|table| table.has_any_policy());
-        if has_operation_policy {
+        let has_policy_table = self.table_in_schema(table, write_schema).is_ok();
+        if has_policy_table {
             write_schema
         } else {
             self.catalogue.current_schema_version_id
@@ -1720,7 +1720,7 @@ mod authorization_scope_compiler_tests {
     }
 
     #[test]
-    fn actual_compiler_selects_write_clauses_and_skips_public_read_support() {
+    fn actual_compiler_selects_write_clauses_and_skips_absent_read_support() {
         let claim_policy = |column: &str| {
             PublicPolicyExpr::eq_session(column, vec!["claims".to_owned(), "user_id".to_owned()])
         };
@@ -1806,7 +1806,7 @@ mod authorization_scope_compiler_tests {
         assert_eq!(delete.subscriptions.len(), 1);
         assert!(
             public.subscriptions.is_empty(),
-            "public read must not create a support subscription"
+            "an absent read grant needs no support subscription"
         );
         assert_ne!(insert.key, update.key);
         assert_ne!(update.key, delete.key);

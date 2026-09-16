@@ -1004,12 +1004,8 @@ impl TableSchema {
         }
     }
 
-    /// Whether this table has opted into authorization.
-    ///
-    /// A completely policy-free table is intentionally open so a new app can
-    /// use its data before it has introduced permissions. Once a table
-    /// declares any read or write clause, its policy set is closed: an
-    /// omitted operation has no grant and therefore denies at the authority.
+    /// Whether this table declares any explicit authorization grants.
+    /// Absence is not an authorization bypass: ordinary user operations deny.
     pub fn has_any_policy(&self) -> bool {
         self.read_policy.is_some() || self.write_policies.has_any()
     }
