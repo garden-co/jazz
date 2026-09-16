@@ -1963,20 +1963,7 @@ impl Database {
             let json: serde_json::Value = serde_json::from_str(&source).map_err(|_| {
                 crate::ivm::runtime::IvmRuntimeError::from(crate::large_values::Error::InvalidJson)
             })?;
-            return match crate::large_values::json_pointer_prefix(source.as_bytes(), pointer)
-                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?
-            {
-                crate::large_values::JsonPointerPrefix::Found(value) => Ok(value),
-                crate::large_values::JsonPointerPrefix::RequiresFullDocument => {
-                    Ok(json.pointer(pointer).cloned())
-                }
-                crate::large_values::JsonPointerPrefix::NeedMore => {
-                    Err(crate::ivm::runtime::IvmRuntimeError::from(
-                        crate::large_values::Error::InvalidJson,
-                    )
-                    .into())
-                }
-            };
+            return Ok(json.pointer(pointer).cloned());
         }
         // JSON validity is a write-admission invariant. Reads deliberately do
         // not revalidate an unread suffix: they parse only the source demanded
