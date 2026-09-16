@@ -1088,7 +1088,7 @@ fn convert_policy_with_native_select_inherits(
             condition,
         ),
         PolicyExpr::ExistsRel { rel } => {
-            append_exists_rel_policy_clause(table, path, Query::from(table.as_str()), rel)
+            append_exists_rel_policy_clause(schema, table, path, Query::from(table.as_str()), rel)
         }
         _ => query_with_predicate_filters(
             table.as_str(),
@@ -1211,7 +1211,9 @@ fn append_policy_clause(
             table: exists_table,
             condition,
         } => append_exists_policy_clause(schema, table, path, query, exists_table, condition),
-        PolicyExpr::ExistsRel { rel } => append_exists_rel_policy_clause(table, path, query, rel),
+        PolicyExpr::ExistsRel { rel } => {
+            append_exists_rel_policy_clause(schema, table, path, query, rel)
+        }
         PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
             let existing_branches = PolicyBranch::alternatives_from_query(query);
             let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
@@ -1546,7 +1548,13 @@ fn append_exists_policy_clause(
     nested_exists_rel
         .into_iter()
         .try_fold(query, |query, (index, rel)| {
-            append_exists_rel_policy_clause(table, &format!("{path}.Exists[{index}]"), query, rel)
+            append_exists_rel_policy_clause(
+                schema,
+                table,
+                &format!("{path}.Exists[{index}]"),
+                query,
+                rel,
+            )
         })
 }
 
@@ -1816,12 +1824,13 @@ fn root_exists_rel_at_correlation(
 }
 
 fn append_exists_rel_policy_clause(
+    schema: &Schema,
     table: &TableName,
     path: &str,
     mut query: Query,
     rel: &RelExpr,
 ) -> Result<Query, SchemaConversionError> {
-    let mut lowered = lower_exists_rel(table, path, rel)?;
+    let mut lowered = lower_exists_rel(schema, table, path, rel)?;
     root_exists_rel_at_correlation(table, path, &mut lowered)?;
     let correlation_index = lowered
         .filters
@@ -2116,6 +2125,7 @@ fn collect_rel_predicate_columns<'a>(
 }
 
 fn lower_exists_rel(
+    schema: &Schema,
     table: &TableName,
     path: &str,
     rel: &RelExpr,
@@ -2133,14 +2143,14 @@ fn lower_exists_rel(
             pending_reachable: None,
         }),
         RelExpr::Filter { input, predicate } => {
-            let mut lowered = lower_exists_rel(table, path, input)?;
+            let mut lowered = lower_exists_rel(schema, table, path, input)?;
             append_scoped_rel_predicate(table, path, &mut lowered, predicate)?;
             Ok(lowered)
         }
-        RelExpr::Project { input, .. } => lower_exists_rel(table, path, input),
+        RelExpr::Project { input, .. } => lower_exists_rel(schema, table, path, input),
         RelExpr::Gather {
             seed, step, bound, ..
-        } => lower_gather_rel(table, path, seed, step, bound),
+        } => lower_gather_rel(schema, table, path, seed, step, bound),
         RelExpr::Join {
             left,
             right,
@@ -2153,8 +2163,8 @@ fn lower_exists_rel(
                     "core schema ExistsRel policies only support inner joins",
                 ));
             }
-            let mut left = lower_exists_rel(table, path, left)?;
-            let right = lower_exists_rel(table, path, right)?;
+            let mut left = lower_exists_rel(schema, table, path, left)?;
+            let right = lower_exists_rel(schema, table, path, right)?;
             let Some(on) = on.first() else {
                 return Err(err(
                     format!("$.{}.{}", table.as_str(), path),
@@ -2288,6 +2298,7 @@ fn lower_exists_rel(
 }
 
 fn lower_gather_rel(
+    schema: &Schema,
     table: &TableName,
     path: &str,
     seed: &RelExpr,
@@ -2297,6 +2308,21 @@ fn lower_gather_rel(
     let (from, seed) = lower_gather_seed(table, path, seed)?;
     let (edge_table, output_table, edge_member_column, edge_parent_column, edge_filters) =
         lower_gather_step(table, path, step)?;
+    // A scalar frontier has no materialized output table, but its projected
+    // FK still identifies the logical source used by scoped joins from Gather.
+    // Keep this separate from `table`: setting that would turn the key-only
+    // frontier into a row-producing relation and change reachability semantics.
+    let output_scope = output_table.clone().or_else(|| {
+        schema
+            .get(&TableName::new(edge_table.clone()))?
+            .columns
+            .columns
+            .iter()
+            .find(|column| column.name.as_str() == edge_parent_column)?
+            .references
+            .as_ref()
+            .map(|table| table.as_str().to_owned())
+    });
     let seed = if output_table.as_deref() == Some(seed.table.as_str())
         && seed.user_column.as_deref() == Some("id")
         && seed.team_column == "id"
@@ -2316,7 +2342,7 @@ fn lower_gather_rel(
         }
     };
     Ok(LoweredRel {
-        scope_paths: output_table
+        scope_paths: output_scope
             .as_ref()
             .map(|table| (table.clone(), Some(Vec::new())))
             .into_iter()

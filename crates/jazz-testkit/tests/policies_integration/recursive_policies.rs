@@ -92,7 +92,7 @@ fn recursive_relation_document_select_policy() -> PolicyExpr {
         seed.gather(step, 10)
             .join(
                 pe::table("resource_access_edges").alias("access"),
-                "id",
+                pe::rel::column("teams", "id"),
                 pe::rel::column("access", "team_id"),
             )
             .where_(pe::rel::all_of([
