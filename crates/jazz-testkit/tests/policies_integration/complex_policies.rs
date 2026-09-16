@@ -812,7 +812,6 @@ async fn exists_rel_join_rejects_invalid_operand_scopes() {
 /// Verifies that join queries apply `SELECT` policies to rows from joined
 /// tables, not only to the base table.
 #[tokio::test]
-#[ignore = "#1761: flat-join policy lowering omits the claims.sub route field from app_rows"]
 async fn join_query_applies_policy_filter_on_joined_table() {
     tokio::task::LocalSet::new()
         .run_until(join_query_applies_policy_filter_on_joined_table_inner())
