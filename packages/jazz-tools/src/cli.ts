@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// CLI for jazz-tools schema tooling
+// CLI for jazz-tools schema and data tooling
 
 import { existsSync, readFileSync, realpathSync } from "fs";
 import { readFile } from "fs/promises";
@@ -16,6 +16,8 @@ import {
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
+import { dataCommand, type DataCommandMode } from "./data-cli/command.js";
+import { dataHelp } from "./data-cli/help.js";
 import type { StoredPermissionsHead } from "./runtime/schema-fetch.js";
 
 export interface BuildOptions {
@@ -543,9 +545,29 @@ function isMainModule(): boolean {
   return realpathOrSelf(entry) === realpathOrSelf(fileURLToPath(import.meta.url));
 }
 
+/**
+ * Which data command (if any) this argv selects.
+ *
+ * Exactly two entry points: `sql` and `schema tables|describe`. There is no
+ * `schema list` alias: one canonical path per task keeps the surface guessable.
+ */
+function dataCommandMode(args: string[]): DataCommandMode | undefined {
+  const [command, subcommand] = args;
+  if (command === "sql") return "sql";
+  if (command !== "schema") return undefined;
+  if (subcommand === "tables") return "tables";
+  if (subcommand === "describe") return "describe";
+  return undefined;
+}
+
 function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
+  console.log(
+    "  sql '<statement>'     Query or mutate application rows (read-only unless --write)",
+  );
+  console.log("  schema tables         List tables from the local or a stored schema");
+  console.log("  schema describe <table> Show columns, types, defaults, and references");
   console.log("  validate              Validate root schema.ts and optional permissions.ts");
   console.log("  schema hash           Print the short hash of the current schema.ts");
   console.log("  schema export         Print the compiled structural schema as JSON");
@@ -602,11 +624,38 @@ function printHelp(): void {
 }
 
 if (isMainModule()) {
-  if (process.argv.slice(2).some((arg) => arg === "--help" || arg === "-h")) {
+  const rawArgs = process.argv.slice(2);
+  const dataMode = dataCommandMode(rawArgs);
+  if (dataMode) {
+    const wantsHelp = rawArgs.some((arg) => arg === "--help" || arg === "-h");
+    const wantsCapabilities = dataMode === "sql" && rawArgs.includes("--capabilities");
+    // Help is answered before any environment loading, credential, schema, or
+    // connection resolution.
+    if (wantsHelp) {
+      console.log(dataHelp(dataMode, wantsCapabilities));
+      process.exit(0);
+    }
+    const envFiles = readEnvFiles(rawArgs);
+    if (envFiles.length > 0) {
+      for (const file of envFiles) loadEnvFile(resolve(process.cwd(), file));
+    } else {
+      loadDotEnv();
+    }
+    const code = await dataCommand(
+      rawArgs.slice(dataMode === "sql" ? 1 : 2),
+      {
+        appId: resolveEnvVar(APP_ID_ENV_VARS),
+        serverUrl: resolveEnvVar(SERVER_URL_ENV_VARS),
+      },
+      dataMode,
+    );
+    process.exit(code);
+  }
+  if (rawArgs.some((arg) => arg === "--help" || arg === "-h")) {
     printHelp();
     process.exit(0);
   }
-  const envFiles = readEnvFiles(process.argv.slice(2));
+  const envFiles = readEnvFiles(rawArgs);
   if (envFiles.length > 0) {
     for (const file of envFiles) {
       loadEnvFile(resolve(process.cwd(), file));
@@ -656,7 +705,7 @@ if (isMainModule()) {
         process.exit(1);
       });
     } else {
-      console.error("Usage: node dist/cli.js schema <hash|export> [--schema-dir <path>] [...]");
+      console.error("Usage: node dist/cli.js schema <tables|describe|hash|export> [options]");
       process.exit(1);
     }
   } else if (command === "migrations") {
