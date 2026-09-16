@@ -3,6 +3,47 @@ use jazz_example_policy_scoped_documents_benchmark::{
 };
 
 #[test]
+fn subscription_hydration_has_the_exact_independently_expected_page() {
+    for policy in [Policy::None, Policy::Owner, Policy::OwnerOrOrg] {
+        let fixture = Fixture::new(1_000, policy);
+        for (page, expected) in [
+            (
+                Page::Owner(2),
+                (20..30).rev().map(document_row).collect::<Vec<_>>(),
+            ),
+            (
+                Page::Org(0),
+                match policy {
+                    Policy::Owner => (20..30).rev().map(document_row).collect(),
+                    _ => (0..40).rev().map(document_row).collect(),
+                },
+            ),
+        ] {
+            let mut session = fixture.session(page, 50, user(2));
+            let (mut stream, event) = session.subscribe();
+            let jazz::db::SubscriptionEvent::Delta {
+                reset,
+                settled,
+                added,
+                updated,
+                removed,
+                ..
+            } = event
+            else {
+                panic!("initial page must be a delta");
+            };
+            assert!(reset && settled);
+            assert!(updated.is_empty() && removed.is_empty());
+            assert_eq!(
+                added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+                expected
+            );
+            jazz::db::block_on(stream.close()).expect("close subscription");
+        }
+    }
+}
+
+#[test]
 fn timed_organization_page_cannot_be_satisfied_by_direct_ownership() {
     let fixture = Fixture::new(10_000, Policy::OwnerOrOrg);
     let rows = fixture.session(Page::Org(0), 50, user(2)).read();

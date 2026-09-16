@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SeededRowIdSource, block_on,
+    Propagation, ReadOpts, SeededRowIdSource, SubscriptionEvent, SubscriptionStream, block_on,
 };
 use jazz::groove::{db::StorageReadMetrics, records::Value};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -226,6 +226,41 @@ pub struct Session {
 }
 
 impl Session {
+    /// Paired first-result endpoint. The stream stays alive in the returned
+    /// value so Divan excludes its finalization, as it excludes read teardown.
+    pub fn subscribe(&mut self) -> (SubscriptionStream, SubscriptionEvent) {
+        assert!(!self.executed, "a cold sample must use a fresh runtime");
+        self.executed = true;
+        let mut stream = block_on(self.db.subscribe_for_identity(
+            &self.prepared,
+            ReadOpts {
+                tier: DurabilityTier::Local,
+                local_updates: LocalUpdates::Immediate,
+                propagation: Propagation::LocalOnly,
+                include_deleted: false,
+                ..ReadOpts::default()
+            },
+            self.identity,
+        ))
+        .expect("subscribe document page");
+        // The standalone native harness owns the runtime loop (there is no
+        // JS/server host driving cold subscription progress in the background).
+        let hydration_start = Instant::now();
+        let initial = loop {
+            if let Some(event) = stream.try_next_event() {
+                break event;
+            }
+            block_on(self.db.tick()).expect("drive subscription hydration");
+            if hydration_start.elapsed().as_secs() > 600 {
+                panic!(
+                    "subscription did not hydrate: {}",
+                    self.db.query_delivery_diagnostics_for_test()
+                );
+            }
+        };
+        (stream, initial)
+    }
+
     pub fn read(&mut self) -> Vec<CurrentRow> {
         assert!(
             !self.executed,

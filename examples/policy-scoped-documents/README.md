@@ -18,7 +18,8 @@ Each sample reads the first page of 50 documents ordered by descending
 `updated_at`, with a literal equality on `owner_id` or `org_id`. All reads use
 the same admitted non-SYSTEM identity (owner 2), Global tier, deferred local
 updates, LocalOnly propagation, and exclude deleted rows. The database is
-history-complete. No transport or subscription delivery is measured.
+history-complete. The original one-shot cases measure no transport or
+subscription delivery.
 
 Compare identical data, indexes and queries across no document policy,
 owner-only policy, and owner OR inherited organization membership. The owner
@@ -37,6 +38,14 @@ result construction are measured. Teardown, seed transactions, public query
 preparation, and storage-counter extraction are excluded. This is runtime-cold,
 not OS-page-cache-cold or end-to-end reopen latency. Divan receives result rows
 as its output. No warm-query cache samples are mixed in.
+
+The `subscribe_` cases reuse the fixture, queries, identities, allocator and
+fresh-runtime boundaries, but measure `subscribe_for_identity` through its first
+published page, including native runtime progress. They use **Local tier with
+immediate local updates**, not Global: a standalone Global subscription requires
+an authority settlement receipt this no-network fixture does not supply. The
+seed has no pending writes, but these remain separately named endpoints, not
+interchangeable timing samples. Subscription finalization is outside the timer.
 
 The standalone receipt reports seed, reopen, public preparation, query and
 close phases separately, plus **logical** storage read counters (not physical
@@ -60,7 +69,7 @@ cargo run --profile perf -p jazz-example-policy-scoped-documents-benchmark --fea
 Record checkout SHA, executable hash, features, allocator and host alongside
 local receipts. Do not time while builds/tests/profilers compete on the host.
 The `benchmark` label enables the CodSpeed native workload matrix. Baseline
-first, planner changes in a later PR. This PR changes no runtime or formats.
+first, planner changes in a later PR. The fixture changes no storage or wire formats.
 
 Correctness CI checks exact ordered IDs against an independent policy oracle,
 including direct owner, inherited-only access, non-members, empty pages and

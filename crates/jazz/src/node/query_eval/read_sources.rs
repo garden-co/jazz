@@ -49,7 +49,7 @@ pub(super) struct CurrentSourceGraph {
     pub(super) metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
     Index {
@@ -4313,6 +4313,24 @@ where
         {
             *source_limit = Some(limit);
         }
+        Ok(paths)
+    }
+
+    /// Binding-specific access paths for an executing current query. Both a
+    /// one-result consumer and a retained subscription hydrate live sources;
+    /// neither may embed these prefixes into a generic prepared-plan cache.
+    pub(super) fn current_query_hydration_access_paths(
+        &self,
+        request: &QueryProgramRequest,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        let mut paths = self.current_query_primary_key_access_paths(shape, binding)?;
+        paths.extend(
+            self.query_program_access_paths(request, true)?
+                .into_iter()
+                .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
+        );
         Ok(paths)
     }
 
