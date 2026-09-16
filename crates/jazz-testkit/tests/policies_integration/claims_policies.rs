@@ -197,6 +197,7 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads_inner() {
 
     admin
         .update(
+            table_name,
             admin_doc,
             vec![("title".to_string(), "admin updated".into())],
         )
@@ -228,7 +229,7 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads_inner() {
         *id == admin_doc && *values == title_document_values("admin updated")
     }));
 
-    admin.delete(admin_doc).expect("admin delete");
+    admin.delete(table_name, admin_doc).expect("admin delete");
     wait_for_subscription_update(
         &mut member_stream,
         &mut member_log,
@@ -382,14 +383,16 @@ async fn admin_role_claims_reject_member_mutations_inner() {
 
     member
         .update(
+            table_name,
             admin_doc,
             vec![("title".to_string(), "member hacked".into())],
         )
         .expect("optimistic local member update");
 
     let rows_after_rejected_update = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after rejected member update");
     assert!(
         rows_after_rejected_update.iter().any(|(id, values)| {
@@ -404,12 +407,13 @@ async fn admin_role_claims_reject_member_mutations_inner() {
     );
 
     member
-        .delete(admin_doc)
+        .delete(table_name, admin_doc)
         .expect("optimistic local member delete");
 
     let rows_after_rejected_delete = observer
-        .query(query, Some(DurabilityTier::EdgeServer))
+        .query(query, jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after rejected member delete");
     assert!(
         rows_after_rejected_delete.iter().any(|(id, values)| {
@@ -443,7 +447,6 @@ async fn admin_role_claims_reject_member_mutations_inner() {
 /// observer ────────────────────────────► sees only the allowed update persist
 /// ```
 #[tokio::test]
-#[ignore = "#1760: an allowed update using id IN session.claims.editable_doc_ids is not persisted by the server"]
 async fn claim_array_id_policy_gates_updates_by_primary_key() {
     tokio::task::LocalSet::new()
         .run_until(claim_array_id_policy_gates_updates_by_primary_key_inner())
@@ -498,7 +501,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "alice sees seeded documents before updates",
         |rows| {
@@ -517,7 +520,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     wait_for_query(
         &observer,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "observer sees seeded documents before updates",
         |rows| {
@@ -538,18 +541,30 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
         .await
         .expect("subscribe observer");
     let mut observer_log = Vec::new();
+    wait_for_subscription_update(
+        &mut observer_stream,
+        &mut observer_log,
+        QUERY_TIMEOUT,
+        "observer receives both initial rows before mutation",
+        |log| has_added_id(log, allowed_doc) && has_added_id(log, blocked_doc),
+    )
+    .await;
+    observer_log.clear();
 
-    alice
+    let allowed_tx = alice
         .update(
+            table_name,
             allowed_doc,
             vec![("title".to_string(), "allowed updated".into())],
         )
-        .expect("optimistic local allowed update");
+        .expect("claim-authorized update succeeds")
+        .expect("allowed update has a transaction");
+    jazz_testkit::wait_for_edge_txs(&alice, &[allowed_tx]).await;
 
     wait_for_query(
         &observer,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "observer sees allowed row update persist",
         |rows| {
@@ -571,16 +586,31 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
     )
     .await;
 
-    alice
+    let blocked_tx = alice
         .update(
+            table_name,
             blocked_doc,
             vec![("title".to_string(), "blocked updated".into())],
         )
-        .expect("optimistic local blocked update");
+        .expect("submit optimistic blocked update")
+        .expect("blocked update has a transaction");
+    let blocked_error = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        alice.wait_for_transaction(blocked_tx, DurabilityTier::EdgeServer),
+    )
+    .await
+    .expect("blocked update settles within timeout")
+    .expect_err("update outside the claim array is rejected by the server");
+    assert!(
+        matches!(blocked_error, jazz::tools::JazzError::Sync(ref message)
+            if message.ends_with("authorization_denied")),
+        "{blocked_error}"
+    );
 
     let rows_after_rejected_update = observer
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("EdgeServer query after rejected blocked-row update");
     assert!(
         rows_after_rejected_update.iter().any(|(id, values)| {
@@ -617,7 +647,6 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
 /// role missing   ──query──► {}
 /// ```
 #[tokio::test]
-#[ignore = "#1760: server schema conversion does not support SessionIsNotNull for claims paths"]
 async fn role_claim_presence_gates_row_visibility() {
     tokio::task::LocalSet::new()
         .run_until(role_claim_presence_gates_row_visibility_inner())
@@ -718,7 +747,7 @@ async fn role_claim_presence_gates_row_visibility_inner() {
     let null_role_rows = wait_for_query(
         &null_role,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "explicit null role sees nothing",
         Some,
@@ -729,7 +758,7 @@ async fn role_claim_presence_gates_row_visibility_inner() {
     let missing_role_rows = wait_for_query(
         &missing_role,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "missing role sees nothing",
         Some,
@@ -758,7 +787,6 @@ async fn role_claim_presence_gates_row_visibility_inner() {
 /// claims[] or missing   ──query/stream──► {}
 /// ```
 #[tokio::test]
-#[ignore = "#1760: multiple claim-array-scoped live subscriptions hang for more than 60 seconds waiting for follow-up delivery"]
 async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates() {
     tokio::task::LocalSet::new()
         .run_until(groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner())
@@ -880,7 +908,7 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner() {
     let empty_rows = wait_for_query(
         &empty,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "empty groups_allowed denies all rows",
         Some,
@@ -891,7 +919,7 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner() {
     let missing_rows = wait_for_query(
         &missing,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "missing groups_allowed claim denies all rows",
         Some,
@@ -983,7 +1011,6 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner() {
 /// claims.revoked_at is missing  ──► matches neither table
 /// ```
 #[tokio::test]
-#[ignore = "#1760: server schema conversion does not support SessionIsNull for claims paths"]
 async fn claim_null_checks_distinguish_explicit_null_from_missing_paths() {
     tokio::task::LocalSet::new()
         .run_until(claim_null_checks_distinguish_explicit_null_from_missing_paths_inner())
@@ -1072,7 +1099,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
     let explicit_null_present_rows = wait_for_query(
         &explicit_null,
         present_query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "explicit null claim does not match != null policy",
         Some,
@@ -1083,7 +1110,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
     let present_value_null_rows = wait_for_query(
         &present_value,
         null_query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "present claim does not match IS NULL policy",
         Some,
@@ -1106,7 +1133,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
     let missing_null_rows = wait_for_query(
         &missing_path,
         null_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "missing claim path does not match IS NULL policy",
         Some,
@@ -1117,7 +1144,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
     let missing_present_rows = wait_for_query(
         &missing_path,
         present_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "missing claim path does not match != null policy",
         Some,
@@ -1149,7 +1176,6 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
 /// anyOf: group="public" OR (group="eng" AND groups CONTAINS "eng")
 /// ```
 #[tokio::test]
-#[ignore = "#1760: server schema conversion does not support nested session claim paths such as claims.org.slug"]
 async fn row_and_claim_predicates_compose_under_and_and_or() {
     tokio::task::LocalSet::new()
         .run_until(row_and_claim_predicates_compose_under_and_and_or_inner())
@@ -1263,7 +1289,7 @@ async fn row_and_claim_predicates_compose_under_and_and_or_inner() {
     let north_empty_all_of_rows = wait_for_query(
         &north_empty,
         all_of_query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "north client without eng membership fails allOf",
         Some,
@@ -1274,7 +1300,7 @@ async fn row_and_claim_predicates_compose_under_and_and_or_inner() {
     let south_eng_all_of_rows = wait_for_query(
         &south_eng,
         all_of_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "south org client fails dotted org.slug branch",
         Some,
@@ -1328,5 +1354,111 @@ async fn row_and_claim_predicates_compose_under_and_and_or_inner() {
     north_eng.shutdown().await.expect("shutdown north_eng");
     north_empty.shutdown().await.expect("shutdown north_empty");
     south_eng.shutdown().await.expect("shutdown south_eng");
+    server.shutdown().await;
+}
+
+/// Nested object fields remain distinct from literal dotted keys. Null checks
+/// match explicit null only, and absent or non-object intermediate fields deny.
+#[tokio::test]
+async fn nested_claim_fields_preserve_keys_and_missing_null_semantics() {
+    tokio::task::LocalSet::new()
+        .run_until(nested_claim_fields_preserve_keys_and_missing_null_semantics_inner())
+        .await;
+}
+
+async fn nested_claim_fields_preserve_keys_and_missing_null_semantics_inner() {
+    let table = "nested_claim_documents";
+    let schema = SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            table,
+            permissions(|p| {
+                p.allow_insert().always();
+                p.allow_read().where_(pe::all_of([
+                    pe::session_where(vec!["claims", "org", "slug"], "north"),
+                    pe::session_where(vec!["claims", "org.slug"], "literal"),
+                    pe::session_where(
+                        vec!["claims", "org", "groups"],
+                        pe::SessionWhere::contains("eng"),
+                    ),
+                    pe::session_where(
+                        vec!["claims", "org", "revoked"],
+                        pe::SessionWhere::is_null(true),
+                    ),
+                ]));
+            }),
+        ))
+        .build();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start server");
+    let seeder =
+        connect_ready_client(&server, &schema, "nested-seeder", table, READY_TIMEOUT).await;
+    let document = create_title_document(&seeder, table, "visible to matching claims").await;
+    let cases = [
+        (
+            "matching",
+            json!({"org": {"slug": "north", "groups": ["eng"], "revoked": null}, "org.slug": "literal"}),
+            true,
+        ),
+        (
+            "swapped",
+            json!({"org": {"slug": "literal", "groups": ["eng"], "revoked": null}, "org.slug": "north"}),
+            false,
+        ),
+        ("missing-parent", json!({"org.slug": "literal"}), false),
+        (
+            "scalar-parent",
+            json!({"org": "north", "org.slug": "literal"}),
+            false,
+        ),
+        (
+            "null-parent",
+            json!({"org": null, "org.slug": "literal"}),
+            false,
+        ),
+        (
+            "missing-leaf",
+            json!({"org": {"slug": "north", "groups": ["eng"]}, "org.slug": "literal"}),
+            false,
+        ),
+        (
+            "non-null-leaf",
+            json!({"org": {"slug": "north", "groups": ["eng"], "revoked": false}, "org.slug": "literal"}),
+            false,
+        ),
+        (
+            "empty-groups",
+            json!({"org": {"slug": "north", "groups": [], "revoked": null}, "org.slug": "literal"}),
+            false,
+        ),
+    ];
+    for (user, claims, allowed) in cases {
+        let client =
+            connect_ready_claims(&server, &schema, user, claims, table, READY_TIMEOUT).await;
+        if allowed {
+            wait_for_rows(
+                &client,
+                Query::from(table),
+                "matching nested claims read document",
+                |rows| (rows.len() == 1 && rows[0].0 == document).then_some(()),
+            )
+            .await;
+        } else {
+            let rows = wait_for_query(
+                &client,
+                Query::from(table),
+                jazz::tools::ReadTier::Remote,
+                QUERY_TIMEOUT,
+                user,
+                Some,
+            )
+            .await;
+            assert!(rows.is_empty(), "{user} must not read the document");
+        }
+        client.shutdown().await.expect("shutdown reader");
+    }
+    seeder.shutdown().await.expect("shutdown seeder");
     server.shutdown().await;
 }

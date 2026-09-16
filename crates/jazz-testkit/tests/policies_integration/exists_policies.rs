@@ -9,6 +9,14 @@ use super::*;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn session(subject: &str, account: u128) -> Session {
+    let mut session = Session::new("urn:jazz:test", subject);
+    session.account_id = Some(jazz::account_registry::AccountId(uuid::Uuid::from_u128(
+        account,
+    )));
+    session
+}
+
 async fn wait_for_protected_row(
     client: &JazzClient,
     protected_id: ObjectId,
@@ -20,7 +28,7 @@ async fn wait_for_protected_row(
         Query::from("protected")
             .filter(eq(col("id"), lit(*protected_id.uuid())))
             .select(["data"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         WAIT_TIMEOUT,
         description,
         |rows| (rows == [(protected_id, vec![Value::Text(expected_data.into())])]).then_some(()),
@@ -38,7 +46,7 @@ async fn wait_for_protected_row_absent(
         Query::from("protected")
             .filter(eq(col("id"), lit(*protected_id.uuid())))
             .select(["data"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         WAIT_TIMEOUT,
         description,
         |rows| rows.is_empty().then_some(()),
@@ -52,7 +60,7 @@ async fn wait_for_admin_row(client: &JazzClient, admin_id: ObjectId, user_id: &s
         Query::from("admins")
             .filter(eq(col("id"), lit(*admin_id.uuid())))
             .select(["user_id"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         WAIT_TIMEOUT,
         format!("{user_id} admin row becomes visible"),
         |rows| (rows == [(admin_id, vec![Value::Text(user_id.into())])]).then_some(()),
@@ -138,7 +146,6 @@ async fn rebac_exists_clause_denies_non_matching_insert_inner() {
 /// Verifies that UPDATE USING policies with EXISTS are enforced on sync, and
 /// that a rejected optimistic update rolls back to server-authoritative state.
 #[tokio::test]
-#[ignore = "#1759: server schema conversion requires policy EXISTS expressions to include an equality against __jazz_outer_row"]
 async fn rebac_update_denied_by_using_exists_policy() {
     tokio::task::LocalSet::new()
         .run_until(rebac_update_denied_by_using_exists_policy_inner())
@@ -179,10 +186,16 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
         jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::ALICE_ID))
             .await
             .expect("connect alice");
-    let bob =
-        jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), super::BOB_ID))
-            .await
-            .expect("connect permissive bob");
+    // Bob authors optimistic local writes as an ordinary user. Backend
+    // credentials would bypass the server policy this test exercises.
+    let bob = jazz_testkit::TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id(super::BOB_ID)
+        .as_user()
+        .ready_on("protected", Duration::from_secs(30))
+        .connect()
+        .await;
 
     let (admin_id, _, _) = alice
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
@@ -202,6 +215,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
 
     let bob_transaction_id = bob
         .update(
+            "protected",
             protected_id,
             vec![("data".into(), Value::Text("hacked by bob".into()))],
         )
@@ -211,11 +225,9 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
             bob_transaction_id.expect("permissive update should commit immediately"),
             DurabilityTier::EdgeServer,
         )
-        .await;
-    assert!(
-        rejected.is_err(),
-        "bob's update should be rejected by EXISTS in USING policy on sync"
-    );
+        .await
+        .expect_err("bob's update should be rejected by EXISTS in USING policy on sync");
+    assert_transaction_policy_denied(rejected);
 
     wait_for_protected_row(
         &alice,
@@ -234,6 +246,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
 
     alice
         .update(
+            "protected",
             protected_id,
             vec![("data".into(), Value::Text("updated by admin alice".into()))],
         )
@@ -249,18 +262,20 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
     server.shutdown().await;
 }
 
-/// Verifies local UPDATE enforcement for an EXISTS-based admin policy: non-admin
-/// sessions are denied and matching admin sessions are allowed.
+/// Verifies server settlement of explicit-session UPDATEs under an EXISTS
+/// policy: Bob's optimistic write is rejected and Alice's admin write is accepted.
 #[tokio::test]
-#[ignore = "#1759: schema conversion requires policy EXISTS expressions to include an equality against __jazz_outer_row"]
-async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
+async fn explicit_session_update_using_exists_policy_allows_admin_and_denies_non_admin() {
     tokio::task::LocalSet::new()
-        .run_until(local_update_using_exists_policy_allows_admin_and_denies_non_admin_inner())
+        .run_until(
+            explicit_session_update_using_exists_policy_allows_admin_and_denies_non_admin_inner(),
+        )
         .await;
 }
 
-async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inner() {
+async fn explicit_session_update_using_exists_policy_allows_admin_and_denies_non_admin_inner() {
     let protected_policies = permissions(|p| {
+        p.allow_read().always();
         p.allow_update()
             .where_old(pe::exists(
                 pe::table("admins").where_(pe::eq("user_id", pe::session(vec!["claims", "sub"]))),
@@ -300,22 +315,43 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
         .expect("seed protected row")
         .0;
 
-    let bob_err = client
-        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
+    wait_for_protected_row(&client, protected, "initial", "seed row settled").await;
+    let bob_transaction = client
+        .for_session(session(super::BOB_ID, 2))
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("bob update".into()))],
         )
-        .expect_err("non-admin update should be denied");
-    assert_client_policy_denied(bob_err, "protected", Operation::Update);
+        .expect("stage optimistic non-admin update")
+        .expect("update commits immediately");
+    let rejection = client
+        .wait_for_transaction(bob_transaction, DurabilityTier::EdgeServer)
+        .await
+        .expect_err("server must reject Bob's update");
+    assert_transaction_policy_denied(rejection);
+    wait_for_protected_row(&client, protected, "initial", "Bob's update is rolled back").await;
 
-    client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
+    let alice_transaction = client
+        .for_session(session(super::ALICE_ID, 1))
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("alice update".into()))],
         )
-        .expect("admin update should be allowed");
+        .expect("stage admin update")
+        .expect("update commits immediately");
+    client
+        .wait_for_transaction(alice_transaction, DurabilityTier::EdgeServer)
+        .await
+        .expect("server accepts Alice's update");
+    wait_for_protected_row(
+        &client,
+        protected,
+        "alice update",
+        "Alice's update is visible",
+    )
+    .await;
 
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;

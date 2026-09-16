@@ -6136,7 +6136,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_claim_ingress_omits_recursive_json_but_keeps_scalar_prototype_names() {
+    fn identity_claim_ingress_preserves_nested_json_and_scalar_prototype_names() {
         let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
         let claims = crate::core_claims_from_json(
             author,
@@ -6149,8 +6149,8 @@ mod tests {
         )
         .expect("recursive metadata must not reject NAPI admission");
 
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("profile")));
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("mixed")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("profile")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("mixed")));
         assert_eq!(
             claims.get(&jazz::query::provider_claim_key("__proto__")),
             Some(&CoreValue::String("safe".to_owned()))

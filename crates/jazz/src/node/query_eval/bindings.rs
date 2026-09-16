@@ -146,7 +146,18 @@ pub(super) fn rewrite_claim_predicate_for_binding(
             case,
             payload: Box::new(rewrite_claim_predicate_for_binding(*payload, claims)),
         },
-        Predicate::IsNull(_) => false_predicate(),
+        Predicate::IsNull(Operand::Claim(name)) => {
+            let path = crate::query::operand_claim_path(&name);
+            match claims
+                .and_then(|claims| crate::tools::policy_claims::policy_claim_at_path(claims, &path))
+            {
+                Some(Value::Nullable(None)) => Predicate::All(Vec::new()),
+                // Missing claims must not match IS NULL; the Not guard above
+                // also prevents them from matching IS NOT NULL.
+                _ => false_predicate(),
+            }
+        }
+        Predicate::IsNull(operand) => Predicate::IsNull(operand),
     }
 }
 
@@ -240,6 +251,14 @@ fn bind_scope_claim_predicate(
     binding_values: &mut BTreeMap<String, Value>,
 ) {
     match predicate {
+        Predicate::Not(inner) if predicate_contains_unbound_claim(inner, Some(claim_values)) => {
+            *predicate = false_predicate();
+        }
+        Predicate::IsNull(Operand::Claim(_)) => {
+            // Null checks need no typed parameter: resolve them before claim
+            // slot inference, which cannot infer a type from IS NULL alone.
+            *predicate = rewrite_claim_predicate_for_binding(predicate.clone(), Some(claim_values));
+        }
         Predicate::All(predicates) | Predicate::Any(predicates) => {
             for predicate in predicates {
                 bind_scope_claim_predicate(predicate, claim_values, binding_values);
@@ -281,8 +300,8 @@ fn bind_scope_claim_operand(
     let Operand::Claim(name) = operand else {
         return;
     };
-    let storage_name = crate::query::operand_claim_storage_key(name);
-    let Some(value) = claim_values.get(&storage_name).cloned() else {
+    let path = crate::query::operand_claim_path(name);
+    let Some(value) = crate::tools::policy_claims::policy_claim_at_path(claim_values, &path) else {
         return;
     };
     let param = claim_param_field(&ClaimPath(crate::query::operand_claim_path(name)));
@@ -486,8 +505,8 @@ fn operand_contains_unbound_claim(
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
     matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| {
-        let storage = crate::query::operand_claim_storage_key(name);
-        claims.contains_key(&storage)
+        let path = crate::query::operand_claim_path(name);
+        crate::tools::policy_claims::policy_claim_at_path(claims, &path).is_some()
     }))
 }
 

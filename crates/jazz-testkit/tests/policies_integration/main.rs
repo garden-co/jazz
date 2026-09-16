@@ -102,6 +102,17 @@ fn authorship_permissions_schema() -> Schema {
         .build()
 }
 
+fn assert_transaction_policy_denied(err: crate::JazzError) {
+    let crate::JazzError::Sync(message) = err else {
+        panic!("expected authority policy rejection, got {err:?}");
+    };
+    assert_eq!(
+        message,
+        "transaction was rejected before reaching EdgeServer durability: authorization_denied",
+        "expected authority policy rejection",
+    );
+}
+
 fn assert_client_policy_denied(err: crate::JazzError, table: &str, operation: Operation) {
     let crate::JazzError::Write(message) = err else {
         panic!("expected policy denial write error, got {err:?}");

@@ -123,6 +123,12 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           (await config.db()).all(query, { tier: "global" }),
       ): Promise<JazzRowRecord[]> => {
         const table = getPrefixedModelName(model);
+        const storedSortBy = options.sortBy
+          ? {
+              ...options.sortBy,
+              field: getFieldName({ model, field: options.sortBy.field }),
+            }
+          : undefined;
 
         const querySupportedByJazz = isQuerySupported(wasmSchema[table]!, options.where);
 
@@ -130,7 +136,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           // Preserve ordering semantics: until sorting is lowered, pagination
           // must remain after the client-side sort. Predicate-only bounded reads
           // (including mutation/uniqueness warmups) can be bounded in Groove.
-          const lowerPagination = options.sortBy === undefined;
+          const lowerPagination = storedSortBy === undefined;
           const qb = createQueryBuilder(table, wasmSchema, {
             conditions: (options.where ?? []).map((condition) =>
               toQueryCondition(model, condition),
@@ -140,7 +146,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           });
 
           let rows = (await readAll(qb)) as JazzRowRecord[];
-          rows = sortListByField(rows, options.sortBy);
+          rows = sortListByField(rows, storedSortBy);
           if (!lowerPagination) {
             rows = paginateList(rows, options.limit, options.offset);
           }
@@ -156,7 +162,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         let rows = (await readAll(qb)) as JazzRowRecord[];
 
         rows = filterListByWhere(rows, options.where);
-        rows = sortListByField(rows, options.sortBy);
+        rows = sortListByField(rows, storedSortBy);
         rows = paginateList(rows, options.limit, options.offset);
 
         return rows;
@@ -373,7 +379,10 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             limit: 1,
           });
 
-          return applySelect(first ?? null, select);
+          return applySelect(
+            first ?? null,
+            select?.map((field) => getFieldName({ model, field })),
+          );
         },
 
         async findMany({
@@ -394,7 +403,12 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             offset,
           });
 
-          return rows.map((row) => applySelect(row, _select));
+          return rows.map((row) =>
+            applySelect(
+              row,
+              _select?.map((field) => getFieldName({ model, field })),
+            ),
+          );
         },
 
         async count({ model, where }) {

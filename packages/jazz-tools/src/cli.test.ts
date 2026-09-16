@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { createServer, type Server } from "node:http";
 import { constants } from "node:fs";
 import {
   access,
@@ -3563,11 +3564,61 @@ function runBin(
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, [binPath, ...args], {
+  return spawnSync(process.execPath, ["--no-warnings", binPath, ...args], {
     encoding: "utf8",
     cwd: options.cwd,
     env: options.env ?? process.env,
   });
+}
+
+async function runCli(
+  args: readonly string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  let resolve!: (value: { status: number | null; stdout: string; stderr: string }) => void;
+  const promise = new Promise<{ status: number | null; stdout: string; stderr: string }>(
+    (resolvePromise) => {
+      resolve = resolvePromise;
+    },
+  );
+  const child = spawn(process.execPath, ["--no-warnings", distCliPath, ...args], {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  child.on("close", (status) => resolve({ status, stdout, stderr }));
+  return promise;
+}
+
+async function listenForDeployRequest(): Promise<{ server: Server; url: string }> {
+  const server = createServer((request, response) => {
+    response.statusCode = 400;
+    response.end(
+      `request=${request.url} secret=${request.headers["x-jazz-admin-secret"] ?? "<missing>"}`,
+    );
+  });
+  let resolveListening!: () => void;
+  let rejectListening!: (reason?: unknown) => void;
+  const listening = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolveListening = resolvePromise;
+    rejectListening = rejectPromise;
+  });
+  server.once("error", rejectListening);
+  server.listen(0, "127.0.0.1", resolveListening);
+  await listening;
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected deploy test server to have a TCP address.");
+  }
+  return { server, url: `http://127.0.0.1:${address.port}` };
 }
 
 function hostNativeBinaryName(): string | null {
@@ -3586,6 +3637,44 @@ function hostNativeBinaryName(): string | null {
 }
 
 describe("bin integration", () => {
+  it.each([
+    ["before command", ["--env-file", ".env.staging", "deploy", "explicit-cli-app"]],
+    ["after command", ["deploy", "--env-file", ".env.staging", "explicit-cli-app"]],
+    ["equals before command", ["--env-file=.env.staging", "deploy", "explicit-cli-app"]],
+  ] as const)("loads an explicit env file and dispatches deploy (%s)", async (_label, args) => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    const { server, url } = await listenForDeployRequest();
+    let resolveClose!: () => void;
+    let rejectClose!: (reason?: unknown) => void;
+    const close = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolveClose = resolvePromise;
+      rejectClose = rejectPromise;
+    });
+
+    await writeFile(
+      join(root, ".env.staging"),
+      [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
+    );
+    const env: NodeJS.ProcessEnv = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
+    for (const name of [...APP_ID_ENV_VARS, ...SERVER_URL_ENV_VARS]) {
+      delete env[name];
+    }
+
+    try {
+      const result = await runCli(args, { cwd: root, env });
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
+      expect(result.stderr).toContain("request=/apps/explicit-cli-app/schemas");
+      expect(result.stderr).toContain("secret=real-secret");
+      expect(result.stderr).not.toContain("Missing app ID");
+      expect(result.stdout).not.toContain("Usage:");
+    } finally {
+      server.close((error) => (error ? rejectClose(error) : resolveClose()));
+      await close;
+    }
+  });
   it("routes validate through the TypeScript CLI for a root schema.ts project", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
@@ -3595,6 +3684,35 @@ describe("bin integration", () => {
     expect(result.status).toBe(0);
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
+  });
+  it.each([
+    ["validate --schema-dir", ["validate", "--schema-dir"]],
+    [
+      "validate --schema-dir followed by another flag",
+      ["validate", "--schema-dir", "--strict-provenance"],
+    ],
+    ["validate --schema-dir with an empty value", ["validate", "--schema-dir", ""]],
+  ])("rejects %s with a deterministic missing-value error", async (_description, args) => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    // A valid cwd schema proves the parser does not silently fall back to cwd
+    // when a recognized value flag is missing.
+    const result = runBin(args, { cwd: root });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Missing value for --schema-dir.");
+  });
+  it("rejects a malformed later value after a valid occurrence", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(["validate", "--schema-dir", root, "--schema-dir"], { cwd: root });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Missing value for --schema-dir.");
   });
 
   it("routes schema relations through the wrapper CLI", async () => {

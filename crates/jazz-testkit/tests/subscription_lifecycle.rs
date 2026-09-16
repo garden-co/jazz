@@ -9,8 +9,8 @@ use std::time::Duration;
 use jazz::query::Query;
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema,
-    permissions, policy_expr as pe,
+    ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, permissions,
+    policy_expr as pe,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -94,8 +94,9 @@ async fn assert_row_stays_absent_locally(
     let deadline = tokio::time::Instant::now() + ABSENCE_WINDOW;
     loop {
         let rows = client
-            .query(query.clone(), None)
+            .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
             .await
+            .map(jazz::tools::test_support::ordinary_rows)
             .expect("local query during absence window");
         assert!(
             rows.iter().all(|(id, _)| *id != row_id),
@@ -158,7 +159,7 @@ async fn one_shot_query_is_served_once_without_installing_live_delivery_impl() {
     let one_shot_rows = wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         DELTA_TIMEOUT,
         "alice's one-shot query returns the first document",
         |rows| {
@@ -178,8 +179,9 @@ async fn one_shot_query_is_served_once_without_installing_live_delivery_impl() {
     // connection, so the server has processed the earlier one-shot teardown
     // before bob's next write arrives.
     alice
-        .query(Query::from("projects"), Some(DurabilityTier::EdgeServer))
+        .query(Query::from("projects"), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("alice's ordering probe on projects");
 
     let (row2, _, row2_tx) = bob
@@ -202,8 +204,9 @@ async fn one_shot_query_is_served_once_without_installing_live_delivery_impl() {
     // The first one-shot delivered row1 into alice's local store; row2 must
     // not join it without a live subscription.
     let local_rows = alice
-        .query(query.clone(), None)
+        .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("alice reads locally after the one-shot");
     assert!(
         local_rows.iter().any(|(id, _)| *id == row1),
@@ -214,7 +217,7 @@ async fn one_shot_query_is_served_once_without_installing_live_delivery_impl() {
     wait_for_query(
         &alice,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         DELTA_TIMEOUT,
         "alice's second one-shot query returns both documents",
         |rows| {
@@ -294,8 +297,9 @@ async fn dropped_subscription_stops_delivery_and_resubscribes_cleanly_impl() {
     // connection, so the server has processed alice's unsubscription before
     // bob's next write arrives.
     alice
-        .query(Query::from("projects"), Some(DurabilityTier::EdgeServer))
+        .query(Query::from("projects"), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("alice's ordering probe on projects");
 
     let (row2, _, row2_tx) = bob
@@ -316,8 +320,9 @@ async fn dropped_subscription_stops_delivery_and_resubscribes_cleanly_impl() {
     .await;
 
     let local_rows = alice
-        .query(query.clone(), None)
+        .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("alice reads locally after unsubscribing");
     assert!(
         local_rows.iter().any(|(id, _)| *id == row1),
@@ -571,7 +576,7 @@ async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscri
     .await;
 
     let live_delete_tx = alice
-        .delete(membership_live)
+        .delete("memberships", membership_live)
         .expect("alice deletes the online membership");
     wait_for_edge_txs(
         &alice,
@@ -588,7 +593,7 @@ async fn deleted_membership_row_revokes_documents_for_live_and_persisted_subscri
     .await;
 
     let off_delete_tx = alice
-        .delete(membership_off)
+        .delete("memberships", membership_off)
         .expect("alice deletes a membership while bob's persistent client is offline");
     wait_for_edge_txs(
         &alice,
@@ -674,7 +679,9 @@ async fn deleting_a_subscribed_row_emits_a_removal_delta_impl() {
     )
     .await;
 
-    let delete_tx = bob.delete(row_id).expect("bob deletes the document");
+    let delete_tx = bob
+        .delete("documents", row_id)
+        .expect("bob deletes the document");
     wait_for_edge_txs(
         &bob,
         &[delete_tx.expect("ordinary mutation commits immediately")],

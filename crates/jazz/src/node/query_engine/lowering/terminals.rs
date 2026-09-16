@@ -314,7 +314,13 @@ pub(super) fn lowered_terminals(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_else(|| source_terminal_route_fields(source, &root_route_fields));
-    let visible_root_with_routes = if root_source_route_fields.is_empty() {
+    let visible_root_with_routes = if !flat_join_payload_fields(plan).is_empty() {
+        source_rows_for_visible_graph(
+            source,
+            closure.visible_root.clone(),
+            &root_source_route_fields,
+        )?
+    } else if root_source_route_fields.is_empty() {
         closure.visible_root.clone()
     } else {
         closure
@@ -391,10 +397,25 @@ pub(super) fn lowered_terminals(
                 &contribution_route_fields,
             )?
         } else {
+            let (visible_parent, parent_source) = match &contribution.parent {
+                Some(parent) => (
+                    covered_source_members.get(parent).cloned().ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Runtime(
+                            "nested join contribution requires its admitted parent".to_owned(),
+                        ))
+                    })?,
+                    resolved_sources.get(parent).ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Runtime(
+                            "nested join parent source was not resolved".to_owned(),
+                        ))
+                    })?,
+                ),
+                None => (closure.visible_root.clone(), source),
+            };
             join_contribution_membership_graph(
-                closure.visible_root.clone(),
+                visible_parent,
                 contribution,
-                source,
+                parent_source,
                 resolved_source,
                 &request.input.shape.nodes,
                 resolved_sources,
@@ -623,10 +644,13 @@ pub(super) fn lowered_terminals(
                         .iter()
                         .map(|field| (field.name.clone(), field.ty.clone())),
                 );
+                // Keep the session/parameter routes used to partition this
+                // terminal, even though they are not public result columns.
                 let graph = graph.clone().project_fields(
                     public_fields
                         .iter()
-                        .map(|field| ProjectField::named(&field.name)),
+                        .map(|field| ProjectField::named(&field.name))
+                        .chain(root_route_fields.iter().map(ProjectField::named)),
                 );
                 let public_field_names = public_fields
                     .iter()
@@ -818,16 +842,14 @@ pub(super) fn lowered_terminals(
                         request,
                         claim_route_fields.clone(),
                     )?;
-                    let contribution_graph = join_contribution_membership_graph(
-                        closure.visible_root.clone(),
-                        contribution,
-                        source,
-                        resolved_source,
-                        &request.input.shape.nodes,
-                        resolved_sources,
-                        request,
-                        &claim_route_fields,
-                    )?;
+                    let contribution_graph = covered_source_members
+                        .get(&contribution.source)
+                        .cloned()
+                        .ok_or_else(|| {
+                            single_gap_report(UnsupportedReason::Runtime(
+                                "join contribution has no admitted source rows".to_owned(),
+                            ))
+                        })?;
                     let graph = fact_terminal_graph(
                         fact,
                         contribution_graph,
@@ -3215,13 +3237,28 @@ pub(super) fn source_rows_for_visible_graph(
         version.tx_time_field,
         version.tx_node_field,
     ];
-    keys.extend(route_fields.iter().cloned());
-    Ok(GraphBuilder::semi_join(
-        source.graph.clone(),
-        visible,
-        keys.clone(),
-        keys,
-    ))
+    keys.extend(source.routing_fields.intersection(route_fields).cloned());
+    if route_fields.is_empty() {
+        return Ok(GraphBuilder::semi_join(
+            source.graph.clone(),
+            visible,
+            keys.clone(),
+            keys,
+        ));
+    }
+    // A joined table's policy may introduce a route absent from the root
+    // source. Recover the source row by exact version and shared routes,
+    // retaining every authority route from the admitted visible relation.
+    let mut fields = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+    fields.extend(
+        route_fields
+            .iter()
+            .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+    );
+    Ok(
+        GraphBuilder::join(source.graph.clone(), visible, keys.clone(), keys)
+            .project_fields(fields),
+    )
 }
 
 /// Attach immutable version evidence to rows that have already passed the

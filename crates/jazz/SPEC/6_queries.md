@@ -181,6 +181,12 @@ whose record is publicly returned. Flat joined output is a separate target AST
 form, described in §6.4.1. Conflating these two forms would make policy
 traversal accidentally promise a public tuple shape.
 
+An explicit source-column/target-column equality may also constrain membership
+through compatible non-reference columns, such as two text columns.
+This remains an existential join: matching joined rows do not produce
+public tuples. UUID and array reference traversals retain their declared-FK
+validation, and source-lookup traversals retain their existing reference rules.
+
 ### 6.1.1 Membership and containment filters
 
 Membership and containment semantics are core-owned query semantics. Binding
@@ -262,6 +268,14 @@ provenance; accountless readers have no ownership authority. Provider claims
 such as `sub` and `user_id` retain their admission-defined values. Additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
+
+Provider claim paths may traverse nested JSON object fields. Path segments are
+literal keys: `["claims", "org", "slug"]` differs from
+`["claims", "org.slug"]`. Traversal through a missing key or a non-object value
+is unbound and denies the corresponding predicate, including under negation.
+An explicit null leaf remains bound: it matches `IS NULL`, while a missing leaf
+does not. Arrays remain values for containment/membership; object traversal does
+not interpret numeric segments as array indexes.
 
 #### Prepared claim parameters
 

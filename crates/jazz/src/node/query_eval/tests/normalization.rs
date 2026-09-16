@@ -277,8 +277,16 @@ fn join_via_nested_joins_normalize_as_parent_projection_gate() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
 
-    assert_eq!(normalized.join_contributions.len(), 1);
+    assert_eq!(normalized.join_contributions.len(), 2);
     let contribution = &normalized.join_contributions[0];
+    assert_eq!(contribution.parent, None);
+    let nested_contribution = &normalized.join_contributions[1];
+    assert_eq!(
+        nested_contribution.parent.as_ref(),
+        Some(&contribution.source)
+    );
+    assert_eq!(nested_contribution.source.table, "users");
+    assert_eq!(nested_contribution.input.0, "join_via:0:nested:0:filter");
     assert_eq!(contribution.input.0, "join_via:0:nested:0:parent_project");
     assert!(matches!(
         normalized.nodes.get(&contribution.input),
