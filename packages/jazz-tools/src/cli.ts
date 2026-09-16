@@ -578,7 +578,7 @@ function printHelp(): void {
     "  migrations create     Generate a typed structural migration stub between two schema versions",
   );
   console.log(
-    "  migrations push <appId> <fromHash> <toHash> Push a reviewed migration edge to the server",
+    "  migrations push [<appId>] <fromHash> <toHash> Push a reviewed migration edge to the server",
   );
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
@@ -698,14 +698,22 @@ if (isMainModule()) {
         name: getFlagValue(commandArgs, "--name"),
       });
     } else if (subcommand === "push") {
-      const appId = args[2];
-      const fromHash = args[3];
-      const toHash = args[4];
-      const sharedArgs = args.slice(5);
+      const pushArgs = args.slice(2);
+      // A push has two positional forms: an explicit app ID followed by both
+      // hashes, or both hashes with the app ID resolved from the environment.
+      // Options are deliberately left in place after the positional values so
+      // the existing flag resolver handles them unchanged.
+      const hasExplicitAppId = pushArgs.length >= 3 && !pushArgs[2]!.startsWith("-");
+      const { appId, args: migrationArgs } = hasExplicitAppId
+        ? splitLeadingAppId(pushArgs)
+        : { appId: resolveEnvVar(APP_ID_ENV_VARS), args: pushArgs };
+      const fromHash = migrationArgs[0];
+      const toHash = migrationArgs[1];
+      const sharedArgs = migrationArgs.slice(2);
 
-      if (!appId || !fromHash || !toHash) {
+      if (!fromHash || !toHash) {
         console.error(
-          "Usage: node dist/cli.js migrations push <appId> <fromHash> <toHash> [options]",
+          "Usage: node dist/cli.js migrations push [<appId>] <fromHash> <toHash> [options]",
         );
         process.exit(1);
       }
