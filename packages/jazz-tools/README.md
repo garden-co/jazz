@@ -118,7 +118,7 @@ suffixes stay unchanged, including `status` and `analysis`. Reverse names remain
 
 Pluralization recognizes terminal `person/people`, `child/children`, `mouse/mice`,
 `goose/geese`, `tooth/teeth`, `foot/feet`, `analysis/analyses`, `status/statuses`,
-`alias/aliases`, and `bus/buses`. Equipment, news, information, software, data,
+`alias/aliases`, and `bus/buses`. Equipment, news, information, software, data, media,
 series, species, fish, and sheep are invariant. These dictionary suffixes match
 lowercase, Titlecase, or UPPERCASE, preserving any prefix (`ownerPersonIds` →
 `ownerPeople`, `owner_person_ids` → `owner_people`). Existing dictionary plurals

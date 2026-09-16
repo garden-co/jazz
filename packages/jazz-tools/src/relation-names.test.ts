@@ -6,6 +6,7 @@ import {
 } from "./relation-names.js";
 import { schema as s } from "./index.js";
 import { analyzeRelations } from "./codegen/relation-analyzer.js";
+import { translateQuery } from "./runtime/query-adapter.js";
 import { definePermissions } from "./permissions/index.js";
 
 const corpus = {
@@ -37,6 +38,9 @@ const corpus = {
   informationIds: "information",
   softwareIds: "software",
   dataIds: "data",
+  mediaIds: "media",
+  "category\nIds": "category\ns",
+  "box\nIds": "box\ns",
   seriesIds: "series",
   speciesIds: "species",
   fishIds: "fish",
@@ -114,7 +118,67 @@ describe("bounded relation names", () => {
       policy.groups.allowRead.where(policy.exists(policy.groups.hopTo("people"))),
       policy.people.allowRead.where(policy.exists(policy.people.hopTo("groupsViaPeople"))),
     ]);
-    expect(JSON.stringify(permissions)).toContain('"personIds"');
+    expect(permissions.groups!.select?.using).toMatchObject({
+      type: "ExistsRel",
+      rel: {
+        Project: {
+          input: {
+            Join: {
+              left: { TableScan: { table: "groups" } },
+              right: { TableScan: { table: "people", alias: "__hop_0" } },
+              on: [
+                {
+                  left: { scope: "groups", column: "personIds" },
+                  right: { scope: "__hop_0", column: "id" },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+    expect(permissions.people!.select?.using).toMatchObject({
+      type: "ExistsRel",
+      rel: {
+        Project: {
+          input: {
+            Join: {
+              left: { TableScan: { table: "people" } },
+              right: { TableScan: { table: "groups", alias: "__hop_0" } },
+              on: [
+                {
+                  left: { scope: "people", column: "id" },
+                  right: { scope: "__hop_0", column: "personIds" },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+    expect(
+      JSON.parse(translateQuery(app.groups.include({ people: true })._build(), app.wasmSchema))
+        .array_subqueries,
+    ).toMatchObject([
+      {
+        column_name: "people",
+        table: "people",
+        inner_column: "id",
+        outer_column: "groups.personIds",
+      },
+    ]);
+    expect(
+      JSON.parse(
+        translateQuery(app.people.include({ groupsViaPeople: true })._build(), app.wasmSchema),
+      ).array_subqueries,
+    ).toMatchObject([
+      {
+        column_name: "groupsViaPeople",
+        table: "groups",
+        inner_column: "personIds",
+        outer_column: "people.id",
+      },
+    ]);
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       // @ts-expect-error the old type-only misspelling is not a relation
       app.groups.include({ persons: true });

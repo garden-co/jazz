@@ -19,6 +19,7 @@ const uncountable = {
   information: "information",
   software: "software",
   data: "data",
+  media: "media",
   series: "series",
   species: "species",
   fish: "fish",
@@ -117,8 +118,14 @@ export function pluralRelationName(name: string): string {
   }
   const lower = name.toLowerCase();
   const ending = (value: string) => (name === name.toUpperCase() ? value.toUpperCase() : value);
-  if (/[bcdfghjklmnpqrstvwxz]y$/.test(lower)) return name.slice(0, -1) + ending("ies");
-  if (/(?:ss|sh|ch|x|z)$/.test(lower)) return name + ending("es");
+  if (
+    lower.endsWith("y") &&
+    lower.length > 1 &&
+    "bcdfghjklmnpqrstvwxz".includes(lower.slice(-2, -1))
+  )
+    return name.slice(0, -1) + ending("ies");
+  if (["ss", "sh", "ch", "x", "z"].some((suffix) => lower.endsWith(suffix)))
+    return name + ending("es");
   return lower.endsWith("s") ? name : name + ending("s");
 }
 
