@@ -72,7 +72,7 @@ fn receive_backpressure_finalizes_consumed_view_update() {
 }
 struct BackpressureDuringHandoffTransport {
     inner: Box<dyn Transport>,
-    blocked: bool,
+    block_next_receive: Rc<std::cell::Cell<bool>>,
 }
 
 impl Transport for BackpressureDuringHandoffTransport {
@@ -85,15 +85,10 @@ impl Transport for BackpressureDuringHandoffTransport {
     }
 
     fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
-        if self.blocked {
-            self.blocked = false;
+        if self.block_next_receive.replace(false) {
             return Err(TransportError::Backpressure);
         }
-        let message = self.inner.try_recv_result()?;
-        if matches!(message, Some(SyncMessage::ViewUpdate(_))) {
-            self.blocked = true;
-        }
-        Ok(message)
+        self.inner.try_recv_result()
     }
 }
 
@@ -123,11 +118,15 @@ impl Transport for TapTransport {
 }
 
 #[test]
-fn handoff_receive_backpressure_keeps_queued_view_ineligible() {
+fn handoff_receive_backpressure_keeps_transport_view_ineligible() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xf4; 16]);
     let server = open_core(0xf5, AuthorSubject::SYSTEM, &schema);
     server.server.set_permissions_ready(true).unwrap();
+    let queued_row = row(0xfa);
+    server
+        .insert_with_id("todos", queued_row, cells("queued", false, alice))
+        .unwrap();
     let client = open_db(0xf6, alice, &schema);
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
@@ -141,14 +140,16 @@ fn handoff_receive_backpressure_keeps_queued_view_ineligible() {
         inner: server_transport,
         outbound: Rc::clone(&server_sent),
     });
+    let block_next_receive = Rc::new(std::cell::Cell::new(false));
     let wrapped = BackpressureDuringHandoffTransport {
         inner: client_transport,
-        blocked: false,
+        block_next_receive: Rc::clone(&block_next_receive),
     };
     let upstream = block_on(client.connect_upstream(Box::new(wrapped)));
     let subscriber = server.accept_subscriber(server_transport, alice);
-    let _subscription =
+    let mut subscription =
         prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    assert!(subscription.try_next_event().is_none());
 
     client.tick().unwrap();
     for _ in 0..32 {
@@ -161,69 +162,82 @@ fn handoff_receive_backpressure_keeps_queued_view_ineligible() {
             break;
         }
     }
-    let subscription = server_sent
+    let initial_view_count = server_sent
         .borrow()
         .iter()
-        .find_map(|message| match message {
-            SyncMessage::ViewUpdate(update) => Some(update.subscription),
-            _ => None,
-        })
-        .expect("authority must queue a view update before handoff staging");
-    let authority_result = client
-        .node
-        .node
-        .borrow()
-        .authority_result_key_for_subscription(subscription)
-        .unwrap();
-    let receipt_before = client
-        .node
-        .node
-        .borrow()
-        .applied_authority_result_generation(&authority_result);
+        .filter(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        .count();
+    assert_eq!(initial_view_count, 1, "authority must send one opening");
+    client.tick().unwrap();
+    assert_eq!(
+        opened_rows(next_settled_opening(&mut subscription)).len(),
+        1
+    );
 
-    loop {
-        let message = upstream
-            .borrow_mut()
-            .transport
-            .try_recv_result()
-            .unwrap()
-            .expect("authority must leave the view update on the transport");
-        let is_view_update = matches!(message, SyncMessage::ViewUpdate(_));
-        upstream
-            .borrow_mut()
-            .staged_inbound
-            .push_back(crate::db::StagedInboundMessage {
-                message,
-                authority_receipt_eligible: true,
-            });
-        if is_view_update {
+    server
+        .insert_with_id("todos", row(0xfb), cells("second", false, alice))
+        .unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+            .count()
+            > initial_view_count
+        {
             break;
         }
     }
+    assert_eq!(
+        server_sent
+            .borrow()
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+            .count(),
+        2,
+        "authority must queue the changed view before handoff"
+    );
+    assert!(
+        upstream.borrow().staged_inbound.is_empty(),
+        "the changed view must remain in the transport backlog before handoff"
+    );
 
+    block_next_receive.set(true);
     upstream
         .borrow_mut()
         .stage_inbound_without_authority_receipt();
     assert!(
-        upstream.borrow().inbound_authority_receipt_quarantine,
-        "recoverable handoff flush must quarantine the next inbound frame"
+        upstream.borrow().staged_inbound.is_empty(),
+        "interrupted handoff must leave the queued changed view on transport"
     );
     client
         .tick()
         .expect("handoff receive backpressure remains recoverable");
-    assert!(
-        !upstream.borrow().inbound_authority_receipt_quarantine,
-        "handoff receive quarantine clears after the queued backlog drains"
-    );
-    assert_eq!(
-        client
-            .node
-            .node
-            .borrow()
-            .applied_authority_result_generation(&authority_result),
-        receipt_before,
-        "a queued handoff snapshot must not become an eligible authority receipt"
-    );
+    while let Some(event) = subscription.try_next_event() {
+        assert!(
+            !event_settled(&event),
+            "the transport-resident pre-handoff view must not settle: {event:?}"
+        );
+    }
+    assert_eq!(prepared_read(&client, &Query::from("todos")).len(), 1);
+
+    let mut settled_update = None;
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            if event_settled(&event) {
+                settled_update = Some(event);
+                break;
+            }
+        }
+        if settled_update.is_some() {
+            break;
+        }
+    }
+    let _settled_update = settled_update.expect("a fresh confirming view must settle");
+    assert_eq!(prepared_read(&client, &Query::from("todos")).len(), 2);
 }
 
 #[test]
