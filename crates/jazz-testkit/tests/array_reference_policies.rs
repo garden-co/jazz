@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value,
-    permissions, policy_expr as pe,
+    ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value, permissions,
+    policy_expr as pe,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -134,7 +134,7 @@ async fn public_schema_allows_uuid_reference_without_target_rows_inner() {
     let roots = wait_for_query(
         &alice,
         jazz::query::Query::from("roots"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees the settled referring root",
         |rows| has_row(&rows, root_id, &[Value::Uuid(absent_target)]).then_some(rows),
@@ -146,7 +146,7 @@ async fn public_schema_allows_uuid_reference_without_target_rows_inner() {
     let targets = wait_for_query(
         &alice,
         jazz::query::Query::from("targets"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice confirms the referenced target is absent",
         |rows| rows.is_empty().then_some(rows),
