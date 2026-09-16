@@ -814,10 +814,19 @@ fn lower_union_plan(
                         .graph
                         .clone()
                 };
-                lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)?
+                lower_linear_plan_steps_cached(
+                    graph,
+                    linear,
+                    root_source,
+                    resolved_sources,
+                    request,
+                    None,
+                    None,
+                    true,
+                )?
             }
             RelationInputPlan::Union(_) | RelationInputPlan::Recursive(_) => {
-                lower_relation_input(branch_plan, resolved_sources, request)?
+                lower_relation_input_for_contributor(branch_plan, resolved_sources, request)?
             }
         };
         // A public root UNION ALL has no join-side occurrence slot. Retain an
@@ -835,13 +844,18 @@ fn lower_union_plan(
                 "UNION ALL root arm projection discarded its stable source row identity".to_owned(),
             ));
         }
-        input.graph =
-            input
-                .graph
-                .project_fields(input.fields.iter().map(ProjectField::named).chain([
-                    ProjectField::renamed(row_field, "__root_union_row".to_owned()),
-                    ProjectField::literal("__root_union_arm", Value::String(label)),
-                ]));
+        // Keep the source descriptor's order ahead of public aliases. Global
+        // UNION ordering addresses source fields by descriptor index.
+        let source_field_names = source_fields(source).collect::<Vec<_>>();
+        let source_field_set = source_field_names.iter().cloned().collect::<BTreeSet<_>>();
+        let retained_fields = source_field_names
+            .into_iter()
+            .chain(input.fields.difference(&source_field_set).cloned())
+            .map(ProjectField::named);
+        input.graph = input.graph.project_fields(retained_fields.chain([
+            ProjectField::renamed(row_field, "__root_union_row".to_owned()),
+            ProjectField::literal("__root_union_arm", Value::String(label)),
+        ]));
         input.fields.insert("__root_union_row".to_owned());
         input.fields.insert("__root_union_arm".to_owned());
         input.union_occurrence_carrier =
