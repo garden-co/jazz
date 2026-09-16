@@ -1,9 +1,7 @@
 import { col, allowExternalProvenanceName } from "./dsl.js";
-import { createRelationCatalogue } from "./codegen/relation-analyzer.js";
 import { defineMigration, renameTableFrom } from "./migrations.js";
 import { definePermissions } from "./permissions/index.js";
 import { defineApp, defineSchema, defineSliceableApp, defineTable } from "./typed-app.js";
-import type { RelationCatalogue as TypedRelationCatalogue } from "./codegen/relation-analyzer.js";
 import type {
   App as TypedApp,
   InsertOf as TypedInsertOf,
@@ -25,7 +23,6 @@ type RuntimeSchemaNamespace = typeof col & {
   defineSchema: typeof defineSchema;
   defineApp: typeof defineApp;
   defineSliceableApp: typeof defineSliceableApp;
-  createRelationCatalogue: typeof createRelationCatalogue;
   defineMigration: typeof defineMigration;
   renameTableFrom: typeof renameTableFrom;
   definePermissions: typeof definePermissions;
@@ -38,7 +35,6 @@ export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
   defineSchema,
   defineApp,
   defineSliceableApp,
-  createRelationCatalogue,
   defineMigration,
   renameTableFrom,
   definePermissions,
@@ -46,19 +42,13 @@ export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
 } as const);
 
 export namespace schema {
-  export type RelationCatalogue = TypedRelationCatalogue;
   export type TableDefinition = TypedTableDefinition;
   export type SchemaDefinition = TypedSchemaDefinition;
-  export type Schema<
-    TSchema extends TypedSchemaDefinition = TypedSchemaDefinition,
-    TCatalogue extends RelationCatalogue | undefined = undefined,
-  > = TypedSchema<TSchema, TCatalogue>;
-  export type App<
-    TSchema extends TypedSchema<any, TypedRelationCatalogue | undefined> | TypedSchemaDefinition,
-  > = TypedApp<TSchema>;
-  export type SliceableApp<
-    TSchema extends TypedSchema<any, TypedRelationCatalogue | undefined> | TypedSchemaDefinition,
-  > = TypedSliceableApp<TSchema>;
+  export type Schema<TSchema extends TypedSchemaDefinition = TypedSchemaDefinition> =
+    TypedSchema<TSchema>;
+  export type App<TSchema extends TypedSchema<any> | TypedSchemaDefinition> = TypedApp<TSchema>;
+  export type SliceableApp<TSchema extends TypedSchema<any> | TypedSchemaDefinition> =
+    TypedSliceableApp<TSchema>;
   export type RowOf<TTable> = TypedRowOf<TTable>;
   export type InsertOf<TTable> = TypedInsertOf<TTable>;
   export type LargeValueUpdateOf<TTable> = TypedLargeValueUpdateOf<TTable>;

@@ -90,33 +90,6 @@ To use a specific prerelease:
 npx jazz-tools@2.0.0-alpha.0 server
 ```
 
-### Exact relation names for generated apps
-
-For exact TypeScript/runtime parity on irregular reference names, keep the
-authored schema separate from the app and permissions modules. Export the
-authored definition from `schema.ts`, then generate and import a catalogue:
-
-```bash
-jazz-tools schema relations --output relation-catalogue.ts
-```
-
-```ts
-// app.ts
-import { schema as s } from "jazz-tools";
-import relationCatalogue from "./relation-catalogue.js";
-import { schema } from "./schema.js";
-
-export const app = s.defineApp(schema, relationCatalogue);
-```
-
-The generated TypeScript file contains an `as const` catalogue. If naming the
-schema type explicitly, use
-`s.Schema<typeof schema, typeof relationCatalogue>`. Regenerate the catalogue
-after every authored schema edit; app construction rejects stale catalogues.
-The `schema relations` command only evaluates the authored `schema.ts` export
-and skips `permissions.ts`, so it also works before `app.ts` or the generated
-catalogue exists.
-
 ## Supported binary targets
 
 - macOS arm64

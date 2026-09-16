@@ -3,11 +3,9 @@
 // CLI for jazz-tools schema tooling
 
 import { existsSync, readFileSync, realpathSync } from "fs";
-import { readFile, writeFile } from "fs/promises";
+import { readFile } from "fs/promises";
 import { basename, join, resolve } from "path";
 import { fileURLToPath } from "url";
-import { createRelationCatalogue } from "./codegen/relation-analyzer.js";
-import { loadCompiledSchema } from "./schema-loader.js";
 import {
   createMigration as createCatalogueMigration,
   deploy as deployCatalogue,
@@ -37,11 +35,6 @@ export interface SchemaExportOptions {
 
 export interface SchemaHashOptions {
   schemaDir: string;
-}
-
-export interface RelationCatalogueOptions {
-  schemaDir: string;
-  output?: string;
 }
 
 const PERMISSIONS_LIFECYCLE_NOTE =
@@ -89,24 +82,6 @@ export async function schemaHash(options: SchemaHashOptions): Promise<void> {
   const result = await getCurrentSchemaHash(options);
   console.log(`Loaded structural schema from ${result.schemaFile}.`);
   console.log(`Current schema hash: ${shortSchemaHash(result.hash)}`);
-}
-
-export async function schemaRelations(options: RelationCatalogueOptions): Promise<void> {
-  const project = await loadCompiledSchema(options.schemaDir, {
-    authoredSchemaOnly: true,
-    loadPermissions: false,
-  });
-  const catalogue = createRelationCatalogue(project.wasmSchema);
-  const json = JSON.stringify(catalogue, null, 2);
-  const output = options.output?.endsWith(".ts")
-    ? `export const relationCatalogue = ${json} as const;\nexport default relationCatalogue;\n`
-    : `${json}\n`;
-  if (options.output) {
-    await writeFile(options.output, output);
-    console.log(`Wrote relation catalogue to ${options.output}.`);
-    return;
-  }
-  process.stdout.write(output);
 }
 
 export interface MigrationCommandOptions {
@@ -597,7 +572,6 @@ function printHelp(): void {
   console.log("  validate              Validate root schema.ts and optional permissions.ts");
   console.log("  schema hash           Print the short hash of the current schema.ts");
   console.log("  schema export         Print the compiled structural schema as JSON");
-  console.log("  schema relations      Emit the schema-bound relation catalogue as JSON");
   console.log("  deploy <appId>        Publish the current schema.ts and permissions.ts");
   console.log("  permissions status <appId> Show the current server permissions head for this app");
   console.log(
@@ -611,9 +585,6 @@ function printHelp(): void {
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
   console.log("\nSchema hash options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-  console.log("\nSchema relations options:");
-  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-  console.log("  --output <path>       Write JSON, or an `as const` TS module for a .ts path");
   console.log("\nSchema export options:");
   console.log(
     "  <appId>               Required for server-backed schema export by hash (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
@@ -684,16 +655,6 @@ if (isMainModule()) {
         console.error(err.message);
         process.exit(1);
       });
-    } else if (subcommand === "relations") {
-      const args = process.argv.slice(4);
-      const schemaDirFlag = getFlagValue(args, "--schema-dir");
-      const outputFlag = getFlagValue(args, "--output");
-      const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
-      const output = outputFlag ? resolve(process.cwd(), outputFlag) : undefined;
-      schemaRelations({ schemaDir, output }).catch((err) => {
-        console.error(err.message);
-        process.exit(1);
-      });
     } else if (subcommand === "export") {
       const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
       const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
@@ -718,9 +679,7 @@ if (isMainModule()) {
         process.exit(1);
       });
     } else {
-      console.error(
-        "Usage: node dist/cli.js schema <hash|relations|export> [--schema-dir <path>] [...]",
-      );
+      console.error("Usage: node dist/cli.js schema <hash|export> [--schema-dir <path>] [...]");
       process.exit(1);
     }
   } else if (command === "migrations") {
