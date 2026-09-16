@@ -232,7 +232,7 @@ describe("permissions type inference", () => {
       const reachableTeams = policy.teams.gather({
         start: { kind: "individual", identity_key: session.claims["sub"] },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
       });
 
       function hasViewerGrant(resource: unknown) {
