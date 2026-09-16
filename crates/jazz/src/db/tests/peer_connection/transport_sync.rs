@@ -181,6 +181,21 @@ fn handoff_receive_backpressure_keeps_queued_view_ineligible() {
         .borrow()
         .applied_authority_result_generation(&authority_result);
 
+    let staged = upstream
+        .borrow_mut()
+        .transport
+        .try_recv_result()
+        .unwrap()
+        .expect("authority must leave a view update on the transport");
+    assert!(matches!(staged, SyncMessage::ViewUpdate(_)));
+    upstream
+        .borrow_mut()
+        .staged_inbound
+        .push_back(crate::db::StagedInboundMessage {
+            message: staged,
+            authority_receipt_eligible: true,
+        });
+
     upstream
         .borrow_mut()
         .stage_inbound_without_authority_receipt();
@@ -203,6 +218,109 @@ fn handoff_receive_backpressure_keeps_queued_view_ineligible() {
             .applied_authority_result_generation(&authority_result),
         receipt_before,
         "a queued handoff snapshot must not become an eligible authority receipt"
+    );
+}
+
+#[test]
+fn handoff_receive_pre_staged_view_update_is_ineligible_after_immediate_drain() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xf7; 16]);
+    let server = open_core(0xf8, AuthorSubject::SYSTEM, &schema);
+    server.server.set_permissions_ready(true).unwrap();
+    let client = open_db(0xf9, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xf9; 16]),
+        1,
+        NodeUuid::from_bytes([0xf8; 16]),
+        1,
+    );
+    let server_sent = Rc::new(RefCell::new(VecDeque::new()));
+    let server_transport = Box::new(TapTransport {
+        inner: server_transport,
+        outbound: Rc::clone(&server_sent),
+    });
+    let upstream = block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+    let _subscription =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ViewUpdate(_)))
+        {
+            break;
+        }
+    }
+    let subscription = server_sent
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::ViewUpdate(update) => Some(update.subscription),
+            _ => None,
+        })
+        .expect("authority must queue a view update before handoff staging");
+    let authority_result = client
+        .node
+        .node
+        .borrow()
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let receipt_before = client
+        .node
+        .node
+        .borrow()
+        .applied_authority_result_generation(&authority_result);
+
+    loop {
+        let message = upstream
+            .borrow_mut()
+            .transport
+            .try_recv_result()
+            .unwrap()
+            .expect("authority must leave the view update on the transport");
+        let is_view_update = matches!(message, SyncMessage::ViewUpdate(_));
+        upstream
+            .borrow_mut()
+            .staged_inbound
+            .push_back(crate::db::StagedInboundMessage {
+                message,
+                authority_receipt_eligible: true,
+            });
+        if is_view_update {
+            break;
+        }
+    }
+    assert!(
+        upstream.borrow().staged_inbound.iter().any(|staged| {
+            matches!(staged.message, SyncMessage::ViewUpdate(_))
+                && staged.authority_receipt_eligible
+        }),
+        "regression setup must preload an eligible ViewUpdate"
+    );
+
+    upstream
+        .borrow_mut()
+        .stage_inbound_without_authority_receipt();
+    assert!(
+        !upstream.borrow().inbound_authority_receipt_quarantine,
+        "an immediately drained handoff must not retain quarantine"
+    );
+    client
+        .tick()
+        .expect("pre-staged handoff receive remains recoverable");
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .applied_authority_result_generation(&authority_result),
+        receipt_before,
+        "a pre-staged handoff snapshot must not become an eligible authority receipt"
     );
 }
 
