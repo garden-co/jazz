@@ -1,4 +1,5 @@
 const DEFAULT_API_URL = "https://v2.dashboard.jazz.tools/api/apps/generate";
+const PROVISION_TIMEOUT_MS = 8_000;
 
 export class ProvisionNetworkError extends Error {
   constructor(apiUrl: string, cause: unknown) {
@@ -27,6 +28,29 @@ export class ProvisionParseError extends Error {
   }
 }
 
+async function readResponseText(response: Response, signal: AbortSignal): Promise<string> {
+  if (!response.body) {
+    return response.text();
+  }
+
+  const decoder = new TextDecoder();
+  let text = "";
+
+  await response.body.pipeTo(
+    new WritableStream<Uint8Array>({
+      write(chunk) {
+        text += decoder.decode(chunk, { stream: true });
+      },
+      close() {
+        text += decoder.decode();
+      },
+    }),
+    { signal },
+  );
+
+  return text;
+}
+
 export async function provisionHostedApp({
   apiUrl = DEFAULT_API_URL,
   fetch: fetchFn = globalThis.fetch,
@@ -34,12 +58,13 @@ export async function provisionHostedApp({
   apiUrl?: string;
   fetch?: typeof globalThis.fetch;
 } = {}): Promise<{ appId: string; adminSecret: string; backendSecret: string }> {
+  const signal = AbortSignal.timeout(PROVISION_TIMEOUT_MS);
   let response: Response;
 
   try {
-    response = await fetchFn(apiUrl, { method: "POST" });
+    response = await fetchFn(apiUrl, { method: "POST", signal });
   } catch (cause) {
-    throw new ProvisionNetworkError(apiUrl, cause);
+    throw new ProvisionNetworkError(apiUrl, signal.aborted ? signal.reason : cause);
   }
 
   if (!response.ok) {
@@ -47,12 +72,26 @@ export async function provisionHostedApp({
   }
 
   let body: unknown;
-  try {
-    body = await response.json();
-  } catch (cause) {
-    throw new ProvisionParseError(`Invalid JSON in response from ${apiUrl}`, cause);
-  }
+  if (!response.body) {
+    try {
+      body = await response.json();
+    } catch (cause) {
+      throw new ProvisionParseError(`Invalid JSON in response from ${apiUrl}`, cause);
+    }
+  } else {
+    let text: string;
+    try {
+      text = await readResponseText(response, signal);
+    } catch (cause) {
+      throw new ProvisionNetworkError(apiUrl, signal.aborted ? signal.reason : cause);
+    }
 
+    try {
+      body = JSON.parse(text);
+    } catch (cause) {
+      throw new ProvisionParseError(`Invalid JSON in response from ${apiUrl}`, cause);
+    }
+  }
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new ProvisionParseError(`Response from ${apiUrl} is not an object`);
   }
