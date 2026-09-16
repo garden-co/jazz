@@ -19,6 +19,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) result_table: String,
     pub(super) result_schema_version: SchemaVersionId,
     pub(super) result_select: Option<Vec<String>>,
+    pub(super) result_relation_projection: Option<Vec<crate::query::RelationProjectColumn>>,
     pub(super) result_set: BTreeSet<ResultMemberEntry>,
     pub(super) result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     pub(super) program_facts: BTreeSet<ProgramFactEntry>,
@@ -230,6 +231,15 @@ impl LocalMaintainedViewSubscription {
                 .as_ref()
                 .map(|columns| columns.iter().map(String::len).sum::<usize>())
                 .unwrap_or_default()
+            + self
+                .result_relation_projection
+                .as_ref()
+                .map(|columns| {
+                    postcard::to_allocvec(columns)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
             + result_set_bytes
             + result_payloads_bytes
             + program_facts_bytes;
@@ -369,6 +379,13 @@ where
             result_table: shape.query().table.clone(),
             result_schema_version: shape.schema_version(),
             result_select: shape.query().select.clone(),
+            result_relation_projection: shape
+                .query()
+                .relation
+                .as_ref()
+                .map(crate::query::relation_output_projection)
+                .transpose()?
+                .map(|(_, columns)| columns),
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),

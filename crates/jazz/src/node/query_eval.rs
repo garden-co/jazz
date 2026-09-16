@@ -1593,13 +1593,16 @@ where
         // public CurrentRow boundary: subscriptions use the public terminal
         // shape, and native/WASM consumers must see the same layout from both
         // read paths.
-        // Tree collectors own relation fields such as `posts` in their public
-        // app-row descriptor. Those fields are not columns of the root
-        // table, so normalizing a structured result against that table would
-        // silently discard the recursive payload before the client can read
-        // it. Flat rows still need this boundary to remove materializer-only
-        // physical fields.
-        if query.flat_join.is_none() && query.array_subqueries.is_empty() {
+        // Relation terminals and tree collectors own their public fields in
+        // the app-row descriptor. Those fields are not necessarily columns of
+        // the root table, so normalizing such output against that table would
+        // silently discard aliases or recursive payload before the client can
+        // read it. Flat rows still need this boundary to remove
+        // materializer-only physical fields.
+        if query.relation.is_none()
+            && query.flat_join.is_none()
+            && query.array_subqueries.is_empty()
+        {
             normalize_public_current_rows(query, table_schema, &mut rows)?;
         }
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
@@ -3375,6 +3378,13 @@ where
             result_table: shape.query().table.clone(),
             result_schema_version: shape.schema_version(),
             result_select: shape.query().select.clone(),
+            result_relation_projection: shape
+                .query()
+                .relation
+                .as_ref()
+                .map(crate::query::relation_output_projection)
+                .transpose()?
+                .map(|(_, columns)| columns),
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),

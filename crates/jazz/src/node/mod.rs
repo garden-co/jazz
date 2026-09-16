@@ -2314,6 +2314,89 @@ impl CurrentRow {
         }
         Ok(projected)
     }
+    /// Project a source row into an explicit relation output, preserving the
+    /// aliases chosen by the relation facade.
+    pub(crate) fn project_relation(
+        &self,
+        table: &TableSchema,
+        columns: &[crate::query::RelationProjectColumn],
+    ) -> Result<Self, Error> {
+        let mut descriptor_fields = vec![records::DescriptorField::new(
+            "row_uuid",
+            records::ValueType::Uuid,
+        )];
+        let mut values = vec![Value::Uuid(self.row_uuid().0)];
+        let mut publication_fields = vec![CurrentRowPublicationField::ResultField {
+            name: "row_uuid".to_owned(),
+            visibility: CurrentRowResultVisibility::HiddenMetadata,
+        }];
+        for projection in columns {
+            let (value, column_type, publication) = match &projection.expr {
+                crate::query::RelationProjectExpr::RowId(
+                    crate::query::RelationRowIdRef::Current,
+                ) => (
+                    Some(Value::Uuid(self.row_uuid().0)),
+                    records::ValueType::Uuid,
+                    CurrentRowPublicationField::ResultField {
+                        name: projection.alias.clone(),
+                        visibility: CurrentRowResultVisibility::ApplicationCell,
+                    },
+                ),
+                crate::query::RelationProjectExpr::Column(reference) => {
+                    if reference.column == "id" {
+                        (
+                            Some(Value::Uuid(self.row_uuid().0)),
+                            records::ValueType::Uuid,
+                            CurrentRowPublicationField::ResultField {
+                                name: projection.alias.clone(),
+                                visibility: CurrentRowResultVisibility::ApplicationCell,
+                            },
+                        )
+                    } else {
+                        let column_position = table
+                            .columns
+                            .iter()
+                            .position(|column| column.name == reference.column)
+                            .ok_or(Error::InvalidStoredValue(
+                                "relation output column is absent from the read schema",
+                            ))?;
+                        let column = &table.columns[column_position];
+                        (
+                            self.cell_at(column_position),
+                            records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                            CurrentRowPublicationField::ResultField {
+                                name: projection.alias.clone(),
+                                visibility: CurrentRowResultVisibility::ApplicationCell,
+                            },
+                        )
+                    }
+                }
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "relation output contains an unsupported expression",
+                    ));
+                }
+            };
+            let field_type = match column_type {
+                records::ValueType::Nullable(inner) => records::ValueType::Nullable(inner),
+                column_type => records::ValueType::Nullable(Box::new(column_type)),
+            };
+            let value = Value::Nullable(value.map(Box::new));
+            values.push(value);
+            descriptor_fields.push(
+                records::DescriptorField::new(projection.alias.clone(), field_type)
+                    .with_identity(records::FieldIdentity::Name(projection.alias.clone())),
+            );
+            publication_fields.push(publication);
+        }
+        let descriptor = records::RecordDescriptor::new_with_fields(descriptor_fields);
+        let raw = descriptor.create(&values)?;
+        Ok(Self::new_with_publication_fields(
+            table.name.clone(),
+            OwnedRecord::new(raw, descriptor),
+            publication_fields,
+        ))
+    }
 
     pub(crate) fn projected_tx_alias(&self) -> Option<(TxTime, NodeAlias)> {
         // Located by name: graph outputs may project additional fields (e.g.

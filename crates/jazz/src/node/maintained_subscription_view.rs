@@ -2014,6 +2014,17 @@ impl MaintainedTerminalSchemas {
                 "maintained result has no compiled payload schema",
             ))
     }
+    pub(in crate::node) fn direct_app_row_schema(&self) -> Result<&AppRowSchema, super::Error> {
+        self.sinks
+            .values()
+            .find_map(|kind| match kind {
+                MaintainedTerminalKind::DirectAppRows(output) => Some(output),
+                _ => None,
+            })
+            .ok_or(super::Error::InvalidStoredValue(
+                "maintained direct result has no compiler-owned app-row schema",
+            ))
+    }
 
     pub(in crate::node) fn aggregate_app_row_schema(&self) -> Result<&AppRowSchema, super::Error> {
         self.sinks

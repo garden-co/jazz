@@ -249,8 +249,16 @@ fn validate_query_canonical_parts(
                 ));
             }
             resolved.array_subqueries = query.array_subqueries.clone();
+            resolved.relation = None;
             resolved.select = query.select.clone();
-            return validate_query_canonical_parts(&resolved, schema);
+            let (mut normalized, params, _) = validate_query_canonical_parts(&resolved, schema)?;
+            // Keep the relation tree in the validated shape so its explicit
+            // output aliases reach row-set normalization and terminal
+            // descriptors. Source filters/order/joins remain canonical Query
+            // clauses above; aliases are not overloaded into Query::select.
+            normalized.relation = Some(relation.clone());
+            let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
+            return Ok((normalized, params, canonical));
         }
         validate_retained_relation_union(relation, &query.table, schema, &mut params)?;
         validate_array_subqueries(
@@ -422,6 +430,7 @@ fn validate_retained_relation_union(
         }
     }
     let mut labels = BTreeSet::new();
+    let mut output_projection = None::<Vec<RelationProjectColumn>>;
     for arm in inputs {
         if arm.label.is_empty()
             || arm.label.len() > 4096
@@ -432,14 +441,27 @@ fn validate_retained_relation_union(
                 "union arm labels must be 1..=4096 bytes, NUL-free, and unique".to_owned(),
             ));
         }
-        let arm_query = relation_query_to_query(&RelationQuery {
+        let arm_relation = RelationQuery {
             rel: arm.input.clone(),
-        })?;
+        };
+        let (_, arm_projection) = relation_output_projection(&arm_relation)?;
+        if let Some(expected) = &output_projection {
+            if expected != &arm_projection {
+                return Err(QueryError::UnsupportedRelationQuery(
+                    "union arms must use the same output projection".to_owned(),
+                ));
+            }
+        } else {
+            output_projection = Some(arm_projection);
+        }
+        let arm_query = relation_query_to_query(&arm_relation)?;
         if arm_query.table != output_table {
             return Err(QueryError::UnsupportedRelationQuery(
                 "union inputs must output the same table".to_owned(),
             ));
         }
+        let mut arm_query = arm_query;
+        arm_query.relation = Some(arm_relation);
         let (_, arm_params, _) = validate_query_canonical_parts(&arm_query, schema)?;
         for (name, ty) in arm_params {
             match params.entry(name) {

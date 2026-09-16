@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::node::query_engine::{CoverageScope, InheritedContribution};
-use crate::query::RelationQuery;
+use crate::query::{RelationProjectExpr, RelationQuery, RelationRowIdRef, relation_scope};
 
 pub(super) fn root_source_id(table: &str) -> SourceId {
     SourceId {
@@ -295,6 +295,11 @@ pub(super) fn storage_backed_maintained_view_eligible(
 }
 
 fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> PayloadProjection {
+    if let Some(relation) = &query.relation
+        && let Ok((_, columns)) = crate::query::relation_output_projection(relation)
+    {
+        return PayloadProjection::Relation(columns);
+    }
     let paths = if collect_relations {
         app_row_path_projections(&root_source_id(&query.table), &query.array_subqueries, &[])
     } else {
@@ -2144,6 +2149,54 @@ fn join_via_root_key(root_source: &SourceId, join: &JoinVia) -> NormalizedValueR
         .unwrap_or_else(|| NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())))
 }
 
+fn relation_row_projection(
+    schema: &RuntimeSchema,
+    query: &JazzQuery,
+    root_source: &SourceId,
+) -> Result<Vec<RowProjection>, Error> {
+    let relation = query.relation.as_ref().ok_or_else(|| {
+        Error::QueryLowering("relation projection is missing its relation tree".to_owned())
+    })?;
+    let (output_scope, columns) = crate::query::relation_output_projection(relation)
+        .map_err(|error| Error::QueryCapability(error.to_string()))?;
+    let mut projections = vec![RowProjection {
+        output: typed_output_field("row_uuid", ColumnType::Uuid),
+        value: NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+    }];
+    for column in columns {
+        let (value, ty) = match &column.expr {
+            RelationProjectExpr::RowId(RelationRowIdRef::Current) => (
+                NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())),
+                ColumnType::Uuid,
+            ),
+            RelationProjectExpr::Column(reference) => {
+                let scope = relation_scope(reference)
+                    .map_err(|error| Error::QueryCapability(error.to_string()))?;
+                if scope != output_scope {
+                    return Err(Error::QueryCapability(
+                        "relation projection must select from its output scope".to_owned(),
+                    ));
+                }
+                let ty = schema_column_type(schema, &query.table, &reference.column)?;
+                (
+                    source_column_value(root_source, &reference.column, JoinTarget::Column),
+                    ty,
+                )
+            }
+            RelationProjectExpr::RowId(_) => {
+                return Err(Error::QueryCapability(
+                    "outer/frontier row-id relation projections are not unified yet".to_owned(),
+                ));
+            }
+        };
+        projections.push(RowProjection {
+            output: typed_output_field(column.alias.clone(), ty),
+            value,
+        });
+    }
+    Ok(projections)
+}
+
 fn join_via_target_key(join_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
     source_column_value(join_source, &join.on_column, join.target)
 }
@@ -2842,7 +2895,9 @@ where
                 .schema
         };
         let query = shape.query();
-        if let Some(relation) = &query.relation {
+        if let Some(relation) = &query.relation
+            && crate::query::relation_union_parts(&relation.rel).is_some()
+        {
             return self.normalized_relation_union_row_set_shape(shape, relation, _binding, schema);
         }
         let root_source = root_source_id(&query.table);
@@ -3209,6 +3264,22 @@ where
             current = projection_node;
         }
 
+        if query
+            .relation
+            .as_ref()
+            .is_some_and(|relation| crate::query::relation_union_parts(&relation.rel).is_none())
+        {
+            let project_node = RowSetNodeId("relation:output".to_owned());
+            nodes.insert(
+                project_node.clone(),
+                RowSetExpr::Project {
+                    input: current,
+                    columns: relation_row_projection(schema, query, &root_source)?,
+                },
+            );
+            current = project_node;
+        }
+
         for (index, subquery) in query.array_subqueries.iter().enumerate() {
             current = normalize_array_subquery(
                 &mut nodes,
@@ -3327,14 +3398,16 @@ where
         let mut inherited_contributions = Vec::new();
         let mut reachable_contributions = Vec::new();
         for arm in parts.inputs {
-            let arm_query = relation_query_to_query(&RelationQuery {
+            let arm_relation = RelationQuery {
                 rel: arm.input.clone(),
-            })?;
+            };
+            let mut arm_query = relation_query_to_query(&arm_relation)?;
             if arm_query.table != shape.query().table {
                 return Err(Error::QueryCapability(
                     "UNION ALL arms must emit the same output table".to_owned(),
                 ));
             }
+            arm_query.relation = Some(arm_relation);
             let arm_shape =
                 arm_query.validate_with_schema_version(schema, shape.schema_version())?;
             let mut normalized = self.normalized_row_set_shape(&arm_shape, binding)?;
