@@ -44,7 +44,7 @@ fn opts() -> ReadOpts {
         ..ReadOpts::default()
     }
 }
-fn open() -> Db<TestStorage> {
+fn open(history_complete: bool) -> Db<TestStorage> {
     let account = |field| PolicyExpr::eq_session(field, vec!["user".into(), "account".into()]);
     let source = SchemaBuilder::new()
         .table(
@@ -71,18 +71,20 @@ fn open() -> Db<TestStorage> {
     let schema = JazzSchema::new(&source).unwrap();
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    block_on(Db::open(
-        DbConfig::new(
-            schema,
-            TestStorage::new(&refs),
-            DbIdentity {
-                node: NodeUuid::from_bytes([0x71; 16]),
-                author: AuthorSubject::SYSTEM,
-            },
-        )
-        .with_id_source(SeededRowIdSource::new(71)),
-    ))
-    .unwrap()
+    let config = DbConfig::new(
+        schema,
+        TestStorage::new(&refs),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x71; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )
+    .with_id_source(SeededRowIdSource::new(71));
+    if history_complete {
+        block_on(Db::open_history_complete(config)).unwrap()
+    } else {
+        block_on(Db::open(config)).unwrap()
+    }
 }
 fn insert(db: &Db<TestStorage>, n: u8, owner: u8, bucket: &str) {
     block_on(db.insert(
@@ -154,7 +156,7 @@ fn assert_state(
 
 #[test]
 fn live_candidates_follow_inserts_moves_deletion_and_inherited_permission_changes() {
-    let db = open();
+    let db = open(false);
     block_on(db.insert(
         "groups",
         cells(jazz::row_input!("member" => jazz::tools::ObjectId::from_uuid(user(3).test_uuid()))),
@@ -205,5 +207,73 @@ fn live_candidates_follow_inserts_moves_deletion_and_inherited_permission_change
     assert_eq!(db.active_groove_subscriptions_for_test(), 1);
     block_on(bob.close()).unwrap();
     assert_eq!(db.active_groove_subscriptions_for_test(), 0);
+    block_on(db.close()).unwrap();
+}
+
+#[test]
+fn settled_index_candidates_remain_live_after_promotion_and_newer_ahead_exit() {
+    let db = open(true);
+    let group = block_on(db.insert(
+        "groups",
+        cells(jazz::row_input!("member" => jazz::tools::ObjectId::from_uuid(user(2).test_uuid()))),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    db.finalize_local_mergeable_commit_for_test(group.mergeable_tx_id())
+        .unwrap();
+    let query = page(&db, "a");
+    let mut stream = block_on(db.subscribe_for_identity(&query, opts(), user(2))).unwrap();
+    let mut state = BTreeSet::new();
+    assert_state(&db, &query, 2, &mut stream, &mut state, &[]);
+    let write = block_on(db.insert(
+        "documents",
+        cells(jazz::row_input!(
+            "owner" => jazz::tools::ObjectId::from_uuid(user(4).test_uuid()),
+            "bucket" => "a",
+            "group_id" => jazz::tools::ObjectId::from_uuid(row(1).0)
+        )),
+        InsertOptions {
+            row_id: Some(row(20)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_state(&db, &query, 2, &mut stream, &mut state, &[20]);
+    db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+        .unwrap();
+    assert_state(&db, &query, 2, &mut stream, &mut state, &[20]);
+    let global = ReadOpts {
+        tier: jazz::tx::DurabilityTier::Global,
+        ..opts()
+    };
+    let ids = block_on(db.all_for_identity(&query, global.clone(), user(2)))
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![row(20)]);
+
+    let moved = block_on(db.update(
+        "documents",
+        row(20),
+        cells(jazz::row_input!("bucket" => "b")),
+        Default::default(),
+    ))
+    .unwrap();
+    // The settled prefix still contains row 20. Its newer Ahead winner must
+    // suppress it, not allow the old matching content to reappear locally.
+    assert_state(&db, &query, 2, &mut stream, &mut state, &[]);
+    db.finalize_local_mergeable_commit_for_test(moved.mergeable_tx_id())
+        .unwrap();
+    assert_state(&db, &query, 2, &mut stream, &mut state, &[]);
+    assert!(
+        block_on(db.all_for_identity(&query, global, user(2)))
+            .unwrap()
+            .is_empty()
+    );
+    block_on(stream.close()).unwrap();
     block_on(db.close()).unwrap();
 }
