@@ -4345,6 +4345,140 @@ async fn commits_insert_update_and_delete_batches() {
 }
 
 #[futures_test::test]
+async fn raw_batch_writes_reject_keys_that_disagree_with_record_primary_keys() {
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).expect("valid storage families");
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let descriptor = database
+        .ivm_runtime
+        .schema()
+        .table("albums")
+        .unwrap()
+        .record_schema();
+
+    let encoded = crate::records::encode_variant_record(
+        0,
+        &descriptor
+            .create(&[Value::U64(7), Value::String("raw insert".to_owned())])
+            .unwrap(),
+    );
+    let mut insert = database.open_batch();
+    insert.insert_raw("albums", PrimaryKeyValue::U64(9), encoded.clone());
+    assert!(database.apply_batch(insert).await.is_err());
+    assert!(
+        database
+            .primary_key_scan_raw("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected raw insert must not publish a physical row"
+    );
+    assert!(
+        database
+            .primary_key_scan("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected raw insert must not publish a logical row"
+    );
+
+    let mut fresh = database.open_batch();
+    // SAFETY: This deliberately exercises the public fresh-ingress validation;
+    // the supplied key is intentionally not fresh for the record's own key.
+    unsafe {
+        fresh.insert_raw_fresh("albums", PrimaryKeyValue::U64(9), encoded.clone());
+    }
+    assert!(database.apply_batch(fresh).await.is_err());
+    assert!(
+        database
+            .primary_key_scan_raw("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected fresh raw insert must not publish a physical row"
+    );
+    assert!(
+        database
+            .primary_key_scan("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected fresh raw insert must not publish a logical row"
+    );
+
+    let mut exact = database.open_batch();
+    assert!(
+        exact
+            .ensure_exact(
+                &database,
+                "albums",
+                PrimaryKeyValue::U64(9),
+                encoded.clone(),
+            )
+            .await
+            .is_err(),
+        "ensure_exact must reject a key that disagrees with the encoded record"
+    );
+    assert!(
+        database
+            .primary_key_scan_raw("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected exact insert must not publish a physical row"
+    );
+    assert!(
+        database
+            .primary_key_scan("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected exact insert must not publish a logical row"
+    );
+
+    let mut seed = database.open_batch();
+    seed.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("stored".to_owned())],
+    );
+    database.commit_batch(seed).await.unwrap();
+    let physical_before = database
+        .primary_key_scan_raw("albums", &[])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(EncodedKeyValue::into_parts)
+        .collect::<Vec<_>>();
+    let logical_before = record_values(database.primary_key_scan("albums", &[]).await.unwrap());
+
+    let replacement = crate::records::encode_variant_record(
+        0,
+        &descriptor
+            .create(&[Value::U64(2), Value::String("replacement".to_owned())])
+            .unwrap(),
+    );
+    let mut update = database.open_batch();
+    update.update_raw("albums", PrimaryKeyValue::U64(1), replacement);
+    assert!(database.apply_batch(update).await.is_err());
+    assert_eq!(
+        database
+            .primary_key_scan_raw("albums", &[])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(EncodedKeyValue::into_parts)
+            .collect::<Vec<_>>(),
+        physical_before,
+        "a rejected raw update must leave physical state unchanged"
+    );
+    assert_eq!(
+        record_values(database.primary_key_scan("albums", &[]).await.unwrap()),
+        logical_before,
+        "a rejected raw update must leave logical state unchanged"
+    );
+}
+
+#[futures_test::test]
 async fn staged_batch_reads_observe_uncommitted_writes() {
     let mut database = Database::new(
         albums_schema(),
