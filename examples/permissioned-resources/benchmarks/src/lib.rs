@@ -1274,15 +1274,19 @@ fn duplex_counted(diagnostics: bool) -> CountedDuplex {
 }
 
 fn schema() -> JazzSchema {
+    // This fixture exposes supporting directories and grant rows to every reader;
+    // resource rows and their children retain the restricted policies below.
     let mut schema = SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new(ORG)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .column("label", PublicColumnType::Text)
                 .column("created_at", PublicColumnType::Timestamp)
                 .column("settings", PublicColumnType::Text),
         )
         .table(
             TableSchemaBuilder::new(GROUP)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("org_id", ORG)
                 .column("label", PublicColumnType::Text)
                 .nullable_column("description", PublicColumnType::Text)
@@ -1291,12 +1295,14 @@ fn schema() -> JazzSchema {
         )
         .table(
             TableSchemaBuilder::new(GROUP_ACCESS)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("group_id", GROUP)
                 .column("user_id", PublicColumnType::Uuid)
                 .column("role", public_role_type("group_access_role")),
         )
         .table(
             TableSchemaBuilder::new(GROUP_ENTRY)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("member_id", GROUP)
                 .fk_column("target_id", GROUP)
                 .column("administrator", PublicColumnType::Boolean)
@@ -1304,6 +1310,7 @@ fn schema() -> JazzSchema {
         )
         .table(
             TableSchemaBuilder::new(PROFILE)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("group_id", GROUP)
                 .column("email", PublicColumnType::Text)
                 .column("display", PublicColumnType::Text)
@@ -1319,6 +1326,7 @@ fn schema() -> JazzSchema {
             .table(resource_table(spec.table).policies(TablePolicies::new().with_select(policy)));
         schema = schema.table(
             TableSchemaBuilder::new(&access_table)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .fk_column("resource", spec.table)
                 .fk_column("team", GROUP)
                 .column(
@@ -1349,6 +1357,7 @@ fn schema() -> JazzSchema {
         let table = format!("empty_child_{child_slot}");
         schema = schema.table(
             TableSchemaBuilder::new(&table)
+                .policies(TablePolicies::new().with_select(PolicyExpr::True))
                 .column("parent_id", PublicColumnType::Uuid)
                 .column("label", PublicColumnType::Text)
                 .column("value_text", PublicColumnType::Text)

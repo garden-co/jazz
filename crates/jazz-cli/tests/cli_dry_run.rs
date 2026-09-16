@@ -1981,7 +1981,8 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         payload
     };
 
-    let schema = structured_schema();
+    use jazz::tools::test_support::AllowAll;
+    let schema = structured_schema().allow_all();
     let server = RunningServer::start_schema(&schema);
     let proxy = BackpressureProxy::start(&server.ws_url);
 
