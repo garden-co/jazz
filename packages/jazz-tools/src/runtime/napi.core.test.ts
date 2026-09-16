@@ -1,3 +1,4 @@
+import { allowAllForTesting } from "./testing/allow-all-for-testing.js";
 import { schema as s } from "../index.js";
 import { translateQuery } from "./query-adapter.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -98,6 +99,8 @@ const TEST_SCHEMA: WasmSchema = {
     ],
   },
 };
+
+const OPEN_TEST_SCHEMA = allowAllForTesting(TEST_SCHEMA);
 
 const DEFAULTS_SCHEMA: WasmSchema = {
   counters: {
@@ -768,7 +771,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
-      TEST_SCHEMA,
+      OPEN_TEST_SCHEMA,
       deterministicBytes("jazz-napi-streaming-insert:node"),
       testAuthorBytes("jazz-napi-streaming-insert:author"),
       1,
@@ -2122,13 +2125,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       appId,
       inMemory: true,
       adminSecret: "core-napi-edge-query-admin",
-      schema: encodeSchema(TEST_SCHEMA),
+      schema: encodeSchema(OPEN_TEST_SCHEMA),
     });
 
     const openRuntime = (peer: string, sourceId: number) => {
       const runtime = new NativeRuntimeAdapter(
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
-        TEST_SCHEMA,
+        OPEN_TEST_SCHEMA,
         deterministicBytes(`jazz-napi-core-edge:${peer}:node`),
         testAuthorBytes(`jazz-napi-core-edge:${peer}:author`),
         sourceId,
@@ -2186,13 +2189,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       appId,
       dataDir: tempDir,
       adminSecret: "core-napi-persistent-edge-query-admin",
-      schema: encodeSchema(TEST_SCHEMA),
+      schema: encodeSchema(OPEN_TEST_SCHEMA),
     });
 
     const openRuntime = (peer: string, sourceId: number, targetServer: LocalJazzServerHandle) => {
       const runtime = new NativeRuntimeAdapter(
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
-        TEST_SCHEMA,
+        OPEN_TEST_SCHEMA,
         deterministicBytes(`jazz-napi-core-persistent-edge:${peer}:node`),
         testAuthorBytes(`jazz-napi-core-persistent-edge:${peer}:author`),
         sourceId,
@@ -2225,7 +2228,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         appId,
         dataDir: tempDir,
         adminSecret: "core-napi-persistent-edge-query-admin",
-        schema: encodeSchema(TEST_SCHEMA),
+        schema: encodeSchema(OPEN_TEST_SCHEMA),
       });
 
       const reader = openRuntime("reader", 42, server);

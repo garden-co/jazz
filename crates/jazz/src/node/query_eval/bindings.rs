@@ -19,17 +19,8 @@ pub(super) enum PreparedClaimBindingMode {
 pub(in crate::node) fn authorization_query_from_read_policy(table: &TableSchema) -> JazzQuery {
     let Some(policy) = &table.read_policy else {
         let mut query = crate::query::Query::from(table.name.as_str());
-        // Generated access edges inherit their parent's explicit read grant.
-        // All other absent SELECT policies are empty read authority.
-        if let Some(parent_column) = access_edge_parent_reference(table) {
-            query.inherits.push(crate::query::InheritsVia {
-                parent_column,
-                operation: crate::query::InheritsOperation::Select,
-                max_depth: None,
-            });
-        } else {
-            query.filters.push(Predicate::Any(Vec::new()));
-        }
+        // Missing SELECT is empty read authority, regardless of table names.
+        query.filters.push(Predicate::Any(Vec::new()));
         return query;
     };
     let mut query = crate::query::Query::from(table.name.as_str());
@@ -39,29 +30,7 @@ pub(in crate::node) fn authorization_query_from_read_policy(table: &TableSchema)
     query.inherits = policy.inherits.clone();
     query.includes = policy.includes.clone();
     query.policy_branches = policy.policy_branches.clone();
-    if let Some(parent_column) = access_edge_parent_reference(table) {
-        query.policy_branches.push(crate::query::PolicyBranch {
-            filters: Vec::new(),
-            joins: Vec::new(),
-            reachable: Vec::new(),
-            inherits: vec![crate::query::InheritsVia {
-                parent_column,
-                operation: crate::query::InheritsOperation::Select,
-                max_depth: None,
-            }],
-        });
-    }
     query
-}
-
-pub(super) fn access_edge_parent_reference(table: &TableSchema) -> Option<String> {
-    if !table.name.ends_with("_access_edges") && table.name != "team_access_edges" {
-        return None;
-    }
-    table
-        .references
-        .contains_key("resource_id")
-        .then(|| "resource_id".to_owned())
 }
 
 pub(super) fn rewrite_claim_join_for_binding(

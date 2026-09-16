@@ -518,8 +518,8 @@ function missingExplicitPolicyMessage(
   return `Warning: table "${tableName}" has a policy set but no explicit ${operation} policy in permissions.ts; ${operation}s will be denied.`;
 }
 
-function fullyOpenTablePolicyMessage(tableName: string): string {
-  return `Warning: table "${tableName}" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.`;
+function missingTablePolicyMessage(tableName: string): string {
+  return `Warning: table "${tableName}" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.`;
 }
 
 export function validatePermissionsAgainstSchema(
@@ -542,7 +542,7 @@ export function collectMissingExplicitPolicyDiagnostics(
         {
           tableName,
           operation: "table",
-          message: fullyOpenTablePolicyMessage(tableName),
+          message: missingTablePolicyMessage(tableName),
         },
       ];
     }
