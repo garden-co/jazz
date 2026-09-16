@@ -3,9 +3,11 @@
 // CLI for jazz-tools schema tooling
 
 import { existsSync, readFileSync, realpathSync } from "fs";
-import { readFile } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import { basename, join, resolve } from "path";
 import { fileURLToPath } from "url";
+import { createRelationCatalogue } from "./codegen/relation-analyzer.js";
+import { loadCompiledSchema } from "./schema-loader.js";
 import {
   createMigration as createCatalogueMigration,
   deploy as deployCatalogue,
@@ -37,29 +39,19 @@ export interface SchemaHashOptions {
   schemaDir: string;
 }
 
+export interface RelationCatalogueOptions {
+  schemaDir: string;
+  output?: string;
+}
+
 const PERMISSIONS_LIFECYCLE_NOTE =
   "Permission-only changes do not create schema hashes or require migrations.";
 
-function parseArgs(): { command: string; options: BuildOptions } {
-  const args = process.argv.slice(2);
+function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";
-  let schemaDir = process.cwd();
-  let jazzBin: string | undefined;
-  let strictProvenance = false;
-
-  for (let i = 1; i < args.length; i++) {
-    const arg = args[i];
-    const nextArg = args[i + 1];
-    if (arg === "--jazz-bin" && nextArg) {
-      jazzBin = nextArg;
-      i += 1;
-    } else if (arg === "--schema-dir" && nextArg) {
-      schemaDir = nextArg;
-      i += 1;
-    } else if (arg === "--strict-provenance") {
-      strictProvenance = true;
-    }
-  }
+  const schemaDir = getFlagValue(args, "--schema-dir", "last") ?? process.cwd();
+  const jazzBin = getFlagValue(args, "--jazz-bin", "last");
+  const strictProvenance = args.includes("--strict-provenance");
 
   return { command, options: { jazzBin, schemaDir, strictProvenance } };
 }
@@ -97,6 +89,24 @@ export async function schemaHash(options: SchemaHashOptions): Promise<void> {
   const result = await getCurrentSchemaHash(options);
   console.log(`Loaded structural schema from ${result.schemaFile}.`);
   console.log(`Current schema hash: ${shortSchemaHash(result.hash)}`);
+}
+
+export async function schemaRelations(options: RelationCatalogueOptions): Promise<void> {
+  const project = await loadCompiledSchema(options.schemaDir, {
+    authoredSchemaOnly: true,
+    loadPermissions: false,
+  });
+  const catalogue = createRelationCatalogue(project.wasmSchema);
+  const json = JSON.stringify(catalogue, null, 2);
+  const output = options.output?.endsWith(".ts")
+    ? `export const relationCatalogue = ${json} as const;\nexport default relationCatalogue;\n`
+    : `${json}\n`;
+  if (options.output) {
+    await writeFile(options.output, output);
+    console.log(`Wrote relation catalogue to ${options.output}.`);
+    return;
+  }
+  process.stdout.write(output);
 }
 
 export interface MigrationCommandOptions {
@@ -197,24 +207,44 @@ export function loadDotEnv(
   loadEnvFile(join(cwd, ".env"), env);
 }
 
-// Collect every `--env-file=PATH` and `--env-file PATH` from argv, in
-// the order they appear. Earlier files take precedence over later ones
-// because loadEnvFile only fills in keys that are still undefined.
-export function readEnvFiles(args: string[]): string[] {
-  const files: string[] = [];
+// Normalize env-file flags in the same pass that records the files to load.
+// This keeps command and operand positions stable for every dispatch path.
+function normalizeArgs(args: string[]): { args: string[]; envFiles: string[] } {
+  const normalized: string[] = [];
+  const envFiles: string[] = [];
   const prefix = "--env-file=";
+
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--env-file") {
       const value = args[i + 1];
-      if (value) files.push(value);
-    } else if (arg.startsWith(prefix)) {
-      files.push(arg.slice(prefix.length));
+      if (!value || value.startsWith("-")) {
+        throw new Error("Missing value for --env-file.");
+      }
+      envFiles.push(value);
+      i += 1;
+      continue;
     }
+    if (arg.startsWith(prefix)) {
+      const value = arg.slice(prefix.length);
+      if (!value || value.startsWith("-")) {
+        throw new Error("Missing value for --env-file.");
+      }
+      envFiles.push(value);
+      continue;
+    }
+    normalized.push(arg);
   }
-  return files;
+
+  return { args: normalized, envFiles };
 }
 
+// Collect every `--env-file=PATH` and `--env-file PATH` from argv, in
+// the order they appear. Earlier files take precedence over later ones
+// because loadEnvFile only fills in keys that are still undefined.
+export function readEnvFiles(args: string[]): string[] {
+  return normalizeArgs(args).envFiles;
+}
 export function resolveEnvVar(
   names: readonly string[],
   env: Record<string, string | undefined> = process.env,
@@ -226,21 +256,39 @@ export function resolveEnvVar(
   return undefined;
 }
 
-function getFlagValue(args: string[], flag: string): string | undefined {
+function getFlagValue(
+  args: string[],
+  flag: string,
+  selection: "first" | "last" = "first",
+): string | undefined {
+  const prefix = `${flag}=`;
+  let selected: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!arg) {
       continue;
     }
     if (arg === flag) {
-      return args[i + 1];
+      const value = args[i + 1];
+      if (!value || value.startsWith("-")) {
+        throw new Error(`Missing value for ${flag}.`);
+      }
+      if (selected === undefined || selection === "last") {
+        selected = value;
+      }
+      continue;
     }
-    const prefix = `${flag}=`;
     if (arg.startsWith(prefix)) {
-      return arg.slice(prefix.length);
+      const value = arg.slice(prefix.length);
+      if (!value || value.startsWith("-")) {
+        throw new Error(`Missing value for ${flag}.`);
+      }
+      if (selected === undefined || selection === "last") {
+        selected = value;
+      }
     }
   }
-  return undefined;
+  return selected;
 }
 
 function hasFlag(args: string[], flag: string): boolean {
@@ -549,6 +597,7 @@ function printHelp(): void {
   console.log("  validate              Validate root schema.ts and optional permissions.ts");
   console.log("  schema hash           Print the short hash of the current schema.ts");
   console.log("  schema export         Print the compiled structural schema as JSON");
+  console.log("  schema relations      Emit the schema-bound relation catalogue as JSON");
   console.log("  deploy <appId>        Publish the current schema.ts and permissions.ts");
   console.log("  permissions status <appId> Show the current server permissions head for this app");
   console.log(
@@ -562,6 +611,9 @@ function printHelp(): void {
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
   console.log("\nSchema hash options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+  console.log("\nSchema relations options:");
+  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+  console.log("  --output <path>       Write JSON, or an `as const` TS module for a .ts path");
   console.log("\nSchema export options:");
   console.log(
     "  <appId>               Required for server-backed schema export by hash (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
@@ -602,11 +654,11 @@ function printHelp(): void {
 }
 
 if (isMainModule()) {
-  if (process.argv.slice(2).some((arg) => arg === "--help" || arg === "-h")) {
+  const { args, envFiles } = normalizeArgs(process.argv.slice(2));
+  if (args.some((arg) => arg === "--help" || arg === "-h")) {
     printHelp();
     process.exit(0);
   }
-  const envFiles = readEnvFiles(process.argv.slice(2));
   if (envFiles.length > 0) {
     for (const file of envFiles) {
       loadEnvFile(resolve(process.cwd(), file));
@@ -614,28 +666,38 @@ if (isMainModule()) {
   } else {
     loadDotEnv();
   }
-  const command = process.argv[2] ?? "";
+  const command = args[0] ?? "";
 
   if (command === "validate") {
-    const { options } = parseArgs();
+    const { options } = parseArgs(args);
     validate(options).catch((err) => {
       console.error(err.message);
       process.exit(1);
     });
   } else if (command === "schema") {
-    const subcommand = process.argv[3] ?? "";
+    const subcommand = args[1] ?? "";
     if (subcommand === "hash") {
-      const args = process.argv.slice(4);
-      const schemaDirFlag = getFlagValue(args, "--schema-dir");
+      const commandArgs = args.slice(2);
+      const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
       const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
       schemaHash({ schemaDir }).catch((err) => {
         console.error(err.message);
         process.exit(1);
       });
-    } else if (subcommand === "export") {
-      const { appId, args } = splitLeadingAppId(process.argv.slice(4));
+    } else if (subcommand === "relations") {
+      const args = process.argv.slice(4);
       const schemaDirFlag = getFlagValue(args, "--schema-dir");
-      const schemaHashFlag = getFlagValue(args, "--schema-hash");
+      const outputFlag = getFlagValue(args, "--output");
+      const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
+      const output = outputFlag ? resolve(process.cwd(), outputFlag) : undefined;
+      schemaRelations({ schemaDir, output }).catch((err) => {
+        console.error(err.message);
+        process.exit(1);
+      });
+    } else if (subcommand === "export") {
+      const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
+      const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
+      const schemaHashFlag = getFlagValue(commandArgs, "--schema-hash");
       if (schemaDirFlag && schemaHashFlag) {
         console.error("--schema-dir and --schema-hash are mutually exclusive.");
         process.exit(1);
@@ -644,41 +706,43 @@ if (isMainModule()) {
       const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
       exportSchema({
         schemaDir,
-        migrationsDir: getFlagValue(args, "--migrations-dir")
-          ? resolve(process.cwd(), getFlagValue(args, "--migrations-dir")!)
+        migrationsDir: getFlagValue(commandArgs, "--migrations-dir")
+          ? resolve(process.cwd(), getFlagValue(commandArgs, "--migrations-dir")!)
           : undefined,
         schemaHash: schemaHashFlag,
         appId,
-        serverUrl: getFlagValue(args, "--server-url") ?? resolveEnvVar(SERVER_URL_ENV_VARS),
-        adminSecret: getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET,
+        serverUrl: getFlagValue(commandArgs, "--server-url") ?? resolveEnvVar(SERVER_URL_ENV_VARS),
+        adminSecret: getFlagValue(commandArgs, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET,
       }).catch((err) => {
         console.error(err.message);
         process.exit(1);
       });
     } else {
-      console.error("Usage: node dist/cli.js schema <hash|export> [--schema-dir <path>] [...]");
+      console.error(
+        "Usage: node dist/cli.js schema <hash|relations|export> [--schema-dir <path>] [...]",
+      );
       process.exit(1);
     }
   } else if (command === "migrations") {
-    const subcommand = process.argv[3] ?? "";
+    const subcommand = args[1] ?? "";
     let task: Promise<unknown>;
 
     if (subcommand === "create") {
-      const { appId, args } = splitLeadingAppId(process.argv.slice(4));
-      const options = resolveMigrationOptions(args);
+      const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
+      const options = resolveMigrationOptions(commandArgs);
       task = createMigration({
         ...options,
         appId,
         schemaDir: options.schemaDir ?? process.cwd(),
-        fromHash: getFlagValue(args, "--fromHash"),
-        toHash: getFlagValue(args, "--toHash"),
-        name: getFlagValue(args, "--name"),
+        fromHash: getFlagValue(commandArgs, "--fromHash"),
+        toHash: getFlagValue(commandArgs, "--toHash"),
+        name: getFlagValue(commandArgs, "--name"),
       });
     } else if (subcommand === "push") {
-      const appId = process.argv[4];
-      const fromHash = process.argv[5];
-      const toHash = process.argv[6];
-      const sharedArgs = process.argv.slice(7);
+      const appId = args[2];
+      const fromHash = args[3];
+      const toHash = args[4];
+      const sharedArgs = args.slice(5);
 
       if (!appId || !fromHash || !toHash) {
         console.error(
@@ -700,9 +764,12 @@ if (isMainModule()) {
       process.exit(1);
     });
   } else if (command === "permissions") {
-    const subcommand = process.argv[3] ?? "";
-    const { appId, args } = splitLeadingAppId(process.argv.slice(4));
-    const options = { ...resolvePermissionsOptions(args), appId: requireAppId(appId) };
+    const subcommand = args[1] ?? "";
+    const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
+    const options = {
+      ...resolvePermissionsOptions(commandArgs),
+      appId: requireAppId(appId),
+    };
     const task =
       subcommand === "status"
         ? permissionsStatus(options)
@@ -713,13 +780,13 @@ if (isMainModule()) {
       process.exit(1);
     });
   } else if (command === "deploy") {
-    const { appId, args } = splitLeadingAppId(process.argv.slice(3));
-    const options = { ...resolveMigrationOptions(args), appId };
+    const { appId, args: commandArgs } = splitLeadingAppId(args.slice(1));
+    const options = { ...resolveMigrationOptions(commandArgs), appId };
     deploy({
       ...requireMigrationServerOptions(options),
       schemaDir: options.schemaDir ?? process.cwd(),
       migrationsDir: options.migrationsDir,
-      noVerify: hasFlag(args, "--no-verify"),
+      noVerify: hasFlag(commandArgs, "--no-verify"),
     }).catch((err) => {
       console.error(err.message);
       process.exit(1);

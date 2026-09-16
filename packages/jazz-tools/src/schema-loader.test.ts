@@ -101,8 +101,17 @@ describe("loadCompiledSchema", () => {
 const FIXTURES_DIR = fileURLToPath(new URL("../tests/ts-dsl/fixtures", import.meta.url));
 
 const fixtureDir = (name: string) => `${FIXTURES_DIR}/${name}`;
-
 describe("bundled DSL schema loading", () => {
+  it("loads authored schema without evaluating permissions for relation catalogue generation", async () => {
+    const loaded = await loadCompiledSchema(fixtureDir("authored-catalogue-split"), {
+      authoredSchemaOnly: true,
+      loadPermissions: false,
+    });
+
+    expect(loaded.schema.tables.map((table) => table.name)).toEqual(["categories", "records"]);
+    expect(loaded.permissions).toBeUndefined();
+    expect(loaded.permissionsFile).toBeUndefined();
+  });
   it("collects tables from a public bare jazz-tools side-effect import", async () => {
     const loaded = await loadCompiledSchema(fixtureDir("side-effect-only"));
 

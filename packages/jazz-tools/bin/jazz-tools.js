@@ -50,7 +50,7 @@ function parseWrapperArgs(rawArgs) {
 
     if (arg === "--rust-bin") {
       const value = rawArgs[i + 1];
-      if (!value) {
+      if (!value || value.startsWith("-")) {
         fail("Missing value for --rust-bin.");
       }
       rustBinOverride = value;
@@ -61,17 +61,49 @@ function parseWrapperArgs(rawArgs) {
     const prefix = "--rust-bin=";
     if (arg.startsWith(prefix)) {
       const value = arg.slice(prefix.length);
-      if (!value) {
+      if (!value || value.startsWith("-")) {
         fail("Missing value for --rust-bin.");
       }
       rustBinOverride = value;
       continue;
     }
 
+    if (arg === "--env-file") {
+      const value = rawArgs[i + 1];
+      if (!value || value.startsWith("-")) {
+        fail("Missing value for --env-file.");
+      }
+    } else if (arg.startsWith("--env-file=")) {
+      const value = arg.slice("--env-file=".length);
+      if (!value || value.startsWith("-")) {
+        fail("Missing value for --env-file.");
+      }
+    }
+
     args.push(arg);
   }
 
   return { args, rustBinOverride };
+}
+
+// Look past global env-file flags only to choose the TypeScript or native
+// implementation. The original argv is passed through unchanged so the
+// selected implementation owns loading and normalization.
+function findCommand(args) {
+  let index = 0;
+  while (index < args.length) {
+    const arg = args[index];
+    if (arg === "--env-file") {
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith("--env-file=")) {
+      index += 1;
+      continue;
+    }
+    return arg;
+  }
+  return undefined;
 }
 
 function exitWithSpawnResult(result, name) {
@@ -100,6 +132,9 @@ function printWrapperHelp() {
   console.log(
     "  schema export         Print structural schema JSON from schema.ts or a schema hash",
   );
+  console.log(
+    "  schema relations      Emit a schema-bound relation catalogue (use --output relation-catalogue.ts)",
+  );
   console.log("  deploy                Publish the current schema and permissions to the server");
   console.log("  permissions status    Show the current server permissions head for this app");
   console.log(
@@ -113,11 +148,10 @@ function printWrapperHelp() {
   console.log("Options:");
   console.log("  -h, --help            Print help");
 }
-
 const here = dirname(fileURLToPath(import.meta.url));
 
 const { args, rustBinOverride } = parseWrapperArgs(process.argv.slice(2));
-const command = args[0];
+const command = findCommand(args);
 
 if (!command || command === "--help" || command === "-h") {
   printWrapperHelp();
@@ -137,7 +171,7 @@ if (!command || command === "--help" || command === "-h") {
     fail(`TypeScript schema CLI missing: ${tsCliPath}`);
   }
 
-  const tsCommandResult = spawnSync(process.execPath, [tsCliPath, ...args], {
+  const tsCommandResult = spawnSync(process.execPath, ["--", tsCliPath, ...args], {
     stdio: "inherit",
     env: process.env,
   });

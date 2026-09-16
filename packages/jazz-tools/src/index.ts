@@ -97,6 +97,14 @@ export {
   defineSliceableApp,
   TypedTableQueryBuilder,
 } from "./typed-app.js";
+
+export {
+  createRelationCatalogue,
+  validateRelationCatalogue,
+  RELATION_CATALOGUE_VERSION,
+  type Relation,
+  type RelationCatalogue,
+} from "./codegen/relation-analyzer.js";
 export { defineMigration, renameTableFrom } from "./migrations.js";
 export {
   getSupportedWhereOperatorsForColumn,
