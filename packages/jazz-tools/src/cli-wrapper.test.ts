@@ -14,11 +14,12 @@ async function runWrapper(
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const { promise, resolve } = Promise.withResolvers<{
-    status: number | null;
-    stdout: string;
-    stderr: string;
-  }>();
+  let resolve!: (value: { status: number | null; stdout: string; stderr: string }) => void;
+  const promise = new Promise<{ status: number | null; stdout: string; stderr: string }>(
+    (resolvePromise) => {
+      resolve = resolvePromise;
+    },
+  );
   const child = spawn(process.execPath, ["--no-warnings", wrapper, ...args], {
     cwd: options.cwd,
     env: options.env ?? process.env,
@@ -43,10 +44,12 @@ async function listenForDeployRequest(): Promise<{ server: Server; url: string }
       `request=${request.url} secret=${request.headers["x-jazz-admin-secret"] ?? "<missing>"}`,
     );
   });
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  server.once("error", reject);
-  server.listen(0, "127.0.0.1", resolve);
-  await promise;
+  let resolve!: () => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("Expected deploy test server to have a TCP address.");
@@ -77,7 +80,9 @@ describe("jazz-tools wrapper", () => {
   ] as const)("loads an explicit env file and routes deploy (%s)", async (_label, args) => {
     const root = await mkdtemp(join(tmpdir(), "jazz-tools-wrapper-env-file-"));
     const { server, url } = await listenForDeployRequest();
-    const close = Promise.withResolvers<void>();
+    const close = new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
 
     try {
       await writeFile(
