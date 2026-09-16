@@ -1146,15 +1146,16 @@ where
         mut program: QueryProgram,
         binding: &Binding,
     ) -> Result<RecordDeltas, Error> {
-        // A first-result reader consumes the maintained program's actual
-        // app-row terminal, with its complete policy routes. It needs neither
-        // sync witness delivery nor the legacy pre-publication internal graph.
-        // Keep all compiler metadata; install only the consumer's terminal.
-        lowered_app_rows_graph(&program)?;
+        // Hydrate through the same live installation as a retained consumer.
+        // The native CurrentRow boundary still consumes the compiler's
+        // materialization layout (including physical provenance), whereas a
+        // retained stream publishes its terminal layout directly.
+        let graph = lowered_materialization_app_rows_graph(&program)?;
         program
             .lowered
             .terminals
             .retain(|terminal| terminal.sink == JAZZ_APP_ROWS_SINK);
+        program.lowered.terminals[0].graph = graph;
         let binding_source_shape = program
             .request
             .input

@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, PreparedQuery, Propagation, ReadOpts,
-    SeededRowIdSource, SubscriptionEvent, SubscriptionStream, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
+    Propagation, ReadOpts, SeededRowIdSource, SubscriptionEvent, SubscriptionStream, block_on,
 };
 use jazz::groove::{records::Value, storage::TestStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -275,5 +275,113 @@ fn settled_index_candidates_remain_live_after_promotion_and_newer_ahead_exit() {
             .is_empty()
     );
     block_on(stream.close()).unwrap();
+    block_on(db.close()).unwrap();
+}
+
+#[test]
+fn first_result_preserves_explicit_public_provenance_and_projected_cells() {
+    let db = open(false);
+    let write = block_on(db.insert(
+        "documents",
+        cells(jazz::row_input!(
+            "owner" => jazz::tools::ObjectId::from_uuid(user(2).test_uuid()),
+            "bucket" => "selected",
+            "group_id" => jazz::tools::ObjectId::from_uuid(row(1).0)
+        )),
+        InsertOptions {
+            updated_at_ms: Some(1234),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let query = db
+        .prepare_query(&Query::from("documents").select([
+            "bucket",
+            "$createdAt",
+            "$updatedAt",
+            "$createdBy",
+            "$updatedBy",
+        ]))
+        .unwrap();
+    let rows = block_on(db.all_for_identity(&query, opts(), user(2))).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), write.row_uuid());
+    let (descriptor, raw) = rows[0].encoded_record();
+    let record = jazz::groove::records::BorrowedRecord::new(raw, descriptor);
+    assert_eq!(
+        record
+            .get_nullable_string(descriptor.field_index("bucket").expect("selected cell"))
+            .unwrap(),
+        Some("selected")
+    );
+    for field in ["$createdAt", "$updatedAt"] {
+        assert_eq!(
+            record
+                .get_u64(descriptor.field_index(field).expect("selected timestamp"))
+                .unwrap(),
+            1234
+        );
+    }
+    for field in ["$createdBy", "$updatedBy"] {
+        assert!(
+            rows[0].binding_field_names().contains(&Some(field)),
+            "selected author must retain its public publication role"
+        );
+        assert!(descriptor.field_index(field).is_some());
+    }
+    let provenance = db.row_provenance(&rows[0]).unwrap().unwrap();
+    let writer = AuthorSubject::system_at(NodeUuid::from_bytes([0x71; 16]));
+    assert_eq!(provenance.created_by, writer);
+    assert_eq!(provenance.updated_by, writer);
+    block_on(db.close()).unwrap();
+}
+
+#[test]
+fn first_result_policy_id_read_keeps_bounded_storage_work() {
+    let db = open(true);
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    for n in 10..90 {
+        block_on(tx.insert(
+            "documents",
+            cells(jazz::row_input!(
+                "owner" => jazz::tools::ObjectId::from_uuid(user(2).test_uuid()),
+                "bucket" => "a",
+                "group_id" => jazz::tools::ObjectId::from_uuid(row(1).0)
+            )),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let committed = block_on(tx.commit()).unwrap();
+    db.finalize_local_mergeable_commit_for_test(committed)
+        .unwrap();
+    let query = db
+        .prepare_query(
+            &Query::from("documents")
+                .filter(eq(col("id"), jazz::query::lit(Value::Uuid(row(40).0)))),
+        )
+        .unwrap();
+    db.reset_storage_read_metrics_for_test();
+    let rows = block_on(db.all_for_identity(
+        &query,
+        ReadOpts {
+            tier: jazz::tx::DurabilityTier::Global,
+            ..opts()
+        },
+        user(2),
+    ))
+    .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![row(40)]
+    );
+    let metrics = db.take_storage_read_metrics_for_test();
+    assert!(
+        (1..=4).contains(&metrics.global_current_rows.reads),
+        "a one-row policy lookup must not hydrate all 80 rows: {metrics:?}"
+    );
     block_on(db.close()).unwrap();
 }
