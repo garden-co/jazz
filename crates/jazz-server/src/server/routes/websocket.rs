@@ -3788,6 +3788,99 @@ mod tests {
         assert_eq!(ws_live_admissions_for(key), WS_PER_IDENTITY_CONNECTION_CAP);
     }
 
+    // Internal route-boundary test: the admission cap belongs to each
+    // independently built ServerState, even when states serve the same app
+    // and authenticated identity. Observe the established sockets' protocol
+    // behavior rather than relying on registry counts alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn websocket_admission_cap_is_scoped_to_server_state() {
+        let app_id = AppId::random();
+        let state_a = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_core_server_shell_schema(ws_public_schema_convert())
+            .build()
+            .await
+            .expect("build first websocket server state")
+            .state;
+        let state_b = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_core_server_shell_schema(ws_public_schema_convert())
+            .build()
+            .await
+            .expect("build second websocket server state")
+            .state;
+        let addr_a = start_ws_test_server(state_a.clone()).await;
+        let addr_b = start_ws_test_server(state_b.clone()).await;
+        let identity = AuthorSubject::for_test_bytes([0x4a; 16]);
+
+        let mut sockets_a = Vec::with_capacity(WS_PER_IDENTITY_CONNECTION_CAP);
+        for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
+            let mut socket = open_negotiated_ws_session(addr_a, &state_a, identity).await;
+            let _ = receive_required_ws_encoded_frames(&mut socket).await;
+            sockets_a.push(socket);
+        }
+        let mut oldest_a = sockets_a.remove(0);
+
+        // This admission must succeed without evicting the oldest socket on
+        // the other ServerState.
+        let mut session_b = open_negotiated_ws_session(addr_b, &state_b, identity).await;
+        let _ = receive_required_ws_encoded_frames(&mut session_b).await;
+        let _session_b = session_b;
+
+        let ping = vec![0x4a, 0x4b, 0x4c];
+        oldest_a
+            .send(WsMessage::Ping(ping.clone().into()))
+            .await
+            .expect("send liveness ping on first server");
+        let handshake_deadline = tokio::time::Instant::now() + WS_SETTLE_DEADLINE;
+        let mut post_pong_deadline = None;
+        let mut saw_pong = false;
+        loop {
+            let deadline = post_pong_deadline.unwrap_or(handshake_deadline);
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, oldest_a.next()).await {
+                Ok(Some(Ok(WsMessage::Pong(payload)))) => {
+                    assert_eq!(payload.as_ref(), ping.as_slice());
+                    saw_pong = true;
+                    post_pong_deadline =
+                        Some(tokio::time::Instant::now() + Duration::from_millis(250));
+                }
+                Ok(Some(Ok(WsMessage::Binary(bytes)))) => {
+                    let frames = decode_ws_message(&WsMessage::Binary(bytes));
+                    panic!("first server state unexpectedly emitted {frames:?}");
+                }
+                Ok(Some(Ok(WsMessage::Close(frame)))) => {
+                    panic!("first server state evicted its oldest socket: {frame:?}");
+                }
+                Ok(Some(Err(error))) => panic!("first server socket failed: {error}"),
+                Ok(Some(Ok(message))) => {
+                    panic!("unexpected first server websocket message: {message:?}");
+                }
+                Ok(None) => panic!("first server websocket ended"),
+                Err(_) => break,
+            }
+        }
+        assert!(
+            saw_pong,
+            "oldest socket on first server must remain usable after second admission"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn trusted_links_do_not_consume_the_public_session_connection_cap() {
         let state = make_ws_convergence_test_state().await;
