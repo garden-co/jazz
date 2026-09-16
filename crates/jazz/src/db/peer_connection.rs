@@ -2621,6 +2621,7 @@ where
                     let mut publications = Vec::new();
                     let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
                     let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
+                    let mut deferred_stop = false;
                     loop {
                         let next = match self.staged_inbound.pop_front() {
                             Some(staged) => Some(staged),
@@ -2636,7 +2637,8 @@ where
                                         &error,
                                     ) =>
                                 {
-                                    return Ok(true);
+                                    deferred_stop = true;
+                                    break;
                                 }
                                 Err(error) => return Err(transport_error(error)),
                             },
@@ -3835,7 +3837,7 @@ where
                         let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                         self.subscriber_dirty_epoch.set(next);
                     }
-                    Ok::<bool, Error>(false)
+                    Ok::<bool, Error>(deferred_stop)
                 })
                 .await?;
                 if stop {
