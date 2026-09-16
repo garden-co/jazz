@@ -1,0 +1,261 @@
+mod common;
+
+use jazz::block_on;
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions};
+use jazz::groove::records::Value;
+use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::{CurrentWriteSchema, MigrationLens, SchemaVersion, TableLens};
+use jazz::query::{Query, col, eq, lit};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, ObjectId, SchemaBuilder, TableSchemaBuilder, Value as PublicValue};
+use jazz_storage_rocksdb::RocksDbStorage;
+use std::collections::BTreeMap;
+
+fn schema(references: bool) -> JazzSchema {
+    let sources = TableSchemaBuilder::new("sources");
+    let sources = if references {
+        sources
+            .fk_column("target", "targets")
+            .nullable_fk_column("optional", "targets")
+            .array_fk_column("many", "targets")
+    } else {
+        sources
+            .column("target", ColumnType::Uuid)
+            .nullable_column("optional", ColumnType::Uuid)
+            .column(
+                "many",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Uuid),
+                },
+            )
+    };
+    common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                sources
+                    .index_only(Vec::<String>::new())
+                    .policies(common::allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("targets")
+                    .column("label", ColumnType::Text)
+                    .policies(common::allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+fn identity() -> DbIdentity {
+    DbIdentity {
+        node: NodeUuid::from_bytes([0x71; 16]),
+        author: AuthorSubject::SYSTEM,
+    }
+}
+fn id(n: u8) -> RowUuid {
+    RowUuid::from_bytes([n; 16])
+}
+
+// Db's catalogue APIs operate on Groove cells; build inputs with the public
+// macro and convert only the value types this fixture uses.
+fn cells(input: std::collections::HashMap<String, PublicValue>) -> BTreeMap<String, Value> {
+    fn convert(value: PublicValue) -> Value {
+        match value {
+            PublicValue::Uuid(v) => Value::Uuid(*v.uuid()),
+            PublicValue::Text(v) => Value::String(v),
+            PublicValue::Null => Value::Nullable(None),
+            PublicValue::Array(v) => Value::Array(v.into_iter().map(convert).collect()),
+            _ => panic!("unexpected fixture value"),
+        }
+    }
+    input.into_iter().map(|(k, v)| (k, convert(v))).collect()
+}
+fn source_cells(nullable: bool) -> BTreeMap<String, Value> {
+    let target = PublicValue::Uuid(ObjectId::from_uuid(id(1).0));
+    let mut result = cells(
+        jazz::row_input!("target" => target.clone(), "optional" => if nullable { PublicValue::Null } else { target.clone() }, "many" => PublicValue::Array(vec![target])),
+    );
+    if !nullable {
+        result.insert(
+            "optional".into(),
+            Value::Nullable(Some(Box::new(Value::Uuid(id(1).0)))),
+        );
+    }
+    result
+}
+async fn insert_source<S: OrderedKvStorage + ReopenableStorage + 'static>(
+    db: &Db<S>,
+    n: u8,
+    nullable: bool,
+) {
+    db.insert(
+        "sources",
+        source_cells(nullable),
+        InsertOptions {
+            row_id: Some(id(n)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+}
+fn assert_rows<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>, expected: &[u8]) {
+    let query = db.prepare_query(&Query::from("sources")).unwrap();
+    let rows = db.read(&query).unwrap();
+    let mut actual = rows.iter().map(|r| r.row_uuid()).collect::<Vec<_>>();
+    actual.sort();
+    assert_eq!(actual, expected.iter().map(|n| id(*n)).collect::<Vec<_>>());
+    for row in rows {
+        assert_eq!(
+            row.cell_at(0),
+            Some(Value::Uuid(id(1).0)),
+            "UUID bytes survive migration"
+        );
+        assert_eq!(
+            row.cell_at(2),
+            Some(Value::Array(vec![Value::Uuid(id(1).0)]))
+        );
+        assert_eq!(
+            row.cell_at(1),
+            Some(Value::Nullable(if row.row_uuid() == id(3) {
+                None
+            } else {
+                Some(Box::new(Value::Uuid(id(1).0)))
+            }))
+        );
+    }
+    for column in ["target", "optional", "many"] {
+        // Reverse traversal requires newly declared reference metadata and the
+        // reference index to find rows authored before that index existed.
+        let query = db
+            .prepare_query(&Query::from("targets").join_via("sources", column, []))
+            .unwrap();
+        assert_eq!(
+            db.read(&query)
+                .unwrap()
+                .iter()
+                .map(|r| r.row_uuid())
+                .collect::<Vec<_>>(),
+            vec![
+                id(1);
+                expected.len() - usize::from(column == "optional" && expected.contains(&3))
+            ]
+        );
+    }
+    let query = db
+        .prepare_query(&Query::from("sources").filter(eq(col("target"), lit(Value::Uuid(id(1).0)))))
+        .unwrap();
+    assert_eq!(db.read(&query).unwrap().len(), expected.len());
+}
+async fn migrate<S: OrderedKvStorage + ReopenableStorage + 'static>(db: &Db<S>) {
+    db.insert(
+        "targets",
+        cells(jazz::row_input!("label" => "existing target")),
+        InsertOptions {
+            row_id: Some(id(1)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    insert_source(db, 2, false).await;
+    insert_source(db, 3, true).await;
+    let old = schema(false);
+    let new = SchemaVersion::new(schema(true));
+    assert_ne!(old.version_id(), new.id);
+    assert!(
+        db.register_schema_view(new.schema.clone()).await.is_err(),
+        "reference changes still require explicit lineage"
+    );
+    let lens = MigrationLens::new(
+        old.version_id(),
+        new.id,
+        ["sources", "targets"]
+            .into_iter()
+            .map(|table| TableLens {
+                source_table: table.into(),
+                target_table: table.into(),
+                ops: vec![],
+            })
+            .collect(),
+    )
+    .unwrap();
+    let lens_id = lens.id();
+    let publication = db
+        .author_schema_lineage_publication(
+            new.clone(),
+            lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    db.publish_schema_with_lens(1, publication).await.unwrap();
+    db.set_current_write_schema(CurrentWriteSchema {
+        revision: 1,
+        schema: new.id,
+    })
+    .await
+    .unwrap();
+    assert!(db.catalogue_lens(lens_id).is_some());
+    assert_eq!(db.catalogue_schema(old.version_id()), Some(old));
+    assert_rows(db, &[2, 3]);
+    insert_source(db, 4, false).await;
+    assert_rows(db, &[2, 3, 4]);
+}
+
+#[test]
+fn explicit_identity_lens_adds_references_to_existing_uuid_columns() {
+    block_on(async {
+        let schema = schema(false);
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = Db::open(DbConfig::new(
+            schema,
+            MemoryStorage::new(&refs).unwrap(),
+            identity(),
+        ))
+        .await
+        .unwrap();
+        migrate(&db).await;
+    });
+}
+
+#[test]
+fn reference_metadata_and_old_rows_survive_rocksdb_reopen() {
+    block_on(async {
+        let old = schema(false);
+        let families = old.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let directory = tempfile::tempdir().unwrap();
+        let db = Db::open(DbConfig::new(
+            old.clone(),
+            RocksDbStorage::open(directory.path(), &refs).unwrap(),
+            identity(),
+        ))
+        .await
+        .unwrap();
+        migrate(&db).await;
+        db.close().await.unwrap();
+        drop(db);
+        let db = Db::open(DbConfig::new(
+            old.clone(),
+            RocksDbStorage::open(directory.path(), &refs).unwrap(),
+            identity(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            db.current_write_schema().unwrap().schema,
+            schema(true).version_id()
+        );
+        assert_eq!(db.catalogue_schema(old.version_id()), Some(old));
+        assert_eq!(
+            db.catalogue_schema(schema(true).version_id()),
+            Some(schema(true))
+        );
+        assert_rows(&db, &[2, 3, 4]);
+        insert_source(&db, 5, false).await;
+        assert_rows(&db, &[2, 3, 4, 5]);
+        db.close().await.unwrap();
+    });
+}
