@@ -1890,9 +1890,9 @@ describe("cli migrations", () => {
     expect(generated).toContain("renameTables: {");
     expect(generated).toContain('people: s.renameTableFrom("users"),');
     expect(generated).toContain("from: {");
-    expect(generated).toContain('"users": s.table({, {}');
+    expect(generated).toContain('"users": s.table({');
     expect(generated).toContain("to: {");
-    expect(generated).toContain('"people": s.table({, {}');
+    expect(generated).toContain('"people": s.table({');
     expect(generated).not.toContain("migrate: {");
   });
 
@@ -1951,10 +1951,10 @@ describe("cli migrations", () => {
     expect(generated).toContain('people: s.renameTableFrom("users"),');
     expect(generated).not.toContain("createTables: {");
     expect(generated).not.toContain("dropTables: {");
-    expect(generated).toContain('"orgs": s.table({, {}');
-    expect(generated).toContain('"users": s.table({, {}');
-    expect(generated).toContain('"companies": s.table({, {}');
-    expect(generated).toContain('"people": s.table({, {}');
+    expect(generated).toContain('"orgs": s.table({');
+    expect(generated).toContain('"users": s.table({');
+    expect(generated).toContain('"companies": s.table({');
+    expect(generated).toContain('"people": s.table({');
     expect(generated).not.toContain("migrate: {");
   });
 
@@ -3226,12 +3226,12 @@ export default s.defineMigration({
   from: {
     todos: s.table({
       ${fromFields}
-    }),
+    }, {}),
   },
   to: {
     todos: s.table({
       ${toFields}
-    }),
+    }, {}),
   },
 });
 `;

@@ -39,7 +39,7 @@ const richApp = schema.defineApp({
     {
       name: schema.string(),
     },
-    {},
+    { todosViaOwner: schema.reverse("todos", "owner") },
   ),
   todos: schema.table(
     {
@@ -49,9 +49,9 @@ const richApp = schema.defineApp({
       priority: schema.int(),
       tags: schema.array(schema.string()),
       payload: schema.bytes().optional(),
-      ownerId: schema.ref("users").optional(),
+      ownerId: schema.uuid().optional(),
     },
-    {},
+    { owner: schema.rel("users", "ownerId") },
   ),
 });
 

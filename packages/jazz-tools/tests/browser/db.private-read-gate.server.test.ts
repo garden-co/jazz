@@ -30,23 +30,26 @@ const app = schema.defineApp({
       visibility: schema.string(),
       owner_id: schema.uuid(),
     },
-    {},
+    {
+      chat_membersViaChat: schema.reverse("chat_members", "chat"),
+      messagesViaChat: schema.reverse("messages", "chat"),
+    },
   ),
   chat_members: schema.table(
     {
-      chat_id: schema.ref("chats"),
+      chat_id: schema.uuid(),
       user_id: schema.uuid(),
     },
-    {},
+    { chat: schema.rel("chats", "chat_id") },
   ),
   messages: schema.table(
     {
-      chat_id: schema.ref("chats"),
+      chat_id: schema.uuid(),
       body: schema.string(),
       author_id: schema.uuid(),
       owner_id: schema.uuid(),
     },
-    {},
+    { chat: schema.rel("chats", "chat_id") },
   ),
   announcements: schema.table(
     {
@@ -64,7 +67,10 @@ const camelChatApp = schema.defineApp({
       createdBy: schema.string(),
       joinCode: schema.string().optional(),
     },
-    {},
+    {
+      chatMembersViaChat: schema.reverse("chatMembers", "chat"),
+      messagesViaChat: schema.reverse("messages", "chat"),
+    },
   ),
   profiles: schema.table(
     {
@@ -72,32 +78,36 @@ const camelChatApp = schema.defineApp({
       name: schema.string(),
       avatar: schema.string().optional(),
     },
-    {},
+    { messagesViaSender: schema.reverse("messages", "sender") },
   ),
   chatMembers: schema.table(
     {
-      chatId: schema.ref("chats"),
+      chatId: schema.uuid(),
       userId: schema.string(),
       joinCode: schema.string().optional(),
     },
-    {},
+    { chat: schema.rel("chats", "chatId") },
   ),
   messages: schema.table(
     {
-      chatId: schema.ref("chats"),
-      senderId: schema.ref("profiles"),
+      chatId: schema.uuid(),
+      senderId: schema.uuid(),
       text: schema.string(),
       createdAt: schema.timestamp(),
     },
-    {},
+    {
+      chat: schema.rel("chats", "chatId"),
+      sender: schema.rel("profiles", "senderId"),
+      reactionsViaMessage: schema.reverse("reactions", "message"),
+    },
   ),
   reactions: schema.table(
     {
-      messageId: schema.ref("messages"),
+      messageId: schema.uuid(),
       userId: schema.string(),
       emoji: schema.string(),
     },
-    {},
+    { message: schema.rel("messages", "messageId") },
   ),
 });
 

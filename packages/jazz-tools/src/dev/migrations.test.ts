@@ -28,8 +28,11 @@ describe("migration stub generation", () => {
 
     expect(source).toContain('"externalId": s.uuid(),');
     expect(source).toContain('"previousId": s.uuid().optional(),');
-    expect(source).toContain('"ownerId": s.ref("users"),');
-    expect(source).toContain('"reviewerId": s.ref("users").optional(),');
+    expect(source).toContain('"ownerId": s.uuid(),');
+    expect(source).toContain('"reviewerId": s.uuid().optional(),');
+
+    expect(source).toContain('"owner": s.rel("users", "ownerId")');
+    expect(source).toContain('"reviewer": s.rel("users", "reviewerId")');
 
     // The generated stub is executable JavaScript: run it through the public
     // migration builder to verify the additive-table migration is usable.
