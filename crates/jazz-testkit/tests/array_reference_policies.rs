@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value,
-    permissions, policy_expr as pe,
+    ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema, Value, permissions,
+    policy_expr as pe,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -109,6 +109,7 @@ async fn create_team(
 async fn set_team_projects(admin: &JazzClient, team_id: ObjectId, project_ids: &[ObjectId]) {
     let transaction_id = admin
         .update(
+            "teams",
             team_id,
             vec![(
                 "project_ids".to_string(),
@@ -160,7 +161,7 @@ async fn assert_alice_granted_and_mallory_denied(
     let mallory_rows = wait_for_query(
         &mallory,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "mallory sees no projects without team membership",
         Some,
@@ -198,7 +199,8 @@ async fn array_reference_membership_grants_read_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "projects", READY_TIMEOUT).await;
 
     let atlas = create_project(&admin, "Atlas").await;
@@ -232,7 +234,8 @@ async fn array_reference_grant_updates_incrementally_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "projects", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,
@@ -275,7 +278,7 @@ async fn array_reference_grant_updates_incrementally_inner() {
     let rows_after_remove = wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "the project is hidden after its id leaves the team's array",
         |rows| lacks_row(&rows, atlas).then_some(rows),
@@ -327,7 +330,8 @@ async fn unindexed_array_reference_still_grants_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "projects", READY_TIMEOUT).await;
 
     let atlas = create_project(&admin, "Atlas").await;

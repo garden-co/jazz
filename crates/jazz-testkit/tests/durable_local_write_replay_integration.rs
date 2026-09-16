@@ -28,7 +28,9 @@ async fn persistent_restart_replays_pending_write_with_valid_token() {
 }
 
 async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
     let mut context = server.make_client_context_for_user(test_schema(), "durable-replay-user");
     context.backend_secret = None;
     context.admin_secret = None;

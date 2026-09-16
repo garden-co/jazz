@@ -960,11 +960,11 @@ impl PerNodeKnowledge {
         let normalized_bundles = version_bundles_for_update(message);
         // Every completed frame replaces the whole subscription input set,
         // including empty snapshots. Pending opening frames do not replace it.
-        if !peer_payload_inventory.opening_pending {
+        if !peer_payload_inventory.opening_pending && program_fact_adds.is_snapshot() {
             self.subscription_entries.clear();
         }
         let result_add_keys = program_fact_adds
-            .iter()
+            .added_rows().iter()
             .map(|input| (input.version.tx, input.row))
             .collect::<BTreeSet<_>>();
         let table_schema = owner_policy_schema().tables[0].clone();
@@ -979,7 +979,10 @@ impl PerNodeKnowledge {
                 }
             }
         }
-        for input in program_fact_adds {
+        for input in program_fact_adds.removed_rows() {
+            self.subscription_entries.remove(&(input.version.tx, input.row));
+        }
+        for input in program_fact_adds.added_rows() {
             self.subscription_entries.insert((input.version.tx, input.row));
         }
         for bundle in &normalized_bundles {
@@ -1061,7 +1064,7 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
         "full view recomputation should carry bundles for every visible member"
     );
     let result_rows = program_fact_adds
-        .iter()
+        .added_rows().iter()
         .filter_map(|fact| match fact {
             input if input.version.layer == crate::protocol::ResultRowLayer::Content => {
                 Some(input.row)
@@ -1432,7 +1435,7 @@ fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: 
     // named here must have a matching CoveredInput and no policy/proof-only
     // row may escape merely because it contributed to an authorized result.
     let covered_rows = program_fact_adds
-        .iter()
+        .added_rows().iter()
         .map(|input| input.row)
         .collect::<BTreeSet<_>>();
     assert_eq!(covered_rows, expected_rows, "covered closure rows differ");

@@ -253,6 +253,39 @@ fn cancelling_cold_hydration_releases_a_later_shared_subscription() {
 }
 
 #[test]
+fn shared_hydrations_wait_for_the_predecessor_without_failing() {
+    let (storage, _) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let descriptor =
+        RecordDescriptor::new([("id", ColumnType::U64), ("title", ColumnType::String)]);
+    let source = |id| {
+        GraphBuilder::values(
+            descriptor.clone(),
+            [vec![Value::U64(id), Value::String("Album".into())]],
+        )
+        .unwrap()
+    };
+    // A large opening deliberately spans several owner turns. The second
+    // subscription shares a node whose private predecessor is not installed.
+    let waker = noop_waker();
+    let first = database
+        .subscribe_with_waker(
+            (0..256).map(|id| (format!("album_{id}"), source(id))),
+            Some(&waker),
+        )
+        .unwrap();
+    let second = database
+        .subscribe([("shared", source(0)), ("independent", source(256))])
+        .unwrap();
+    block_on(database.drive_progress()).unwrap();
+    let first_rows = block_on(database.next_multisink_subscription(&first)).unwrap();
+    assert_eq!(first_rows.sinks.len(), 256);
+    let second_rows = block_on(database.next_multisink_subscription(&second)).unwrap();
+    assert_eq!(second_rows.sinks["shared"].deltas.len(), 1);
+    assert_eq!(second_rows.sinks["independent"].deltas.len(), 1);
+}
+
+#[test]
 fn write_during_cold_subscription_hydration_is_delivered_exactly_once() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = block_on(Database::new(schema(), storage)).unwrap();

@@ -6,7 +6,7 @@ import {
   liveEdgeBackendInsert,
   liveEdgeBackendClose,
 } from "./tests/browser/live-edge-replay-node.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
@@ -69,6 +69,13 @@ export default defineConfig({
   define: {
     __JAZZ_BROWSER_SOAK__: JSON.stringify(process.env.JAZZ_BROWSER_SOAK ?? ""),
     __JAZZ_ABSTRACT_BENCH__: JSON.stringify(abstractBench),
+    __JAZZ_COLD_LOAD_BATCH_UPDATES__: JSON.stringify(
+      process.env.JAZZ_COLD_LOAD_BATCH_UPDATES === "1",
+    ),
+    __JAZZ_COLD_LOAD_FIXTURE__: JSON.stringify(process.env.JAZZ_COLD_LOAD_FIXTURE_DIR ?? ""),
+    __JAZZ_COLD_LOAD_RESPONSIVENESS__: JSON.stringify(
+      process.env.JAZZ_COLD_LOAD_RESPONSIVENESS === "1",
+    ),
     __JAZZ_REALISTIC_BROWSER_SCENARIOS__: JSON.stringify(realisticBrowserScenarios),
     __JAZZ_REALISTIC_BROWSER_RUN_ID__: JSON.stringify(realisticBrowserRunId),
     __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: JSON.stringify(realisticBrowserLimitOverrides),
@@ -129,6 +136,17 @@ export default defineConfig({
         },
       ],
       commands: {
+        readColdLoadFixture: async (_context, chunk?: number) => {
+          const directory = process.env.JAZZ_COLD_LOAD_FIXTURE_DIR;
+          if (!directory) throw new Error("JAZZ_COLD_LOAD_FIXTURE_DIR is required");
+          if (chunk !== undefined && (!Number.isSafeInteger(chunk) || chunk < 0))
+            throw new Error("Cold-load fixture chunk must be a non-negative integer");
+          const file =
+            chunk === undefined
+              ? "cold-load-fixture-1500.json"
+              : `cold-load-fixture-1500-pages-${chunk}.json`;
+          return JSON.parse(readFileSync(resolve(directory, file), "utf8"));
+        },
         workerFaultBundleUrl: async () => workerFaultBundle.url(),
         recoverPendingIndexedDbWrites: async ({ context, page }, config) =>
           recoverPendingIndexedDbWrites(context, page, config),

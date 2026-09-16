@@ -347,9 +347,81 @@ pub struct ViewUpdatePayload {
     pub version_carriers: Vec<VersionCarrier>,
     /// Per-peer payload coverage and authorization progress.
     pub peer_payload_inventory: PeerPayloadInventory,
-    /// Complete authorized supporting physical row/version set for this subscription.
-    /// Install atomically after every referenced native version is available.
-    pub supporting_rows: Vec<SupportingRow>,
+    /// Atomic physical supporting-set snapshot or exact-predecessor successor.
+    /// Native bodies for additions must be available before installation.
+    pub supporting_rows: SupportingRowsUpdate,
+}
+
+/// Wire v2 supporting-set transition. Revisions are opaque 16-byte identities,
+/// scoped to the admitted subscription/authority, never history timestamps.
+/// Postcard discriminants are pinned: Snapshot = 0, Delta = 1; field order is
+/// declaration order. There is no v1 complete-manifest compatibility decoder.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum SupportingRowsUpdate {
+    /// Initial or recovery complete set; supersedes pending predecessors.
+    Snapshot {
+        /// Fresh opaque revision, not an authorization token.
+        revision: [u8; 16],
+        /// Complete exact physical supporting versions.
+        rows: Vec<SupportingRow>,
+    },
+    /// Atomic change against one exact retained predecessor.
+    Delta {
+        /// Revision that must already be installed or queued in this usage.
+        predecessor: [u8; 16],
+        /// Successor revision. An empty confirmation may repeat its predecessor.
+        revision: [u8; 16],
+        /// Physical memberships entering the supporting set.
+        adds: Vec<SupportingRow>,
+        /// Physical memberships leaving this set, not globally deleted bytes.
+        removes: Vec<SupportingRow>,
+    },
+}
+
+impl SupportingRowsUpdate {
+    /// Construct a complete initial/recovery snapshot with a fresh revision.
+    pub fn snapshot(rows: Vec<SupportingRow>) -> Self {
+        Self::Snapshot {
+            revision: *uuid::Uuid::new_v4().as_bytes(),
+            rows,
+        }
+    }
+
+    /// Exact successor identity.
+    pub fn revision(&self) -> [u8; 16] {
+        match self {
+            Self::Snapshot { revision, .. } | Self::Delta { revision, .. } => *revision,
+        }
+    }
+
+    /// Native bodies needed by this message: all snapshot rows or delta adds.
+    pub fn added_rows(&self) -> &[SupportingRow] {
+        match self {
+            Self::Snapshot { rows, .. } => rows,
+            Self::Delta { adds, .. } => adds,
+        }
+    }
+
+    /// Physical memberships removed by this message.
+    pub fn removed_rows(&self) -> &[SupportingRow] {
+        match self {
+            Self::Snapshot { .. } => &[],
+            Self::Delta { removes, .. } => removes,
+        }
+    }
+
+    /// Whether this update establishes an independent complete predecessor.
+    pub fn is_snapshot(&self) -> bool {
+        matches!(self, Self::Snapshot { .. })
+    }
+
+    /// Mutably access rows whose bodies this message supplies or references.
+    pub fn added_rows_mut(&mut self) -> &mut Vec<SupportingRow> {
+        match self {
+            Self::Snapshot { rows, .. } => rows,
+            Self::Delta { adds, .. } => adds,
+        }
+    }
 }
 
 impl ViewUpdatePayload {
@@ -736,8 +808,19 @@ impl SyncMessage {
         let Some(view) = self.carried_view_update() else {
             return Ok(());
         };
+        if view.supporting_rows.revision() == [0; 16]
+            || matches!(&view.supporting_rows, SupportingRowsUpdate::Delta { predecessor, revision, adds, removes }
+                if *predecessor == [0; 16] || (predecessor == revision && (!adds.is_empty() || !removes.is_empty())))
+        {
+            return Err(WireContractError::InvalidSupportingRevision);
+        }
         let mut identities = std::collections::BTreeSet::new();
-        for row in &view.supporting_rows {
+        for row in view
+            .supporting_rows
+            .added_rows()
+            .iter()
+            .chain(view.supporting_rows.removed_rows())
+        {
             if !row.is_wire_valid() {
                 return Err(WireContractError::InvalidSupportingRow);
             }
@@ -759,6 +842,8 @@ impl SyncMessage {
 /// A semantic value violates the frozen peer-wire contract.
 #[derive(Debug)]
 pub enum WireContractError {
+    /// A transition has a nil revision or a nonempty self-successor.
+    InvalidSupportingRevision,
     /// A version carrier is structurally malformed.
     VersionCarrier(VersionBundleRunError),
     /// A supporting native row reference is malformed.
@@ -770,6 +855,9 @@ pub enum WireContractError {
 impl std::fmt::Display for WireContractError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidSupportingRevision => {
+                write!(f, "supporting transition revision is invalid")
+            }
             Self::VersionCarrier(error) => error.fmt(f),
             Self::InvalidSupportingRow => write!(f, "supporting row reference is invalid"),
             Self::DuplicateSupportingRow => write!(
@@ -798,6 +886,11 @@ fn validate_version_bundles(bundles: &[VersionBundle]) -> Result<(), VersionBund
         validate_version_records(&bundle.versions)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RECEIPT_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) fn validate_version_records(
@@ -887,13 +980,12 @@ pub struct VersionRecord {
 /// and resource bounds; this record role owns its discriminator and schema.
 mod version_record_wire_row {
     use super::*;
-    use serde::{Deserialize, Serialize};
 
     const MAGIC: &[u8; 5] = b"JVRR\x01";
 
     // Descriptor identity includes immutable names, layouts, nested types and
-    // enum registry/case schemas. Cache only successful canonicalization;
-    // arbitrary OwnedRecord bytes still require validation on every call.
+    // enum registry/case schemas. Row bytes are produced by the encoder;
+    // untrusted receipt admission is separate from this representation codec.
     const MAX_DESCRIPTOR_PROOFS: usize = 16;
     const MAX_DESCRIPTOR_PROOF_BYTES: usize = 64 * 1024;
 
@@ -982,11 +1074,6 @@ mod version_record_wire_row {
     pub(super) fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
         let proof = descriptor_for_encode(record.descriptor())?;
         let descriptor = &proof.encoded;
-        let canonical = proof.canonical;
-        let values = canonical.bind(record.raw()).to_values()?;
-        if canonical.create(&values)? != record.raw() {
-            return Err(groove::records::Error::NonCanonicalRecord);
-        }
         let length =
             u32::try_from(descriptor.len()).map_err(|_| groove::records::Error::LengthOverflow)?;
         let mut bytes = Vec::with_capacity(MAGIC.len() + 4 + descriptor.len() + record.raw().len());
@@ -1012,10 +1099,6 @@ mod version_record_wire_row {
         let end = 9usize.checked_add(length).ok_or_else(invalid)?;
         let descriptor = descriptor_for_decode(bytes.get(9..end).ok_or_else(invalid)?)?.canonical;
         let raw = bytes.get(end..).ok_or_else(invalid)?;
-        let values = descriptor.bind(raw).to_values()?;
-        if descriptor.create(&values)? != raw {
-            return Err(invalid());
-        }
         Ok(OwnedRecord::new(raw.to_vec(), descriptor))
     }
 
@@ -1023,6 +1106,73 @@ mod version_record_wire_row {
     mod tests {
         use super::*;
         use groove::records::{DescriptorField, FieldIdentity};
+
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct WireRow(#[serde(with = "super")] OwnedRecord);
+
+        // Pin the outer Postcard byte-blob contract independently of its
+        // serializer implementation, including both varint length boundaries.
+        #[test]
+        fn row_bulk_bytes_preserve_sequence_wire_contract() {
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let envelope = encode(&record).unwrap();
+            for length in [envelope.len(), 127, 128, 16383, 16384] {
+                let mut bytes = envelope.clone();
+                bytes.resize(length, 0);
+                // This codec preserves row bytes, even when receipt admission
+                // would reject their contents. Do not weaken that boundary.
+                let row = WireRow(decode(&bytes).unwrap());
+                let mut expected = Vec::new();
+                let mut remaining = length;
+                while remaining >= 128 {
+                    expected.push((remaining as u8 & 0x7f) | 0x80);
+                    remaining >>= 7;
+                }
+                expected.push(remaining as u8);
+                expected.extend_from_slice(&bytes);
+                assert_eq!(postcard::to_allocvec(&row).unwrap(), expected);
+                assert_eq!(postcard::to_allocvec(&bytes).unwrap(), expected);
+                assert_eq!(postcard::from_bytes::<WireRow>(&expected).unwrap(), row);
+                assert_eq!(postcard::from_bytes::<Vec<u8>>(&expected).unwrap(), bytes);
+
+                // A following field must retain its boundary in both directions.
+                let old = postcard::to_allocvec(&(bytes.clone(), 999u64)).unwrap();
+                assert_eq!(postcard::to_allocvec(&(&row, 999u64)).unwrap(), old);
+                assert_eq!(
+                    postcard::from_bytes::<(WireRow, u64)>(&old).unwrap(),
+                    (row, 999)
+                );
+
+                let json = serde_json::to_string(&bytes).unwrap();
+                let json_row: WireRow = serde_json::from_str(&json).unwrap();
+                assert_eq!(serde_json::to_string(&json_row).unwrap(), json);
+                assert_eq!(encode(&json_row.0).unwrap(), bytes);
+            }
+        }
+
+        #[test]
+        fn row_bulk_bytes_reject_truncated_and_invalid_envelopes() {
+            for bytes in [
+                vec![],
+                b"JVRR\x02".to_vec(),
+                b"JVRR\x01\xff\xff\xff\xff".to_vec(),
+            ] {
+                let wire = postcard::to_allocvec(&bytes).unwrap();
+                assert!(postcard::from_bytes::<WireRow>(&wire).is_err());
+                assert!(
+                    serde_json::from_str::<WireRow>(&serde_json::to_string(&bytes).unwrap())
+                        .is_err()
+                );
+            }
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let wire = postcard::to_allocvec(&WireRow(record)).unwrap();
+            for end in 0..wire.len() {
+                assert!(postcard::from_bytes::<WireRow>(&wire[..end]).is_err());
+            }
+            assert!(serde_json::from_str::<WireRow>("[256]").is_err());
+        }
 
         // These internal tests exercise the exact untrusted byte boundary and
         // proof reuse, which ordinary client queries cannot observe directly.
@@ -1053,8 +1203,13 @@ mod version_record_wire_row {
                 assert!(decode(&malformed_descriptor).is_err());
                 DESCRIPTOR_PROOFS
                     .with(|cache| assert_eq!(cache.borrow().entries.len(), usize::from(warm)));
-                assert!(decode(&malformed_row).is_err());
-                assert!(encode(&OwnedRecord::new(malformed_raw.clone(), descriptor)).is_err());
+                // The row codec preserves bytes; explicit receipt admission
+                // owns untrusted row validation, not descriptor cache hits.
+                assert_eq!(decode(&malformed_row).unwrap().raw(), malformed_raw);
+                assert_eq!(
+                    encode(&OwnedRecord::new(malformed_raw.clone(), descriptor)).unwrap(),
+                    malformed_row
+                );
                 assert_eq!(encode(&record).unwrap(), encoded);
             }
         }
@@ -1166,7 +1321,10 @@ mod version_record_wire_row {
             assert!(decode(&unknown_version).is_err());
             let mut trailing = encoded.clone();
             trailing.push(0);
-            assert!(decode(&trailing).is_err());
+            assert_eq!(
+                decode(&trailing).unwrap().raw(),
+                &trailing[9 + u32::from_le_bytes(trailing[5..9].try_into().unwrap()) as usize..]
+            );
             assert!(decode(&encoded[..8]).is_err());
             assert!(decode(&postcard::to_allocvec(&original).unwrap()).is_err());
         }
@@ -1176,16 +1334,52 @@ mod version_record_wire_row {
         record: &OwnedRecord,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        encode(record)
-            .map_err(serde::ser::Error::custom)?
-            .serialize(serializer)
+        let bytes = encode(record).map_err(serde::ser::Error::custom)?;
+        // Postcard's byte blob and u8 sequence have the same canonical
+        // varint length + raw bytes contract. Extend the output in bulk.
+        serializer.serialize_bytes(&bytes)
     }
 
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<OwnedRecord, D::Error> {
-        let bytes = Vec::<u8>::deserialize(deserializer)?;
-        decode(&bytes).map_err(serde::de::Error::custom)
+        struct RowVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RowVisitor {
+            type Value = OwnedRecord;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JVRR v1 row byte blob")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+                // Decode from the deserializer's slice; only the resulting
+                // owned record needs a payload copy. Admission remains separate.
+                decode(bytes).map_err(E::custom)
+            }
+
+            fn visit_borrowed_bytes<E: serde::de::Error>(
+                self,
+                bytes: &'de [u8],
+            ) -> Result<Self::Value, E> {
+                self.visit_bytes(bytes)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                // Human-readable formats such as JSON still represent bytes
+                // as arrays. Never reserve from an untrusted size hint.
+                let mut bytes = Vec::new();
+                while let Some(byte) = sequence.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                self.visit_bytes(&bytes)
+            }
+        }
+
+        deserializer.deserialize_bytes(RowVisitor)
     }
 }
 
@@ -1196,6 +1390,8 @@ impl VersionRecord {
     /// deliberately permits deferred decoding, so callers must pass through
     /// here before treating a deserialized record as trusted.
     pub(crate) fn validate_receipt(&self) -> Result<(), VersionBundleRunError> {
+        #[cfg(test)]
+        RECEIPT_VALIDATIONS.with(|count| count.set(count.get() + 1));
         let malformed = || VersionBundleRunError::MalformedVersionRecord {
             table: self.table().to_owned(),
         };
@@ -1242,7 +1438,7 @@ impl VersionRecord {
             WireRowRecord::FIELD_CREATED_BY_IDX,
             WireRowRecord::FIELD_UPDATED_BY_IDX,
         ] {
-            RowAuthor::from_value(borrowed.get_idx(index).map_err(|_| malformed())?)
+            RowAuthor::from_record(borrowed.get_record(index).map_err(|_| malformed())?)
                 .map_err(|_| malformed())?;
         }
         borrowed
@@ -1458,10 +1654,10 @@ impl VersionRecord {
 
     /// Original author for this logical row.
     pub fn created_by(&self) -> AuthorSubject {
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(WireRowRecord::FIELD_CREATED_BY_IDX)
+                .get_record(WireRowRecord::FIELD_CREATED_BY_IDX)
                 .expect("valid wire created_by"),
         )
         .expect("canonical wire created_by")
@@ -1478,10 +1674,10 @@ impl VersionRecord {
 
     /// Author of this row version.
     pub fn updated_by(&self) -> AuthorSubject {
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(WireRowRecord::FIELD_UPDATED_BY_IDX)
+                .get_record(WireRowRecord::FIELD_UPDATED_BY_IDX)
                 .expect("valid wire updated_by"),
         )
         .expect("canonical wire updated_by")
@@ -3922,6 +4118,7 @@ pub struct SupportingRow {
     pub physical_table: crate::ids::GlobalPhysicalTableId,
     /// Authored native-record table name used by the existing exact version repair API.
     /// This is lookup metadata, not a query-source label; physical identity is authoritative.
+    #[serde(deserialize_with = "supporting_table_name::deserialize")]
     pub version_table: groove::Intern<String>,
     /// Physical row identity.
     pub row: RowUuid,
@@ -3933,6 +4130,91 @@ impl SupportingRow {
     /// Validate the native reference before catalogue-dependent receiver admission.
     pub fn is_wire_valid(&self) -> bool {
         !self.version_table.is_empty() && self.version.layer != ResultRowLayer::ContentOrDeletion
+    }
+}
+
+mod supporting_table_name {
+    use std::{borrow::Cow, cell::Cell, fmt};
+
+    use groove::Intern;
+    use serde::de::{Error, Unexpected, Visitor};
+
+    thread_local! {
+        // Intern handles own permanent pool entries, never input-buffer references.
+        // Exact string equality makes this independent of schema/authority lifetimes.
+        static LAST: Cell<Option<Intern<String>>> = const { Cell::new(None) };
+        #[cfg(test)]
+        pub(super) static LOOKUPS: Cell<usize> = const { Cell::new(0) };
+        #[cfg(test)]
+        pub(super) static OWNED_VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn intern(name: Cow<'_, str>) -> Intern<String> {
+        LAST.with(|last| {
+            if let Some(found) = last.get().filter(|old| old.as_str() == name.as_ref()) {
+                return found;
+            }
+            #[cfg(test)]
+            LOOKUPS.set(LOOKUPS.get() + 1);
+            let found = match name {
+                Cow::Borrowed(name) => Intern::from_ref(name),
+                Cow::Owned(name) => Intern::new(name),
+            };
+            last.set(Some(found));
+            found
+        })
+    }
+
+    struct TableName;
+
+    impl<'de> Visitor<'de> for TableName {
+        type Value = Intern<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(intern(Cow::Borrowed(value)))
+        }
+
+        fn visit_string<E: Error>(self, value: String) -> Result<Self::Value, E> {
+            #[cfg(test)]
+            OWNED_VISITS.set(OWNED_VISITS.get() + 1);
+            Ok(intern(Cow::Owned(value)))
+        }
+
+        fn visit_bytes<E: Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+            match std::str::from_utf8(value) {
+                Ok(value) => self.visit_str(value),
+                Err(_) => Err(E::invalid_value(Unexpected::Bytes(value), &self)),
+            }
+        }
+
+        fn visit_byte_buf<E: Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+            match String::from_utf8(value) {
+                Ok(value) => self.visit_string(value),
+                Err(error) => Err(E::invalid_value(
+                    Unexpected::Bytes(&error.into_bytes()),
+                    &self,
+                )),
+            }
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Intern<String>, D::Error> {
+        // Serialization stays the existing string representation. Request borrowing
+        // during decode instead of String::deserialize's allocate-before-intern path.
+        deserializer.deserialize_str(TableName)
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset() {
+        LAST.set(None);
+        LOOKUPS.set(0);
+        OWNED_VISITS.set(0);
     }
 }
 
@@ -4483,7 +4765,7 @@ impl<'de> serde::Deserialize<'de> for SchemaVersion {
 }
 
 /// Atomic catalogue payload that admits one non-genesis schema.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct SchemaLineagePublication {
     /// Content-addressed identity of this complete bundle.
     pub id: SchemaLineagePublicationId,
@@ -4499,6 +4781,33 @@ pub struct SchemaLineagePublication {
     /// paths only locate the entity in this immutable descriptor; they are not
     /// inputs to the UUID allocation.
     pub physical_identities: PhysicalIdentityManifest,
+}
+
+// Declaration order is immaterial to the v1 content ID and durable encoding.
+// Equality preserves multiplicity; validation still rejects duplicate declarations.
+// Compare the full payload, never just its claimed (or recomputed) digest.
+impl PartialEq for SchemaLineagePublication {
+    fn eq(&self, other: &Self) -> bool {
+        fn same_declarations(left: &[String], right: &[String]) -> bool {
+            if left == right {
+                return true;
+            }
+            if left.len() != right.len() {
+                return false;
+            }
+            let mut left = left.iter().collect::<Vec<_>>();
+            let mut right = right.iter().collect::<Vec<_>>();
+            left.sort_unstable();
+            right.sort_unstable();
+            left == right
+        }
+        self.id == other.id
+            && self.schema == other.schema
+            && self.lens == other.lens
+            && self.physical_identities == other.physical_identities
+            && same_declarations(&self.new_tables, &other.new_tables)
+            && same_declarations(&self.dropped_tables, &other.dropped_tables)
+    }
 }
 
 /// Immutable globally meaningful physical identities for one published schema
@@ -5208,6 +5517,8 @@ impl SchemaLineagePublication {
             dropped_tables,
             physical_identities,
         };
+        publication.new_tables.sort();
+        publication.dropped_tables.sort();
         publication.id = publication.content_id();
         Ok(publication)
     }
@@ -5233,6 +5544,8 @@ impl SchemaLineagePublication {
             dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
             physical_identities,
         };
+        publication.new_tables.sort();
+        publication.dropped_tables.sort();
         publication.id = publication.content_id();
         publication
     }
@@ -5767,7 +6080,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(15);
             let encoded = groove::large_values::encode_stored_scalar(
                 value.kind,
-                &groove::large_values::StoredScalar::Chunked(value.clone()),
+                &groove::large_values::StoredScalar::Chunked(value.as_ref().clone()),
             )
             .expect("admitted large descriptor has canonical encoding");
             put_bytes(bytes, &encoded);
@@ -5968,6 +6281,152 @@ mod tests {
     use crate::tx::TxKind;
     use groove::schema::{ColumnSchema, ColumnType};
 
+    // Internal wire corpus: byte compatibility and interning work cannot be
+    // observed through row queries. Public sync suites still gate visible behavior.
+    #[test]
+    fn supporting_table_borrowing_preserves_existing_wire_bytes_and_validation() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct PreviousSupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId,
+            version_table: groove::Intern<String>,
+            row: RowUuid,
+            version: RowVersionRefEntry,
+        }
+        for name in ["", "todos", "résumé/倉庫", &"long_label".repeat(100)] {
+            for populated in [false, true] {
+                let old = PreviousSupportingRow {
+                    physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                        [3; 16],
+                    )),
+                    version_table: groove::Intern::from_ref(name),
+                    row: RowUuid::from_bytes([4; 16]),
+                    version: RowVersionRefEntry {
+                        tx: TxId::new(TxTime(987654), NodeUuid::from_bytes([5; 16])),
+                        schema_version: populated.then(|| SchemaVersionId::from_bytes([6; 16])),
+                        layer: ResultRowLayer::Content,
+                        batch: populated
+                            .then(|| TxId::new(TxTime(1234), NodeUuid::from_bytes([7; 16]))),
+                        branch_or_prefix: populated.then(|| vec![0, 1, 254, 255]),
+                        row_digest: populated.then(|| vec![42; 32]),
+                    },
+                };
+                let bytes = postcard::to_allocvec(&old).unwrap();
+                let row: SupportingRow = postcard::from_bytes(&bytes).unwrap();
+                assert_eq!(row.physical_table, old.physical_table);
+                assert_eq!(row.version_table, old.version_table);
+                assert_eq!(row.row, old.row);
+                assert_eq!(row.version, old.version);
+                assert_eq!(row.is_wire_valid(), !name.is_empty());
+                assert_eq!(postcard::to_allocvec(&row).unwrap(), bytes);
+                let old_again: PreviousSupportingRow =
+                    postcard::from_bytes(&postcard::to_allocvec(&row).unwrap()).unwrap();
+                assert_eq!(old_again.version_table, old.version_table);
+                let json = serde_json::to_vec(&old).unwrap();
+                assert_eq!(serde_json::from_slice::<SupportingRow>(&json).unwrap(), row);
+                assert_eq!(serde_json::to_vec(&row).unwrap(), json);
+                // Match existing postcard acceptance at every truncated boundary,
+                // including optional/default field semantics, rather than assuming it.
+                for end in 0..bytes.len() {
+                    assert_eq!(
+                        postcard::from_bytes::<SupportingRow>(&bytes[..end]).is_ok(),
+                        postcard::from_bytes::<PreviousSupportingRow>(&bytes[..end]).is_ok()
+                    );
+                }
+                let mut trailing = bytes.clone();
+                trailing.push(0);
+                let (_, new_tail) = postcard::take_from_bytes::<SupportingRow>(&trailing).unwrap();
+                let (_, old_tail) =
+                    postcard::take_from_bytes::<PreviousSupportingRow>(&trailing).unwrap();
+                assert_eq!(new_tail, old_tail);
+                assert_eq!(new_tail, &[0]);
+            }
+        }
+
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Name(
+            #[serde(deserialize_with = "supporting_table_name::deserialize")]
+            groove::Intern<String>,
+        );
+        // Existing postcard string grammar: unsigned length varint, then UTF-8.
+        const GOLDEN: &[u8] = &[5, b't', b'o', b'd', b'o', b's'];
+        assert_eq!(
+            postcard::from_bytes::<Name>(GOLDEN).unwrap().0.as_str(),
+            "todos"
+        );
+        assert_eq!(
+            postcard::to_allocvec(&Name("todos".to_owned().into())).unwrap(),
+            GOLDEN
+        );
+        for invalid in [&[1, 255][..], &[2, 0xc0, 0x80], &[2, b'x']] {
+            assert!(postcard::from_bytes::<Name>(invalid).is_err());
+            assert!(postcard::from_bytes::<groove::Intern<String>>(invalid).is_err());
+        }
+        use serde::de::value::{BytesDeserializer, Error, StringDeserializer};
+        assert!(
+            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(&[255])).is_err()
+        );
+        assert_eq!(
+            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(b"valid"))
+                .unwrap()
+                .as_str(),
+            "valid"
+        );
+        assert_eq!(
+            supporting_table_name::deserialize(StringDeserializer::<Error>::new("owned".into()))
+                .unwrap()
+                .as_str(),
+            "owned"
+        );
+    }
+
+    #[test]
+    fn supporting_table_borrowing_uses_one_bounded_cache_entry_without_input_ownership() {
+        #[derive(serde::Deserialize)]
+        struct Name(
+            #[serde(deserialize_with = "supporting_table_name::deserialize")]
+            groove::Intern<String>,
+        );
+        let first = groove::Intern::<String>::from_ref("table_name_cache_first");
+        let second = groove::Intern::<String>::from_ref("table_name_cache_second");
+        let bytes = postcard::to_allocvec(&first).unwrap();
+        supporting_table_name::reset();
+        for _ in 0..1000 {
+            assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+        }
+        assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
+        assert_eq!(supporting_table_name::OWNED_VISITS.get(), 0);
+        assert_eq!(
+            postcard::from_bytes::<Name>(&postcard::to_allocvec(&second).unwrap())
+                .unwrap()
+                .0,
+            second
+        );
+        assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+        assert_eq!(
+            supporting_table_name::LOOKUPS.get(),
+            3,
+            "one entry, not an unbounded local interner"
+        );
+        drop(bytes);
+        assert_eq!(first.as_str(), "table_name_cache_first");
+        let independent = std::thread::spawn(move || {
+            supporting_table_name::reset();
+            let decoded = postcard::from_bytes::<Name>(&postcard::to_allocvec(&first).unwrap())
+                .unwrap()
+                .0;
+            assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
+            decoded
+        })
+        .join()
+        .unwrap();
+        assert_eq!(independent, first);
+        assert_eq!(
+            supporting_table_name::LOOKUPS.get(),
+            3,
+            "other thread cannot alter this cache"
+        );
+    }
+
     #[test]
     fn peer_view_rejects_duplicate_exact_supporting_row() {
         let row = SupportingRow {
@@ -5995,7 +6454,7 @@ mod tests {
             settled_through: GlobalTime(0),
             version_carriers: Vec::new(),
             peer_payload_inventory: PeerPayloadInventory::default(),
-            supporting_rows: vec![row.clone(), row],
+            supporting_rows: SupportingRowsUpdate::snapshot(vec![row.clone(), row]),
         });
         assert!(matches!(
             message.validate_wire_contract(),
@@ -6109,6 +6568,65 @@ mod tests {
                     )))
                     .to_value()
             )
+        );
+    }
+
+    // Byte receipts belong here because integration results cannot detect an
+    // accidental change to persisted policy-claim node encoding.
+    #[test]
+    fn nested_policy_claim_v1_encoding_receipt() {
+        let path = vec!["org".to_owned(), "slug".to_owned()];
+        let key = crate::query::provider_claim_path_operand_key(&path);
+        assert_eq!(key.as_bytes(), b"\0claim-path-v1:3:org4:slug");
+        assert_eq!(
+            crate::query::operand_claim_path(&key),
+            vec!["claims", "org", "slug"]
+        );
+        assert_eq!(
+            crate::query::provider_claim_path_operand_key(&["org.slug".into()]).as_bytes(),
+            b"\0claims:org.slug"
+        );
+        let unusual = vec!["".to_owned(), "é:x".to_owned()];
+        let key = crate::query::provider_claim_path_operand_key(&unusual);
+        assert_eq!(key.as_bytes(), "\0claim-path-v1:0:4:é:x".as_bytes());
+        assert_eq!(crate::query::operand_claim_path(&key)[1..], unusual);
+
+        let object = crate::tools::policy_claims::json_value_to_policy_claim(
+            serde_json::json!({"slug": "north", "revoked": null}),
+            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            object,
+            Value::Tuple(vec![
+                Value::Tuple(vec![Value::String("revoked".into()), Value::Nullable(None)]),
+                Value::Tuple(vec![
+                    Value::String("slug".into()),
+                    Value::String("north".into())
+                ]),
+            ])
+        );
+        let claims = BTreeMap::from([(crate::query::provider_claim_key("org"), object)]);
+        let encoded = policy_binding_directory_claims_value(&claims).unwrap();
+        let Value::Array(nodes) = &encoded else {
+            panic!("claim node array")
+        };
+        let mut receipt = blake3::Hasher::new();
+        for node in nodes {
+            let Value::Record(record) = node else {
+                panic!("claim node record")
+            };
+            receipt.update(&(record.raw().len() as u64).to_le_bytes());
+            receipt.update(record.raw());
+        }
+        assert_eq!(
+            receipt.finalize().to_hex().as_str(),
+            "475d72b7c78a532386605e6391d57c02f6a69eae69993c97cb2e4414bd9d52b4"
+        );
+        assert_eq!(
+            policy_binding_directory_claims_from_value(encoded).unwrap(),
+            claims
         );
     }
 
@@ -6422,7 +6940,7 @@ mod tests {
         for value in [
             Value::Record(record),
             Value::Enum(enum_value),
-            Value::Large(large),
+            Value::Large(Box::new(large)),
         ] {
             assert!(
                 MigrationLens::new(
@@ -6578,7 +7096,7 @@ mod tests {
             versions: vec![noncanonical],
         };
         assert!(message.validate_version_carriers().is_err());
-        assert!(crate::wire::encode_sync_message(&message).is_err());
+        assert!(crate::wire::encode_sync_message(&message).is_ok());
 
         // Hostile peers do not use our guarded encoder. Their postcard bytes
         // must fail closed without reaching the infallible public accessors.
@@ -6602,8 +7120,9 @@ mod tests {
             versions: vec![trailing_record],
         };
         assert!(
-            postcard::to_allocvec(&trailing_message).is_err(),
-            "the canonical row writer rejects trailing bytes"
+            crate::wire::decode_sync_message(&postcard::to_allocvec(&trailing_message).unwrap())
+                .is_err(),
+            "untrusted receipt admission rejects trailing row bytes"
         );
         // A hostile sender can still write an invalid blob without invoking
         // that writer. Splice its explicitly framed row into a valid message.
@@ -6698,7 +7217,7 @@ mod tests {
             table.wire_record_descriptor(),
             noncanonical_author,
         ));
-        assert!(crate::wire::encode_sync_message(&message).is_err());
+        assert!(crate::wire::encode_sync_message(&message).is_ok());
         let remote = postcard::to_allocvec(&message).unwrap();
         assert!(crate::wire::decode_sync_message(&remote).is_err());
 
@@ -7402,3 +7921,5 @@ mod tests {
         assert_ne!(lens.content_id(), changed.content_id());
     }
 }
+#[cfg(test)]
+pub(crate) mod supporting_set_test_oracle;

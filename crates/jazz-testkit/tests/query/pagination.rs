@@ -34,7 +34,9 @@ local_tokio_test! {
 /// ```
 async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
     let schema = subscription_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -154,7 +156,9 @@ local_tokio_test! {
 /// returns all rows after the requested offset.
 async fn subscribe_all_cold_ordered_subscription_supports_offset_without_limit() {
     let schema = subscription_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -429,7 +433,7 @@ async fn subscribe_all_preserves_sorting_on_sort_key_changes() {
     wait_for_query(
         &client,
         query.clone(),
-        None,
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         "initial projected rows are sorted by priority",
         |rows| {
@@ -445,7 +449,7 @@ async fn subscribe_all_preserves_sorting_on_sort_key_changes() {
     log.clear();
 
     client
-        .update(alice_id, vec![("priority".to_string(), Value::Integer(25))])
+        .update("todos", alice_id, vec![("priority".to_string(), Value::Integer(25))])
         .expect("update the active sort key");
 
     wait_for_subscription_update(
@@ -467,7 +471,7 @@ async fn subscribe_all_preserves_sorting_on_sort_key_changes() {
     let rows = wait_for_query(
         &client,
         query,
-        None,
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         "projected query returns the updated sort order",
         |rows| {
@@ -558,7 +562,7 @@ async fn subscribe_all_offset_limited_subscription_shifts_window_when_deleting_r
     log.clear();
 
     pair.writer
-        .delete(a_id)
+        .delete("todos", a_id)
         .expect("delete row before offset window");
 
     wait_for_subscription_update(

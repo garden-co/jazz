@@ -45,7 +45,8 @@ async fn run() {
         .with_jwks_url(issuer.endpoint())
         .with_native_transport_connector(native_connector())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let edge = JazzServer::builder()
         .with_app_id(core.app_id())
         .with_schema(schema.clone())
@@ -54,7 +55,8 @@ async fn run() {
         .with_upstream_url(core.base_url())
         .with_native_transport_connector(native_connector())
         .start()
-        .await;
+        .await
+        .expect("start test server");
 
     for _ in 0..300 {
         if edge.server_state().edge_upstream_health() == EdgeUpstreamHealth::Connected {
@@ -100,7 +102,7 @@ async fn run() {
     let row_id = wait_for_query(
         &observer,
         Query::from("todos"),
-        Some(DurabilityTier::GlobalServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(60),
         "device run marker at Core",
         |rows| {
@@ -153,7 +155,8 @@ async fn run() {
         .with_upstream_url(core.base_url())
         .with_native_transport_connector(native_connector())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     for _ in 0..300 {
         if edge.server_state().edge_upstream_health() == EdgeUpstreamHealth::Connected {
             break;

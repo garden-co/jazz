@@ -135,6 +135,17 @@ export interface RequestLike {
   headers?: Headers | Record<string, string | string[] | undefined>;
 }
 
+export type AuthUpdate =
+  | {
+      mode: "bearer";
+      jwtToken?: string;
+      trustedReservedSession?: Session;
+    }
+  | {
+      mode: "cookie";
+      cookieSession?: Session;
+    };
+
 /**
  * Common interface for the runtime backing `JazzClient`.
  */
@@ -1012,29 +1023,49 @@ export class JazzClient {
     return this;
   }
 
+  private updateAuthSnapshot(update: AuthUpdate): void {
+    const previousJwtToken = this.context.jwtToken;
+    const previousCookieSession = this.context.cookieSession;
+    const previousTrustedReservedSession = getTrustedReservedSession(this.context);
+    const previousResolvedSession = this.resolvedSession;
+
+    if (update.mode === "bearer") {
+      this.context.jwtToken = update.jwtToken;
+      this.context.cookieSession = undefined;
+      setTrustedReservedSession(this.context, update.trustedReservedSession);
+    } else {
+      this.context.jwtToken = undefined;
+      this.context.cookieSession = update.cookieSession;
+      setTrustedReservedSession(this.context, undefined);
+    }
+
+    try {
+      this.resolvedSession = this.resolveSessionFromContext();
+      this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+    } catch (error) {
+      this.context.jwtToken = previousJwtToken;
+      this.context.cookieSession = previousCookieSession;
+      setTrustedReservedSession(this.context, previousTrustedReservedSession);
+      this.resolvedSession = previousResolvedSession;
+      throw error;
+    }
+  }
+
   updateAuthToken(jwtToken?: string): void {
-    this.context.jwtToken = jwtToken;
-    setTrustedReservedSession(this.context, undefined);
-    this.resolvedSession = this.resolveSessionFromContext();
-    // Push the refreshed credentials into the Rust transport.
-    // Carry forward admin/backend secrets from context — omitting them here
-    // would deserialise to None on the Rust side and silently erase any
-    // privileged credentials the transport was connected with.
-    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+    this.updateAuthSnapshot({ mode: "bearer", jwtToken });
   }
 
   /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
   updateTrustedAuthToken(jwtToken: string, session: Session): void {
-    this.context.jwtToken = jwtToken;
-    setTrustedReservedSession(this.context, session);
-    this.resolvedSession = this.resolveSessionFromContext();
-    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+    this.updateAuthSnapshot({
+      mode: "bearer",
+      jwtToken,
+      trustedReservedSession: session,
+    });
   }
 
   updateCookieSession(cookieSession?: Session): void {
-    this.context.cookieSession = cookieSession;
-    this.resolvedSession = this.resolveSessionFromContext();
-    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+    this.updateAuthSnapshot({ mode: "cookie", cookieSession });
   }
 
   private normalizeQueryExecutionOptions(

@@ -10,6 +10,7 @@ async fn start_server() -> JazzServer {
         .with_admin_secret(ADMIN_SECRET)
         .start()
         .await
+        .expect("start test server")
 }
 
 fn app_url(server: &JazzServer, path: &str) -> String {
@@ -208,7 +209,8 @@ async fn admin_schema_api_persists_catalogue_in_the_production_storage_backend()
         .with_data_dir(data_dir.path())
         .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let client = reqwest::Client::new();
     let published = admin_request(client.post(app_url(&server, "/admin/schemas")))
         .json(&publish_body(schema_with_column(
@@ -232,7 +234,8 @@ async fn admin_schema_api_persists_catalogue_in_the_production_storage_backend()
         .with_data_dir(data_dir.path())
         .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let list = admin_request(client.get(app_url(&restarted, "/schemas")))
         .send()
         .await

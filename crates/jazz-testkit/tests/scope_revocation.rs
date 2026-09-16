@@ -5,8 +5,7 @@ use std::time::Duration;
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz::tools::{
-    ColumnDescriptor, ColumnType, DurabilityTier, RowDescriptor, Session, TableName, TableSchema,
-    Value,
+    ColumnDescriptor, ColumnType, RowDescriptor, Session, TableName, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -77,7 +76,7 @@ fn canonical_user(user_id: &str) -> String {
 async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = owned_docs_schema();
 
             push_catalogue_in_memory(
@@ -149,7 +148,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             wait_for_query(
                 &bob,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "bob sees doc before revocation",
                 |rows| rows.iter().any(|(id, _)| *id == doc_id).then_some(()),
@@ -162,6 +161,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             let revoke_tx = writer
                 .for_session(writer_session)
                 .update(
+                    "docs",
                     doc_id,
                     vec![("owner_id".to_owned(), Value::Text(alice_owner_id))],
                 )
@@ -171,7 +171,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             let edge_rows_after_revoke = wait_for_query(
                 &bob,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "bob EdgeServer query excludes doc after revocation",
                 |rows| rows.iter().all(|(id, _)| *id != doc_id).then_some(rows),
@@ -183,8 +183,9 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             );
 
             let local_rows_after_revoke = bob
-                .query(query, None)
+                .query(query, jazz::tools::ReadTier::LocalFirst)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("bob local query after revocation");
             assert!(
                 local_rows_after_revoke.iter().any(|(id, _)| *id == doc_id),

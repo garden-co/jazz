@@ -7,7 +7,12 @@ fn covered_input_rows(update: &SyncMessage) -> BTreeSet<RowUuid> {
     let SyncMessage::ViewUpdate(payload) = update else {
         panic!("expected ViewUpdate");
     };
-    payload.supporting_rows.iter().map(|row| row.row).collect()
+    payload
+        .supporting_rows
+        .added_rows()
+        .iter()
+        .map(|row| row.row)
+        .collect()
 }
 
 /// These direct controls model an actual trusted backend reader.  The

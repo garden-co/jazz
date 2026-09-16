@@ -786,7 +786,7 @@ where
                     .node
                     .lock()
                     .await
-                    .append_and_stage_large_value(value_ref, bytes)
+                    .append_and_stage_large_value(*value_ref, bytes)
                     .await?;
                 self.write_staged_large_value_update(table, row, column, staged, nullable)
                     .await
@@ -846,7 +846,7 @@ where
                     .node
                     .lock()
                     .await
-                    .edit_and_stage_large_value(value_ref, offset, delete_length, insert)
+                    .edit_and_stage_large_value(*value_ref, offset, delete_length, insert)
                     .await?;
                 self.write_staged_large_value_update(table, row, column, staged, nullable)
                     .await
@@ -1040,7 +1040,7 @@ where
                 "partial splice requires a bytes or string column",
             ));
         }
-        let Value::Large(mut current) = value else {
+        let Value::Large(current) = value else {
             return Ok((
                 apply_inline_splices(
                     preserve_nullable(value, nullable),
@@ -1052,6 +1052,7 @@ where
                 Vec::new(),
             ));
         };
+        let mut current = *current;
         if current.kind != expected_kind {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -1192,7 +1193,7 @@ where
                 .ok_or_else(|| Error::new(ErrorCode::Query, "splice page length overflows"))?;
         }
         Ok((
-            preserve_nullable(Value::Large(current), nullable),
+            preserve_nullable(Value::Large(Box::new(current)), nullable),
             final_staged,
             prior_claims,
         ))
@@ -1263,10 +1264,10 @@ where
             .node
             .lock()
             .await
-            .edit_and_stage_large_value(large.clone(), 0, large.byte_length, replacement)
+            .edit_and_stage_large_value(large.as_ref().clone(), 0, large.byte_length, replacement)
             .await?;
         Ok((
-            preserve_nullable(Value::Large(staged.value_ref.clone()), nullable),
+            preserve_nullable(Value::Large(Box::new(staged.value_ref.clone())), nullable),
             Some(staged),
             Vec::new(),
         ))
@@ -1324,7 +1325,7 @@ where
                 })?;
             cells.insert(
                 column.to_owned(),
-                preserve_nullable(Value::Large(staged.value_ref.clone()), nullable),
+                preserve_nullable(Value::Large(Box::new(staged.value_ref.clone())), nullable),
             );
             let parents = node
                 .local_content_winner_tx_id_in_schema(self.schema_version_id, table, row)
@@ -2918,8 +2919,16 @@ where
         published: PublishedTransaction,
         upload_unit: Option<SyncMessage>,
     ) -> Result<(), Error> {
+        let changed_tables = published
+            .changed_tables()
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
         self.node.queue_local_publication(published, upload_unit);
-        if let Err(error) = self.refresh_subscriptions().await {
+        if let Err(error) = self
+            .refresh_subscriptions_for_tables(Some(&changed_tables))
+            .await
+        {
             super::peer_connection::route_subscription_refresh_failure(
                 &self.node.subscriptions,
                 &error,
@@ -2940,6 +2949,11 @@ where
             } = outcome;
             loop {
                 if !publications.is_empty() {
+                    let changed_tables = publications
+                        .iter()
+                        .flat_map(|publication| publication.changed_tables())
+                        .cloned()
+                        .collect::<HashSet<_>>();
                     let mut persisted = Vec::with_capacity(publications.len());
                     for publication in &publications {
                         persisted.push((publication.tx_id(), publication.persist().await));
@@ -2949,7 +2963,10 @@ where
                         node.settle_published_transaction(tx_id, persistence)?;
                     }
                     drop(node);
-                    if let Err(error) = self.refresh_subscriptions().await {
+                    if let Err(error) = self
+                        .refresh_subscriptions_for_tables(Some(&changed_tables))
+                        .await
+                    {
                         super::peer_connection::route_subscription_refresh_failure(
                             &self.node.subscriptions,
                             &error,
@@ -3046,9 +3063,42 @@ where
         next
     }
 
+    pub(super) fn ensure_open_schema_admitted(&self) -> Result<(), Error> {
+        if !self.requires_open_schema_admission {
+            return Ok(());
+        }
+        let admission = self.node.open_schema_admission.borrow();
+        admission
+            .as_ref()
+            .and_then(|pending| pending.result.clone())
+            .unwrap_or_else(|| Err(pending_open_schema_error()))
+    }
+
+    pub(super) async fn await_open_schema_for_read(&self, opts: &ReadOpts) -> Result<(), Error> {
+        if !self.requires_open_schema_admission {
+            return Ok(());
+        }
+        if effective_read_tier(opts) < DurabilityTier::Edge
+            || opts.propagation == Propagation::LocalOnly
+        {
+            return self.ensure_open_schema_admitted();
+        }
+        let wait = {
+            let state = self.node.open_schema_admission.borrow();
+            let pending = state.as_ref().expect("pending owner has admission state");
+            if let Some(result) = &pending.result {
+                return result.clone();
+            }
+            pending.wait.clone()
+        };
+        wait.await?;
+        self.ensure_open_schema_admitted()
+    }
+
     pub(super) fn current_write_schema_for_query(
         &self,
     ) -> Result<(JazzSchema, SchemaVersionId), Error> {
+        self.ensure_open_schema_admitted()?;
         if self.schema_view_is_fixed {
             return Ok((self.schema.clone(), self.schema_version_id));
         }
@@ -3183,6 +3233,7 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
+        self.ensure_open_schema_admitted()?;
         self.table_schema(table)?;
         Ok(self
             .node

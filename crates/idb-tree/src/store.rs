@@ -34,7 +34,61 @@ pub struct Commit {
     pub deleted_page_ids: Vec<PageId>,
 }
 
+/// Keeps a store's single-tree admission alive until it is revoked or the
+/// last tree clone drops. Revocation fences even resident reads and writes.
+#[derive(Default)]
+pub struct TreeOwnership {
+    is_live: Option<Box<dyn Fn() -> bool>>,
+    release: Option<Box<dyn FnOnce()>>,
+}
+
+impl TreeOwnership {
+    pub fn new(release: impl FnOnce() + 'static) -> Self {
+        Self {
+            is_live: None,
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub fn revocable(
+        is_live: impl Fn() -> bool + 'static,
+        release: impl FnOnce() + 'static,
+    ) -> Self {
+        Self {
+            is_live: Some(Box::new(is_live)),
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.is_live.as_ref().is_none_or(|check| check())
+    }
+}
+
+impl Drop for TreeOwnership {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            release();
+        }
+    }
+}
+
 pub trait PageStore {
+    /// Opt in only while this tree exclusively owns the store: no independent
+    /// handle may retain an older root. The store must also reject reclamation
+    /// commits after ownership expires, including already prepared commits.
+    /// Clones of one IdbTree share a root and are permitted. Independent trees
+    /// (including ones built from cloned stores) require this to remain false
+    /// for every writer sharing their store. Default-off does not make a reader
+    /// safe alongside another writer that violates this exclusivity contract.
+    fn claim_tree_ownership(&self) -> Result<TreeOwnership, String> {
+        Ok(TreeOwnership::default())
+    }
+
+    fn can_reclaim_obsolete_pages(&self) -> bool {
+        false
+    }
+
     fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>>;
     fn read_page(&self, page_id: PageId) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>>;
     fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>>;

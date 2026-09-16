@@ -50,6 +50,12 @@ pub struct TickMetrics {
     pub tick: u64,
     pub table_delta_records: usize,
     pub records_processed: usize,
+    /// Selected-window records visited to build generic root position maps.
+    pub root_ordering_position_records: usize,
+    /// Selected-window records whose generic maps had no plain output consumer.
+    pub root_ordering_position_records_skipped: usize,
+    /// Input deltas used for unbounded membership without enumerating windows.
+    pub top_by_delta_membership_records: usize,
     pub recursive_recomputes: usize,
     pub hydration_memo_hits: u64,
     pub hydration_memo_computes: u64,

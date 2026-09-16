@@ -2687,3 +2687,387 @@ fn transaction_metadata_round_trips_through_recovery() {
         Some(r#"{"source":"exclusive"}"#.to_owned())
     );
 }
+
+
+#[test]
+fn known_node_alias_transaction_misses_do_not_rescan_catalogue() {
+    // Internal storage-read instrumentation proves that a missing transaction
+    // remains a point lookup. Public row equality alone cannot detect the
+    // redundant alias scan or deliberately exercise resident alias discovery.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&temp_dir, schema());
+    let pending_id = TxId::new(TxTime::from(100), node(1));
+
+    core.reset_storage_read_metrics();
+    for _ in 0..16 {
+        assert!(core.transaction_state_settled(pending_id).is_none());
+        assert!(core.query_transaction(pending_id).unwrap().is_none());
+    }
+    let reads = core.take_storage_read_metrics();
+    assert_eq!(reads.transactions_rows.reads, 32, "{reads:?}");
+    assert_eq!(reads.other.reads, 0, "known aliases require no catalogue reads");
+    assert_eq!(reads.other.ranges, 0, "known aliases require no catalogue scans");
+
+    // A miss is not an absence cache. The exact previously missing identity
+    // becomes visible as soon as its transaction is applied.
+    let tx_id = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(9), 100).cells(title_cells("arrived after miss")),
+        )
+        .unwrap();
+    assert_eq!(tx_id, pending_id);
+    assert!(core.transaction_state_settled(tx_id).is_some());
+    assert!(core.query_transaction(tx_id).unwrap().is_some());
+
+    // Unknown UUIDs still use durable discovery; no fabricated alias is saved.
+    let unknown = TxId::new(TxTime::from(100), node(0x72));
+    assert!(core.query_transaction(unknown).unwrap().is_none());
+    assert!(!core.node_aliases.contains_key(&unknown.node));
+
+    // Losing a resident mapping must still recover the existing durable one.
+    let alias = core.node_aliases.remove(&tx_id.node).unwrap();
+    core.reset_storage_read_metrics();
+    assert!(core.query_transaction(tx_id).unwrap().is_some());
+    assert_eq!(core.node_aliases.get(&tx_id.node), Some(&alias));
+    assert!(core.take_storage_read_metrics().other.reads > 0);
+
+    drop(core);
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema());
+    let missing = TxId::new(TxTime::from(101), node(1));
+    reopened.reset_storage_read_metrics();
+    assert!(reopened.query_transaction(missing).unwrap().is_none());
+    let reads = reopened.take_storage_read_metrics();
+    assert_eq!(reads.transactions_rows.reads, 1, "{reads:?}");
+    assert_eq!(reads.other.reads, 0);
+    assert_eq!(reads.other.ranges, 0);
+    assert!(reopened.query_transaction(tx_id).unwrap().is_some());
+}
+
+#[test]
+fn absent_node_discovery_is_bounded_and_arriving_transactions_remain_visible() {
+    // Internal read counters and an intentionally evicted alias mapping are
+    // needed to distinguish cached catalogue absence from cached transaction
+    // absence. Public row equality alone cannot prove this work bound.
+    let (_dir, mut core) = open_node_with_uuid(node(9));
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let absent = TxId::new(TxTime::from(10), node(1));
+    assert!(core.query_transaction(absent).unwrap().is_none());
+    assert_eq!(core.absent_node_alias, Some(absent.node));
+    core.reset_storage_read_metrics();
+    for time in 10..42 {
+        let id = TxId::new(TxTime::from(time), absent.node);
+        assert!(core.query_transaction(id).unwrap().is_none());
+        assert!(core.transaction_state_settled(id).is_none());
+    }
+    let reads = core.take_storage_read_metrics();
+    assert_eq!(reads.other.reads, 0, "{reads:?}");
+    assert_eq!(reads.other.ranges, 0, "{reads:?}");
+    assert_eq!(reads.transactions_rows.reads, 0, "{reads:?}");
+
+    let (arriving, unit) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row(7), 10).cells(title_cells("arrived")),
+    ).unwrap();
+    assert_eq!(arriving, absent);
+    let SyncMessage::CommitUnit { tx, versions } = unit else { panic!("expected commit unit"); };
+    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS).unwrap();
+    assert!(core.query_transaction(arriving).unwrap().is_some());
+    assert_eq!(core.current_rows("todos", DurabilityTier::Local).unwrap().into_iter().map(current_row_pair).collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(7), title_cells("arrived"))]));
+
+    // Discovering an existing alias must not depend on the queried timestamp
+    // having a transaction. Subsequent missing transactions remain point reads.
+    let alias = core.node_aliases.remove(&arriving.node).unwrap();
+    let future = TxId::new(TxTime::from(999), arriving.node);
+    assert!(core.query_transaction(future).unwrap().is_none());
+    assert_eq!(core.node_aliases.get(&arriving.node), Some(&alias));
+    core.reset_storage_read_metrics();
+    assert!(core.query_transaction(future).unwrap().is_none());
+    let reads = core.take_storage_read_metrics();
+    assert_eq!(reads.transactions_rows.reads, 1, "{reads:?}");
+    assert_eq!(reads.other.ranges, 0, "{reads:?}");
+    assert_eq!(reads.other.reads, 0, "{reads:?}");
+
+    let retained_aliases = core.node_aliases.len();
+    for byte in 80..120 {
+        let id = TxId::new(TxTime::from(1), node(byte));
+        assert!(core.query_transaction(id).unwrap().is_none());
+        assert_eq!(core.absent_node_alias, Some(id.node));
+        assert_eq!(core.node_aliases.len(), retained_aliases);
+    }
+}
+
+#[test]
+fn cancelled_alias_discovery_invalidates_absence_before_suspension() {
+    // Internal cancellation point: public ingest cannot expose the instant
+    // between an alias scan and publishing its resident/durable prerequisite.
+    use std::future::Future;
+    let node_schema = schema();
+    let cfs = node_schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = YieldingStorage::wrap(MemoryStorage::new(&refs).unwrap());
+    let control = storage.control();
+    let mut core = NodeState::new(node(9), node_schema, storage.clone()).unwrap();
+    let absent = TxId::new(TxTime::from(10), node(1));
+    assert!(core.query_transaction(absent).unwrap().is_none());
+    assert_eq!(core.absent_node_alias, Some(absent.node));
+    storage.evict_all();
+    control.pause();
+    let mut future = Box::pin(core.ensure_node_alias(absent.node));
+    let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(future.as_mut().poll(&mut context).is_pending());
+    drop(future);
+    assert_eq!(core.absent_node_alias, None);
+    control.resume();
+    let alias = crate::db::block_on(core.ensure_node_alias(absent.node)).unwrap();
+    assert_eq!(core.node_aliases.get(&absent.node), Some(&alias));
+    assert!(core.query_transaction(absent).unwrap().is_none());
+}
+
+#[test]
+fn cached_absent_alias_does_not_hide_a_poisoned_database() {
+    // Internal fault injection verifies the read gate even when no storage
+    // lookup is necessary; a public query cannot plant this cached proof.
+    let (mut core, storage) = fail_write_many_node();
+    let absent = TxId::new(TxTime::from(10), node(1));
+    assert!(core.query_transaction(absent).unwrap().is_none());
+    storage.fail_nth_following_write_many(1);
+    assert!(core.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(7), 10).cells(title_cells("fails")),
+    ).is_err());
+    assert_eq!(core.absent_node_alias, Some(absent.node));
+    assert!(matches!(crate::db::block_on(core.query_transaction(absent)),
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))));
+}
+
+#[test]
+fn transaction_status_projects_state_without_decoding_payloads() {
+    // Internal coverage is required to plant semantically invalid durable
+    // payloads and measure decoder work: neither is exposed by public APIs.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&temp_dir, schema);
+    let tx_id = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(9), 10)
+                .cells(BTreeMap::from([("title".to_owned(), "status".to_owned())])),
+        )
+        .unwrap();
+    let mut stored = core.query_transaction(tx_id).unwrap().unwrap();
+    let expected = (stored.fate.clone(), stored.global_time, stored.durability);
+
+    // Exercise both the cached-alias path and durable alias discovery.
+    core.node_aliases.remove(&tx_id.node);
+    assert_eq!(
+        core.transaction_state_settled(tx_id),
+        Some(expected.clone())
+    );
+    assert_eq!(core.node_aliases.get(&tx_id.node), Some(&stored.node_alias));
+    assert!(
+        core.transaction_state_settled(TxId::new(TxTime::from(999), tx_id.node))
+            .is_none()
+    );
+    core.pending_persistence.insert(tx_id);
+    assert_eq!(
+        core.transaction_state_settled(tx_id),
+        Some((expected.0.clone(), expected.1, DurabilityTier::None))
+    );
+    core.pending_persistence.remove(&tx_id);
+
+    assert!(
+        core.transaction_state_settled(TxId::new(tx_id.time, node(0x72)))
+            .is_none()
+    );
+    for fate in [
+        Fate::Pending,
+        Fate::Accepted,
+        Fate::Rejected(RejectionReason::AuthorizationDenied),
+        Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
+        Fate::Rejected(RejectionReason::ExclusiveConflict),
+        Fate::Rejected(RejectionReason::CausalityViolation),
+        Fate::Rejected(RejectionReason::Cascade { root: tx_id }),
+        Fate::Rejected(RejectionReason::MalformedCommit("detail".to_owned())),
+    ] {
+        for durability in [
+            DurabilityTier::None,
+            DurabilityTier::Local,
+            DurabilityTier::Edge,
+            DurabilityTier::Global,
+        ] {
+            for global_time in [None, Some(GlobalTime(42))] {
+                let mut batch = core.database.open_batch();
+                batch.update(
+                    "jazz_transactions",
+                    transaction_values(
+                        stored.node_alias,
+                        &stored.tx,
+                        fate.clone(),
+                        global_time,
+                        durability,
+                        core.contribution_merge_storage_value(None).unwrap(),
+                    )
+                    .unwrap(),
+                );
+                let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
+                let persisted = crate::db::block_on(applied.persist());
+                core.database.finish_persistence(persisted).unwrap();
+                assert_eq!(
+                    core.transaction_state_settled(tx_id),
+                    Some((fate.clone(), global_time, durability))
+                );
+                let audit = core.transaction_record(tx_id).unwrap();
+                assert_eq!(
+                    core.transaction_state_settled(tx_id),
+                    Some((audit.fate, audit.global_time, audit.durability))
+                );
+            }
+        }
+    }
+
+    for payload_bytes in [16, 1024 * 1024] {
+        stored.tx.user_metadata_json = Some("x".repeat(payload_bytes));
+        let mut provenance = canonical_contribution_provenance(tx_id);
+        let duplicate = provenance.substitutions[0].sources[0].clone();
+        provenance.substitutions[0].sources.push(duplicate);
+        stored.tx.contribution_merge = Some(provenance);
+        let values = transaction_values(
+            stored.node_alias,
+            &stored.tx,
+            stored.fate.clone(),
+            stored.global_time,
+            stored.durability,
+            core.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut batch = core.database.open_batch();
+        batch.update("jazz_transactions", values.clone());
+        let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        core.database.finish_persistence(persisted).unwrap();
+
+        super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(0));
+        for _ in 0..1500 {
+            assert_eq!(
+                core.transaction_state_settled(tx_id),
+                Some(expected.clone())
+            );
+        }
+        assert_eq!(
+            super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.get()),
+            0,
+            "status polling must do zero payload decodes regardless of payload size or poll count"
+        );
+        assert!(
+            core.query_transaction(tx_id).resolve().is_err(),
+            "full durable reads must still reject malformed contribution identities"
+        );
+        assert!(core.transaction_record(tx_id).is_none());
+
+        // Valid record framing does not make an incomplete rejected fate valid.
+        for reason in [None, Some("cascade")] {
+            let mut invalid_state = values.clone();
+            invalid_state[TransactionRowRecord::FIELD_FATE_IDX] =
+                Value::String("rejected".to_owned());
+            invalid_state[TransactionRowRecord::FIELD_REJECTION_REASON_IDX] =
+                Value::Nullable(reason.map(|reason| Box::new(Value::String(reason.to_owned()))));
+            let mut batch = core.database.open_batch();
+            batch.update("jazz_transactions", invalid_state);
+            let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
+            let persisted = crate::db::block_on(applied.persist());
+            core.database.finish_persistence(persisted).unwrap();
+            for pending in [false, true] {
+                if pending {
+                    core.pending_persistence.insert(tx_id);
+                }
+                assert!(
+                    core.transaction_state_settled(tx_id).is_none(),
+                    "pending durability override must not hide malformed fate fields"
+                );
+                core.pending_persistence.remove(&tx_id);
+            }
+        }
+    }
+}
+
+/// Alice's unsynced write survives a missing-generation index repair before
+/// recovery: commit -> damage derived indexes -> reopen -> read pending write.
+#[test]
+fn declared_index_repair_precedes_recovery_and_preserves_pending_writes() {
+    // Direct storage damage is necessary to emulate an older buggy writer;
+    // ordinary APIs cannot create missing or malformed index entries.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let pending_tx;
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        pending_tx = node
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(9), 10).cells(title_cells("pending")),
+            )
+            .unwrap();
+        node.database.close().unwrap();
+    }
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let expected_indexes;
+    let primary_before;
+    {
+        let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+        primary_before = cfs
+            .iter()
+            .filter(|cf| cf.as_str() != "__groove_class_indices")
+            .map(|cf| (cf.clone(), storage.prefix(cf.clone(), Vec::new()).unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let storage =
+            groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+        let marker = b"\0groove-declared-index-generation".to_vec();
+        storage.delete("indices".into(), marker).unwrap();
+        expected_indexes = storage.prefix("indices".into(), Vec::new()).unwrap();
+        assert!(!expected_indexes.is_empty());
+        for (key, _) in &expected_indexes {
+            storage.delete("indices".into(), key.clone()).unwrap();
+        }
+        // A malformed stale value must be removed without attempting decode.
+        let mut stale = expected_indexes[0].0.clone();
+        stale.extend_from_slice(b"stale");
+        storage
+            .set("indices".into(), stale, b"malformed".to_vec())
+            .unwrap();
+        storage.close().unwrap();
+    }
+    {
+        let mut reopened = open_node_at(&temp_dir, schema.clone());
+        assert_eq!(
+            reopened
+                .current_rows("todos", DurabilityTier::Local)
+                .unwrap()
+                .into_iter()
+                .map(current_row_pair)
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([(row(9), title_cells("pending"))])
+        );
+        assert_eq!(
+            reopened.transaction_state_settled(pending_tx).unwrap(),
+            (Fate::Pending, None, DurabilityTier::Local)
+        );
+        reopened.database.close().unwrap();
+    }
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    for (cf, expected) in primary_before {
+        assert_eq!(
+            storage.prefix(cf.clone(), Vec::new()).unwrap(),
+            expected,
+            "repair must preserve every non-index byte in {cf}"
+        );
+    }
+    let storage =
+        groove::storage::LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+    let indexes = storage
+        .prefix("indices".into(), Vec::new())
+        .unwrap()
+        .into_iter()
+        .filter(|(key, _)| key != b"\0groove-declared-index-generation")
+        .collect::<Vec<_>>();
+    assert_eq!(indexes, expected_indexes);
+    storage.close().unwrap();
+}

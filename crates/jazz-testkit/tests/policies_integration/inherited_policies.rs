@@ -365,8 +365,15 @@ async fn create_array_ref_todo(
         .0
 }
 
-async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
-    client.update(row_id, changes).expect("update row");
+async fn update_row(
+    client: &JazzClient,
+    table_name: &str,
+    row_id: ObjectId,
+    changes: Vec<(String, Value)>,
+) {
+    client
+        .update(table_name, row_id, changes)
+        .expect("update row");
 }
 
 // -- Tests --
@@ -412,7 +419,8 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -500,7 +508,7 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners_inner() {
     let charlie_rows = wait_for_query(
         &charlie,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "charlie sees no documents without folder ownership",
         Some,
@@ -511,7 +519,7 @@ async fn inherited_folder_documents_are_visible_to_all_folder_owners_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no documents without folder ownership",
         Some,
@@ -571,7 +579,8 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice_writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -639,12 +648,12 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     );
 
     alice_writer
-        .delete(folder_id)
+        .delete("folders", folder_id)
         .expect("delete inherited parent folder");
     let alice_rows_after_delete = wait_for_query(
         &alice_reader,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice's retained document view removes the deleted-parent document",
         |rows| rows.is_empty().then_some(rows),
@@ -666,7 +675,7 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     let folders_after_delete = wait_for_query(
         &bob,
         folders_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees no folders after inherited parent delete",
         |rows| rows.is_empty().then_some(rows),
@@ -677,7 +686,7 @@ async fn inherited_folder_documents_fail_closed_for_missing_and_deleted_folder_t
     let final_rows = wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees no documents after inherited parent delete",
         |rows| rows.is_empty().then_some(rows),
@@ -746,7 +755,8 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -889,7 +899,7 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no documents",
         Some,
@@ -918,7 +928,6 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
 /// alice ──insert owner=alice, folder=shared─────────► server ──► accepted
 /// ```
 #[tokio::test]
-#[ignore = "#1762: inherited write policies resolves on wrong branch"]
 async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
     tokio::task::LocalSet::new()
         .run_until(inherited_folder_insert_requires_folder_owner_when_fk_present_inner())
@@ -933,6 +942,8 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
             permissions(|p| {
                 p.allow_insert().always();
                 p.allow_read().where_(folder_owner_policy());
+                // Child inserts inherit the parent's UPDATE USING permission.
+                p.allow_update().where_old(folder_owner_policy());
             }),
         ))
         .table(make_folder_documents_schema(
@@ -956,7 +967,8 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1161,7 +1173,6 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
 /// alice ──delete folder────────────────────────────► server ──► persisted
 /// ```
 #[tokio::test]
-#[ignore = "#1764: folder-owner inherited DELETE leaves the folder-backed document present after an EdgeServer-tier read"]
 async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_documents() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -1200,7 +1211,8 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1253,13 +1265,13 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     .await;
 
     alice
-        .delete(doc_id)
+        .delete("documents", doc_id)
         .expect("folder owner deletes folder-backed document");
 
     let rows_after_doc_delete = wait_for_query(
         &alice,
         documents_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "folder-backed document is gone after folder-owner delete",
         Some,
@@ -1280,13 +1292,13 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
     .await;
 
     alice
-        .delete(folder_id)
+        .delete("folders", folder_id)
         .expect("folder owner deletes folder");
 
     let rows_after_folder_delete = wait_for_query(
         &alice,
         folders_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "folder is gone after folder-owner delete",
         Some,
@@ -1315,7 +1327,6 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 /// bob ──delete charlie doc──────────────────────────► server ──✗ rejected
 /// ```
 #[tokio::test]
-#[ignore = "#1764: the document-owner/non-owner inherited DELETE scenario does not settle within 20 seconds"]
 async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owners() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -1354,7 +1365,8 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -1431,7 +1443,7 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
                 )
     }));
 
-    bob.delete(bob_doc_id)
+    bob.delete("documents", bob_doc_id)
         .expect("document owner deletes owned folder-backed document");
 
     let rows_after_owned_delete = wait_for_rows(
@@ -1460,13 +1472,13 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
         "only charlie's document should remain after bob deletes his own: {rows_after_owned_delete:?}"
     );
 
-    bob.delete(charlie_doc_id)
+    bob.delete("documents", charlie_doc_id)
         .expect("optimistic local delete for unauthorized attempt");
 
     let rows_after_unauthorized_delete = wait_for_query(
         &alice,
         documents_query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "charlie doc remains after unauthorized delete attempt",
         Some,
@@ -1532,7 +1544,8 @@ async fn inherited_multiple_folder_paths_compose_with_or_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,
@@ -1681,7 +1694,7 @@ async fn inherited_multiple_folder_paths_compose_with_or_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no rows without either inherited path",
         Some,
@@ -1699,7 +1712,6 @@ async fn inherited_multiple_folder_paths_compose_with_or_inner() {
 /// Verifies that folder ownership grants UPDATE access to a folder-backed
 /// document when the child row inherits `allowedTo.update(...)` from its parent.
 #[tokio::test]
-#[ignore = "#1762: the Rust client rejects the inherited-visible UPDATE with `read policy denied UPSERT on table documents`"]
 async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
     tokio::task::LocalSet::new()
         .run_until(inherited_folder_update_allows_folder_owner_and_blocks_other_users_inner())
@@ -1740,7 +1752,8 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,
@@ -1781,6 +1794,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
 
     update_row(
         &alice,
+        "documents",
         doc_id,
         vec![("title".to_string(), "Edited By Folder Owner".into())],
     )
@@ -1815,16 +1829,18 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inne
         ),
     ));
 
-    update_row(
-        &bob,
-        doc_id,
-        vec![("title".to_string(), "Edited By Bob".into())],
-    )
-    .await;
+    let error = bob
+        .update(
+            "documents",
+            doc_id,
+            vec![("title".to_string(), "Edited By Bob".into())],
+        )
+        .expect_err("Bob cannot update a row absent from his readable local data");
+    assert!(error.to_string().contains("read policy denied"), "{error}");
     let rows_after_bob = wait_for_query(
         &admin,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "non-owner without folder access cannot update the row",
         Some,
@@ -1862,7 +1878,8 @@ async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "files", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
     let dave = connect_ready_user(&server, &schema, super::DAVE_ID, "files", READY_TIMEOUT).await;
@@ -1904,7 +1921,7 @@ async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no files without a visible referencing todo",
         Some,
@@ -1931,7 +1948,8 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "files", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
 
@@ -1970,7 +1988,9 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     ));
 
     log.clear();
-    alice.delete(todo_id).expect("delete referencing todo");
+    alice
+        .delete("todos", todo_id)
+        .expect("delete referencing todo");
     wait_for_subscription_update(
         &mut stream,
         &mut log,
@@ -1982,7 +2002,7 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     let rows_after_delete = wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "file A is hidden after deleting the referencing todo",
         Some,
@@ -2005,6 +2025,7 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
     log.clear();
     update_row(
         &alice,
+        "todos",
         todo_retarget_id,
         vec![("image".to_string(), Value::Uuid(file_b))],
     )
@@ -2050,7 +2071,8 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "files", READY_TIMEOUT).await;
     let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
 
@@ -2100,6 +2122,7 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
 
     update_row(
         &alice,
+        "todos",
         todo_id,
         vec![(
             "images".to_string(),
@@ -2132,6 +2155,7 @@ async fn inherited_referencing_array_membership_preserves_set_semantics_inner() 
     log.clear();
     update_row(
         &alice,
+        "todos",
         todo_id,
         vec![(
             "images".to_string(),
@@ -2184,7 +2208,8 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows_inner() {
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "file_parts", READY_TIMEOUT).await;
     let alice = connect_ready_user(
         &server,
@@ -2249,7 +2274,7 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows_inner() {
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no leaf rows without an inherited path",
         Some,
@@ -2297,7 +2322,8 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
 
@@ -2353,6 +2379,7 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
 
     update_row(
         &admin,
+        "folders",
         folder_id,
         vec![(
             "owners".to_string(),
@@ -2366,7 +2393,7 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
     let rows_after_update = wait_for_query(
         &bob_fresh,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "child row becomes hidden once the parent row stops granting access",
         Some,
@@ -2420,7 +2447,8 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
 
@@ -2475,6 +2503,7 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
 
     update_row(
         &admin,
+        "documents",
         doc_id,
         vec![("folder_id".to_string(), Value::Uuid(hidden_folder_id))],
     )
@@ -2485,7 +2514,7 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
     let rows_after_retarget = wait_for_query(
         &bob_fresh,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "child row becomes hidden after retargeting to a non-visible parent",
         Some,
@@ -2543,7 +2572,8 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     let server = JazzServer::builder()
         .with_schema(schema.clone())
         .start()
-        .await;
+        .await
+        .expect("start test server");
     let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
 
@@ -2565,7 +2595,7 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     let initial_rows = wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "bob sees no rows while the child points at a hidden parent",
         Some,
@@ -2580,6 +2610,7 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
 
     update_row(
         &admin,
+        "documents",
         doc_id,
         vec![("folder_id".to_string(), Value::Uuid(visible_folder_id))],
     )
@@ -2631,21 +2662,10 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     server.shutdown().await;
 }
 
-/// Verifies that forward inheritance fails closed when the child row's policy
-/// delegates SELECT to a parent table that has no explicit SELECT policy.
-///
-/// Alice owns the parent folder row by data convention, but because `folders`
-/// does not declare a read policy, `allowedTo.read(folder_id)` must not infer
-/// access from permissive/default behavior.
+/// Verifies that server startup rejects a child SELECT policy that inherits
+/// from a parent table without an explicit read policy.
 #[tokio::test]
-#[ignore = "#1761: server schema conversion rejects INHERITS when the referenced parent has no SELECT policy"]
-async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
-    tokio::task::LocalSet::new()
-        .run_until(inherits_select_denies_when_parent_operation_policy_is_missing_inner())
-        .await;
-}
-
-async fn inherits_select_denies_when_parent_operation_policy_is_missing_inner() {
+async fn inherits_select_rejects_missing_parent_read_policy() {
     let documents_policies = permissions(|p| {
         p.allow_read().where_(pe::allowed_to_read("folder_id"));
     });
@@ -2663,82 +2683,26 @@ async fn inherits_select_denies_when_parent_operation_policy_is_missing_inner() 
                 .policies(documents_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let admin = connect_ready_client(
-        &server,
-        &schema,
-        "inherits-admin",
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-    let alice = connect_ready_user(
-        &server,
-        &schema,
-        super::ALICE_ID,
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-
-    let (folder_id, _, folder_tx) = admin
-        .insert(
-            "folders",
-            crate::row_input!("owner_id" => super::ALICE_ID, "name" => "Shared"),
-        )
-        .expect("folder insert should succeed");
-    let (_, _, document_tx) = admin
-        .insert(
-            "documents",
-            crate::row_input!(
-                "owner_id" => super::BOB_ID,
-                "title" => "Inherited doc",
-                "folder_id" => folder_id
-            ),
-        )
-        .expect("document insert should succeed");
-    wait_for_edge_txs(
-        &admin,
-        &[
-            folder_tx.expect("folder insert should commit immediately"),
-            document_tx.expect("document insert should commit immediately"),
-        ],
-    )
-    .await;
-
-    let rows = alice
-        .query(
-            Query::from("documents").select(["title"]),
-            Some(DurabilityTier::EdgeServer),
-        )
-        .await
-        .expect("query documents as alice");
-
+    let error = match JazzServer::start_with_schema(schema).await {
+        Err(error) => error,
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("inheritance from a missing parent read policy must be rejected");
+        }
+    };
     assert!(
-        rows.is_empty(),
-        "child rows should be denied when INHERITS reaches a parent table with no explicit SELECT policy"
+        error.contains("$.documents.policies.select.using")
+            && error.contains(
+                "INHERITS via_column 'folder_id' references table 'folders' without a Select policy"
+            ),
+        "expected a missing parent read policy error, got: {error}"
     );
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
 }
 
-/// Verifies the permissive-local behavior for an INSERT policy that inherits
-/// through a parent FK.
-///
-/// In local permissive mode, the child table has an explicit INSERT policy, but
-/// the parent table has no INSERT policy. This covers the local-only branch
-/// where a missing parent operation policy is treated as allowed while
-/// evaluating `allowedTo.insert(folder_id)`.
+/// Verifies that server startup rejects a child INSERT policy that inherits
+/// from a parent table without an explicit INSERT policy.
 #[tokio::test]
-#[ignore = "#1762: permissive-local policy mode is no longer exposed by the Rust public API"]
-async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
-    tokio::task::LocalSet::new().run_until(local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local_inner()).await;
-}
-
-async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local_inner()
-{
+async fn inherits_insert_rejects_missing_parent_insert_policy() {
     let documents_policies = permissions(|p| {
         p.allow_insert().where_(pe::allowed_to_insert("folder_id"));
     });
@@ -2752,64 +2716,26 @@ async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permi
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let admin = connect_ready_client(
-        &server,
-        &schema,
-        "inherits-admin",
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-    let alice = connect_ready_user(
-        &server,
-        &schema,
-        super::ALICE_ID,
-        "documents",
-        READY_TIMEOUT,
-    )
-    .await;
-
-    let (folder_id, _, folder_tx) = admin
-        .insert("folders", crate::row_input!("title" => "alice folder"))
-        .expect("seed folder row");
-    wait_for_edge_txs(
-        &admin,
-        &[folder_tx.expect("folder insert should commit immediately")],
-    )
-    .await;
-
-    let document_tx = alice
-        .insert(
-            "documents",
-            crate::row_input!("title" => "draft doc", "folder_id" => folder_id),
-        )
-        .expect(
-            "permissive local runtimes should treat missing parent INSERT policy as allow for INHERITS",
-        )
-        .2
-        .expect("document insert should commit immediately");
-    wait_for_edge_txs(&alice, &[document_tx]).await;
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
+    let error = match JazzServer::start_with_schema(schema).await {
+        Err(error) => error,
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("inheritance from a missing parent INSERT policy must be rejected");
+        }
+    };
+    assert!(
+        error.contains("$.documents.policies.insert.with_check")
+            && error.contains(
+                "INHERITS via_column 'folder_id' references table 'folders' without a Insert policy"
+            ),
+        "expected a missing parent INSERT policy error, got: {error}"
+    );
 }
 
-/// Verifies the permissive-local behavior for reverse inherited UPDATE access.
-///
-/// The `files` UPDATE policy is delegated through rows in `todos` that
-/// reference the file. `todos` intentionally has no UPDATE policy, so this
-/// covers the local-only branch where missing source-table UPDATE policy is
-/// treated as allowed for `allowedTo.updateReferencing(...)`.
+/// Verifies that server startup rejects reverse inherited UPDATE access when
+/// the referencing source table has no explicit UPDATE policy.
 #[tokio::test]
-#[ignore = "#1762: permissive-local policy mode is no longer exposed by the Rust public API"]
-async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
-    tokio::task::LocalSet::new().run_until(local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local_inner()).await;
-}
-
-async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local_inner()
- {
+async fn inherits_referencing_rejects_missing_source_update_policy() {
     let files_policies = permissions(|p| {
         p.allow_update()
             .where_old(pe::allowed_to_update_referencing("todos", "file_id"))
@@ -2830,53 +2756,18 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone()).await;
-    let admin =
-        connect_ready_client(&server, &schema, "inherits-admin", "files", READY_TIMEOUT).await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "files", READY_TIMEOUT).await;
-
-    let (file_id, _, file_tx) = admin
-        .insert(
-            "files",
-            crate::row_input!("owner_id" => super::BOB_ID, "name" => "shared-file"),
-        )
-        .expect("seed file row");
-    let (_, _, todo_tx) = admin
-        .insert(
-            "todos",
-            crate::row_input!(
-                "owner_id" => super::ALICE_ID,
-                "title" => "todo referencing file",
-                "file_id" => file_id,
-            ),
-        )
-        .expect("seed referencing todo row");
-    wait_for_edge_txs(
-        &admin,
-        &[
-            file_tx.expect("file insert should commit immediately"),
-            todo_tx.expect("todo insert should commit immediately"),
-        ],
-    )
-    .await;
-
-    let update_tx = alice
-        .update(
-            file_id,
-            vec![
-                ("owner_id".into(), Value::Text(super::BOB_ID.into())),
-                ("name".into(), Value::Text("updated by alice".into())),
-            ],
-        )
-        .expect(
-            "permissive local runtimes should treat missing source UPDATE policy as allow for INHERITS_REFERENCING",
-        )
-        .expect("file update should commit immediately");
-    wait_for_edge_txs(&alice, &[update_tx]).await;
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
+    let error = match JazzServer::start_with_schema(schema).await {
+        Err(error) => error,
+        Ok(server) => {
+            server.shutdown().await;
+            panic!("reverse inheritance from a missing source UPDATE policy must be rejected");
+        }
+    };
+    assert!(
+        error.contains("$.files.policies.update.using")
+            && error.contains("INHERITS_REFERENCING source_table 'todos' has no Update policy"),
+        "expected a missing source UPDATE policy error, got: {error}"
+    );
 }
 
 /// Verifies that inherited WITH CHECK constraints evaluate the proposed new
@@ -2886,15 +2777,16 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
 /// folder, but Bob cannot update that root folder. The child's update must
 /// therefore fail the inherited `allowedTo.update(parent_id)` check.
 #[tokio::test]
-#[ignore = "#1762: the public client cannot observe the update-only child row before exercising inherited WITH CHECK"]
-async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
+async fn update_with_check_inherits_denies_when_parent_is_not_updateable() {
     tokio::task::LocalSet::new()
-        .run_until(local_update_with_check_inherits_denies_when_parent_is_not_updateable_inner())
+        .run_until(update_with_check_inherits_denies_when_parent_is_not_updateable_inner())
         .await;
 }
 
-async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_inner() {
+async fn update_with_check_inherits_denies_when_parent_is_not_updateable_inner() {
     let folders_policies = permissions(|p| {
+        p.allow_read()
+            .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
         p.allow_update()
             .where_old(pe::eq("owner_id", pe::session(vec!["claims", "sub"])))
             .where_new(pe::allowed_to_update_with_depth("parent_id", 10));
@@ -2908,7 +2800,9 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_i
                 .policies(folders_policies),
         )
         .build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin =
         connect_ready_client(&server, &schema, "inherits-admin", "folders", READY_TIMEOUT).await;
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "folders", READY_TIMEOUT).await;
@@ -2934,8 +2828,19 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_i
     )
     .await;
 
-    let update_err = bob
+    // Give UPDATE a readable preimage so the rejection exercises WITH CHECK,
+    // rather than failing because the child is absent from Bob's local data.
+    wait_for_rows(
+        &bob,
+        Query::from("folders"),
+        "Bob receives his own child before updating it",
+        |rows| rows.iter().any(|(id, _)| *id == child_id).then_some(()),
+    )
+    .await;
+
+    let update_tx = bob
         .update(
+            "folders",
             child_id,
             vec![
                 ("owner_id".into(), Value::Text(super::BOB_ID.into())),
@@ -2943,8 +2848,33 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_i
                 ("parent_id".into(), Value::Uuid(root_id)),
             ],
         )
-        .expect_err("update should fail inherited WITH CHECK");
-    assert_client_policy_denied(update_err, "folders", Operation::Update);
+        .expect("submit update to Bob's readable child")
+        .expect("ordinary update has a transaction");
+    let update_err = bob
+        .wait_for_transaction(update_tx, DurabilityTier::EdgeServer)
+        .await
+        .expect_err("authority should reject inherited WITH CHECK");
+    assert!(
+        update_err.to_string().contains("authorization_denied"),
+        "expected policy rejection, got {update_err}"
+    );
+    let rows = wait_for_query(
+        &admin,
+        Query::from("folders").select(["name", "parent_id"]),
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "child remains unchanged after rejected update",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == child_id
+                        && *values == vec![Value::Text("Child".into()), Value::Uuid(root_id)]
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 2);
 
     admin.shutdown().await.expect("shutdown admin");
     bob.shutdown().await.expect("shutdown bob");

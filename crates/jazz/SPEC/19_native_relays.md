@@ -26,6 +26,22 @@ RN / Swift / Kotlin UI instance B ─ in-memory client Db ├─ persistent nati
                                                        └─ SQLite ordered-KV store
 ```
 
+Trusted native admission opens the persistent half with the scope-isolated
+client-relay capability before attaching foregrounds. This permits exact
+same-session row-version repair from its retained authority and authored-write
+ledger, including while upstream settlement is unavailable. Generic Rust relay
+openers do not acquire this capability from scope text, and a live registry entry
+cannot switch between generic and admitted modes.
+
+The trusted platform owns the durable account-to-root mapping; account-session
+setup uses its existing versioned account-root derivation, so linked identities
+may share a physical root while keeping distinct live scopes and repair ledgers.
+The native ledger owner string is `jazz-native-relay-owner-v1:` followed by app,
+storage, and auth scope, each encoded as its decimal UTF-8 byte length, `:`, and
+its exact UTF-8 bytes. The admitted author additionally binds the core scope
+ledger. This is a ledger identity encoding, not a new SQLite row format or an
+authorization grant for every cached row.
+
 The relay is a normal non-history-complete `Db`:
 
 - UI writes are ordinary local client commits sent to the relay.

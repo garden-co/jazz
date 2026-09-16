@@ -1,6 +1,6 @@
 //! Bridge the administrative catalogue into the WebSocket-serving core shell.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use jazz::groove::records::Value as CoreValue;
 use jazz::protocol::{LensOp as CoreLensOp, MigrationLens, TableLens};
@@ -8,6 +8,8 @@ use jazz::schema::JazzSchema;
 
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, Value};
 use jazz::tools::schema_lens::{Lens, LensOp};
+
+use super::catalogue::{CatalogueError, PermissionsHeadSummary};
 
 use super::{ServerRuntimeHandle, ServerState};
 
@@ -29,6 +31,72 @@ pub(crate) async fn publish_runtime_catalogue(
     // otherwise a later head can install first and then be overwritten by this
     // older bridge.
     let _publication = state.runtime_catalogue_publication.lock().await;
+    publish_runtime_catalogue_locked(state, schemas, lenses).await
+}
+
+pub(crate) enum PermissionsPublicationError {
+    Catalogue(CatalogueError),
+    LineageUnavailable(String),
+    Bridge(String),
+}
+
+pub(crate) async fn publish_permissions_and_runtime(
+    state: &ServerState,
+    schema_hash: SchemaHash,
+    permissions: HashMap<TableName, jazz::tools::public_schema::TablePolicies>,
+    expected_parent_bundle_object_id: Option<jazz::tools::ObjectId>,
+) -> Result<PermissionsHeadSummary, PermissionsPublicationError> {
+    #[cfg(test)]
+    state.run_runtime_catalogue_before_publication_hook_for_test();
+    let _publication = state.runtime_catalogue_publication.lock().await;
+
+    let runtime_enabled =
+        state.runtime().is_some() || state.core_server_shell_storage_config.is_some();
+    let mut shell = state.runtime();
+    if runtime_enabled {
+        ensure_structural_lineage_locked(state, schema_hash, &HashMap::new(), &[], &mut shell)
+            .await
+            .map_err(|error| match error {
+                StructuralLineageError::Unavailable(message) => {
+                    PermissionsPublicationError::LineageUnavailable(message)
+                }
+                StructuralLineageError::Bridge(message) => {
+                    PermissionsPublicationError::Bridge(message)
+                }
+            })?;
+    }
+
+    state
+        .catalogue
+        .publish_permissions_bundle(
+            &state.catalogue_store,
+            schema_hash,
+            permissions,
+            expected_parent_bundle_object_id,
+        )
+        .map_err(PermissionsPublicationError::Catalogue)?;
+    let head = state
+        .catalogue
+        .current_permissions(&state.catalogue_store)
+        .map_err(PermissionsPublicationError::Catalogue)?
+        .ok_or_else(|| {
+            PermissionsPublicationError::Bridge(
+                "published permissions head is missing from the catalogue".to_owned(),
+            )
+        })?
+        .head;
+
+    publish_runtime_catalogue_locked(state, &[], &[])
+        .await
+        .map_err(PermissionsPublicationError::Bridge)?;
+    Ok(head)
+}
+
+async fn publish_runtime_catalogue_locked(
+    state: &ServerState,
+    schemas: &[Schema],
+    lenses: &[Lens],
+) -> Result<(), String> {
     if state.runtime().is_none() && state.core_server_shell_storage_config.is_none() {
         return Ok(());
     }
@@ -46,36 +114,7 @@ pub(crate) async fn publish_runtime_catalogue(
     }
 
     for lens in lenses {
-        let source_schema = known_schema(state, &supplied_schemas, lens.source_hash)?;
-        let target_schema = known_schema(state, &supplied_schemas, lens.target_hash)?;
-        let runtime_lens = convert_lens(lens, &source_schema, &target_schema)?;
-        let new_tables = lens
-            .forward
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                LensOp::AddTable { table, .. } => Some(table.as_str().to_owned()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let dropped_tables = lens
-            .forward
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                LensOp::RemoveTable { table, .. } => Some(table.as_str().to_owned()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let initial_schema = JazzSchema::new(&source_schema)
-            .map_err(|error| format!("convert lens source schema for runtime: {error}"))?;
-        let target_runtime = JazzSchema::new(&target_schema)
-            .map_err(|error| format!("convert lens target schema: {error}"))?;
-        let runtime_shell = runtime_shell(state, &mut shell, initial_schema)?;
-        runtime_shell
-            .publish_schema_with_lens(target_runtime, runtime_lens, new_tables, dropped_tables)
-            .await
-            .map_err(|error| format!("publish schema lineage to runtime shell: {error}"))?;
+        publish_runtime_lens(state, &mut shell, lens, &supplied_schemas).await?;
     }
 
     let permissions = state
@@ -87,6 +126,16 @@ pub(crate) async fn publish_runtime_catalogue(
     let Some(permissions) = permissions else {
         return Ok(());
     };
+    ensure_structural_lineage_locked(
+        state,
+        permissions.head.schema_hash,
+        &supplied_schemas,
+        lenses,
+        &mut shell,
+    )
+    .await
+    .map_err(StructuralLineageError::into_string)?;
+
     let mut schema = known_schema(state, &supplied_schemas, permissions.head.schema_hash)?;
     let structural_runtime = JazzSchema::new(&schema)
         .map_err(|error| format!("convert permissions lineage source schema: {error}"))?;
@@ -109,6 +158,204 @@ pub(crate) async fn publish_runtime_catalogue(
     Ok(())
 }
 
+async fn publish_runtime_lens(
+    state: &ServerState,
+    shell: &mut Option<ServerRuntimeHandle>,
+    lens: &Lens,
+    supplied_schemas: &HashMap<SchemaHash, Schema>,
+) -> Result<(), String> {
+    let source_schema = known_schema(state, supplied_schemas, lens.source_hash)?;
+    let target_schema = known_schema(state, supplied_schemas, lens.target_hash)?;
+    let runtime_lens = convert_lens(lens, &source_schema, &target_schema)?;
+    let new_tables = lens
+        .forward
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            LensOp::AddTable { table, .. } => Some(table.as_str().to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let dropped_tables = lens
+        .forward
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            LensOp::RemoveTable { table, .. } => Some(table.as_str().to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let initial_schema = JazzSchema::new(&source_schema)
+        .map_err(|error| format!("convert lens source schema for runtime: {error}"))?;
+    let target_runtime = JazzSchema::new(&target_schema)
+        .map_err(|error| format!("convert lens target schema: {error}"))?;
+    let runtime_shell = runtime_shell(state, shell, initial_schema)?;
+    runtime_shell
+        .publish_schema_with_lens(target_runtime, runtime_lens, new_tables, dropped_tables)
+        .await
+        .map_err(|error| format!("publish schema lineage to runtime shell: {error}"))?;
+    Ok(())
+}
+
+#[derive(Debug)]
+enum StructuralLineageError {
+    Unavailable(String),
+    Bridge(String),
+}
+
+impl StructuralLineageError {
+    fn into_string(self) -> String {
+        match self {
+            Self::Unavailable(message) | Self::Bridge(message) => message,
+        }
+    }
+}
+
+async fn ensure_structural_lineage_locked(
+    state: &ServerState,
+    target_hash: SchemaHash,
+    supplied_schemas: &HashMap<SchemaHash, Schema>,
+    supplied_lenses: &[Lens],
+    shell: &mut Option<ServerRuntimeHandle>,
+) -> Result<(), StructuralLineageError> {
+    let target_schema = known_schema(state, supplied_schemas, target_hash)
+        .map_err(StructuralLineageError::Bridge)?;
+    let target_runtime = JazzSchema::new(&target_schema)
+        .map_err(|error| StructuralLineageError::Bridge(error.to_string()))?;
+
+    let Some(runtime) = shell.clone() else {
+        runtime_shell(state, shell, target_runtime)
+            .map(|_| ())
+            .map_err(StructuralLineageError::Bridge)?;
+        return Ok(());
+    };
+    let target_runtime_id = target_runtime.version_id();
+    if runtime
+        .runtime_catalogue_contains_schema(target_runtime_id)
+        .await
+        .map_err(StructuralLineageError::Bridge)?
+    {
+        return Ok(());
+    }
+
+    let mut lenses_by_edge = HashMap::new();
+    let durable_lenses = state
+        .catalogue
+        .known_lenses(&state.catalogue_store)
+        .map_err(|error| {
+            StructuralLineageError::Bridge(format!("read catalogue lenses: {error}"))
+        })?;
+    for lens in durable_lenses {
+        lenses_by_edge.insert((lens.source_hash, lens.target_hash), lens);
+    }
+    for lens in supplied_lenses.iter().filter(|lens| !lens.is_draft()) {
+        lenses_by_edge.insert((lens.source_hash, lens.target_hash), lens.clone());
+    }
+    let mut lenses = lenses_by_edge.into_values().collect::<Vec<_>>();
+    lenses.sort_by(|left, right| {
+        left.source_hash
+            .as_bytes()
+            .cmp(right.source_hash.as_bytes())
+            .then_with(|| {
+                left.target_hash
+                    .as_bytes()
+                    .cmp(right.target_hash.as_bytes())
+            })
+    });
+
+    let mut schemas_by_hash = HashMap::from([(target_hash, target_schema)]);
+    let mut valid_lenses = Vec::new();
+    for lens in lenses {
+        let Some(source_schema) =
+            known_schema_if_present(state, supplied_schemas, lens.source_hash)
+                .map_err(StructuralLineageError::Bridge)?
+        else {
+            continue;
+        };
+        let Some(target_schema) =
+            known_schema_if_present(state, supplied_schemas, lens.target_hash)
+                .map_err(StructuralLineageError::Bridge)?
+        else {
+            continue;
+        };
+        schemas_by_hash.insert(lens.source_hash, source_schema);
+        schemas_by_hash.insert(lens.target_hash, target_schema);
+        valid_lenses.push(lens);
+    }
+
+    let mut runtime_known = HashSet::new();
+    for (&hash, schema) in &schemas_by_hash {
+        let runtime_schema = JazzSchema::new(schema).map_err(|error| {
+            StructuralLineageError::Bridge(format!("convert catalogue schema {hash}: {error}"))
+        })?;
+        if runtime
+            .runtime_catalogue_contains_schema(runtime_schema.version_id())
+            .await
+            .map_err(StructuralLineageError::Bridge)?
+        {
+            runtime_known.insert(hash);
+        }
+    }
+
+    let mut incoming = HashMap::<SchemaHash, Vec<Lens>>::new();
+    // Grouping preserves the deterministic order established above.
+    for lens in valid_lenses {
+        incoming.entry(lens.target_hash).or_default().push(lens);
+    }
+    let mut visiting = HashSet::new();
+    let path = match find_lineage_path(target_hash, &incoming, &runtime_known, &mut visiting) {
+        LineagePath::Unique(path) => path,
+        LineagePath::None | LineagePath::Ambiguous => {
+            return Err(StructuralLineageError::Unavailable(format!(
+                "permissions target schema {target_hash} has no unique published lineage in the server shell; publish a migration first"
+            )));
+        }
+    };
+    for lens in path {
+        publish_runtime_lens(state, shell, &lens, supplied_schemas)
+            .await
+            .map_err(StructuralLineageError::Bridge)?;
+    }
+    Ok(())
+}
+
+enum LineagePath {
+    None,
+    Unique(Vec<Lens>),
+    Ambiguous,
+}
+
+fn find_lineage_path(
+    current: SchemaHash,
+    incoming: &HashMap<SchemaHash, Vec<Lens>>,
+    runtime_known: &HashSet<SchemaHash>,
+    visiting: &mut HashSet<SchemaHash>,
+) -> LineagePath {
+    if runtime_known.contains(&current) {
+        return LineagePath::Unique(Vec::new());
+    }
+    if !visiting.insert(current) {
+        return LineagePath::None;
+    }
+
+    let mut found = None;
+    for lens in incoming.get(&current).into_iter().flatten() {
+        match find_lineage_path(lens.source_hash, incoming, runtime_known, visiting) {
+            LineagePath::None => {}
+            LineagePath::Ambiguous => return LineagePath::Ambiguous,
+            LineagePath::Unique(mut path) => {
+                path.push(lens.clone());
+                if found.is_some() {
+                    return LineagePath::Ambiguous;
+                }
+                found = Some(path);
+            }
+        }
+    }
+    visiting.remove(&current);
+    found.map_or(LineagePath::None, LineagePath::Unique)
+}
+
 fn runtime_shell(
     state: &ServerState,
     shell: &mut Option<ServerRuntimeHandle>,
@@ -127,21 +374,30 @@ fn known_schema(
     supplied_schemas: &HashMap<SchemaHash, Schema>,
     hash: SchemaHash,
 ) -> Result<Schema, String> {
+    known_schema_if_present(state, supplied_schemas, hash)?
+        .ok_or_else(|| format!("catalogue schema {hash} is missing"))
+}
+
+fn known_schema_if_present(
+    state: &ServerState,
+    supplied_schemas: &HashMap<SchemaHash, Schema>,
+    hash: SchemaHash,
+) -> Result<Option<Schema>, String> {
     if let Some(schema) = state
         .catalogue
         .known_schema(&state.catalogue_store, &hash)
         .map_err(|error| format!("read catalogue schema {hash}: {error}"))?
         .or_else(|| supplied_schemas.get(&hash).cloned())
     {
-        return Ok(schema);
+        return Ok(Some(schema));
     }
 
     let empty_schema = Schema::new();
     if hash == SchemaHash::compute(&empty_schema) {
-        return Ok(empty_schema);
+        return Ok(Some(empty_schema));
     }
 
-    Err(format!("catalogue schema {hash} is missing"))
+    Ok(None)
 }
 
 fn convert_lens(lens: &Lens, source: &Schema, target: &Schema) -> Result<MigrationLens, String> {

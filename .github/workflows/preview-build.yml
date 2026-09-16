@@ -142,7 +142,8 @@ jobs:
             './packages/create-jazz'
           )
           if [[ "${INCLUDE_RN}" == "true" ]]; then
-            PACKAGES+=('./crates/jazz-rn')
+            node dev/artifacts/rn-preview-dependencies.mjs "${PREVIEW_COMMIT}"
+            PACKAGES+=('./crates/jazz-rn/npm/android' './crates/jazz-rn/npm/ios' './crates/jazz-rn')
           fi
           # Bind source and dependency URLs to the exact same publication list.
           node packages/create-jazz/scripts/write-preview-snapshot.mjs "${PREVIEW_COMMIT}" "${PACKAGES[@]}"

@@ -1,4 +1,5 @@
 import { access } from "node:fs/promises";
+import { createServer } from "node:net";
 import { JazzServer } from "jazz-napi";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "undici";
@@ -58,6 +59,39 @@ describe("startLocalJazzServer via JazzServer", () => {
 
     const healthResponse = await fetch(`${handle.url}/health`);
     expect(healthResponse.ok).toBe(true);
+  }, 30_000);
+
+  it("rejects direct NAPI startup on an occupied explicit port without killing the process", async () => {
+    const blocker = createServer();
+    await new Promise<void>((resolve, reject) => {
+      blocker.once("error", reject);
+      blocker.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = blocker.address();
+    if (!address || typeof address === "string") {
+      await new Promise<void>((resolve, reject) => {
+        blocker.close((error) => (error ? reject(error) : resolve()));
+      });
+      throw new Error("occupied listener did not expose a numeric port");
+    }
+
+    try {
+      await expect(
+        JazzServer.start({
+          appId: "00000000-0000-0000-0000-000000000003",
+          port: address.port,
+          inMemory: true,
+          adminSecret: "occupied-port-admin",
+          backendSecret: "occupied-port-backend",
+        }),
+      ).rejects.toThrow(/bind|server listener/i);
+      expect(process.uptime()).toBeGreaterThan(0);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        blocker.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   }, 30_000);
 
   maybeIt(

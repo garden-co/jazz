@@ -296,21 +296,27 @@ pub(crate) fn lower_resolved_query_program(
     });
     verify_routed_terminal_outputs(&terminals, &parameters, &request, &explain)?;
 
+    let maintained_terminal_tables = resolved_sources
+        .values()
+        .map(|source| {
+            (
+                source.table_schema.name.clone(),
+                source.table_schema.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let targeted_refresh_tables = maintained_terminal_tables.keys().cloned().collect();
+
     Ok(QueryProgram {
         lowered: LoweredGraph {
+            shared_witness_sinks: shared_witness_sinks(&terminals),
             terminals,
             internal_app_rows_graph,
             parameters,
             output,
-            maintained_terminal_tables: resolved_sources
-                .values()
-                .map(|source| {
-                    (
-                        source.table_schema.name.clone(),
-                        source.table_schema.clone(),
-                    )
-                })
-                .collect(),
+            maintained_terminal_tables,
+            targeted_refresh_tables,
+            targeted_refresh_uncertain: false,
         },
         source_descriptors: resolved_sources
             .iter()
@@ -944,8 +950,12 @@ pub(crate) struct QueryProgram {
 /// Groove graph plus the semantic contracts needed to consume it.
 #[derive(Clone, Debug)]
 pub(crate) struct LoweredGraph {
-    /// Executable named groove terminals emitted by this program.
+    /// Logical named terminals, including independently meaningful witness roles.
     pub(crate) terminals: Vec<LoweredTerminal>,
+    /// Replacement sink -> version sink for compiler-proven identical payloads.
+    /// Only the version sink executes; its consumer applies both role weights.
+    /// This is ephemeral execution metadata, never a wire/storage identity.
+    pub(crate) shared_witness_sinks: BTreeMap<String, String>,
     /// Filtered current-row graph used only by synchronous one-shot
     /// materializers. Public terminals have their own exact output shape and
     /// must not be decoded as storage-backed current rows.
@@ -958,6 +968,28 @@ pub(crate) struct LoweredGraph {
     /// lowered program. This is derived from resolved query-engine sources, not
     /// recollected from the public query shape.
     pub(crate) maintained_terminal_tables: BTreeMap<String, TableSchema>,
+    /// Logical tables read by embedded policy programs and the main query.
+    /// Unlike `maintained_terminal_tables`, this is an invalidation footprint,
+    /// not a decoding schema map.
+    pub(crate) targeted_refresh_tables: BTreeSet<String>,
+    /// If policy dependency compilation could not expose a complete footprint,
+    /// local writes conservatively refresh this subscription for every table.
+    pub(crate) targeted_refresh_uncertain: bool,
+}
+
+impl LoweredGraph {
+    pub(crate) fn execution_terminals(&self) -> impl Iterator<Item = &LoweredTerminal> {
+        self.terminals
+            .iter()
+            .filter(|terminal| !self.shared_witness_sinks.contains_key(&terminal.sink))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn shared_witness_sinks_for_test(
+    terminals: &[LoweredTerminal],
+) -> BTreeMap<String, String> {
+    shared_witness_sinks(terminals)
 }
 
 /// One executable output terminal produced by query lowering.

@@ -244,6 +244,55 @@ async fn signed_i64_inputs_are_supported() {
     );
 }
 
+/// AVG must not overflow while summing two distinct finite `f64::MAX` rows.
+#[futures_test::test]
+async fn avg_of_two_f64_max_values_stays_finite() {
+    let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
+    let mut database = Database::new(metric_schema(ColumnType::F64), storage)
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "metrics",
+        vec![Value::U64(1), Value::U64(10), Value::F64(f64::MAX)],
+    );
+    batch.insert(
+        "metrics",
+        vec![Value::U64(2), Value::U64(10), Value::F64(f64::MAX)],
+    );
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
+
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::table("metrics"),
+        ["bucket"],
+        [aggregate(
+            AggregateFunction::Avg,
+            Some("score"),
+            "avg_score",
+        )],
+    );
+    let rows = database
+        .query_graph(graph)
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let (values, weight) = &rows[0];
+    assert_eq!(*weight, 1);
+    assert_eq!(values[0], Value::U64(10));
+    let Value::Nullable(Some(value)) = &values[1] else {
+        panic!("AVG result should be non-null: {values:?}");
+    };
+    let Value::F64(average) = value.as_ref() else {
+        panic!("AVG result should be F64: {values:?}");
+    };
+    assert!(average.is_finite(), "AVG must remain finite");
+    assert_eq!(*average, f64::MAX, "AVG must equal f64::MAX exactly");
+}
+
 #[futures_test::test]
 async fn sum_overflow_fails_with_a_named_error_at_the_declared_width() {
     let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
@@ -269,4 +318,47 @@ async fn sum_overflow_fails_with_a_named_error_at_the_declared_width() {
             IvmRuntimeError::AggregateOverflow
         ))
     ));
+}
+
+#[futures_test::test]
+async fn avg_preserves_small_finite_residual_after_large_cancellation() {
+    let storage = MemoryStorage::new(&["metrics"]).expect("valid memory storage families");
+    let mut database = Database::new(metric_schema(ColumnType::F64), storage)
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    for (index, score) in [f64::MAX, -f64::MAX, 1.0e-20].into_iter().enumerate() {
+        batch.insert(
+            "metrics",
+            vec![
+                Value::U64(index as u64 + 1),
+                Value::U64(10),
+                Value::F64(score),
+            ],
+        );
+    }
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
+    let graph = GraphBuilder::aggregate(
+        GraphBuilder::table("metrics"),
+        ["bucket"],
+        [aggregate(
+            AggregateFunction::Avg,
+            Some("score"),
+            "avg_score",
+        )],
+    );
+    let rows = database
+        .query_graph(graph)
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, 1);
+    assert_eq!(
+        rows[0].0[1],
+        Value::Nullable(Some(Box::new(Value::F64(1.0e-20 / 3.0))))
+    );
 }

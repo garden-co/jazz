@@ -98,4 +98,10 @@ Use the same secret with `BrowserPasskeyBackup` for a passkey backup. Export req
 
 `createAccountManager`, opaque `AccountHandle`, and `createJazzClient` remain available for applications that intentionally own their lifecycle. The manager handles credentials and registry operations only. Contexts accept valid handles and never change identity; low-level callers must arrange graceful shutdown before linking or replacing contexts themselves. The session abstraction composes these primitives in shared TypeScript; framework adapters only observe state and acknowledge consumer cleanup.
 
-`db.deleteClientStorage()` resets supported browser database storage without erasing retained account signing roots. It is a development reset, not account registration or linking.
+## Storage reset
+
+`await db.deleteClientStorage()` resets the active browser IndexedDB namespace and keeps the live client usable. **It permanently deletes unsynced writes and local-only data.** Resync requires the data to already exist on the configured server and the same account to retain access. Ordinary close or shutdown is not a server-sync receipt.
+
+Reset preserves default local-first signing roots in `localStorage` and does not sign out the account or external auth provider. Preserve browser credentials and other databases; verify custom credential stores separately. Logout changes the selected account state, while a storage reset clears the selected data cache. Reset does not register or link an account.
+
+The [browser console helper](/docs/faq#reset-browser-storage) provides the same scoped reset and requires a live registered client. Keep the client open until the reset finishes.

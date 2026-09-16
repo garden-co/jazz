@@ -8,8 +8,9 @@ use super::mutation_errors::{
     mutation_error_event, mutation_error_event_for, queue_mutation_error,
 };
 use super::node_runtime::{
-    notify_write_state_waiters, refresh_subscriptions_in, retire_relay_upstream_subscription,
-    route_upstream_subscription_rejection, take_relay_upstream_subscription_owner,
+    make_query_runtime_waker, notify_write_state_waiters, refresh_subscriptions_in,
+    retire_relay_upstream_subscription, route_upstream_subscription_rejection,
+    take_relay_upstream_subscription_owner,
 };
 use super::*;
 use crate::protocol::expand_version_carriers;
@@ -331,7 +332,11 @@ where
                         && tx.made_by == session_claim_binding.0
                 });
                 state
-                    .ingest_relay_commit_unit(tx.clone(), versions.clone())
+                    .ingest_relay_commit_unit_with_encoder_trust(
+                        tx.clone(),
+                        versions.clone(),
+                        ingest_context.trust.is_trusted(),
+                    )
                     .await?;
                 if same_scope_author {
                     state
@@ -615,10 +620,13 @@ where
     pub(super) active_authority_view_receipts: ActiveAuthorityViewReceipts,
     pub(super) coverage_refresh_generations: CoverageRefreshGenerations,
     pub(super) scheduler: SharedTickScheduler,
+    pub(super) query_runtime_wake_pending: Arc<AtomicBool>,
+    pub(super) query_runtime_waker: Rc<RefCell<Option<Waker>>>,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
     pub(super) upstream_upload_destination: Option<UpstreamUploadDestination>,
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
+    pub(super) open_schema_admission: OpenSchemaAdmission,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) current_rows: row_availability::SharedCurrentRows,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -798,6 +806,9 @@ pub(super) struct UpstreamConnectionState {
     pub(super) pending: Vec<PendingUpstreamCommand>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) announced_shapes: BTreeSet<ShapeRegistrationKey>,
+    /// Exact admitted opens retained for a fresh snapshot after authority handoff.
+    pub(super) sent_subscriptions: BTreeMap<SubscriptionKey, PendingUpstreamSubscription>,
+    pub(super) awaiting_support_snapshots: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
     pub(super) sent_session_claim_revisions: BTreeMap<AuthorSubject, u64>,
     pub(super) outbox: Outbox,
     pub(super) uploaded: BTreeSet<TxId>,
@@ -884,7 +895,7 @@ fn collect_large_value_refs(value: &Value, refs: &mut Vec<groove::large_values::
     match value {
         Value::Large(value_ref) => {
             if !refs.contains(value_ref) {
-                refs.push(value_ref.clone());
+                refs.push(value_ref.as_ref().clone());
             }
         }
         Value::Tuple(values) | Value::Array(values) => {
@@ -1710,11 +1721,11 @@ where
     /// tighter one: the client keeps the same subscription, but its visible
     /// membership must be recalculated immediately.
     pub(super) async fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
-        let progress_waker = self
-            .scheduler
-            .borrow()
-            .as_ref()
-            .and_then(|scheduler| scheduler.query_runtime_waker());
+        let progress_waker = make_query_runtime_waker(
+            &self.scheduler,
+            &self.query_runtime_wake_pending,
+            &self.query_runtime_waker,
+        );
         let session_claim_binding = self.subscriber_session_claim_binding();
         let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber(SubscriberConnectionState {
@@ -1888,11 +1899,32 @@ where
     pub(super) fn stage_inbound_without_authority_receipt(&mut self) {
         if let ConnectionLink::Upstream(UpstreamConnectionState {
             pending_row_version_repairs,
+            sent_subscriptions,
+            awaiting_support_snapshots,
+            pending,
             ..
         }) = &mut self.link
         {
             for repair in pending_row_version_repairs {
                 repair.authority_receipt_eligible = false;
+            }
+            // A surviving link's old delta chain is not a newly selected
+            // authority receipt. Reissue its admitted opens and ignore deltas
+            // until each independent snapshot arrives. Never reconstruct claims.
+            for (key, request) in sent_subscriptions {
+                if pending.iter().any(|command| {
+                    matches!(command,
+                    PendingUpstreamCommand::Unsubscribe(subscription) if subscription == key)
+                }) {
+                    continue;
+                }
+                awaiting_support_snapshots.entry(*key).or_default();
+                if !pending.iter().any(|command| {
+                    matches!(command,
+                    PendingUpstreamCommand::Subscribe(open) if open.subscription == *key)
+                }) {
+                    pending.push(PendingUpstreamCommand::Subscribe(request.clone()));
+                }
             }
         }
         while let Some(message) = self.transport.try_recv() {
@@ -1906,15 +1938,29 @@ where
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub async fn tick(&mut self) -> Result<DbTickStats, Error> {
+        let result = self.tick_inner().await;
+        if let Err(error) = &result {
+            if matches!(self.link, ConnectionLink::Upstream(_)) {
+                finish_open_schema_connection(
+                    &self.open_schema_admission,
+                    self.connection_epoch,
+                    Err(error.clone()),
+                );
+            }
+        }
+        result
+    }
+
+    async fn tick_inner(&mut self) -> Result<DbTickStats, Error> {
         if let Some(error) = self.startup_error.take() {
             return Err(error);
         }
         let mut stats = DbTickStats::default();
-        let progress_waker = self
-            .scheduler
-            .borrow()
-            .as_ref()
-            .and_then(|scheduler| scheduler.query_runtime_waker());
+        let progress_waker = make_query_runtime_waker(
+            &self.scheduler,
+            &self.query_runtime_wake_pending,
+            &self.query_runtime_waker,
+        );
         let connection_epoch = self.connection_epoch;
         // The host-admitted scope-isolated worker owns one immutable foreground
         // session and may forward that exact binding upstream. A generic
@@ -1937,6 +1983,8 @@ where
                 pending,
                 upstream_subscriptions,
                 announced_shapes,
+                sent_subscriptions,
+                awaiting_support_snapshots,
                 sent_session_claim_revisions,
                 outbox,
                 uploaded,
@@ -1965,6 +2013,8 @@ where
                                     identity: policy_binding.0,
                                     claims: policy_binding.1,
                                 });
+                            #[cfg(any(test, feature = "testing"))]
+                            crate::delivery_diagnostics::record(|| format!("repair_fetch_send runtime={} count={sent_count} delegated={}", self.node.borrow().groove_runtime_token(), delegated_session.is_some()));
                             if let Err(error) = self
                                 .transport
                                 .send(SyncMessage::FetchRowVersions {
@@ -2114,6 +2164,8 @@ where
                                         "upstream send subscribe {}",
                                         summarize_subscription_key(subscribe.subscription)
                                     ));
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("upstream_subscribe_apply runtime={} subscription={:?}", self.node.borrow().groove_runtime_token(), subscribe.subscription));
                                     let outcome = self
                                         .node
                                         .lock()
@@ -2143,8 +2195,13 @@ where
                                         }
                                         return Err(transport_error(error));
                                     }
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("upstream_subscribe_sent runtime={} subscription={:?}", self.node.borrow().groove_runtime_token(), pending_subscription.subscription));
+                                    sent_subscriptions.insert(pending_subscription.subscription, pending_subscription.clone());
                                 }
                                 PendingUpstreamCommand::Unsubscribe(subscription) => {
+                                    sent_subscriptions.remove(subscription);
+                                    awaiting_support_snapshots.remove(subscription);
                                     if let Some(receipts) = self.active_authority_view_receipts.borrow_mut().as_mut() {
                                         receipts.subscriptions.remove(subscription);
                                     }
@@ -2699,12 +2756,33 @@ where
                                     )
                                     .await?;
                                 }
-                                let outcome = self
-                                    .node
-                                    .lock()
-                                    .await
-                                    .apply_trusted_catalogue_snapshot(*snapshot)
-                                    .await?;
+                                let mut catalogue_owner = self.node.lock().await;
+                                if catalogue_owner.defer_catalogue_for_persistence(progress_waker.as_ref())? {
+                                    drop(catalogue_owner);
+                                    self.staged_inbound.push_front(StagedInboundMessage {
+                                        message: SyncMessage::CatalogueSnapshot(snapshot),
+                                        authority_receipt_eligible,
+                                    });
+                                    break;
+                                }
+                                let outcome = catalogue_owner.apply_trusted_catalogue_snapshot(*snapshot).await?;
+                                drop(catalogue_owner);
+                                let requested = self.open_schema_admission.borrow()
+                                    .as_ref().map(|pending| pending.schema);
+                                if let Some(requested) = requested {
+                                    let admitted = self.node.lock().await
+                                        .catalogue_schemas().contains_key(&requested);
+                                    if let Some(pending) = self.open_schema_admission.borrow_mut().as_mut() {
+                                        if pending.connection_epoch == Some(self.connection_epoch) {
+                                            pending.authoritative_catalogue_received = true;
+                                        }
+                                    }
+                                    finish_open_schema_connection(
+                                        &self.open_schema_admission,
+                                        self.connection_epoch,
+                                        if admitted { Ok(()) } else { Err(pending_open_schema_error()) },
+                                    );
+                                }
                                 publications.extend(outcome.publications);
                             }
                             SyncMessage::CurrentRowsReceipt(receipt) => {
@@ -2735,6 +2813,8 @@ where
                                 continue;
                             }
                             SyncMessage::RowVersionPayloads { version_bundles } => {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("repair_payload_received runtime={} bundles={} pending_repairs={} sent_count={:?}", self.node.borrow().groove_runtime_token(), version_bundles.len(), pending_row_version_repairs.len(), pending_row_version_fetches.front().map(|fetch| fetch.sent_count)));
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
                                         &self.node,
@@ -2765,11 +2845,13 @@ where
                                 let batch = fetch.requests.iter().take(fetch.sent_count).cloned().collect::<Vec<_>>();
                                 {
                                     let mut node = self.node.lock().await;
-                                    let applied_bundles = node.apply_row_version_payloads_for_requests(
+                                    let result = node.apply_row_version_payloads_for_requests(
                                         &batch,
                                         version_bundles,
-                                    )
-                                    .await?;
+                                    ).await;
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_payload_apply runtime={} result={:?}", node.groove_runtime_token(), result.as_ref().map(Vec::len).map_err(std::mem::discriminant)));
+                                    let applied_bundles = result?;
                                     // Only the still-selected authority receipt can later be
                                     // served to this durable foreground scope without a fresh
                                     // policy check. A stale/fallback repair may populate the
@@ -2792,9 +2874,7 @@ where
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 }
                                 let repair = pending_row_version_repairs.pop_front().expect("active repair");
-                                if repair.superseded {
-                                    continue;
-                                }
+                                if !repair.superseded {
                                 let (subscription, settled_through) = match &repair.update {
                                     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                         subscription,
@@ -2816,14 +2896,45 @@ where
                                     repair.authority_receipt_eligible,
                                 )?;
                                 scope_view_cuts.insert(subscription, settled_through);
+                                }
+                                while pending_row_version_fetches.front().is_some_and(|fetch|
+                                    fetch.requests.is_empty() && fetch.sent_count == 0)
+                                {
+                                    pending_row_version_fetches.pop_front();
+                                    let successor = pending_row_version_repairs.pop_front().expect("paired pending successor");
+                                    if successor.superseded { continue; }
+                                    stage_initial_coverage_clear_for_update(&successor.update,
+                                        &self.latest_coverage_subscriptions, &mut pending_initial_coverage_clears);
+                                    if let SyncMessage::ViewUpdate(view) = &successor.update {
+                                        scope_view_cuts.insert(view.subscription, view.settled_through);
+                                    }
+                                    push_view_update_message_for_receiver(&mut pending_view_updates,
+                                        successor.update, successor.authority_receipt_eligible)?;
+                                }
                             }
                             message @ SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                 subscription,
                                 settled_through,
                                 ..
                             }) => {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("foreground_view_received runtime={} subscription={subscription:?} eligible={authority_receipt_eligible}", self.node.borrow().groove_runtime_token()));
+                                if let Some(minimum_cut) = awaiting_support_snapshots.get_mut(&subscription) {
+                                    if !authority_receipt_eligible {
+                                        *minimum_cut = (*minimum_cut).max(settled_through);
+                                    }
+                                    if !authority_receipt_eligible || !matches!(&message,
+                                        SyncMessage::ViewUpdate(view) if view.supporting_rows.is_snapshot()
+                                            && !view.peer_payload_inventory.opening_pending)
+                                        || settled_through < *minimum_cut {
+                                        #[cfg(any(test, feature = "testing"))]
+                                        crate::delivery_diagnostics::record(|| format!("receiver_waiting_snapshot_skip runtime={} subscription={subscription:?} cut={} minimum={}", self.node.borrow().groove_runtime_token(), settled_through.0, minimum_cut.0));
+                                        continue;
+                                    }
+                                    awaiting_support_snapshots.remove(&subscription);
+                                }
                                 if matches!(&message, SyncMessage::ViewUpdate(payload)
-                                    if !payload.peer_payload_inventory.opening_pending)
+                                    if !payload.peer_payload_inventory.opening_pending && payload.supporting_rows.is_snapshot())
                                 {
                                     // Keep the active request until its correlated reply
                                     // arrives, but discard obsolete work that was never
@@ -2848,9 +2959,42 @@ where
                                 let _ = subscription;
                                 let missing = {
                                     let mut node = self.node.lock().await;
-                                    node.missing_known_state_row_version_refs(&message).await?
+                                    let result = node.missing_known_state_row_version_refs(&message).await;
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("receiver_body_preflight runtime={} subscription={subscription:?} result={:?}", node.groove_runtime_token(), result.as_ref().map(Vec::len).map_err(std::mem::discriminant)));
+                                    result?
                                 };
-                                if missing.is_empty() {
+                                let predecessor_is_waiting = pending_row_version_repairs.iter().any(|repair|
+                                    !repair.superseded && matches!(&repair.update, SyncMessage::ViewUpdate(view)
+                                        if view.subscription == subscription));
+                                // Dependent deltas cannot be coalesced as complete
+                                // snapshots were. Bound each stalled chain and reopen
+                                // its exact admitted usage instead of retaining an
+                                // unbounded backlog behind one unavailable body.
+                                if predecessor_is_waiting && pending_row_version_repairs.iter()
+                                    .filter(|repair| !repair.superseded && matches!(&repair.update,
+                                        SyncMessage::ViewUpdate(view) if view.subscription == subscription))
+                                    .count() >= 64
+                                {
+                                    let request = sent_subscriptions.get(&subscription).ok_or(
+                                        crate::node::Error::InvalidStoredValue("support delta repair has no admitted subscription"))?;
+                                    awaiting_support_snapshots.insert(subscription, settled_through);
+                                    pending.push(PendingUpstreamCommand::Subscribe(request.clone()));
+                                    for index in (0..pending_row_version_repairs.len()).rev() {
+                                        if matches!(&pending_row_version_repairs[index].update,
+                                            SyncMessage::ViewUpdate(view) if view.subscription == subscription) {
+                                            if pending_row_version_fetches[index].sent_count == 0 {
+                                                pending_row_version_repairs.remove(index);
+                                                pending_row_version_fetches.remove(index);
+                                            } else {
+                                                pending_row_version_repairs[index].superseded = true;
+                                            }
+                                        }
+                                    }
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                    continue;
+                                }
+                                if missing.is_empty() && !predecessor_is_waiting {
                                     stage_initial_coverage_clear_for_update(
                                         &message,
                                         &self.latest_coverage_subscriptions,
@@ -2904,6 +3048,8 @@ where
                                                     )))
                                                 })
                                         });
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("receiver_repair runtime={} subscription={subscription:?} missing={} predecessor_waiting={predecessor_is_waiting} owner={}", self.node.borrow().groove_runtime_token(), missing.len(), policy_binding.is_some()));
                                     let Some(policy_binding) = policy_binding else {
                                         // A queued complete snapshot may arrive after its
                                         // last reader has closed. Do not fetch bytes for a
@@ -2941,6 +3087,8 @@ where
                                 {
                                     continue;
                                 }
+                                sent_subscriptions.remove(&subscription);
+                                awaiting_support_snapshots.remove(&subscription);
                                 let delivered = queue_relay_subscription_rejection(
                                     &self.relay_upstream_subscription_owners,
                                     &self.pending_relay_subscription_rejections,
@@ -3199,8 +3347,14 @@ where
                                         .min()
                                 };
                                 let observed = self.node.borrow();
-                                let observed_claims = observed
-                                    .session_claim_revision(expected.link);
+                                let observed_claims = if request.delegated_session.is_some() {
+                                    // Delegated subjects have independent local and authority
+                                    // claim counters. Only the admitted authority receipt can
+                                    // advance the remote revision for this immutable snapshot.
+                                    0
+                                } else {
+                                    observed.session_claim_revision(expected.link)
+                                };
                                 let observed_policy = observed.active_catalogue_seq();
                                 drop(observed);
                                 // Context components are monotonic per admitted
@@ -3308,9 +3462,8 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
-                                // Transport admission remains bound to the
-                                // backend's SYSTEM link, while this support
-                                // lease uses the now-current authority context
+                                // Transport admission retains its authority link,
+                                // while this support lease uses the current context
                                 // under the immutable delegated subject named
                                 // by the request and receipt.
                                 let scope_authority = AuthorityContext {
@@ -3509,34 +3662,29 @@ where
                                     )
                                     .await?;
                                 }
+                                let mut ingress_owner = self.node.lock().await;
+                                if crate::node::is_catalogue_mutation(&message)
+                                    && ingress_owner.defer_catalogue_for_persistence(progress_waker.as_ref())?
+                                {
+                                    drop(ingress_owner);
+                                    self.staged_inbound.push_front(StagedInboundMessage { message, authority_receipt_eligible });
+                                    break;
+                                }
                                 if *local_receiver {
                                     match message {
                                         SyncMessage::CommitUnit { tx, versions } => {
-                                            self.node
-                                                .lock()
-                                                .await
-                                                .ingest_relay_commit_unit(tx, versions)
-                                                .await?;
+                                            ingress_owner.ingest_relay_commit_unit_with_encoder_trust(tx, versions, true).await?;
                                         }
                                         other => {
-                                            let outcome = self
-                                                .node
-                                                .lock()
-                                                .await
-                                                .apply_sync_message_with_ingest_context(other, None)
-                                                .await?;
+                                            let outcome = ingress_owner.apply_sync_message_with_ingest_context(other, None).await?;
                                             publications.extend(outcome.publications);
                                         }
                                     }
                                 } else {
-                                    let outcome = self
-                                        .node
-                                        .lock()
-                                        .await
-                                        .apply_sync_message_with_ingest_context(message, None)
-                                        .await?;
+                                    let outcome = ingress_owner.apply_sync_message_with_ingest_context(message, None).await?;
                                     publications.extend(outcome.publications);
                                 }
+                                drop(ingress_owner);
                                 if let Some((tx_id, fate)) = routed_fate {
                                     let authority = *expected_scope_authority;
                                     let mut routes = self.edge_fate_routes.borrow_mut();
@@ -3688,15 +3836,30 @@ where
                 serve_dirty,
             }) => {
                 let stop = Box::pin(async {
-                // A trusted backend subscriber is an edge's normal upstream
-                // link.  Unlike an application subscriber, it is entitled to
-                // the authority catalogue and has no application subscription
-                // that would otherwise cause a ViewUpdate to carry the
-                // snapshot.  Announce it eagerly (and again only when its
-                // fingerprint changes) so catalogue publication can propagate
-                // Core -> peer edge before any client work starts.
-                if ingest_context.trust.is_trusted() {
-                    send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut())?;
+                // These links have a host-admitted app identity (or an existing
+                // trusted catalogue capability). Send the same app-wide metadata
+                // that precedes a ViewUpdate before query compilation: a replica
+                // reopening an unknown published schema cannot register that query
+                // until the catalogue arrives. A generic relay has no admitted
+                // application scope and retains its request-driven delivery.
+                let catalogue_ready = self.node.borrow().catalogue_bootstrap_state()
+                    == crate::node::CatalogueBootstrapState::Ready;
+                let owner_admitted = self.open_schema_admission.borrow().as_ref()
+                    .is_none_or(|pending| pending.authoritative_catalogue_received);
+                let catalogue_entitled = ingest_context.trust.is_trusted()
+                    || (!peer.has_announced_catalogue_snapshot()
+                        && (ingest_context.trust == CommitUnitTrust::Session
+                            || (ingest_context.trust == CommitUnitTrust::Relay
+                                && peer.admitted_scope_relay_binding().is_some())));
+                if catalogue_ready && owner_admitted && catalogue_entitled {
+                    match send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut()) {
+                        Ok(()) => {},
+                        Err(error) if error.code == ErrorCode::Backpressure => {
+                            schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                            return Ok(true);
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 let mut applied_inbound = false;
                 let mut scheduled_follow_up = false;
@@ -3821,7 +3984,7 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
-                    let (message, parked_policy_binding) = if let Some(message) = self.transport.try_recv() {
+                    let (message, parked_policy_binding) = if let Some(message) = self.staged_inbound.pop_front().map(|staged| staged.message).or_else(|| self.transport.try_recv()) {
                         (Box::new(message), None)
                     } else {
                         let ready = pending_catalogue_subscriptions.iter().find_map(|(key, pending)| {
@@ -3845,6 +4008,7 @@ where
                         drop_peer_request(&self.node);
                         continue;
                     }
+                    let previously_applied_inbound = applied_inbound;
                     applied_inbound = true;
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(
@@ -4245,6 +4409,8 @@ where
                             // machine than ordinary peer messages. Keep that state on the heap
                             // so a commit uploaded on this same connection does not carry the
                             // inactive Subscribe arm on a normal two-megabyte executor stack.
+                            #[cfg(any(test, feature = "testing"))]
+                            crate::delivery_diagnostics::record(|| format!("owner_subscribe_received runtime={} subscription={:?}", self.node.borrow().groove_runtime_token(), subscribe.subscription));
                             let should_continue = Box::pin(async {
                             let subscription_has_delegated_session = subscribe.delegated_session.is_some();
                             let session_claim_binding = parked_policy_binding.or_else(|| admitted_request_policy_binding(
@@ -4257,6 +4423,8 @@ where
                                 // A relay's transport is not a user. It may
                                 // only carry the topology-assigned immutable
                                 // session snapshot for this request.
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4264,12 +4432,16 @@ where
                                 validate_known_state_declaration(&subscribe.known_state)
                             {
                                 let _ = message;
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
                             if shape_id != subscription.shape_id {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4289,6 +4461,8 @@ where
                             let Some(registration) =
                                 shape_registrations.get(&registration_key).cloned()
                             else {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             };
@@ -4337,11 +4511,15 @@ where
                                     });
                                     return Ok(true);
                                 } else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                     drop_peer_request(&self.node);
                                 }
                                 return Ok::<bool, Error>(true);
                             };
                             if values.len() != shape.params().len() {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4354,6 +4532,8 @@ where
                             let binding = match shape.bind(value_map) {
                                 Ok(binding) => binding,
                                 Err(_) => {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                     drop_peer_request(&self.node);
                                     return Ok::<bool, Error>(true);
                                 }
@@ -4366,6 +4546,8 @@ where
                             )
                             .is_err()
                             {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4390,6 +4572,8 @@ where
                             if let Some(existing_coverage) = served.get(&subscription)
                                 && existing_coverage != &coverage
                             {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4414,6 +4598,8 @@ where
                                 let expected = match expected_result {
                                     Ok(expected) => expected,
                                     Err(_) => {
+                                        #[cfg(any(test, feature = "testing"))]
+                                        crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                         drop_peer_request(&self.node);
                                         return Ok::<bool, Error>(true);
                                     }
@@ -4433,6 +4619,8 @@ where
                                         },
                                     );
                                 if !exact_support {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                     drop_peer_request(&self.node);
                                     return Ok::<bool, Error>(true);
                                 }
@@ -4455,6 +4643,8 @@ where
                                 && let Some(existing) = scope_purposes.get(&subscription)
                                 && existing != purpose
                             {
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
                             }
@@ -4507,7 +4697,13 @@ where
                                 }
                                 opts
                             } else {
-                                opts.clone()
+                                // The incoming relay capability belongs to this hop.
+                                // An authority forwards the admitted policy snapshot
+                                // on its own trusted link, without claiming a client
+                                // relay capability on that separate connection.
+                                let mut upstream_opts = opts.clone();
+                                upstream_opts.binding_source = BindingSource::Ordinary;
+                                upstream_opts
                             };
                             // A scope relay has one authority stream per exact
                             // admitted coverage. Foreground connections pin
@@ -4568,7 +4764,7 @@ where
                                         opening_pending: true,
                                         ..Default::default()
                                     },
-                                    supporting_rows: Vec::new(),
+                                    supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
                                 }))
                             } else {
                                 None
@@ -4725,6 +4921,8 @@ where
                                         (shape.shape_id(), binding.binding_id()),
                                     )
                                 {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
                                     drop_peer_request(&self.node);
                                     return Ok::<bool, Error>(true);
                                 }
@@ -4757,6 +4955,8 @@ where
                                 });
                             group.subscribers.insert(subscription);
                             group.pending_initial_subscribers.insert(subscription);
+                            #[cfg(any(test, feature = "testing"))]
+                            crate::delivery_diagnostics::record(|| format!("owner_subscribe_admitted runtime={} subscription={subscription:?}", self.node.borrow().groove_runtime_token()));
                             if let Some(selected) = selected_authority_result_key {
                                 // Keep the policy-scoped U source selected at
                                 // admission. A later owner-loop lookup must
@@ -4992,8 +5192,12 @@ where
                             requests,
                             delegated_session,
                         } => {
+                            #[cfg(any(test, feature = "testing"))]
+                            crate::delivery_diagnostics::record(|| format!("repair_fetch_received runtime={} requests={} local={local_receiver} partial={partial_edge_query_host} delegated={} session_binding={}", self.node.borrow().groove_runtime_token(), requests.len(), delegated_session.is_some(), session_claim_binding.is_some()));
                             if let Err(message) = validate_fetch_row_versions(&requests) {
                                 let _ = message;
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                 drop_peer_request(&self.node);
                                 continue;
                             }
@@ -5001,6 +5205,8 @@ where
                                 let Some(binding) = admitted_request_policy_binding(
                                     *ingest_context, peer, session_claim_binding.clone(), delegated_session,
                                 ) else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
@@ -5022,11 +5228,15 @@ where
                                 // contents into scope-ledger authority.
                                 let PeerRole::ClientLink { identity: peer_identity } = peer.role()
                                 else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
                                 let Some((session_identity, _)) = session_claim_binding.as_ref()
                                 else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
@@ -5039,6 +5249,8 @@ where
                                             && peer_identity == *session_identity
                                     });
                                 if delegated_session.is_some() || !scope_matches {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 }
@@ -5051,6 +5263,8 @@ where
                                     delegated_session,
                                 );
                                 let Some(repair_policy_binding) = repair_policy_binding else {
+                                    #[cfg(any(test, feature = "testing"))]
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
@@ -5060,12 +5274,14 @@ where
                             };
                             let responses = {
                                 let mut node = self.node.lock().await;
-                                peer.serve_row_versions(
+                                let result = peer.serve_row_versions(
                                     &mut node,
                                     &requests,
                                     repair_context,
-                                )
-                                .await?
+                                ).await;
+                                #[cfg(any(test, feature = "testing"))]
+                                crate::delivery_diagnostics::record(|| format!("repair_fetch_served runtime={} result={:?}", node.groove_runtime_token(), result.as_ref().map(|responses| responses.iter().map(|response| match response { SyncMessage::RowVersionPayloads { version_bundles } => version_bundles.len(), _ => 0 }).sum::<usize>()).map_err(std::mem::discriminant)));
+                                result?
                             };
                             for response in responses {
                                 queue_sync_context_control(
@@ -5084,6 +5300,7 @@ where
                             // the subscriber owner-loop does not retain those
                             // compiler states while serving unrelated control
                             // messages or maintained-view updates.
+                            let mut catalogue_deferred = false;
                             let should_continue = Box::pin(async {
                             if matches!(other, SyncMessage::SessionClaims { .. })
                                 && matches!(
@@ -5138,7 +5355,17 @@ where
                             // responses (e.g. fate updates) flow back to the
                             // subscriber.
                             let maintenance_now_ms = self.upload_retry_clock.borrow().now_ms();
-                            let outcome = dispatch_admitted_subscriber_message(
+                            let outcome = if crate::node::is_catalogue_mutation(&other) {
+                                let mut owner = self.node.lock().await;
+                                if owner.defer_catalogue_for_persistence(progress_waker.as_ref())? {
+                                    drop(owner);
+                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, authority_receipt_eligible: false });
+                                    catalogue_deferred = true;
+                                    return Ok::<bool, Error>(false);
+                                }
+                                owner.apply_sync_message_with_ingest_context(other, Some(*ingest_context)).await?
+                            } else {
+                            dispatch_admitted_subscriber_message(
                                 &self.node,
                                 peer,
                                 *local_receiver,
@@ -5153,7 +5380,8 @@ where
                                 maintenance_now_ms,
                                 other,
                             )
-                            .await?;
+                            .await?
+                            };
                             let (responses, changed, published) = finish_peer_publication_outcome_with_refresh(
                                 &self.node,
                                 &self.subscriptions,
@@ -5215,6 +5443,10 @@ where
                             Ok::<bool, Error>(false)
                             })
                             .await?;
+                            if catalogue_deferred {
+                                applied_inbound = previously_applied_inbound;
+                                break;
+                            }
                             if should_continue {
                                 continue;
                             }
@@ -5457,7 +5689,13 @@ where
                                     Ok(Some(reconciled)) => reconciled,
                                     Ok(None) => {
                                         group.pending_initial_subscribers.insert(subscription);
-                                        serve_again = true;
+                                        if !peer.subscription_awaits_selected_authority_source(
+                                            group_subscription,
+                                        ) && !peer.has_pending_initial_maintained_subscription(
+                                            group_subscription,
+                                        ) {
+                                            serve_again = true;
+                                        }
                                         continue;
                                     }
                                     Err(crate::node::Error::QueryCapability(detail)) => {
@@ -5617,7 +5855,13 @@ where
                                 Ok(Some(update)) => update,
                                 Ok(None) => {
                                     group.pending_initial_subscribers.insert(subscription);
-                                    serve_again = true;
+                                    if !peer.subscription_awaits_selected_authority_source(
+                                        group_subscription,
+                                    ) && !peer.has_pending_initial_maintained_subscription(
+                                        group_subscription,
+                                    ) {
+                                        serve_again = true;
+                                    }
                                     continue;
                                 }
                                 Err(crate::node::Error::QueryCapability(detail)) => {
@@ -5987,8 +6231,6 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             opening_pending: peer_payload_inventory.opening_pending,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
         },
         _ => unreachable!("expected view update message"),
     }
@@ -6062,6 +6304,21 @@ where
     let frame_is_selected = |update: &PendingAuthorityViewUpdate| {
         authority_link_selected && update.authority_receipt_eligible
     };
+    #[cfg(any(test, feature = "testing"))]
+    for update in pending.iter() {
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "receiver_batch_select runtime={} subscription={:?} selected={} epoch={connection_epoch} selected_epoch={:?}",
+                node.borrow().groove_runtime_token(),
+                update.parts.subscription,
+                frame_is_selected(update),
+                active_authority_view_receipts
+                    .borrow()
+                    .as_ref()
+                    .map(|receipt| receipt.connection_epoch)
+            )
+        });
+    }
     let confirmed_subscriptions = pending
         .iter()
         .filter(|update| frame_is_selected(update) && !update.parts.opening_pending)
@@ -6074,8 +6331,8 @@ where
                 && !update.parts.opening_pending
                 && !update.parts.defer_settlement
                 && (update.parts.reset_input_set
-                    || !update.parts.program_fact_adds.is_empty()
-                    || !update.parts.program_fact_removes.is_empty())
+                    || !update.parts.supporting_adds().is_empty()
+                    || !update.parts.supporting_removes().is_empty())
         })
         .map(|update| update.parts.subscription)
         .collect::<BTreeSet<_>>();
@@ -6170,7 +6427,16 @@ where
     }
     if !updates.is_empty() {
         let mut node_ref = node.lock().await;
-        match node_ref.apply_view_updates_in_batch(updates).await {
+        let result = node_ref.apply_view_updates_in_batch(updates).await;
+        #[cfg(any(test, feature = "testing"))]
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "receiver_batch_apply runtime={} result={:?}",
+                node_ref.groove_runtime_token(),
+                result.as_ref().map_err(std::mem::discriminant)
+            )
+        });
+        match result {
             Ok(()) => {
                 let authoritative_cut = confirmed_subscriptions
                     .iter()
@@ -7101,7 +7367,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
                 .map(|bundles| bundles.len())
                 .unwrap_or_default(),
             peer_payload_inventory.complete_tx_payloads.len(),
-            program_fact_adds.len()
+            program_fact_adds.added_rows().len() + program_fact_adds.removed_rows().len()
         ),
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {
@@ -7163,9 +7429,21 @@ where
             node.borrow().client_relay_scope().is_some(),
             payload.subscription,
             payload.peer_payload_inventory.opening_pending,
-            payload.supporting_rows.len(),
+            payload.supporting_rows.added_rows().len(),
             payload.version_carriers.len()
         );
+    }
+    #[cfg(any(test, feature = "testing"))]
+    if let SyncMessage::ViewUpdate(payload) = &message {
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "owner_view_send runtime={} subscription={:?} snapshot={} opening={}",
+                node.borrow().groove_runtime_token(),
+                payload.subscription,
+                payload.supporting_rows.is_snapshot(),
+                payload.peer_payload_inventory.opening_pending
+            )
+        });
     }
     send_sync_message_chunked(transport, message)
 }

@@ -11,8 +11,9 @@ use jazz_testkit::{TestingClient, wait_for_edge_txs};
 
 async fn query_documents_as_alice(client: &JazzClient) -> HashSet<ObjectId> {
     client
-        .query(Query::from("documents"), None)
+        .query(Query::from("documents"), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents as alice")
         .into_iter()
         .map(|(id, _)| id)
@@ -37,7 +38,9 @@ async fn rebac_select_policy_with_null_literal_filters_query_results() {
                 )
                 .build();
 
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let admin = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema.clone())
@@ -107,7 +110,9 @@ async fn rebac_select_policy_with_is_null_filters_query_results() {
                 )
                 .build();
 
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let admin = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema.clone())

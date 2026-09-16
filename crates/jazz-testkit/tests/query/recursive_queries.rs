@@ -7,8 +7,7 @@ use crate::support::{
 use jazz::query::{Gather, Query, col, eq, lit};
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, QueryResult, Schema, SchemaBuilder,
-    TableSchema, Value,
+    ColumnType, JazzClient, ObjectId, QueryResult, Schema, SchemaBuilder, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 
@@ -51,7 +50,9 @@ struct Clients {
 
 impl Clients {
     async fn start(schema: Schema) -> Self {
-        let server = JazzServer::start_with_schema(schema.clone()).await;
+        let server = JazzServer::start_with_schema(schema.clone())
+            .await
+            .expect("start test server");
         let alice = TestingClient::builder()
             .with_server(&server)
             .with_schema(schema.clone())
@@ -168,7 +169,7 @@ async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
     let rows = wait_for_query_results(
         &clients.bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "recursive gather rows",
         |rows| {

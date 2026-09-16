@@ -41,13 +41,15 @@ use crate::ids::{
     RowAuthor, RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias,
     SchemaVersionId,
 };
+#[cfg(test)]
+use crate::protocol::ProgramFactEntry;
 use crate::protocol::{
-    AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CoveredInputEntry,
-    CurrentWriteSchema, LensOp, MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest,
-    PhysicalTableIdentity, PolicyBindingKey, ProgramFactEntry, ProgramSourceId, ProgramSourceRole,
-    ReadViewKey, ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication,
-    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
+    AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp,
+    MigrationLens, PhysicalColumnIdentity, PhysicalIdentityManifest, PhysicalTableIdentity,
+    PolicyBindingKey, ProgramSourceId, ProgramSourceRole, ReadViewKey, ResultMemberEntry,
+    ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
+    SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier, VersionRecord,
+    expand_version_carriers,
 };
 use crate::query::{
     Binding, BindingId, OrderBy, Query as JazzQuery, QueryError, ShapeId, ValidatedQuery,
@@ -332,6 +334,7 @@ mod query_eval;
 mod recovery;
 mod row_availability;
 mod source_resolution;
+pub(crate) mod supporting_frontier;
 mod views;
 pub(crate) use open_tx::TransactionBranchRowState;
 #[cfg(feature = "testing")]
@@ -398,6 +401,17 @@ pub const SKEW_TOLERANCE_MS: u64 = 30_000;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn is_catalogue_mutation(message: &SyncMessage) -> bool {
+    matches!(
+        message,
+        SyncMessage::CatalogueSnapshot(_)
+            | SyncMessage::PublishSchema { .. }
+            | SyncMessage::PublishSchemaWithLens { .. }
+            | SyncMessage::PublishLens { .. }
+            | SyncMessage::SetCurrentWriteSchema { .. }
+    )
+}
 
 fn next_groove_runtime_token() -> u64 {
     NEXT_GROOVE_RUNTIME_TOKEN.fetch_add(1, Ordering::Relaxed)
@@ -549,6 +563,10 @@ pub struct NodeState<S> {
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
+    /// One completed catalogue scan proved this UUID absent. The sole alias
+    /// writer invalidates it before any await; transaction absence is never
+    /// memoized. Fixed size bounds memory under arbitrary peer UUID churn.
+    absent_node_alias: Option<NodeUuid>,
     /// Exact ahead-current keys used to make peer replay idempotent. No caller
     /// needs ordering, so use the low-overhead deterministic hasher here.
     ahead_current_keys: FxHashSet<(PhysicalTableId, VersionLayer, Vec<u8>)>,
@@ -1030,17 +1048,17 @@ impl RetainedRootWindowSource {
 /// This index is rebuilt from existing facts; it has no storage or wire codec.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CoveredInputCoordinate {
-    source: ProgramSourceId,
+    physical_table: crate::ids::GlobalPhysicalTableId,
     row: RowUuid,
     layer: crate::protocol::ResultRowLayer,
     branch: Vec<u8>,
 }
 
-impl From<&CoveredInputEntry> for CoveredInputCoordinate {
-    fn from(input: &CoveredInputEntry) -> Self {
+impl From<&crate::protocol::SupportingRow> for CoveredInputCoordinate {
+    fn from(input: &crate::protocol::SupportingRow) -> Self {
         Self {
-            source: input.source.clone(),
-            row: input.source_row,
+            physical_table: input.physical_table,
+            row: input.row,
             layer: input.version.layer,
             branch: input.version.branch_or_prefix.clone().unwrap_or_default(),
         }
@@ -1079,13 +1097,14 @@ pub(crate) struct AuthorityResultState {
     live_settled: bool,
     /// Exact authoritative membership and an occurrence index for replacement.
     /// Non-row facts paired with the membership.
-    settled_program_facts: BTreeSet<ViewFactEntry>,
+    /// Exact v2 transport predecessor. Invalidate before settled-fact mutation;
+    /// never recover it as authority evidence after restart or scope teardown.
+    supporting_revision: Option<[u8; 16]>,
     /// O(changed) admission indexes for the exact source closure. These are
     /// receiver-local indexes over `settled_program_facts`, rebuilt on reopen;
     /// they never replace the durable closure itself.
-    covered_input_sources: BTreeSet<ProgramSourceId>,
-    covered_input_versions: BTreeMap<CoveredInputCoordinate, CoveredInputEntry>,
-    compiled_covered_input_sources: Option<BTreeSet<ProgramSourceId>>,
+    covered_input_versions: BTreeMap<CoveredInputCoordinate, crate::protocol::SupportingRow>,
+    compiled_covered_input_sources: Option<CompiledScopeTables>,
     /// Optional fast cursor and authorization receipt. The cursor is durable
     /// cache metadata; only `live_settled` permits a new known-state claim.
     settled_through: Option<GlobalTime>,
@@ -1119,8 +1138,8 @@ pub(crate) enum AuthoritySourceClosure {
 pub(crate) struct AuthoritySourceIncremental {
     pub(crate) predecessor_generation: u64,
     pub(crate) generation: u64,
-    pub(crate) adds: BTreeSet<ProgramFactEntry>,
-    pub(crate) removes: BTreeSet<ProgramFactEntry>,
+    pub(crate) adds: BTreeSet<crate::protocol::SupportingRow>,
+    pub(crate) removes: BTreeSet<crate::protocol::SupportingRow>,
 }
 
 impl AuthoritySourceIncremental {
@@ -1132,8 +1151,8 @@ impl AuthoritySourceIncremental {
         previous: Option<Self>,
         predecessor_generation: u64,
         generation: u64,
-        adds: BTreeSet<ProgramFactEntry>,
-        removes: BTreeSet<ProgramFactEntry>,
+        adds: BTreeSet<crate::protocol::SupportingRow>,
+        removes: BTreeSet<crate::protocol::SupportingRow>,
     ) -> Result<Self, Error> {
         if !adds.is_disjoint(&removes) {
             return Err(Error::InvalidStoredValue(
@@ -1270,6 +1289,37 @@ struct RejectionTracking {
     rejected_transactions: BTreeMap<TxId, RejectedTransaction>,
     /// Pending child transactions grouped by pending parent transaction.
     child_txs_by_parent: BTreeMap<TxId, BTreeSet<TxId>>,
+    /// Includes Accepted partial-child constraints, unlike `child_txs_by_parent`.
+    /// The shared pending-edge staging helper advances this before inserting a row.
+    /// Deletes/failed batches never lower it; recovery recomputes it from every
+    /// durable edge. Unknown during startup cannot prove absence.
+    pending_parent_time_bound: PendingParentTimeBound,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum PendingParentTimeBound {
+    #[default]
+    Unknown,
+    Empty,
+    Through(TxTime),
+}
+
+impl PendingParentTimeBound {
+    fn observe(&mut self, time: TxTime) {
+        match self {
+            Self::Unknown => {}
+            Self::Empty => *self = Self::Through(time),
+            Self::Through(ceiling) => *ceiling = (*ceiling).max(time),
+        }
+    }
+
+    fn excludes(self, time: TxTime) -> bool {
+        match self {
+            Self::Unknown => false,
+            Self::Empty => true,
+            Self::Through(ceiling) => time > ceiling,
+        }
+    }
 }
 
 /// Authenticated identity attached to an inbound commit-unit upload.
@@ -1896,7 +1946,7 @@ impl CurrentRow {
         };
         let record = self.record.borrowed();
         Ok(Some(match column {
-            "$createdBy" | "$updatedBy" => RowAuthor::from_value(record.get_idx(index)?)
+            "$createdBy" | "$updatedBy" => RowAuthor::from_record(record.get_record(index)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .to_value(),
             "$createdAt" | "$updatedAt" => Value::U64(record.get_u64(index)?),
@@ -1921,11 +1971,11 @@ impl CurrentRow {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
-            created_by: RowAuthor::from_value(borrowed.get_idx(created_by_idx)?)
+            created_by: RowAuthor::from_record(borrowed.get_record(created_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .as_author_subject(),
             created_at: borrowed.get_u64(created_at_idx)?,
-            updated_by: RowAuthor::from_value(borrowed.get_idx(updated_by_idx)?)
+            updated_by: RowAuthor::from_record(borrowed.get_record(updated_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .as_author_subject(),
             updated_at: borrowed.get_u64(updated_at_idx)?,
@@ -2239,6 +2289,11 @@ pub struct SyncMetrics {
     pub receiver_per_bundle_ingests: u64,
     /// Receiver-level shared ingest batches committed.
     pub receiver_bulk_ingest_commits: u64,
+    /// Bounded local physical-history existence probes during reset preparation.
+    pub receiver_history_table_probes: u64,
+    /// Row-history repair scans avoided after canonical reset persistence by
+    /// proving their physical content-history table was empty before the batch.
+    pub receiver_history_rebuild_rows_avoided: u64,
     /// Authoritative reset callback materialization fell back because the
     /// reset referenced a version not yet available in this receiver.
     pub authoritative_reset_missing_payload_fallbacks: u64,
@@ -2429,7 +2484,7 @@ impl MergeableCommit {
         nullable: bool,
     ) -> Self {
         let column = column.into();
-        let value = Value::Large(staged.value_ref);
+        let value = Value::Large(Box::new(staged.value_ref));
         self.cells.insert(
             column.clone(),
             if nullable {
@@ -2532,7 +2587,7 @@ fn collect_indirect_descriptors(
     match value {
         Value::Large(value_ref) => {
             if !descriptors.contains(value_ref) {
-                descriptors.push(value_ref.clone());
+                descriptors.push(value_ref.as_ref().clone());
             }
         }
         Value::Tuple(values) | Value::Array(values) => {
@@ -2574,7 +2629,7 @@ fn version_indirect_descriptors(
 }
 
 pub(crate) struct ViewUpdateParts {
-    pub(crate) wire_rows: Option<Vec<crate::protocol::SupportingRow>>,
+    pub(crate) wire_rows: Option<crate::protocol::SupportingRowsUpdate>,
     pub(crate) subscription: SubscriptionKey,
     pub(crate) settled_through: GlobalTime,
     pub(crate) defer_settlement: bool,
@@ -2585,9 +2640,22 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) opening_pending: bool,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
-    pub(crate) program_fact_adds: Vec<ViewFactEntry>,
-    pub(crate) program_fact_removes: Vec<ViewFactEntry>,
 }
+
+impl ViewUpdateParts {
+    pub(crate) fn supporting_adds(&self) -> &[crate::protocol::SupportingRow] {
+        self.wire_rows
+            .as_ref()
+            .map_or(&[], |rows| rows.added_rows())
+    }
+    pub(crate) fn supporting_removes(&self) -> &[crate::protocol::SupportingRow] {
+        self.wire_rows
+            .as_ref()
+            .map_or(&[], |rows| rows.removed_rows())
+    }
+}
+
+type CompiledScopeTables = BTreeMap<crate::ids::GlobalPhysicalTableId, groove::Intern<String>>;
 
 #[derive(Default)]
 struct IngestMemo {
@@ -2609,6 +2677,10 @@ impl PublishedTransaction {
     /// The transaction made resident by this publication.
     pub fn tx_id(&self) -> TxId {
         self.tx_id
+    }
+
+    pub(crate) fn changed_tables(&self) -> &[String] {
+        self.persistence.changed_tables()
     }
 
     /// Persist the resident publication in storage order.
@@ -2797,133 +2869,6 @@ fn select_all(table: &str) -> Query {
     Query::Select(Box::new(
         Select::new([SelectItem::Wildcard]).from([TableRef::named(table)]),
     ))
-}
-
-/// Durable v1 identity for authority-selected results.
-///
-/// This intentionally uses normal Groove values, not postcard or a variable
-/// claim payload: `[shape, binding, read-view, policy-absent-or-present,
-/// 32-byte policy handle]`. The handle names a separate typed directory entry
-/// that preserves the exact subject and claims and rejects a collision during
-/// both write and recovery.
-fn authority_result_store_prefix(authority_result_key: &AuthorityResultKey) -> Vec<Value> {
-    let binding_view = authority_result_key.binding_view;
-    let mut key = vec![
-        Value::Uuid(binding_view.shape_id.0),
-        Value::Uuid(binding_view.binding_id.0),
-        Value::Uuid(binding_view.read_view.id),
-    ];
-    match &authority_result_key.policy_binding {
-        None => {
-            key.push(Value::U8(0));
-            key.push(Value::Bytes(vec![0; 32]));
-        }
-        Some(policy) => {
-            key.push(Value::U8(1));
-            key.push(Value::Bytes(policy.directory_digest().to_vec()));
-        }
-    }
-    key
-}
-
-fn known_state_fact_key(authority_result_key: &AuthorityResultKey) -> Vec<Value> {
-    authority_result_store_prefix(authority_result_key)
-}
-
-fn settled_program_fact_key(
-    authority_result_key: &AuthorityResultKey,
-    fact: &ViewFactEntry,
-) -> Result<Vec<Value>, Error> {
-    let mut key = authority_result_store_prefix(authority_result_key);
-    key.push(Value::Bytes(
-        settled_program_fact_digest(&codec::program_fact_storage_bytes(fact)?).to_vec(),
-    ));
-    Ok(key)
-}
-
-/// Domain-separated identity for an admitted source closure fact. The full
-/// canonical source-role/version encoding belongs in the value cell, and its
-/// fixed-size digest is validated before recovery publishes resident state.
-const SETTLED_PROGRAM_FACT_DIGEST_DOMAIN: &str = "jazz.settled-program-fact-key.v1";
-
-fn settled_program_fact_digest(fact_bytes: &[u8]) -> [u8; 32] {
-    blake3::derive_key(SETTLED_PROGRAM_FACT_DIGEST_DOMAIN, fact_bytes)
-}
-
-fn settled_program_fact_storage_write(
-    authority_result_key: &AuthorityResultKey,
-    fact: &ViewFactEntry,
-) -> Result<groove::db::DirectRecordStoreWrite, Error> {
-    let fact_bytes = codec::program_fact_storage_bytes(fact)?;
-    let mut key = authority_result_store_prefix(authority_result_key);
-    key.push(Value::Bytes(
-        settled_program_fact_digest(&fact_bytes).to_vec(),
-    ));
-    Ok(groove::db::DirectRecordStoreWrite::Set {
-        key,
-        value: vec![Value::Bytes(fact_bytes)],
-    })
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct StoredAuthorityResultKey {
-    binding_view: BindingViewKey,
-    policy_digest: Option<[u8; 32]>,
-}
-
-fn authority_result_key_from_store_prefix(
-    key: &[Value],
-    context: &'static str,
-) -> Result<StoredAuthorityResultKey, Error> {
-    if key.len() != 5 {
-        return Err(Error::InvalidStoredValue(context));
-    }
-    let (Value::Uuid(shape_id), Value::Uuid(binding_id), Value::Uuid(read_view)) =
-        (&key[0], &key[1], &key[2])
-    else {
-        return Err(Error::InvalidStoredValue(context));
-    };
-    let binding_view = BindingViewKey::new(
-        ShapeId(*shape_id),
-        BindingId(*binding_id),
-        ReadViewKey { id: *read_view },
-    );
-    let Value::U8(scope) = key[3] else {
-        return Err(Error::InvalidStoredValue(context));
-    };
-    let Value::Bytes(digest) = &key[4] else {
-        return Err(Error::InvalidStoredValue(context));
-    };
-    let digest: [u8; 32] = digest
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::InvalidStoredValue(context))?;
-    match scope {
-        0 if digest == [0; 32] => Ok(StoredAuthorityResultKey {
-            binding_view,
-            policy_digest: None,
-        }),
-        1 => Ok(StoredAuthorityResultKey {
-            binding_view,
-            policy_digest: Some(digest),
-        }),
-        _ => Err(Error::InvalidStoredValue(context)),
-    }
-}
-
-fn resolve_stored_authority_result_key(
-    stored: StoredAuthorityResultKey,
-    policies: &BTreeMap<[u8; 32], crate::protocol::PolicyBindingKey>,
-    context: &'static str,
-) -> Result<AuthorityResultKey, Error> {
-    match stored.policy_digest {
-        None => Ok(AuthorityResultKey::unscoped(stored.binding_view)),
-        Some(digest) => policies
-            .get(&digest)
-            .cloned()
-            .map(|policy| AuthorityResultKey::policy_scoped(stored.binding_view, policy))
-            .ok_or(Error::InvalidStoredValue(context)),
-    }
 }
 
 /// Details of a persisted current row that could not be decoded at the point of use.
@@ -3137,58 +3082,26 @@ fn query_errors_keep_display_source_and_matching_after_node_conversion() {
 }
 
 #[cfg(test)]
-#[test]
-fn authority_result_store_prefix_round_trips_complete_policy_identity() {
-    let binding_view = BindingViewKey::new(
-        ShapeId(uuid::Uuid::from_u128(1)),
-        BindingId(uuid::Uuid::from_u128(2)),
-        ReadViewKey {
-            id: uuid::Uuid::from_u128(3),
-        },
-    );
-    let mut claims = BTreeMap::new();
-    claims.insert("role".to_owned(), Value::String("editor".to_owned()));
-    claims.insert("team".to_owned(), Value::U64(7));
-    let key = AuthorityResultKey::policy_scoped(
-        binding_view,
-        crate::protocol::PolicyBindingKey::from_canonical_parts(
-            AuthorSubject::authenticated("https://issuer.example", "alice").unwrap(),
-            claims,
-        ),
-    );
-
-    let prefix = authority_result_store_prefix(&key);
-    assert_eq!(
-        prefix.len(),
-        5,
-        "authority result identity is a fixed 5-field key"
-    );
-    assert_eq!(prefix[3], Value::U8(1));
-    assert!(matches!(&prefix[4], Value::Bytes(digest) if digest.len() == 32));
-    let digest = key.policy_binding.as_ref().unwrap().directory_digest();
-    assert_eq!(
-        resolve_stored_authority_result_key(
-            authority_result_key_from_store_prefix(&prefix, "test").unwrap(),
-            &BTreeMap::from([(digest, key.policy_binding.clone().unwrap())]),
-            "test",
-        )
-        .unwrap(),
-        key
-    );
-}
-
-#[cfg(test)]
 mod authority_source_incremental_tests {
     use super::*;
 
-    fn fact(table: &str) -> ProgramFactEntry {
-        ProgramFactEntry::ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry {
-            source: ProgramSourceId {
-                table: table.to_owned().into(),
-                path: vec![ProgramSourceRole::Root],
+    fn fact(table: &str) -> crate::protocol::SupportingRow {
+        let tx = TxId::new(crate::time::TxTime::from(1), NodeUuid::from_bytes([1; 16]));
+        crate::protocol::SupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(
+                if table == "a" { 1 } else { 2 },
+            )),
+            version_table: table.to_owned().into(),
+            row: RowUuid::from_bytes([2; 16]),
+            version: crate::protocol::RowVersionRefEntry {
+                tx,
+                schema_version: None,
+                layer: crate::protocol::ResultRowLayer::Content,
+                batch: Some(tx),
+                branch_or_prefix: None,
+                row_digest: None,
             },
-            complete: true,
-        })
+        }
     }
 
     #[test]

@@ -69,3 +69,18 @@ data-multi/
 
 # Lane-local Android SDK, NDK, JDK and emulator cache.
 /.cache/android-device-acceptance/
+# Generated browser benchmark phase receipts.
+packages/jazz-tools/.vitest-browser-bench/
+/.vercel/
+
+# Derived from the locally built or release-assembled native artifacts.
+/packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts
+/packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts
+
+# Generated RN platform payloads (manifests remain sealed with their binaries).
+/crates/jazz-rn/npm/*/android/
+/crates/jazz-rn/npm/*/ios/
+/crates/jazz-rn/npm/*/native/
+/crates/jazz-rn/npm/*/JazzNativeRelay.xcframework/
+
+/crates/jazz-rn/ios-payload/

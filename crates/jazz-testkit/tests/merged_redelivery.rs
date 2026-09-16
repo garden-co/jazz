@@ -17,8 +17,8 @@ use std::time::Duration;
 use jazz::query::Query;
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, SubscriptionStream,
-    SubscriptionStreamItem, TableSchema, Value, WriteContext,
+    ColumnType, JazzClient, ObjectId, SchemaBuilder, SubscriptionStream, SubscriptionStreamItem,
+    TableSchema, Value, WriteContext,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, has_added_id, wait_for_query, wait_for_subscription_update};
@@ -70,8 +70,9 @@ where
     let deadline = tokio::time::Instant::now() + QUERY_TIMEOUT;
     loop {
         let rows = client
-            .query(query.clone(), None)
+            .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
             .await
+            .map(jazz::tools::test_support::ordinary_rows)
             .unwrap_or_else(|error| panic!("local query for {description} failed: {error}"));
         if predicate(&rows) {
             return rows;
@@ -118,7 +119,9 @@ async fn concurrent_column_writes_merge_and_reach_a_third_subscriber() {
 
 async fn concurrent_column_writes_merge_and_reach_a_third_subscriber_impl() {
     let _suite_guard = MERGED_REDELIVERY_SUITE_LOCK.lock().await;
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = connect_writer(&server, "alice-merge-subscriber").await;
     let bob = connect_writer(&server, "bob-merge-subscriber").await;
@@ -155,6 +158,7 @@ async fn concurrent_column_writes_merge_and_reach_a_third_subscriber_impl() {
     for status in ["status-1", "status-2", "status-3"] {
         alice
             .update(
+                "tasks",
                 task_id,
                 vec![("status".to_string(), Value::Text(status.to_string()))],
             )
@@ -163,7 +167,7 @@ async fn concurrent_column_writes_merge_and_reach_a_third_subscriber_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees status-3 before writing assignee",
         |rows| {
@@ -179,12 +183,14 @@ async fn concurrent_column_writes_merge_and_reach_a_third_subscriber_impl() {
     // bob's write: two concurrent heads on different columns, with alice's
     // later write winning the merge ordering.
     bob.update(
+        "tasks",
         task_id,
         vec![("assignee".to_string(), Value::Text("assigned".to_string()))],
     )
     .expect("bob assignee write");
     alice
         .update(
+            "tasks",
             task_id,
             vec![("status".to_string(), Value::Text("status-4".to_string()))],
         )
@@ -246,7 +252,9 @@ async fn offline_merge_redelivers_after_reconnect() {
 
 async fn offline_merge_redelivers_after_reconnect_impl() {
     let _suite_guard = MERGED_REDELIVERY_SUITE_LOCK.lock().await;
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = connect_writer(&server, "alice-offline-merge").await;
     let bob = connect_writer(&server, "bob-offline-merge").await;
@@ -271,7 +279,7 @@ async fn offline_merge_redelivers_after_reconnect_impl() {
         wait_for_query(
             client,
             query.clone(),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
             QUERY_TIMEOUT,
             format!("{who} sees the initial task"),
             |rows| {
@@ -290,12 +298,14 @@ async fn offline_merge_redelivers_after_reconnect_impl() {
     // other, so the server merges two concurrent heads with alice's later
     // status write winning the merge ordering.
     bob.update(
+        "tasks",
         task_id,
         vec![("assignee".to_string(), Value::Text("assigned".to_string()))],
     )
     .expect("bob assignee write while charlie is offline");
     alice
         .update(
+            "tasks",
             task_id,
             vec![("status".to_string(), Value::Text("status-1".to_string()))],
         )
@@ -304,7 +314,7 @@ async fn offline_merge_redelivers_after_reconnect_impl() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "server holds the merged row before charlie reconnects",
         |rows| {
@@ -372,7 +382,9 @@ async fn same_value_write_still_advances_visible_row_metadata() {
 
 async fn same_value_write_still_advances_visible_row_metadata_impl() {
     let _suite_guard = MERGED_REDELIVERY_SUITE_LOCK.lock().await;
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = connect_writer(&server, "alice-metadata-only").await;
     let charlie = connect_writer(&server, "charlie-metadata-only").await;
@@ -403,8 +415,9 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
 
     // Snapshot the delivered $updatedAt before the same-value write.
     let initial_rows = charlie
-        .query(metadata_query.clone(), None)
+        .query(metadata_query.clone(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("charlie reads initial metadata");
     assert_eq!(initial_rows.len(), 1, "charlie holds the delivered task");
     let Value::Timestamp(initial_updated_at) = initial_rows[0].1[0] else {
@@ -419,6 +432,7 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
     alice
         .with_write_context(WriteContext::default().with_updated_at(explicit_updated_at))
         .update(
+            "tasks",
             task_id,
             vec![("status".to_string(), Value::Text("status-0".to_string()))],
         )
@@ -427,8 +441,9 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
     let deadline = tokio::time::Instant::now() + QUERY_TIMEOUT;
     loop {
         let rows = charlie
-            .query(metadata_query.clone(), None)
+            .query(metadata_query.clone(), jazz::tools::ReadTier::LocalFirst)
             .await
+            .map(jazz::tools::test_support::ordinary_rows)
             .expect("charlie reads metadata after same-value write");
         if rows.len() == 1 {
             if let Value::Timestamp(updated_at) = rows[0].1[0] {
@@ -485,7 +500,9 @@ async fn late_subscriber_updates_merged_row_without_full_history() {
 
 async fn late_subscriber_updates_merged_row_without_full_history_impl() {
     let _suite_guard = MERGED_REDELIVERY_SUITE_LOCK.lock().await;
-    let server = JazzServer::start_with_schema(test_schema()).await;
+    let server = JazzServer::start_with_schema(test_schema())
+        .await
+        .expect("start test server");
 
     let alice = connect_writer(&server, "alice-late-writer").await;
     let bob = connect_writer(&server, "bob-late-writer").await;
@@ -501,7 +518,7 @@ async fn late_subscriber_updates_merged_row_without_full_history_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees the initial task",
         |rows| (rows.len() == 1 && rows[0].0 == task_id).then_some(()),
@@ -511,12 +528,14 @@ async fn late_subscriber_updates_merged_row_without_full_history_impl() {
     // Concurrent single-column writes create the merged row charlie will later
     // receive as his only state.
     bob.update(
+        "tasks",
         task_id,
         vec![("assignee".to_string(), Value::Text("assigned".to_string()))],
     )
     .expect("bob assignee write");
     alice
         .update(
+            "tasks",
             task_id,
             vec![("status".to_string(), Value::Text("status-1".to_string()))],
         )
@@ -529,7 +548,7 @@ async fn late_subscriber_updates_merged_row_without_full_history_impl() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees the merged row",
         |rows| (rows.len() == 1 && rows[0].1 == merged).then_some(()),
@@ -542,7 +561,7 @@ async fn late_subscriber_updates_merged_row_without_full_history_impl() {
     wait_for_query(
         &charlie,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "charlie sees only the merged current row",
         |rows| (rows.len() == 1 && rows[0].0 == task_id && rows[0].1 == merged).then_some(()),
@@ -551,6 +570,7 @@ async fn late_subscriber_updates_merged_row_without_full_history_impl() {
 
     charlie
         .update(
+            "tasks",
             task_id,
             vec![(
                 "status".to_string(),
@@ -567,7 +587,7 @@ async fn late_subscriber_updates_merged_row_without_full_history_impl() {
         wait_for_query(
             client,
             query.clone(),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
             QUERY_TIMEOUT,
             format!("{who} sees charlie's write on the merged row"),
             |rows| (rows.len() == 1 && rows[0].0 == task_id && rows[0].1 == expected).then_some(()),

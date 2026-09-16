@@ -8,10 +8,12 @@ import type { DbForConnection } from "./types.js";
 
 function deferred() {
   let resolve!: () => void;
-  const promise = new Promise<void>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function foregroundLeaseFixture() {
@@ -716,6 +718,156 @@ describe("BrowserConnectionManager.shutdown", () => {
   });
 });
 
+function browserAuthManagerFixture(connections: BrowserWorkerConnection[]) {
+  const contexts: BrowserWorkerConnectionContext[] = [];
+  const host = {
+    config: {
+      appId: "browser-auth-error-test",
+      serverUrl: "https://example.test",
+      jwtToken: "old.jwt",
+    },
+    isShuttingDown: false,
+    runtimeSource: {
+      createBrowserWorkerConnection: vi.fn((context: BrowserWorkerConnectionContext) => {
+        contexts.push(context);
+        return connections[contexts.length - 1]!;
+      }),
+    },
+    markUnauthenticated: vi.fn(),
+    clearAuthError: vi.fn(),
+    onMutationError: vi.fn(),
+    clearAuthenticatedInspectorLocalReads: vi.fn(),
+  };
+  const manager = new BrowserConnectionManager(host as unknown as DbForConnection);
+  (
+    manager as unknown as {
+      onClientCreated(input: {
+        schemaKey: string;
+        schema: Record<string, never>;
+        client: JazzClient;
+      }): void;
+    }
+  ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+  return {
+    manager,
+    host,
+    contexts,
+    createConnection: host.runtimeSource.createBrowserWorkerConnection,
+  };
+}
+
+describe("BrowserConnectionManager auth update failures", () => {
+  it("returns undefined synchronously, latches a worker auth failure for readiness, and recovers on reconnect", async () => {
+    const failure = new Error("worker auth update failed");
+    const first = {
+      ready: vi.fn(async () => undefined),
+      waitForServerConnection: vi.fn(async () => undefined),
+      updateAuth: vi.fn(async () => {
+        throw failure;
+      }),
+      disconnect: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      deleteStorage: vi.fn(async () => undefined),
+      flushLocal: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+      shutdown: vi.fn(async () => undefined),
+    } as unknown as BrowserWorkerConnection;
+    const second = {
+      ready: vi.fn(async () => undefined),
+      waitForServerConnection: vi.fn(async () => undefined),
+      updateAuth: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      deleteStorage: vi.fn(async () => undefined),
+      flushLocal: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+      shutdown: vi.fn(async () => undefined),
+    } as unknown as BrowserWorkerConnection;
+    const { manager, host, createConnection } = browserAuthManagerFixture([first, second]);
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason);
+    process.on("unhandledRejection", onUnhandledRejection);
+    try {
+      expect(manager.updateAuth({ mode: "bearer", jwtToken: "new.jwt" })).toBeUndefined();
+      // Node emits unhandledRejection only after the current host turn; crossing
+      // it is necessary to observe an escaped promise rather than a microtask.
+      const hostTurn = deferred();
+      setTimeout(hostTurn.resolve, 0);
+      await hostTurn.promise;
+
+      expect(unhandledRejections).toEqual([]);
+      expect(host.markUnauthenticated).not.toHaveBeenCalled();
+      expect(host.clearAuthError).not.toHaveBeenCalled();
+      await expect(manager.ensureReady("local")).rejects.toBe(failure);
+
+      await expect(manager.reconnect()).resolves.toBeUndefined();
+      expect(createConnection).toHaveBeenCalledTimes(2);
+      expect(first.reconnect).not.toHaveBeenCalled();
+      expect(second.reconnect).toHaveBeenCalledOnce();
+      await expect(manager.ensureReady("local")).resolves.toBeUndefined();
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
+  });
+
+  it("does not let a late auth failure from replaced connection A poison connection B or auth state", async () => {
+    const firstAuth = deferred();
+    const first = {
+      ready: vi.fn(async () => undefined),
+      waitForServerConnection: vi.fn(async () => undefined),
+      updateAuth: vi.fn(() => firstAuth.promise),
+      disconnect: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      deleteStorage: vi.fn(async () => undefined),
+      flushLocal: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+      shutdown: vi.fn(async () => undefined),
+    } as unknown as BrowserWorkerConnection;
+    const second = {
+      ready: vi.fn(async () => undefined),
+      waitForServerConnection: vi.fn(async () => undefined),
+      updateAuth: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      deleteStorage: vi.fn(async () => undefined),
+      flushLocal: vi.fn(async () => undefined),
+      waitForPendingWrites: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+      shutdown: vi.fn(async () => undefined),
+    } as unknown as BrowserWorkerConnection;
+    const { manager, host, contexts, createConnection } = browserAuthManagerFixture([
+      first,
+      second,
+    ]);
+    await manager.ensureReady("local");
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason);
+    process.on("unhandledRejection", onUnhandledRejection);
+    try {
+      expect(manager.updateAuth({ mode: "bearer", jwtToken: "new.jwt" })).toBeUndefined();
+      contexts[0]!.onFailure(new Error("connection A failed"));
+      await expect(manager.reconnect()).resolves.toBeUndefined();
+      expect(createConnection).toHaveBeenCalledTimes(2);
+
+      const staleFailure = new Error("stale auth update from connection A");
+      firstAuth.reject(staleFailure);
+      const hostTurn = deferred();
+      setTimeout(hostTurn.resolve, 0);
+      await hostTurn.promise;
+
+      expect(unhandledRejections).toEqual([]);
+      expect(host.markUnauthenticated).not.toHaveBeenCalled();
+      expect(host.clearAuthError).not.toHaveBeenCalled();
+      await expect(manager.ensureReady("local")).resolves.toBeUndefined();
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
+  });
+});
+
 describe("BrowserConnectionManager explicit transport transitions", () => {
   it("enables Inspector-local reads only from the worker attachment receipt", async () => {
     const connection = {
@@ -971,6 +1123,54 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     expect(first.reconnect).not.toHaveBeenCalled();
     expect(second.reconnect).toHaveBeenCalledOnce();
     await expect(manager.ensureReady("edge")).resolves.toBeUndefined();
+  });
+
+  it("rejects remote readiness on terminal failure while explicitly offline", async () => {
+    const fixture = await leasedManagerFixture();
+    const failure = new Error("browser worker terminated");
+    const bothWaitersParked = deferred();
+    let waitForReconnectCalls = 0;
+    const waitForReconnect = fixture.manager.waitForReconnect.bind(fixture.manager);
+    vi.spyOn(fixture.manager, "waitForReconnect").mockImplementation((signal) => {
+      waitForReconnectCalls += 1;
+      if (waitForReconnectCalls === 2) bothWaitersParked.resolve();
+      return waitForReconnect(signal);
+    });
+
+    fixture.contexts[0]?.onExplicitOfflineChange?.(true);
+    expect(fixture.manager.isExplicitlyOffline()).toBe(true);
+
+    let edgeResult: unknown;
+    let globalResult: unknown;
+    const edgeReady = fixture.manager.ensureReady("edge").then(
+      () => {
+        edgeResult = "resolved";
+      },
+      (error) => {
+        edgeResult = error;
+      },
+    );
+    const globalReady = fixture.manager.ensureReady("global").then(
+      () => {
+        globalResult = "resolved";
+      },
+      (error) => {
+        globalResult = error;
+      },
+    );
+    await bothWaitersParked.promise;
+    fixture.fail(failure);
+
+    await vi.waitFor(() => {
+      expect(edgeResult).toBe(failure);
+      expect(globalResult).toBe(failure);
+    });
+    await Promise.all([edgeReady, globalReady]);
+    expect(fixture.manager.isExplicitlyOffline()).toBe(true);
+
+    await expect(fixture.manager.reconnect()).resolves.toBeUndefined();
+    expect(fixture.manager.isExplicitlyOffline()).toBe(false);
+    await expect(fixture.manager.ensureReady("edge")).resolves.toBeUndefined();
   });
 
   it("disconnects a worker created while offline before an immediate reconnect", async () => {

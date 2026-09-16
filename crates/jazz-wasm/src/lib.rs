@@ -1645,6 +1645,7 @@ impl WasmDb {
             .await
             .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
+            .await
             .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
@@ -1680,6 +1681,7 @@ impl WasmDb {
             .await
             .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
+            .await
             .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
@@ -1769,6 +1771,17 @@ impl WasmDb {
         self.open_inner()?
             .abandon_transaction(open_transaction_id)
             .map_err(to_js_error)
+    }
+
+    /// Exact local state for the write-merge bridge, matching NAPI. Write
+    /// authorization remains at the mutation boundary; this is not a query.
+    #[wasm_bindgen(js_name = localCurrentRow)]
+    pub fn local_current_row(&self, table: String, row_id: Vec<u8>) -> Result<Vec<u8>, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let inner = self.open_inner()?;
+        let row = with_wasm_db!(&inner, |db| block_on(db.local_current_row(&table, row_id)))
+            .map_err(to_js_error)?;
+        encode_synchronous_rows(&row.into_iter().collect::<Vec<_>>())
     }
 
     #[wasm_bindgen(js_name = all)]
@@ -3254,6 +3267,27 @@ fn encode_rows(rows: &[jazz::node::CurrentRow]) -> Result<Vec<u8>, postcard::Err
     jazz::binding_codec::encode_rows(rows)
 }
 
+fn encode_synchronous_rows(rows: &[jazz::node::CurrentRow]) -> Result<Vec<u8>, JsValue> {
+    for row in rows {
+        let (descriptor, raw) = row.encoded_record();
+        let values = descriptor.bind(raw).to_values().map_err(to_js_error)?;
+        if values.iter().any(value_contains_indirect_scalar) {
+            return Err(JsValue::from_str(
+                "synchronous WASM all/transaction reads cannot materialize a large value; use an async relation read or subscription instead",
+            ));
+        }
+    }
+    encode_rows(rows).map_err(to_js_error)
+}
+
+fn value_contains_indirect_scalar(value: &Value) -> bool {
+    match value {
+        Value::Large(_) => true,
+        Value::Nullable(Some(value)) => value_contains_indirect_scalar(value),
+        _ => false,
+    }
+}
+
 fn encode_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
@@ -4434,7 +4468,7 @@ mod dynamic_schema_view_tests {
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn wasm_claim_ingress_omits_recursive_json_but_keeps_scalar_prototype_names() {
+    fn wasm_claim_ingress_preserves_nested_json_and_scalar_prototype_names() {
         let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
         let claims = claims_from_js(
             author,
@@ -4448,8 +4482,8 @@ mod dynamic_schema_view_tests {
         )
         .expect("recursive metadata must not reject WASM admission");
 
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("profile")));
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("mixed")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("profile")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("mixed")));
         assert_eq!(
             claims.get(&jazz::query::provider_claim_key("__proto__")),
             Some(&Value::String("safe".to_owned()))

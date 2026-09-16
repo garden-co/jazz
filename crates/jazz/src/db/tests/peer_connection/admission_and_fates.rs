@@ -8,6 +8,27 @@ use crate::db::peer_connection::{
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
+fn finish_catalogue_bootstrap_before_control_backpressure(
+    subscriber: &Rc<LocalMutex<PeerConnection<RocksDbStorage>>>,
+    outbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
+) {
+    subscriber.borrow_mut().transport = Box::new(BackpressureOnceTransport {
+        outbound: Rc::clone(outbound),
+        failed: true,
+    });
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        outbound.borrow_mut().pop_front(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(outbound.borrow().is_empty());
+    // Rearm the first-send fault specifically for the original control test.
+    subscriber.borrow_mut().transport = Box::new(BackpressureOnceTransport {
+        outbound: Rc::clone(outbound),
+        failed: false,
+    });
+}
+
 // Internal contention is deliberately planted: the public boundary is async
 // detach completion and continued local writes, but callers cannot hold these
 // owner guards deterministically through the public API.
@@ -691,6 +712,7 @@ fn ordinary_wire_chunk_response_retries_after_bounded_transport_backpressure() {
         }),
         identity,
     );
+    finish_catalogue_bootstrap_before_control_backpressure(&subscriber, &outbound);
     let batch = ChunkResponseBatch {
         responses: vec![ChunkResponseEntry {
             request_id: 3,
@@ -821,6 +843,7 @@ fn subscriber_control_reply_retries_after_bounded_transport_backpressure() {
         }),
         identity,
     );
+    finish_catalogue_bootstrap_before_control_backpressure(&subscriber, &outbound);
     let rejection = SyncMessage::SubscribeRejected {
         subscription: SubscriptionKey {
             shape_id: ShapeId(uuid::Uuid::from_bytes([4; 16])),
@@ -1485,6 +1508,7 @@ fn authorization_scope_replies_retry_fifo_after_backpressure() {
         }),
         identity,
     );
+    finish_catalogue_bootstrap_before_control_backpressure(&subscriber, &outbound);
     let first = SyncMessage::AuthorizationScopeUnavailable {
         request_id: PermissionAdviceRequestId([7; 16]),
     };
@@ -1640,7 +1664,7 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
             durability: DurabilityTier::Local,
         })],
         peer_payload_inventory: PeerPayloadInventory::default(),
-        supporting_rows: Vec::new(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
     });
 
     send_subscriber_with_sync_context(
@@ -1668,7 +1692,7 @@ fn canonical_sibling_pending_carrier_registers_a_fate_observer() {
 }
 
 #[test]
-fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
+fn catalogue_bootstrap_is_eager_but_later_idle_updates_remain_trusted_only() {
     // This stays internal because trust is authenticated by the host at the
     // transport boundary; exposing it through a public client fixture would
     // test the HTTP/WebSocket bootstrap race rather than this hop contract.
@@ -1700,9 +1724,28 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     );
     client_link.borrow_mut().tick().unwrap();
     assert!(
-        client_transport.try_recv().is_none(),
-        "ordinary sessions must not receive authority catalogue snapshots"
+        matches!(
+            client_transport.try_recv(),
+            Some(SyncMessage::CatalogueSnapshot(_))
+        ),
+        "admitted sessions receive the initial catalogue before query compilation"
     );
+    assert!(client_transport.try_recv().is_none());
+
+    // A resumed connection receives an actual snapshot even with unchanged A;
+    // a peer requesting absent B needs that explicit authoritative outcome.
+    let cursor = client_link.borrow_mut().take_resume_cursor().unwrap();
+    let (mut client_transport, core_client_transport) = duplex();
+    let client_link = core.accept_subscriber_with_resume(
+        core_client_transport,
+        AuthorSubject::for_test_bytes([0xc1; 16]),
+        cursor,
+    );
+    client_link.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = client_transport.try_recv() else {
+        panic!("resumed unchanged authority must send its catalogue");
+    };
+    assert_eq!(snapshot.current_write_schema.schema, base.version_id());
 
     let evolved = SchemaVersion::new(build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
@@ -1763,7 +1806,24 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     client_link.borrow_mut().tick().unwrap();
     assert!(
         client_transport.try_recv().is_none(),
-        "catalogue changes stay authority-only on ordinary session links"
+        "later idle changes remain request-driven on ordinary session links"
+    );
+    let cursor = client_link.borrow_mut().take_resume_cursor().unwrap();
+    let (mut resumed_transport, core_resumed_transport) = duplex();
+    let resumed = core.accept_subscriber_with_resume(
+        core_resumed_transport,
+        AuthorSubject::for_test_bytes([0xc1; 16]),
+        cursor,
+    );
+    resumed.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = resumed_transport.try_recv() else {
+        panic!("resumed session must receive published B before querying");
+    };
+    assert!(
+        snapshot
+            .schemas
+            .iter()
+            .any(|schema| schema.id == evolved.id)
     );
 }
 
@@ -1973,6 +2033,13 @@ fn ordinary_session_link_rejects_forged_delegated_permission_advice_intent() {
         1,
     );
     let subscriber = server.accept_subscriber(server_transport, ordinary);
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
     client_transport
         .send(SyncMessage::AuthorizationScopeIntent {
             request_id: PermissionAdviceRequestId([0xa1; 16]),
@@ -2486,7 +2553,7 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
                 && !update.peer_payload_inventory.opening_pending,
             "the empty reset must carry its settled authorization receipt"
         );
-        assert!(update.supporting_rows.is_empty());
+        assert!(update.supporting_rows.added_rows().is_empty());
     }
     drop(sent);
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
@@ -2652,7 +2719,7 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
     assert!(
         refreshed
             .iter()
-            .all(|update| { update.supporting_rows.is_empty() })
+            .all(|update| { update.supporting_rows.added_rows().is_empty() })
     );
     let ConnectionLink::Subscriber(state) = &subscriber.borrow().link else {
         unreachable!("accepted client is served by a subscriber link")
@@ -5668,6 +5735,52 @@ fn delegated_subscription_binding_survives_backend_raw_claim_refresh() {
         Some((delegated_identity, delegated_claims)),
         "refreshing the backend author claims must not retarget a delegated usage site"
     );
+}
+
+// Internal admission boundary shared by subscriptions, body repair and advice:
+// provider metadata must exactly match the immutable server-authenticated scope.
+#[test]
+fn scoped_relay_request_rejects_mismatched_provider_claims() {
+    let schema = owner_read_schema();
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("user".into()),
+    )]);
+    let (_client, transport) = duplex();
+    let subscriber =
+        server
+            .server
+            .accept_scope_isolated_relay_subscriber(transport, author, claims.clone(), 1);
+    let connection = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &connection.link else {
+        unreachable!()
+    };
+    for requested in [
+        BTreeMap::new(),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("role"),
+            Value::String("admin".into()),
+        )]),
+        claims.clone(),
+    ] {
+        let exact = requested == claims;
+        let admitted = admitted_request_policy_binding(
+            state.ingest_context,
+            &state.peer,
+            None,
+            Some(crate::protocol::DelegatedSessionBinding {
+                identity: author,
+                claims: requested,
+            }),
+        );
+        assert_eq!(
+            admitted.is_some(),
+            exact,
+            "only the exact provider claim snapshot is admitted"
+        );
+    }
 }
 
 // Internal: only host admission can select connection trust. Raw wire claims

@@ -471,7 +471,7 @@ fn m2_writer_core_reader_converges_against_oracle() {
                 panic!("expected view update");
             };
             assert!(!payload.peer_payload_inventory.opening_pending);
-            assert!(payload.supporting_rows.iter().any(|fact| {
+            assert!(payload.supporting_rows.added_rows().iter().any(|fact| {
                 matches!(
                     fact,
                     input

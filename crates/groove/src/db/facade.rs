@@ -344,7 +344,7 @@ impl Database {
         // marker/mutation path.
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
-        let mut ivm_runtime = IvmRuntime::new(schema)?;
+        let ivm_runtime = IvmRuntime::new(schema)?;
         let storage = Rc::new(LayoutStorage::new(storage, storage_layout).await?);
         let chunk_storage: Rc<dyn crate::chunks::ChunkStorage> =
             Rc::new(crate::chunks::ManagedChunkStorage::new(Rc::new(
@@ -352,7 +352,22 @@ impl Database {
             )));
         let chunk_resolver: Rc<dyn crate::chunks::MissingChunkResolver> =
             Rc::new(crate::chunks::UnavailableChunkResolver);
-        let large_value_lifecycle = std::sync::Arc::new(futures::lock::Mutex::new(()));
+        Ok(Self::from_runtime_storage(
+            ivm_runtime,
+            storage,
+            std::sync::Arc::new(futures::lock::Mutex::new(())),
+            chunk_storage,
+            chunk_resolver,
+        ))
+    }
+
+    fn from_runtime_storage(
+        mut ivm_runtime: IvmRuntime,
+        storage: Rc<LayoutStorage>,
+        large_value_lifecycle: std::sync::Arc<futures::lock::Mutex<()>>,
+        chunk_storage: Rc<dyn crate::chunks::ChunkStorage>,
+        chunk_resolver: Rc<dyn crate::chunks::MissingChunkResolver>,
+    ) -> Self {
         ivm_runtime.set_chunk_provider(Rc::new(
             crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 chunk_storage.clone(),
@@ -367,7 +382,7 @@ impl Database {
                 }),
             ),
         ));
-        Ok(Self {
+        Self {
             storage,
             chunk_storage,
             chunk_resolver,
@@ -377,11 +392,13 @@ impl Database {
             storage_read_metrics: Rc::new(RefCell::new(StorageReadMetrics::default())),
             stored_record_descriptors: RefCell::new(BTreeMap::new()),
             next_publication_id: 1,
+            immutable_batch_owner: Rc::new(()),
             durable_publication_frontier: None,
             resident_publications: BTreeMap::new(),
             persisted_publications: BTreeSet::new(),
             resident_writes: Rc::new(RefCell::new(StagedWriteState::default())),
             publication_persistence: Rc::new(RefCell::new(PersistenceOrder {
+                owner_waiter: None,
                 next: 1,
                 waiters: BTreeMap::new(),
                 failure: None,
@@ -392,7 +409,8 @@ impl Database {
             large_value_lifecycle_publications: BTreeSet::new(),
             abandoned_application: Rc::new(Cell::new(false)),
             poisoned: false,
-        })
+            storage_extraction_prepared: false,
+        }
     }
 
     pub fn durable_publication_frontier(&self) -> Option<PublicationId> {
@@ -417,6 +435,7 @@ impl Database {
     pub fn guard_host_application(&self) -> Result<HostApplicationGuard, Error> {
         self.ensure_not_poisoned()?;
         Ok(HostApplicationGuard {
+            order: Rc::clone(&self.publication_persistence),
             abandoned_application: Rc::clone(&self.abandoned_application),
             completed: false,
         })
@@ -467,7 +486,87 @@ impl Database {
         Ok(entries)
     }
 
+    /// Register the database owner's wake while external publications settle.
+    /// Returns true while teardown must wait. Every peer shares this one owner;
+    /// repeated registration replaces its wake rather than retaining peers.
+    /// Failed or abandoned publication ownership wakes it to observe the error.
+    pub fn wait_for_publication_settlement(&self, waker: Option<&Waker>) -> Result<bool, Error> {
+        self.ensure_not_poisoned()?;
+        if !self.has_unsettled_publications() {
+            return Ok(false);
+        }
+        if let Some(waker) = waker {
+            self.publication_persistence.borrow_mut().owner_waiter = Some(waker.clone());
+        }
+        Ok(true)
+    }
+
+    /// Whether an external publication owner must settle before schema teardown.
+    pub fn has_unsettled_publications(&self) -> bool {
+        !self.resident_publications.is_empty()
+    }
+
+    /// Finish the durable obligations of a runtime that will be replaced.
+    ///
+    /// Query hydration and incremental delivery are cancelled by `rebuild` or
+    /// `into_storage`;
+    /// callers must reopen their subscriptions from authoritative stored state.
+    /// This waits only for captured ordered writes, never for missing query
+    /// inputs. The database remains owned by the caller across suspension.
+    /// Once preparation starts this instance cannot serve queries again, even
+    /// if the caller cancels preparation or a storage write fails.
+    pub async fn prepare_for_storage_extraction(&mut self) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        if !self.resident_publications.is_empty() {
+            return Err(Error::UnsettledPublications);
+        }
+        self.poisoned = true;
+        let storage = OwnedStorage::new(Rc::clone(&self.storage));
+        std::future::poll_fn(|cx| self.ivm_runtime.poll_storage_extraction(&storage, cx)).await?;
+        self.storage_extraction_prepared = true;
+        Ok(())
+    }
+
+    /// Replace a successfully prepared runtime over the same storage owner.
+    /// Outstanding local chunk reads can finish against the unchanged layout.
+    /// The old facade is already retired and is dropped during replacement.
+    /// Invalid replacement schemas leave this facade retired and owned.
+    pub fn rebuild(&mut self, schema: DatabaseSchema) -> Result<(), Error> {
+        assert!(
+            self.storage_extraction_prepared,
+            "database rebuild requires completed preparation"
+        );
+        validate_application_storage_names(&schema)?;
+        validate_durable_key_schema(&schema)?;
+        let runtime = IvmRuntime::new(schema)?;
+        assert!(self.resident_publications.is_empty());
+        assert!(!self.ivm_runtime.has_pending_storage_writes());
+        let replacement = Self::from_runtime_storage(
+            runtime,
+            self.storage.clone(),
+            self.large_value_lifecycle.clone(),
+            self.chunk_storage.clone(),
+            self.chunk_resolver.clone(),
+        );
+        *self = replacement;
+        Ok(())
+    }
+
+    /// Consume this runtime and cancel reconstructible query work. Pending
+    /// durable writes require `prepare_for_storage_extraction` first; externally
+    /// owned publications must be settled by their owners before extraction.
     pub fn into_storage(self) -> BoxedStorage {
+        assert!(
+            self.resident_publications.is_empty(),
+            "database has unsettled publications"
+        );
+        assert!(
+            !self.ivm_runtime.has_pending_storage_writes(),
+            "database has pending durable writes"
+        );
+        // Owned cold query futures retain the layout storage. Drop them before
+        // testing external ownership, rather than mistaking them for a caller.
+        drop(self.ivm_runtime);
         Rc::try_unwrap(self.storage)
             .unwrap_or_else(|_| panic!("database storage still has an outstanding operation"))
             .into_inner()

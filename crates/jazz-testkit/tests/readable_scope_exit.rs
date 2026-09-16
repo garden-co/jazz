@@ -51,12 +51,15 @@ async fn local_rows(client: &JazzClient, query: Query) -> Vec<(ObjectId, Vec<Val
             },
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("inspect local cache")
 }
 
 async fn run_readable_exit(relayed: bool) {
     let schema = schema();
-    let authority = JazzServer::start_with_schema(schema.clone()).await;
+    let authority = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let relay = if relayed {
         Some(
             JazzServer::builder()
@@ -66,7 +69,8 @@ async fn run_readable_exit(relayed: bool) {
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await,
+                .await
+                .expect("start test server"),
         )
     } else {
         None
@@ -132,6 +136,7 @@ async fn run_readable_exit(relayed: bool) {
     let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
     staged
         .update(
+            "tasks",
             task,
             vec![
                 ("done".into(), Value::Boolean(true)),
@@ -141,6 +146,7 @@ async fn run_readable_exit(relayed: bool) {
         .unwrap();
     staged
         .update(
+            "tasks",
             sibling,
             vec![("title".into(), Value::Text("sibling after".into()))],
         )
@@ -200,7 +206,7 @@ async fn run_readable_exit(relayed: bool) {
 
     let start = local_log.len();
     let tx = bob
-        .update(task, vec![("done".into(), Value::Boolean(false))])
+        .update("tasks", task, vec![("done".into(), Value::Boolean(false))])
         .unwrap()
         .unwrap();
     jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
@@ -213,7 +219,7 @@ async fn run_readable_exit(relayed: bool) {
     )
     .await;
     let start = local_log.len();
-    let tx = bob.delete(task).unwrap().unwrap();
+    let tx = bob.delete("tasks", task).unwrap().unwrap();
     jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
     wait_for_subscription_update(
         &mut local,
@@ -306,7 +312,9 @@ async fn run_revoked_exit_shared_case(
     shared_cache: bool,
 ) {
     let schema = revocation_schema(dependency);
-    let authority = JazzServer::start_with_schema(schema.clone()).await;
+    let authority = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let relay = if relayed {
         Some(
             JazzServer::builder()
@@ -316,7 +324,8 @@ async fn run_revoked_exit_shared_case(
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await,
+                .await
+                .expect("start test server"),
         )
     } else {
         None
@@ -412,12 +421,16 @@ async fn run_revoked_exit_shared_case(
     ];
     if let Some(grant) = grant {
         staged
-            .update(grant, vec![("owner".into(), Value::Text("bob".into()))])
+            .update(
+                "grants",
+                grant,
+                vec![("owner".into(), Value::Text("bob".into()))],
+            )
             .unwrap();
     } else {
         changes.push(("owner".into(), Value::Text("bob".into())));
     }
-    staged.update(task, changes).unwrap();
+    staged.update("tasks", task, changes).unwrap();
     jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     wait_for_subscription_update(
         &mut remote,
@@ -446,6 +459,7 @@ async fn run_revoked_exit_shared_case(
     let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
     staged
         .update(
+            "tasks",
             task,
             vec![
                 ("done".into(), Value::Boolean(false)),
@@ -456,7 +470,11 @@ async fn run_revoked_exit_shared_case(
         .unwrap();
     if let Some(grant) = grant {
         staged
-            .update(grant, vec![("owner".into(), Value::Text("alice".into()))])
+            .update(
+                "grants",
+                grant,
+                vec![("owner".into(), Value::Text("alice".into()))],
+            )
             .unwrap();
     }
     jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
@@ -525,7 +543,9 @@ async fn run_reconnect_scalar_query(count: usize) {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = schema();
-            let authority = JazzServer::start_with_schema(schema.clone()).await;
+            let authority = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let relay = JazzServer::builder()
                 .with_schema(schema.clone())
                 .with_app_id(authority.app_id())
@@ -533,7 +553,8 @@ async fn run_reconnect_scalar_query(count: usize) {
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let bob = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema.clone())
@@ -578,6 +599,7 @@ async fn run_reconnect_scalar_query(count: usize) {
             for task in &tasks {
                 staged
                     .update(
+                        "tasks",
                         *task,
                         vec![
                             ("done".into(), Value::Boolean(true)),
@@ -648,7 +670,9 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = revocation_schema(dependency);
-            let authority = JazzServer::start_with_schema(schema.clone()).await;
+            let authority = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let relay = JazzServer::builder()
                 .with_schema(schema.clone())
                 .with_app_id(authority.app_id())
@@ -656,7 +680,8 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let bob = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema.clone())
@@ -764,14 +789,19 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
             ];
             if dependency {
                 staged
-                    .update(grants[0], vec![("owner".into(), Value::Text("bob".into()))])
+                    .update(
+                        "grants",
+                        grants[0],
+                        vec![("owner".into(), Value::Text("bob".into()))],
+                    )
                     .unwrap();
             } else {
                 revoked.push(("owner".into(), Value::Text("bob".into())));
             }
-            staged.update(tasks[0], revoked).unwrap();
+            staged.update("tasks", tasks[0], revoked).unwrap();
             staged
                 .update(
+                    "tasks",
                     tasks[1],
                     vec![
                         ("done".into(), Value::Boolean(true)),
@@ -872,6 +902,7 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
             if dependency {
                 staged
                     .update(
+                        "grants",
                         grants[0],
                         vec![("owner".into(), Value::Text("alice".into()))],
                     )
@@ -879,6 +910,7 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
             }
             staged
                 .update(
+                    "tasks",
                     tasks[0],
                     vec![
                         ("owner".into(), Value::Text("alice".into())),
@@ -942,7 +974,9 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = schema();
-            let authority = JazzServer::start_with_schema(schema.clone()).await;
+            let authority = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let relay = JazzServer::builder()
                 .with_schema(schema.clone())
                 .with_app_id(authority.app_id())
@@ -950,7 +984,8 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 .with_upstream_url(authority.base_url())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let writer = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema.clone())

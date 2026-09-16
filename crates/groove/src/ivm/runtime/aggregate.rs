@@ -240,7 +240,10 @@ fn aggregate_avg(
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
     let mut sum = 0_f64;
+    let mut scale = 0_f64;
     let mut count = 0_i64;
+    let mut has_f64 = false;
+    let mut has_non_finite = false;
     for (record, weight) in records {
         if *weight <= 0 {
             continue;
@@ -252,11 +255,41 @@ fn aggregate_avg(
         let numeric = numeric_value_as_f64(&value)?;
         sum += numeric * (*weight as f64);
         count += *weight;
+        has_f64 |= matches!(value, Value::F64(_));
+        if numeric.is_finite() {
+            scale = scale.max(numeric.abs());
+        } else {
+            has_non_finite = true;
+        }
     }
     if count <= 0 {
         return Ok(None);
     }
-    Ok(Some(Value::F64(sum / (count as f64))))
+
+    // Keep the established accumulation order for integer and non-finite
+    // inputs. Scaling is only needed for finite F64 values, and falling back
+    // here preserves the existing NaN/infinity behavior exactly.
+    if !has_f64 || has_non_finite || sum.is_finite() {
+        return Ok(Some(Value::F64(sum / (count as f64))));
+    }
+    if scale == 0.0 {
+        return Ok(Some(Value::F64(0.0)));
+    }
+
+    let mut scaled_sum = 0_f64;
+    for (record, weight) in records {
+        if *weight <= 0 {
+            continue;
+        }
+        let value = evaluate_aggregate_expr(&BorrowedRecord::new(record, &input_desc), expr)?;
+        let Some(value) = unwrap_nullable_value(value) else {
+            continue;
+        };
+        let numeric = numeric_value_as_f64(&value)?;
+        scaled_sum += (numeric / scale) * (*weight as f64);
+    }
+    let normalized = (scaled_sum / (count as f64)).clamp(-1.0, 1.0);
+    Ok(Some(Value::F64(scale * normalized)))
 }
 
 fn aggregate_extremum(

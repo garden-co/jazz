@@ -33,6 +33,18 @@ async function storeStandaloneConfig(page: Page) {
   );
 }
 
+async function connectFromForm(page: Page) {
+  await page.getByLabel("Server URL").fill(SERVER_URL);
+  await page.getByLabel("App ID").fill(APP_ID);
+  await page.getByLabel("Admin secret").fill(ADMIN_SECRET);
+  await page.getByRole("button", { name: "Connect" }).click();
+
+  await expect(page.getByRole("heading", { name: "Select schema" })).toBeVisible();
+  await expect(page.getByRole("option")).toHaveCount(2);
+  await page.getByLabel("Schema hash").selectOption({ index: 1 });
+  await page.getByRole("button", { name: "Use schema" }).click();
+}
+
 async function expectTodosTableLoaded(page: Page) {
   await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("link", { name: "Schema" })).toBeVisible({ timeout: 5_000 });
@@ -45,6 +57,7 @@ async function openTodosTable(page: Page) {
   await page.goto("/");
   await storeStandaloneConfig(page);
   await page.reload();
+  await connectFromForm(page);
 
   await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible({
     timeout: 5_000,
@@ -65,7 +78,9 @@ function rowByTitle(page: Page, title: string) {
 }
 
 test.describe("connection page", () => {
-  test("prefills connection form from hash fragment", async ({ page }) => {
+  test("prefills connection fields from hash fragment without retaining the admin secret", async ({
+    page,
+  }) => {
     const fragment = new URLSearchParams({
       serverUrl: SERVER_URL,
       appId: APP_ID,
@@ -75,45 +90,45 @@ test.describe("connection page", () => {
 
     await expect(page.getByLabel("Server URL")).toHaveValue(SERVER_URL);
     await expect(page.getByLabel("App ID")).toHaveValue(APP_ID);
-    await expect(page.getByLabel("Admin secret")).toHaveValue(ADMIN_SECRET);
+    await expect(page.getByLabel("Admin secret")).toHaveValue("");
   });
 
   test("connects to server, shows schema selection and loads data explorer", async ({ page }) => {
     await page.goto("/");
-    await page.getByLabel("Server URL").fill(SERVER_URL);
-    await page.getByLabel("App ID").fill(APP_ID);
-    await page.getByLabel("Admin secret").fill(ADMIN_SECRET);
-    await page.getByRole("button", { name: "Connect" }).click();
-
-    await expect(page.getByRole("heading", { name: "Select schema" })).toBeVisible();
-    await expect(page.getByRole("option")).toHaveCount(2);
-
-    await page.getByLabel("Schema hash").selectOption({ index: 1 });
-
-    await page.getByRole("button", { name: "Use schema" }).click();
+    await connectFromForm(page);
 
     await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible();
   });
 
-  test("loads data explorer from stored config", async ({ page }) => {
+  test("prefills a stored connection without retaining the admin secret", async ({ page }) => {
     await page.goto("/");
     await storeStandaloneConfig(page);
     await page.reload();
 
-    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Add connection" })).toBeVisible();
+    await expect(page.getByLabel("Server URL")).toHaveValue(SERVER_URL);
+    await expect(page.getByLabel("App ID")).toHaveValue(APP_ID);
+    await expect(page.getByLabel("Admin secret")).toHaveValue("");
+  });
+
+  test("requires an ephemeral secret after loading a stored connection", async ({ page }) => {
+    await page.goto("/");
+    await storeStandaloneConfig(page);
+    await page.reload();
+
+    await expect(page.getByLabel("Admin secret")).toHaveValue("");
+    await connectFromForm(page);
+
     await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible();
     await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible();
   });
 
-  test("connection manager opens a prefilled edit screen", async ({ page }) => {
+  test("opens a prefilled edit screen without retaining the admin secret", async ({ page }) => {
     await page.goto("/");
     await storeStandaloneConfig(page);
     await page.reload();
 
-    await expect(page.getByRole("button", { name: "Connections" })).toBeVisible();
-
-    await page.getByRole("button", { name: "Connections" }).click();
-
+    await page.getByRole("button", { name: "Cancel" }).click();
     await expect(page.getByRole("heading", { name: "Connections" })).toBeVisible();
     await expect(page.getByText("Browser test")).toBeVisible();
 
@@ -123,7 +138,7 @@ test.describe("connection page", () => {
     await expect(page.getByLabel("Name")).toHaveValue("Browser test");
     await expect(page.getByLabel("Server URL")).toHaveValue(SERVER_URL);
     await expect(page.getByLabel("App ID")).toHaveValue(APP_ID);
-    await expect(page.getByLabel("Admin secret")).toHaveValue(ADMIN_SECRET);
+    await expect(page.getByLabel("Admin secret")).toHaveValue("");
     await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
   });
 });

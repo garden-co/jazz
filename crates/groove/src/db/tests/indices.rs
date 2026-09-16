@@ -3,6 +3,74 @@
 use super::*;
 
 #[futures_test::test]
+async fn table_existence_is_bounded_and_observes_applied_resident_state() {
+    for count in [1, 1024] {
+        let storage = MemoryStorage::new(&["albums"]).unwrap();
+        let mut database = Database::new(albums_schema(), storage).await.unwrap();
+        assert!(!database.table_has_stored_rows("albums").await.unwrap());
+        assert!(database.table_has_stored_rows("missing").await.is_err());
+        let mut batch = database.open_batch();
+        for id in 0..count {
+            batch.insert(
+                "albums",
+                vec![Value::U64(id), Value::String("record".into())],
+            );
+        }
+        assert!(
+            !database.table_has_stored_rows("albums").await.unwrap(),
+            "unapplied batch is not resident"
+        );
+        let applied = database.apply_batch(batch).await.unwrap();
+        database.reset_storage_read_metrics();
+        assert!(database.table_has_stored_rows("albums").await.unwrap());
+        let reads = database.storage_read_metrics();
+        assert_eq!(
+            reads.total.reads, 1,
+            "one candidate regardless of cardinality"
+        );
+        assert_eq!(reads.total.ranges, 1);
+        let persisted = applied.persist().await;
+        database.finish_persistence(persisted).unwrap();
+        database.reset_storage_read_metrics();
+        assert!(database.table_has_stored_rows("albums").await.unwrap());
+        assert_eq!(database.storage_read_metrics().total.reads, 1);
+
+        let mut batch = database.open_batch();
+        for id in 0..count {
+            batch.delete("albums", PrimaryKeyValue::U64(id));
+        }
+        assert!(database.table_has_stored_rows("albums").await.unwrap());
+        let applied = database.apply_batch(batch).await.unwrap();
+        assert!(
+            !database.table_has_stored_rows("albums").await.unwrap(),
+            "resident tombstones hide persisted rows"
+        );
+        let persisted = applied.persist().await;
+        database.finish_persistence(persisted).unwrap();
+        assert!(!database.table_has_stored_rows("albums").await.unwrap());
+    }
+}
+
+#[futures_test::test]
+async fn table_existence_rejects_poisoned_storage_after_failed_persistence() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("record".into())],
+    );
+    let applied = database.apply_batch(batch).await.unwrap();
+    control.fail_next(TestStorageOperation::WriteMany);
+    let persisted = applied.persist().await;
+    assert!(database.finish_persistence(persisted).is_err());
+    assert!(matches!(
+        database.table_has_stored_rows("albums").await,
+        Err(Error::DatabasePoisoned)
+    ));
+}
+
+#[futures_test::test]
 async fn database_creation_dedups_schema_indices_as_durable_nodes() {
     let storage =
         MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
@@ -1848,5 +1916,418 @@ async fn live_index_registration_rejects_while_a_publication_is_resident() {
                 .unwrap()
         ),
         [vec![Value::U64(7), Value::String("Blue Train".to_owned())]]
+    );
+}
+
+// Internal storage corruption is necessary to reproduce old writer bugs and
+// pin the durable repair marker; assertions use normal indexed/primary reads.
+#[futures_test::test]
+async fn declared_index_generation_repairs_missing_and_stale_entries_once() {
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    let mut database = Database::new(indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    for id in 0..1030 {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("title-{id}"))],
+        );
+    }
+    database.commit_batch(batch).await.unwrap();
+    let primary_before = storage.prefix("albums".into(), Vec::new()).await.unwrap();
+    let expected = storage
+        .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(expected.len(), 1030);
+    storage
+        .delete("indices".into(), expected[0].0.clone())
+        .await
+        .unwrap();
+    let stale_key = b"albums\0albums_by_title\0obsolete".to_vec();
+    storage
+        .set(
+            "indices".into(),
+            stale_key.clone(),
+            b"invalid obsolete value".to_vec(),
+        )
+        .await
+        .unwrap();
+    drop(database);
+    let mut database = Database::new(indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    database.ensure_declared_index_generation(1).await.unwrap();
+    assert_eq!(
+        storage
+            .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        storage.prefix("albums".into(), Vec::new()).await.unwrap(),
+        primary_before
+    );
+    assert_eq!(
+        database
+            .index_scan_raw("albums", "albums_by_title", &[])
+            .await
+            .unwrap()
+            .len(),
+        1030
+    );
+    // Byte fixture: one NUL followed by ASCII, then exactly BE u64.
+    assert_eq!(
+        storage
+            .get(
+                "indices".into(),
+                b"\x00groove-declared-index-generation".to_vec()
+            )
+            .await
+            .unwrap(),
+        Some(vec![0, 0, 0, 0, 0, 0, 0, 1])
+    );
+    // A completed generation does no repair work on reopen. Injecting a stale
+    // entry distinguishes that fast path from a silently repeated rebuild.
+    storage
+        .set("indices".into(), stale_key.clone(), b"sentinel".to_vec())
+        .await
+        .unwrap();
+    drop(database);
+    let mut database = Database::new(indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    database.ensure_declared_index_generation(1).await.unwrap();
+    assert_eq!(
+        storage
+            .get("indices".into(), stale_key.clone())
+            .await
+            .unwrap(),
+        Some(b"sentinel".to_vec())
+    );
+    database.ensure_declared_index_generation(2).await.unwrap();
+    assert_eq!(
+        storage.get("indices".into(), stale_key).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        storage.prefix("albums".into(), Vec::new()).await.unwrap(),
+        primary_before
+    );
+}
+
+// Storage failpoints/cancellation cannot be driven through a public query.
+#[futures_test::test]
+async fn declared_index_generation_retries_cancelled_and_failed_repair() {
+    for cancel in [false, true] {
+        let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+        let mut database = Database::new(indexed_albums_schema(), storage.clone())
+            .await
+            .unwrap();
+        let mut batch = database.open_batch();
+        batch.insert("albums", vec![Value::U64(7), Value::String("title".into())]);
+        database.commit_batch(batch).await.unwrap();
+        if cancel {
+            control.pause_on(TestStorageOperation::WriteMany);
+            control.release_one(); // Clear commits; suspend before replay.
+            let mut repair = Box::pin(database.ensure_declared_index_generation(1));
+            control.take_observed();
+            for _ in 0..100 {
+                assert!(futures::poll!(repair.as_mut()).is_pending());
+                if control
+                    .observed()
+                    .iter()
+                    .filter(|op| **op == TestStorageOperation::WriteMany)
+                    .count()
+                    == 2
+                {
+                    break;
+                }
+            }
+            assert_eq!(
+                control
+                    .observed()
+                    .iter()
+                    .filter(|op| **op == TestStorageOperation::WriteMany)
+                    .count(),
+                2
+            );
+            drop(repair);
+            control.resume();
+        } else {
+            control.fail_next(TestStorageOperation::FlushWriteBoundary);
+            assert!(database.ensure_declared_index_generation(1).await.is_err());
+        }
+        assert!(matches!(
+            database.ensure_usable(),
+            Err(Error::DatabasePoisoned)
+        ));
+        assert_eq!(
+            storage
+                .get(
+                    "indices".into(),
+                    b"\0groove-declared-index-generation".to_vec()
+                )
+                .await
+                .unwrap(),
+            None
+        );
+        drop(database);
+        let mut database = Database::new(indexed_albums_schema(), storage.clone())
+            .await
+            .unwrap();
+        database.ensure_declared_index_generation(1).await.unwrap();
+        assert_eq!(
+            database
+                .index_scan_raw("albums", "albums_by_title", &[])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            database
+                .primary_key_scan_raw("albums", &[])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+// Pin malformed/future durable marker handling before destructive repair.
+#[futures_test::test]
+async fn declared_index_generation_rejects_unknown_marker_without_writing() {
+    for bytes in [vec![], vec![1], 2u64.to_be_bytes().to_vec()] {
+        let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+        storage
+            .set(
+                "indices".into(),
+                b"\0groove-declared-index-generation".to_vec(),
+                bytes,
+            )
+            .await
+            .unwrap();
+        let mut database = Database::new(indexed_albums_schema(), storage)
+            .await
+            .unwrap();
+        control.take_observed();
+        assert!(matches!(
+            database.ensure_declared_index_generation(1).await,
+            Err(Error::InvalidPersistedIndex(_))
+        ));
+        assert!(
+            control
+                .take_observed()
+                .iter()
+                .all(|op| *op == TestStorageOperation::Get)
+        );
+    }
+}
+
+// Primary-only installation emulates an older database with a broken unique
+// index; duplicates across replay batches must fail closed without marking done.
+#[futures_test::test]
+async fn declared_index_generation_rejects_duplicate_unique_owners_across_batches() {
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    for id in 0..1025 {
+        let title = if id == 1024 {
+            "title-0".into()
+        } else {
+            format!("title-{id}")
+        };
+        batch.insert("albums", vec![Value::U64(id), Value::String(title)]);
+    }
+    database.commit_batch(batch).await.unwrap();
+    drop(database);
+    let before = storage.prefix("albums".into(), Vec::new()).await.unwrap();
+    let mut database = Database::new(unique_indexed_albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        database.ensure_declared_index_generation(1).await,
+        Err(Error::IvmRuntime(
+            IvmRuntimeError::UniqueIndexViolation { .. }
+        ))
+    ));
+    assert_eq!(
+        storage
+            .get(
+                "indices".into(),
+                b"\0groove-declared-index-generation".to_vec()
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        storage.prefix("albums".into(), Vec::new()).await.unwrap(),
+        before
+    );
+}
+
+// The final marker durability boundary is inaccessible via public queries.
+#[futures_test::test]
+async fn declared_index_generation_final_marker_flush_failure_and_cancel() {
+    for cancel in [false, true] {
+        let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
+        let mut database = Database::new(indexed_albums_schema(), storage.clone())
+            .await
+            .unwrap();
+        let mut batch = database.open_batch();
+        batch.insert("albums", vec![Value::U64(7), Value::String("title".into())]);
+        database.commit_batch(batch).await.unwrap();
+        let expected = storage
+            .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+            .await
+            .unwrap();
+        control.take_observed();
+        control.pause_on(TestStorageOperation::FlushWriteBoundary);
+        control.release_one();
+        let mut repair = Box::pin(database.ensure_declared_index_generation(1));
+        for _ in 0..100 {
+            assert!(futures::poll!(repair.as_mut()).is_pending());
+            if control
+                .observed()
+                .iter()
+                .filter(|op| **op == TestStorageOperation::FlushWriteBoundary)
+                .count()
+                == 2
+            {
+                break;
+            }
+        }
+        let observed = control.observed();
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|op| **op == TestStorageOperation::FlushWriteBoundary)
+                .count(),
+            2
+        );
+        let marker_write = observed
+            .iter()
+            .position(|op| *op == TestStorageOperation::Set)
+            .unwrap();
+        let first_flush = observed
+            .iter()
+            .position(|op| *op == TestStorageOperation::FlushWriteBoundary)
+            .unwrap();
+        assert!(first_flush < marker_write);
+        if cancel {
+            drop(repair);
+        } else {
+            control.fail_next(TestStorageOperation::FlushWriteBoundary);
+            control.resume();
+            assert!(repair.await.is_err());
+        }
+        control.resume();
+        assert!(matches!(
+            database.ensure_usable(),
+            Err(Error::DatabasePoisoned)
+        ));
+        assert_eq!(
+            storage
+                .get(
+                    "indices".into(),
+                    b"\0groove-declared-index-generation".to_vec()
+                )
+                .await
+                .unwrap(),
+            Some(1u64.to_be_bytes().to_vec())
+        );
+        assert_eq!(
+            storage
+                .prefix("indices".into(), b"albums\0albums_by_title\0".to_vec())
+                .await
+                .unwrap(),
+            expected
+        );
+        drop(database);
+        let mut reopened = Database::new(indexed_albums_schema(), storage.clone())
+            .await
+            .unwrap();
+        control.take_observed();
+        let reads_before = control.point_read_count();
+        reopened.ensure_declared_index_generation(1).await.unwrap();
+        assert_eq!(control.point_read_count(), reads_before + 1);
+        assert!(
+            control
+                .take_observed()
+                .iter()
+                .all(|op| *op == TestStorageOperation::Get)
+        );
+        assert_eq!(
+            reopened
+                .index_scan_raw("albums", "albums_by_title", &[])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+// Unknown physical variants must fail closed during primary replay. Only direct
+// storage corruption can install a tag absent from the admitted schema.
+#[futures_test::test]
+async fn declared_index_generation_rejects_unknown_primary_variant() {
+    let mut schema = indexed_albums_schema();
+    schema.tables[0] = schema.tables[0].clone().with_variant(1, ["id", "title"]);
+    let descriptor = schema.tables[0].record_schema_for_variant(1).unwrap();
+    let storage = MemoryStorage::new(&["albums", "indices"]).unwrap();
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        crate::records::VariantRecord::create(
+            1,
+            descriptor,
+            &[Value::U64(7), Value::String("title".into())],
+        )
+        .unwrap(),
+    );
+    database.commit_batch(batch).await.unwrap();
+    drop(database);
+    let rows = storage.prefix("albums".into(), Vec::new()).await.unwrap();
+    let raw = descriptor
+        .create(&[Value::U64(7), Value::String("title".into())])
+        .unwrap();
+    let invalid = crate::records::encode_variant_record(99, &raw);
+    storage
+        .set("albums".into(), rows[0].0.clone(), invalid.clone())
+        .await
+        .unwrap();
+    let mut database = Database::new(schema, storage.clone()).await.unwrap();
+    assert!(database.ensure_declared_index_generation(1).await.is_err());
+    assert!(matches!(
+        database.ensure_usable(),
+        Err(Error::DatabasePoisoned)
+    ));
+    assert_eq!(
+        storage
+            .get(
+                "indices".into(),
+                b"\0groove-declared-index-generation".to_vec()
+            )
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        storage
+            .get("albums".into(), rows[0].0.clone())
+            .await
+            .unwrap(),
+        Some(invalid)
     );
 }

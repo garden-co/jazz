@@ -21,7 +21,7 @@ use crate::protocol_limits::{
 /// This is the sole supported wire version. It is independent of the v1
 /// storage, catalogue, and binding formats: those labels name their own
 /// formats and are not wire-protocol compatibility aliases.
-pub const WIRE_PROTOCOL_VERSION: u16 = 1;
+pub const WIRE_PROTOCOL_VERSION: u16 = 2;
 
 /// Frozen v1 full-frame artifact rejection corpus. NAPI and WASM execute every
 /// frame in the complete Rust message/Hello fixtures, plus these explicit
@@ -316,6 +316,7 @@ pub struct WireInboundContext {
     expected_protocol_version: u16,
     negotiated_features: WireFeatures,
     expected_session: Option<WireSession>,
+    trusted_encoder: bool,
 }
 
 impl WireInboundContext {
@@ -328,6 +329,19 @@ impl WireInboundContext {
             expected_protocol_version,
             negotiated_features,
             expected_session,
+            trusted_encoder: false,
+        }
+    }
+
+    pub(crate) fn set_trusted_encoder(&mut self, trusted: bool) {
+        self.trusted_encoder = trusted;
+    }
+
+    pub(crate) fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+        if self.trusted_encoder {
+            postcard::from_bytes(bytes)
+        } else {
+            decode_frame(bytes)
         }
     }
 
@@ -502,7 +516,23 @@ pub(crate) fn admit_complete_envelope(
     validate_logical_message_len(payload.len()).map_err(|message| {
         WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
     })?;
-    decode_sync_message_for_features(&payload, context.negotiated_features).map_err(|error| {
+    let decoded = if context.trusted_encoder {
+        decode_sync_message_trusted(&payload)
+            .map_err(|error| {
+                WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    error.to_string(),
+                )
+            })
+            .and_then(|message| {
+                ensure_sync_message_features(&message, context.negotiated_features)?;
+                Ok(message)
+            })
+    } else {
+        decode_sync_message_for_features(&payload, context.negotiated_features)
+    };
+    decoded.map_err(|error| {
         WireError::new(
             error.code,
             error.retry,
@@ -579,9 +609,7 @@ pub fn validate_frame_for_artifact_corpus(
 
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
 pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
-    message
-        .validate_wire_contract()
-        .map_err(|_| postcard::Error::SerdeSerCustom)?;
+    // Our encoder owns correctness; do not decode/revalidate its input rows.
     to_allocvec(message)
 }
 
@@ -622,6 +650,13 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
         return Err(postcard::Error::DeserializeBadOption);
     }
     Ok(message)
+}
+
+/// Decode output from a topology-trusted encoder without representation checks.
+/// Trust is assigned locally when the transport is installed, never on the wire.
+#[doc(hidden)]
+pub fn decode_sync_message_trusted(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    postcard::from_bytes(bytes)
 }
 
 /// Decode one canonical postcard value only when it consumes the complete input.
@@ -1664,7 +1699,7 @@ mod tests {
                 settled_through: GlobalTime,
                 version_carriers: Vec<VersionCarrier>,
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory,
-                supporting_rows: Vec<crate::protocol::SupportingRow>,
+                supporting_rows: crate::protocol::SupportingRowsUpdate,
             },
         }
 
@@ -1846,8 +1881,41 @@ mod tests {
             settled_through: GlobalTime(500),
             version_carriers,
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            supporting_rows: Vec::new(),
+            supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
         })
+    }
+
+    // Internal work accounting is needed: decoded values alone cannot expose
+    // a redundant receipt pass or prove the locally selected trust boundary.
+    #[test]
+    fn trusted_encoder_skips_receipt_validation_but_session_admission_keeps_it() {
+        let message = SyncMessage::RowVersionPayloads {
+            version_bundles: version_bundles(2),
+        };
+        crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.set(0));
+        let payload = encode_sync_message(&message).unwrap();
+        assert_eq!(
+            crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()),
+            0
+        );
+        let mut trusted = WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, None);
+        trusted.set_trusted_encoder(true);
+        let mut decoder = WireStreamDecoder::new(FEATURE_NONE).unwrap();
+        let envelope = WireEnvelope::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, payload.clone());
+        assert_eq!(
+            admit_complete_envelope(&trusted, &mut decoder, envelope.clone()).unwrap(),
+            message
+        );
+        assert_eq!(
+            crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()),
+            0
+        );
+        let session = WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, None);
+        assert_eq!(
+            admit_complete_envelope(&session, &mut decoder, envelope).unwrap(),
+            message
+        );
+        assert!(crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()) > 0);
     }
 
     fn version_bundles(count: usize) -> Vec<VersionBundle> {
@@ -2185,7 +2253,7 @@ mod tests {
                     authorization_progress: None,
                     opening_pending: false,
                 },
-                supporting_rows: Vec::new(),
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
             }),
             SyncMessage::CommitUnit {
                 tx: Transaction {
@@ -2246,6 +2314,7 @@ mod tests {
         };
         payload
             .supporting_rows
+            .added_rows_mut()
             .push(crate::protocol::SupportingRow {
                 physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
                     [0x21; 16],
@@ -2262,16 +2331,18 @@ mod tests {
                 },
             });
         assert!(
-            encode_sync_message(&SyncMessage::ViewUpdate(payload)).is_err(),
+            SyncMessage::ViewUpdate(payload)
+                .validate_wire_contract()
+                .is_err(),
             "an exact snapshot reference must name one native register layer"
         );
     }
 
     #[test]
-    fn negotiation_requires_an_exact_v1_advertisement_and_intersects_features() {
+    fn negotiation_requires_an_exact_v2_advertisement_and_intersects_features() {
         let remote = WireHello {
-            min_protocol_version: 1,
-            max_protocol_version: 1,
+            min_protocol_version: 2,
+            max_protocol_version: 2,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
             role: WirePeerRole::Relay,
             authority: None,
@@ -2290,8 +2361,53 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_rejects_version_ranges_even_when_they_include_v1() {
-        for (min_protocol_version, max_protocol_version) in [(0, 1), (1, 2), (1, 15)] {
+    fn v2_supporting_transition_encoding_and_v1_rejection_are_pinned() {
+        // Internal wire-level corpus: public row equality cannot pin enum tags,
+        // fixed-array revision bytes or rejection before semantic decoding.
+        use crate::protocol::SupportingRowsUpdate;
+        let snapshot = SupportingRowsUpdate::Snapshot {
+            revision: [0x51; 16],
+            rows: vec![],
+        };
+        let delta = SupportingRowsUpdate::Delta {
+            predecessor: [0x51; 16],
+            revision: [0x52; 16],
+            adds: vec![],
+            removes: vec![],
+        };
+        let snapshot_bytes = [vec![0], vec![0x51; 16], vec![0]].concat();
+        let delta_bytes = [vec![1], vec![0x51; 16], vec![0x52; 16], vec![0, 0]].concat();
+        assert_eq!(postcard::to_allocvec(&snapshot).unwrap(), snapshot_bytes);
+        assert_eq!(postcard::to_allocvec(&delta).unwrap(), delta_bytes);
+        assert_eq!(
+            postcard::from_bytes::<SupportingRowsUpdate>(&snapshot_bytes).unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            postcard::from_bytes::<SupportingRowsUpdate>(&delta_bytes).unwrap(),
+            delta
+        );
+        for end in 0..delta_bytes.len() {
+            assert!(postcard::from_bytes::<SupportingRowsUpdate>(&delta_bytes[..end]).is_err());
+        }
+        let old = WireHello {
+            min_protocol_version: 1,
+            max_protocol_version: 1,
+            features: current_wire_features(),
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+        assert_eq!(
+            negotiate_wire(&old, current_wire_features())
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedProtocolVersion
+        );
+    }
+
+    #[test]
+    fn negotiation_rejects_version_ranges_even_when_they_include_v2() {
+        for (min_protocol_version, max_protocol_version) in [(0, 2), (1, 2), (2, 15)] {
             let remote = WireHello {
                 min_protocol_version,
                 max_protocol_version,
@@ -2308,8 +2424,8 @@ mod tests {
     }
 
     #[test]
-    fn wire_v1_rejects_v14_without_compatibility_negotiation() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 1);
+    fn wire_v2_rejects_v14_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 2);
         let remote = WireHello {
             min_protocol_version: 14,
             max_protocol_version: 14,
@@ -2326,7 +2442,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_v1_rejects_v15_peer_before_payload_decode() {
+    fn wire_v2_rejects_v15_peer_before_payload_decode() {
         let v15_peer = WireHello {
             min_protocol_version: 15,
             max_protocol_version: 15,
@@ -2338,7 +2454,7 @@ mod tests {
         let error = negotiate_wire(&v15_peer, current_wire_features())
             .expect_err("v15 encoding must fail during the v1 handshake");
 
-        assert_eq!(WIRE_PROTOCOL_VERSION, 1);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 2);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }

@@ -104,6 +104,7 @@ struct RetainedReceipt {
     result_weights_bytes: usize,
     result_payloads_bytes: usize,
     versions_bytes: usize,
+    supporting_frontier_bytes: usize,
     replacements_bytes: usize,
     terminal_schemas_bytes: usize,
     control_state_bytes: usize,
@@ -595,6 +596,10 @@ fn retained_receipt(db: &BenchDb) -> RetainedReceipt {
         versions_bytes: receipts
             .iter()
             .map(|receipt| receipt.footprint.versions_bytes)
+            .sum(),
+        supporting_frontier_bytes: receipts
+            .iter()
+            .map(|receipt| receipt.footprint.supporting_frontier_bytes)
             .sum(),
         replacements_bytes: receipts
             .iter()

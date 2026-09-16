@@ -199,6 +199,14 @@ holding peer-visible effects until their publication is at or below Groove's
 durable frontier. A later publication must never become externally releasable
 past an earlier unresolved publication.
 
+Declared-index and other durable-node writes are prepared before a resident
+publication can park its query-only work. Those completed writes MUST enter the
+same staged atomic batch as that publication's base writes before its persistence
+owner can take a snapshot. A terminal waiting for missing content does not defer
+index durability to a later query turn. Otherwise a settled base publication can
+lack its index, and an older terminal can append obsolete index writes after a
+newer publication has deleted the row (regression #3015).
+
 Durability-before-publication remains an explicit policy for operations such
 as schema installation that must not become optimistically visible. The policy
 is named at the existing Groove database boundary; it does not select another
@@ -286,3 +294,27 @@ conflated.
   no longer open: immediate local updates publish resident work before
   persistence, while durability-before-publication remains available for
   explicitly durable operations.
+
+## Runtime retirement and replacement
+
+A live catalogue replacement first waits for externally owned publications to
+settle, before changing the catalogue. Waiting preserves the old usable runtime
+and retains the ingress frame in order. The owner wake is registered with the
+pending check; settlement, failure, and abandoned persistence wake that owner.
+A failed database cannot register another settlement wait.
+
+Retirement then makes the old runtime unavailable and finishes captured durable
+writes in queue order through the existing write-outcome guards. It does not
+wait for query chunks or deliver pending subscription output. Cancellation or
+write failure leaves the old instance unavailable; only completed preparation
+permits runtime replacement. Reconstructible hydration and query evaluation are
+cancelled when the retired runtime is dropped. Resident publication index writes
+already belong to their original atomic publication, not this retirement flush.
+
+Runtime replacement retains the same layout storage, chunk services, and large
+value lifecycle mutex while installing one fresh semantic runtime. Independently
+suspended auxiliary local chunk reads may finish against that same storage;
+they do not prevent a catalogue replacement. A replacement schema error leaves
+the retired facade owned and unavailable. The separate raw `into_storage` API
+requires unique external storage ownership and is not used for live Jazz runtime
+replacement.

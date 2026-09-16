@@ -353,7 +353,7 @@ fn record_values_reject_non_canonical_child_bytes() {
 }
 
 #[test]
-fn structural_validation_matches_full_decode_for_corrupt_composite_records() {
+fn structural_validation_rejects_corrupt_composite_records_before_lazy_access() {
     let child = RecordDescriptor::new([
         ("maybe_id", ValueType::Nullable(Box::new(ValueType::U8))),
         ("active", ValueType::Bool),
@@ -381,11 +381,16 @@ fn structural_validation_matches_full_decode_for_corrupt_composite_records() {
         .unwrap();
 
     let equivalent = |raw: &[u8]| {
+        // Lazy reads no longer validate descendants. Explicit canonical
+        // validation must retain its recursive rejection behavior.
         assert_eq!(
             descriptor.bind(raw).validate().is_ok(),
-            descriptor.bind(raw).to_values().is_ok(),
-            "structural validation and decoding disagreed for {raw:?}"
+            descriptor.bind(raw).validate_canonical().is_ok(),
+            "structural and canonical validation disagreed for {raw:?}"
         );
+        if descriptor.bind(raw).validate().is_ok() {
+            assert!(descriptor.bind(raw).to_values().is_ok());
+        }
     };
 
     equivalent(&valid);
@@ -1351,7 +1356,7 @@ fn epoch_1_variable_scalar_array_and_payload_enum_goldens_are_exact_and_fail_clo
     assert!(
         descriptor
             .bind(&frozen[..frozen.len() - 1])
-            .to_values()
+            .validate_canonical()
             .is_err()
     );
 }
@@ -2111,12 +2116,12 @@ fn indirect_string_uses_the_same_logical_value_type_with_an_explicit_physical_ar
     )
     .unwrap();
     let record = descriptor
-        .create(&[Value::Large(prepared.value_ref.clone())])
+        .create(&[Value::Large(Box::new(prepared.value_ref.clone()))])
         .unwrap();
 
     assert_eq!(
         descriptor.get_idx(&record, 0).unwrap(),
-        Value::Large(prepared.value_ref)
+        Value::Large(Box::new(prepared.value_ref))
     );
     assert_eq!(
         descriptor.bind(&record).get_str(0).unwrap_err(),
@@ -2323,4 +2328,444 @@ fn unwrap_nested_nullable_preserves_outer_none_as_inner_null() {
             .expect("nested nullable absence remains a row");
         assert_eq!(target.get_idx(&output[span], 0).unwrap(), expected);
     }
+}
+
+// Internal byte-admission coverage is necessary here: database APIs cannot
+// construct malformed OwnedRecord payloads or expose canonicality errors.
+#[test]
+fn embedded_record_admission_matches_legacy_roundtrip_corpus() {
+    fn check(descriptor: RecordDescriptor, raw: &[u8]) {
+        let expected = descriptor.bind(raw).to_values().and_then(|values| {
+            if descriptor.create(&values)? == raw {
+                Ok(())
+            } else {
+                Err(Error::NonCanonicalRecord)
+            }
+        });
+        let record = OwnedRecord::new(raw.to_vec(), descriptor);
+        let actual = values::ensure_value_type(
+            &Value::Record(record.clone()),
+            &ValueType::Record(Box::new(descriptor)),
+        );
+        assert_eq!(
+            actual, expected,
+            "record {descriptor:?}: {raw:?}, old={expected:?}, new={actual:?}"
+        );
+        let schema = EnumSchema::new("fixture", [EnumCase::new("payload", descriptor)]).unwrap();
+        let actual = values::ensure_value_type(
+            &Value::Enum(EnumValue::new(0, record)),
+            &ValueType::Enum(Box::new(schema)),
+        );
+        assert_eq!(
+            actual, expected,
+            "enum {descriptor:?}: {raw:?}, old={expected:?}, new={actual:?}"
+        );
+    }
+    let child = descriptor([
+        ValueType::Bool,
+        ValueType::Nullable(Box::new(ValueType::U16)),
+    ]);
+    let event = EnumSchema::new(
+        "event",
+        [
+            EnumCase::new("empty", RecordDescriptor::default()),
+            EnumCase::new("value", child),
+        ],
+    )
+    .unwrap();
+    let cases = vec![
+        (RecordDescriptor::default(), vec![]),
+        (
+            epoch_1_scalar_record_descriptor(),
+            EPOCH_1_SCALAR_RECORD_FIXTURE.to_vec(),
+        ),
+        (
+            descriptor([ValueType::F64]),
+            f64::NAN.to_le_bytes().to_vec(),
+        ),
+        (
+            descriptor([ValueType::Nullable(Box::new(ValueType::F64))]),
+            [b"\x01".as_slice(), f64::NAN.to_le_bytes().as_slice()].concat(),
+        ),
+        (descriptor([ValueType::raw_bytes()]), vec![]),
+        (descriptor([ValueType::raw_string()]), b"text".to_vec()),
+        (
+            descriptor([ValueType::Tuple(vec![ValueType::F64])]),
+            1.0f64.to_le_bytes().to_vec(),
+        ),
+        (
+            descriptor([ValueType::Tuple(vec![ValueType::Nullable(Box::new(
+                ValueType::U32,
+            ))])]),
+            vec![1, 1, 2, 3, 4],
+        ),
+        (
+            descriptor([ValueType::Nullable(Box::new(ValueType::Tuple(vec![
+                ValueType::F64,
+            ])))]),
+            vec![0; 9],
+        ),
+        (
+            descriptor([ValueType::Array(Box::new(ValueType::Tuple(vec![])))]),
+            vec![],
+        ),
+    ];
+    let mut cases = cases;
+    // Exercise recursive tuple detection through every containing type. Raw
+    // wrappers are intentional: public encoding rejects some legacy tuple
+    // representations before they can reach the embedding admission boundary.
+    for (inner, raw) in cases.clone() {
+        let record_type = ValueType::Record(Box::new(inner));
+        cases.push((descriptor([record_type.clone()]), raw.clone()));
+        cases.push((
+            descriptor([ValueType::Array(Box::new(record_type.clone()))]),
+            [1u32.to_le_bytes().as_slice(), raw.as_slice()].concat(),
+        ));
+        cases.push((
+            descriptor([ValueType::Nullable(Box::new(record_type))]),
+            [b"\x01".as_slice(), raw.as_slice()].concat(),
+        ));
+        let schema = EnumSchema::new("wrapper", [EnumCase::new("value", inner)]).unwrap();
+        cases.push((
+            descriptor([ValueType::Enum(Box::new(schema))]),
+            [b"\x00".as_slice(), raw.as_slice()].concat(),
+        ));
+    }
+    for value_type in [
+        ValueType::String,
+        ValueType::Bytes,
+        ValueType::stored_scalar(crate::large_values::LargeValueKind::Json),
+    ] {
+        let value = if value_type == ValueType::Bytes {
+            Value::Bytes(vec![0, 128, 255])
+        } else {
+            Value::String("null".into())
+        };
+        let d = descriptor([value_type]);
+        cases.push((d, d.create(&[value]).unwrap()));
+        // Primitive, chunked, unknown/future format and nonminimal envelopes.
+        for raw in [
+            vec![2],
+            vec![2, 255],
+            vec![3],
+            vec![3, 255],
+            vec![4, 0],
+            vec![0x82, 0, 1],
+        ] {
+            cases.push((d, raw));
+        }
+    }
+    for (kind, logical) in [
+        (
+            crate::large_values::LargeValueKind::Bytes,
+            b"bytes".as_slice(),
+        ),
+        (
+            crate::large_values::LargeValueKind::String,
+            b"text".as_slice(),
+        ),
+        (
+            crate::large_values::LargeValueKind::Json,
+            b"null".as_slice(),
+        ),
+    ] {
+        let prepared = crate::large_values::prepare(kind, logical).unwrap();
+        let d = descriptor([ValueType::stored_scalar(kind)]);
+        cases.push((
+            d,
+            d.create(&[Value::Large(Box::new(prepared.value_ref))])
+                .unwrap(),
+        ));
+    }
+    let composite = descriptor([
+        ValueType::Record(Box::new(child)),
+        ValueType::Enum(Box::new(event)),
+        ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ValueType::Array(Box::new(ValueType::Record(Box::new(child)))),
+        ValueType::EnumTag(ScalarEnumSchema::new("status", ["one", "two"]).unwrap()),
+    ]);
+    let child_value = OwnedRecord::new(
+        child
+            .create(&[Value::Bool(true), Value::Nullable(None)])
+            .unwrap(),
+        child,
+    );
+    cases.push((
+        composite,
+        composite
+            .create(&[
+                Value::Record(child_value.clone()),
+                Value::Enum(EnumValue::new(1, child_value.clone())),
+                Value::Array(vec![
+                    Value::Nullable(None),
+                    Value::Nullable(Some(Box::new(Value::String("abc".into())))),
+                ]),
+                Value::Array(vec![Value::Record(child_value)]),
+                Value::EnumTag(1),
+            ])
+            .unwrap(),
+    ));
+    for (descriptor, raw) in cases {
+        check(descriptor, &raw);
+        for length in 0..raw.len() {
+            check(descriptor, &raw[..length]);
+        }
+        for extra in [0, 1, 255] {
+            let mut changed = raw.clone();
+            changed.push(extra);
+            check(descriptor, &changed);
+        }
+        for index in 0..raw.len() {
+            for byte in [0, 1, 2, 3, 127, 128, 254, 255] {
+                let mut changed = raw.clone();
+                changed[index] = byte;
+                check(descriptor, &changed);
+            }
+        }
+    }
+}
+
+// This internal counter checks work, which public query results cannot expose.
+// Reading valid nested bytes must not invoke the record encoder.
+#[test]
+fn nested_record_read_does_not_reencode_descendants() {
+    let leaf = RecordDescriptor::new([("value", ValueType::String)]);
+    let leaf_record = OwnedRecord::new(leaf.create(&[Value::String("kept".into())]).unwrap(), leaf);
+    let middle = RecordDescriptor::new([("leaf", ValueType::Record(Box::new(leaf)))]);
+    let middle_record = OwnedRecord::new(
+        middle
+            .create(&[Value::Record(leaf_record.clone())])
+            .unwrap(),
+        middle,
+    );
+    let root = RecordDescriptor::new([("middle", ValueType::Record(Box::new(middle)))]);
+    let raw = root
+        .create(&[Value::Record(middle_record.clone())])
+        .unwrap();
+    RECORD_ENCODE_COUNT.with(|count| count.set(0));
+    let value = root.bind(&raw).get_idx(0).unwrap();
+    assert_eq!(value, Value::Record(middle_record));
+    let Value::Record(record) = value else {
+        panic!("record expected")
+    };
+    assert_eq!(record.get_idx(0).unwrap(), Value::Record(leaf_record));
+    assert_eq!(RECORD_ENCODE_COUNT.with(|count| count.get()), 0);
+}
+
+// Internal representation tests: byte identity and borrowed storage cannot be
+// observed through a database query, which deliberately hides record layouts.
+#[test]
+fn encoded_field_assembly_matches_value_encoder_and_borrows_nested_record() {
+    let nested = descriptor([ValueType::String, ValueType::U64]);
+    let child = OwnedRecord::new(
+        nested
+            .create(&[Value::String("nested".into()), Value::U64(19)])
+            .unwrap(),
+        nested,
+    );
+    let d = descriptor([
+        ValueType::String,
+        ValueType::U64,
+        ValueType::Record(Box::new(nested)),
+        ValueType::Nullable(Box::new(ValueType::U64)),
+        ValueType::Bytes,
+    ]);
+    let values = [
+        Value::String("first".into()),
+        Value::U64(7),
+        Value::Record(child),
+        Value::Nullable(None),
+        Value::Bytes(vec![1, 2, 3]),
+    ];
+    let expected = d.create(&values).unwrap();
+    let actual = d
+        .create_with_encoded_fields::<Error>(expected.len(), |index, out| {
+            if index == 1 {
+                d.encode_field_into(index, &values[index], out)
+            } else {
+                out.extend_from_slice(&expected[d.field_span(&expected, index)?]);
+                Ok(())
+            }
+        })
+        .unwrap();
+    assert_eq!(actual, expected);
+    let borrowed = d.bind(&actual).get_record(2).unwrap();
+    assert_eq!(borrowed.get_str(0).unwrap(), "nested");
+    assert_eq!(borrowed.get_u64(1).unwrap(), 19);
+    assert_eq!(
+        borrowed.raw().as_ptr(),
+        actual[d.field_span(&actual, 2).unwrap()].as_ptr()
+    );
+    assert!(d.bind(&actual).get_record(0).is_err());
+    assert!(d.bind(&actual).get_record(99).is_err());
+}
+
+#[test]
+fn indirect_reference_visitor_preserves_nested_multiplicity_and_early_stop() {
+    use crate::large_values::{LargeValueKind, prepare};
+    let reference = prepare(LargeValueKind::String, b"indirect contents")
+        .unwrap()
+        .value_ref;
+    let nested = descriptor([ValueType::String]);
+    let child = OwnedRecord::new(
+        nested
+            .create(&[Value::Large(Box::new(reference.clone()))])
+            .unwrap(),
+        nested,
+    );
+    let d = descriptor([
+        ValueType::String,
+        ValueType::Array(Box::new(ValueType::Nullable(Box::new(ValueType::String)))),
+        ValueType::Record(Box::new(nested)),
+    ]);
+    let raw = d
+        .create(&[
+            Value::String("inline contents".repeat(100)),
+            Value::Array(vec![
+                Value::Nullable(None),
+                Value::Nullable(Some(Box::new(Value::Large(Box::new(reference.clone()))))),
+                Value::Nullable(Some(Box::new(Value::String("inline".into())))),
+                Value::Nullable(Some(Box::new(Value::Large(Box::new(reference.clone()))))),
+            ]),
+            Value::Record(child),
+        ])
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(
+        !d.visit_large_value_refs(&raw, |r| {
+            seen.push(r.clone());
+            false
+        })
+        .unwrap()
+    );
+    assert_eq!(seen, vec![reference.clone(); 3]);
+    let mut count = 0;
+    assert!(
+        d.visit_large_value_refs(&raw, |r| {
+            assert_eq!(r, &reference);
+            count += 1;
+            true
+        })
+        .unwrap()
+    );
+    assert_eq!(count, 1);
+}
+
+// Internal byte fixtures pin array-relative offsets and nullable/scalar framing,
+// which are deliberately not visible in database query results.
+#[test]
+fn variable_fields_append_exact_bytes_into_existing_output() {
+    let nullable_string = ValueType::Nullable(Box::new(ValueType::String));
+    let nested_type = ValueType::Array(Box::new(ValueType::Array(Box::new(
+        nullable_string.clone(),
+    ))));
+    let cases = [
+        (
+            nullable_string,
+            Value::Nullable(Some(Box::new(Value::String("abc".into())))),
+            vec![1, 2, b'a', b'b', b'c'],
+        ),
+        (
+            ValueType::Array(Box::new(ValueType::String)),
+            Value::Array(vec![
+                Value::String("a".into()),
+                Value::String("bc".into()),
+                Value::String(String::new()),
+            ]),
+            vec![
+                3, 0, 0, 0, 14, 0, 0, 0, 17, 0, 0, 0, 2, b'a', 2, b'b', b'c', 2,
+            ],
+        ),
+        (
+            nested_type,
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::Nullable(Some(Box::new(Value::String("a".into())))),
+                    Value::Nullable(None),
+                ]),
+                Value::Array(vec![]),
+            ]),
+            vec![
+                2, 0, 0, 0, 20, 0, 0, 0, 2, 0, 0, 0, 11, 0, 0, 0, 1, 2, b'a', 0, 0, 0, 0, 0,
+            ],
+        ),
+        (
+            ValueType::Bytes,
+            Value::Bytes(vec![0, 255]),
+            vec![2, 0, 255],
+        ),
+        (
+            ValueType::Array(Box::new(ValueType::String)),
+            Value::Array(vec![]),
+            vec![0, 0, 0, 0],
+        ),
+    ];
+    for (value_type, value, expected) in cases {
+        let d = descriptor([value_type]);
+        let mut output = Vec::with_capacity(512);
+        output.extend_from_slice(&[91, 92, 93]);
+        let pointer = output.as_ptr();
+        d.encode_field_into(0, &value, &mut output).unwrap();
+        assert_eq!(&output[..3], &[91, 92, 93]);
+        assert_eq!(&output[3..], expected);
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(d.bind(&output[3..]).get_idx(0).unwrap(), value);
+    }
+}
+
+#[test]
+fn variable_field_failure_preserves_preexisting_output() {
+    let d = descriptor([ValueType::Array(Box::new(ValueType::stored_scalar(
+        crate::large_values::LargeValueKind::Json,
+    )))]);
+    let value = Value::Array(vec![
+        Value::String("{}".into()),
+        Value::String("invalid-json".into()),
+    ]);
+    let mut output = vec![91, 92, 93];
+    assert!(d.encode_field_into(0, &value, &mut output).is_err());
+    assert_eq!(output, [91, 92, 93]);
+}
+
+// An internal representation budget: every ordinary scalar in a materialized
+// row pays Value's inline width, even when no indirect large value is present.
+#[test]
+fn materialized_value_cells_have_a_small_inline_representation() {
+    assert!(
+        std::mem::size_of::<Value>() <= 64,
+        "Value occupies {} bytes; uncommon payloads must not inflate every cell",
+        std::mem::size_of::<Value>()
+    );
+}
+
+// Boxing changes Rust ownership only. Pin both the native scalar carrier and
+// the existing serde enum discriminant/payload independently of Value's layout.
+#[test]
+fn compact_large_value_preserves_native_and_serde_encodings() {
+    use crate::large_values::{LargeValueKind, StoredScalar, encode_stored_scalar, prepare};
+    let reference = prepare(LargeValueKind::Bytes, b"same payload")
+        .unwrap()
+        .value_ref;
+    let value = Value::Large(reference.clone().into());
+    let descriptor = descriptor([ValueType::Bytes]);
+    let stored = descriptor.create(std::slice::from_ref(&value)).unwrap();
+    assert_eq!(
+        stored,
+        encode_stored_scalar(
+            LargeValueKind::Bytes,
+            &StoredScalar::Chunked(reference.clone())
+        )
+        .unwrap()
+    );
+    assert_eq!(descriptor.bind(&stored).get_idx(0).unwrap(), value);
+    // Large remains enum variant 8 in the existing generic Value carrier.
+    let mut expected = vec![8];
+    expected.extend(postcard::to_allocvec(&reference).unwrap());
+    let encoded = postcard::to_allocvec(&value).unwrap();
+    assert_eq!(encoded, expected);
+    assert_eq!(postcard::from_bytes::<Value>(&encoded).unwrap(), value);
+    assert_eq!(
+        serde_json::to_value(&value).unwrap(),
+        serde_json::json!({"Large": reference})
+    );
 }

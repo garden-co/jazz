@@ -235,6 +235,11 @@ pub struct TableSchema {
     pub variants: Vec<TableVariant>,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static VARIANT_DESCRIPTOR_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl TableSchema {
     pub fn new(name: impl Into<String>, columns: impl IntoIterator<Item = ColumnSchema>) -> Self {
         Self::new_inner(name, columns, false)
@@ -380,6 +385,8 @@ impl TableSchema {
 
     /// Build the dense descriptor registered for one whole-row enum case.
     pub fn record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
+        #[cfg(test)]
+        VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(count.get() + 1));
         if self.variants.is_empty() {
             return Some(self.record_schema());
         }

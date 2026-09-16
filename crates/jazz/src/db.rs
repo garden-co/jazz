@@ -10,13 +10,15 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
-#[cfg(feature = "sync-autopsy")]
 use std::sync::{
-    LazyLock, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::task::{Context, Poll, Waker};
+#[cfg(feature = "sync-autopsy")]
+use std::sync::{LazyLock, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 
+use futures::FutureExt as _;
 use futures::lock::Mutex as LocalMutex;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_channel::oneshot;
@@ -901,8 +903,11 @@ impl PeerIoPump {
         &self,
         payload: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, String> {
-        let message = crate::wire::decode_sync_message(&payload)
-            .map_err(|error| format!("malformed auxiliary chunk payload: {error}"))?;
+        let message = match self.role {
+            PeerIoPumpRole::Upstream => crate::wire::decode_sync_message_trusted(&payload),
+            PeerIoPumpRole::Subscriber => crate::wire::decode_sync_message(&payload),
+        }
+        .map_err(|error| format!("malformed auxiliary chunk payload: {error}"))?;
         match self.route_incoming(message).await {
             Ok(()) => Ok(None),
             Err(_) => Ok(Some(payload)),
@@ -916,12 +921,13 @@ impl PeerIoPump {
         &self,
         frame: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, String> {
-        let decoded = crate::wire::decode_frame(&frame)
+        let context = self.wire_inbound_context()?;
+        let decoded = context
+            .decode_frame(&frame)
             .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
         let crate::wire::WireFrame::Message(envelope) = decoded else {
             return Ok(Some(frame));
         };
-        let context = self.wire_inbound_context()?;
         let mut decoder = crate::wire::WireStreamDecoder::new(context.negotiated_features())
             .map_err(|error| format!("invalid auxiliary wire context: {error}"))?;
         let message = crate::wire::admit_complete_envelope(context, &mut decoder, envelope)
@@ -1245,6 +1251,104 @@ impl groove::chunks::MissingChunkResolver for PeerChunkResolver {
 }
 pub(crate) type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
 
+/// One pending owner schema, shared with its authenticated upstream connections.
+/// Shared futures release their waiter registrations when individual reads cancel.
+struct PendingOpenSchema {
+    connection_epoch: Option<u64>,
+    authoritative_catalogue_received: bool,
+    schema: SchemaVersionId,
+    result: Option<Result<(), Error>>,
+    sender: Option<futures::channel::oneshot::Sender<Result<(), Error>>>,
+    wait: futures::future::Shared<futures::future::LocalBoxFuture<'static, Result<(), Error>>>,
+}
+
+type OpenSchemaAdmission = Rc<RefCell<Option<PendingOpenSchema>>>;
+
+impl PendingOpenSchema {
+    fn new(schema: SchemaVersionId) -> Self {
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        Self {
+            connection_epoch: None,
+            authoritative_catalogue_received: false,
+            schema,
+            result: None,
+            sender: Some(sender),
+            wait: async move {
+                receiver.await.unwrap_or_else(|_| {
+                    Err(Error::new(
+                        ErrorCode::Protocol,
+                        "database closed before schema admission",
+                    ))
+                })
+            }
+            .boxed_local()
+            .shared(),
+        }
+    }
+}
+
+fn finish_open_schema_admission(state: &OpenSchemaAdmission, result: Result<(), Error>) {
+    let sender = {
+        let mut state = state.borrow_mut();
+        let Some(pending) = state.as_mut() else {
+            return;
+        };
+        if matches!(pending.result, Some(Ok(()))) {
+            return;
+        }
+        pending.result = Some(result.clone());
+        pending.sender.take()
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(result);
+    }
+}
+
+fn finish_open_schema_connection(
+    state: &OpenSchemaAdmission,
+    connection_epoch: u64,
+    result: Result<(), Error>,
+) {
+    let owns_attempt = state
+        .borrow()
+        .as_ref()
+        .is_some_and(|pending| pending.connection_epoch == Some(connection_epoch));
+    if owns_attempt {
+        finish_open_schema_admission(state, result);
+    }
+}
+
+fn begin_open_schema_connection(state: &OpenSchemaAdmission, connection_epoch: u64) {
+    let replace = state.borrow().as_ref().is_some_and(|pending| {
+        pending.connection_epoch.is_some() && !matches!(pending.result, Some(Ok(())))
+    });
+    if replace {
+        finish_open_schema_admission(
+            state,
+            Err(Error::new(
+                ErrorCode::Protocol,
+                "upstream replaced before schema admission",
+            )),
+        );
+    }
+    if let Some(pending) = state.borrow_mut().as_mut() {
+        if matches!(pending.result, Some(Ok(()))) {
+            return;
+        }
+        if replace {
+            *pending = PendingOpenSchema::new(pending.schema);
+        }
+        pending.connection_epoch = Some(connection_epoch);
+    }
+}
+
+fn pending_open_schema_error() -> Error {
+    Error::new(
+        ErrorCode::Schema,
+        "opened schema is awaiting published catalogue admission; connect to the authority",
+    )
+}
+
 /// Temporary source-compatibility for node operations that are still wholly
 /// synchronous. Storage-facing call sites must use `lock().await` instead.
 /// Remove this trait as the remaining domains become suspendable.
@@ -1511,6 +1615,7 @@ where
     schema: JazzSchema,
     schema_version_id: SchemaVersionId,
     schema_view_is_fixed: bool,
+    requires_open_schema_admission: bool,
     schema_views: Rc<RefCell<BTreeMap<SchemaViewId, JazzSchema>>>,
     identity: DbIdentity,
     node: Rc<Node<S>>,
@@ -1800,7 +1905,19 @@ async fn queue_local_acknowledgements<S>(routes: &LocalFateRoutes, node: &Shared
 where
     S: OrderedKvStorage,
 {
-    let tx_ids = routes.borrow().keys().copied().collect::<Vec<_>>();
+    // Acknowledged routes remain registered for later global/rejection fates,
+    // but no longer need a local durability probe. A new queue on the same
+    // transaction still gets its own acknowledgement; dead queues need none.
+    let tx_ids = routes
+        .borrow()
+        .iter()
+        .filter(|(_, pending)| {
+            pending
+                .iter()
+                .any(|route| !route.local_acknowledged && route.queue.strong_count() > 0)
+        })
+        .map(|(tx_id, _)| *tx_id)
+        .collect::<Vec<_>>();
     let mut durable = BTreeSet::new();
     let mut node = node.lock().await;
     for tx_id in tx_ids {
@@ -2637,6 +2754,28 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Testing-only direct bulk installer; excludes connection admission and
+    /// scope receipts for isolated benchmark measurements.
+    #[cfg(feature = "testing")]
+    pub async fn ingest_captured_reset_bundles_for_benchmark(
+        &self,
+        bundles: &[crate::protocol::VersionBundle],
+    ) -> Result<usize, Error> {
+        Ok(self
+            .node
+            .node()
+            .lock()
+            .await
+            .ingest_captured_reset_bundles_for_benchmark(bundles)
+            .await?)
+    }
+
+    /// Complete the ordinary facade refresh after direct benchmark ingestion.
+    #[cfg(feature = "testing")]
+    pub async fn refresh_after_benchmark_ingest(&self) -> Result<usize, Error> {
+        self.refresh_subscriptions().await
+    }
+
     /// Reserve local transaction-clock positions through `high_water` before a
     /// trusted native foreground host reuses a node identity.
     pub async fn reserve_minted_tx_time_after(&self, high_water: TxTime) -> Result<(), Error> {
@@ -4307,10 +4446,13 @@ struct SubscriptionState {
     snapshot_index: RelationSnapshotIndex,
     snapshot_source: SubscriptionSnapshotSource,
     settled: bool,
-    /// A replacement graph opened cold. Keep the last complete facade only
-    /// until the replacement has its first local terminal batch, then publish
-    /// one complete reset from that retained baseline.
-    cold_runtime_replacement: bool,
+    /// The graph has not consumed its first local terminal batch. Withhold
+    /// initial publication (or retain the last complete replacement facade)
+    /// until that batch arrives, including a completed zero-row batch.
+    pending_initial_local_snapshot: bool,
+    /// A non-durable foreground has not yet received its local owner's answer.
+    /// This gates only opening; later disconnections retain the published view.
+    pending_initial_owner_result: bool,
     sender: SubscriptionSender,
 }
 
@@ -4351,7 +4493,7 @@ impl SubscriptionSender {
     fn materialized<S: OrderedKvStorage>(
         &self,
         node: &NodeState<S>,
-        query: &Query,
+        shape: &ValidatedQuery,
         event: &SubscriptionEvent,
     ) -> Result<bool, Error> {
         let mut publication = self.publication.borrow_mut();
@@ -4375,7 +4517,7 @@ impl SubscriptionSender {
                     rows: vec![row.row.clone()],
                     edges: Vec::new(),
                 };
-                if node.relation_snapshot_has_materialized_required_cells(query, &changed)? {
+                if node.relation_snapshot_has_materialized_required_cells(shape, &changed)? {
                     publication.unresolved.remove(&row.occurrence_id);
                 } else {
                     publication.unresolved.insert(row.occurrence_id.clone());
@@ -5572,6 +5714,10 @@ fn apply_maintained_membership_update_to_snapshot(
 /// Applies only top-level structured-terminal edits to the producer-owned
 /// subscription snapshot. Descendant edits remain in the returned event for
 /// binding object reducers, which own nested object materialization.
+#[cfg_attr(
+    feature = "cold-settle-attribution",
+    tracing::instrument(skip_all, name = "cold.phase.deliver_query_outputs")
+)]
 fn apply_terminal_operations_to_subscription_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
@@ -5631,9 +5777,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
     let before = affected
         .iter()
         .filter_map(|occurrence_id| {
-            let index = occurrences
-                .iter()
-                .position(|current| current == occurrence_id)?;
+            let index = *snapshot_index.roots.get(occurrence_id)?;
             Some((occurrence_id.clone(), (index, snapshot.rows[index].clone())))
         })
         .collect::<BTreeMap<_, _>>();
@@ -5678,13 +5822,17 @@ fn apply_terminal_operations_to_subscription_snapshot(
         }
     }
 
+    // Membership remains valid across positional edits; positions do not.
+    // Avoid searching the growing vector for a provably fresh insertion.
+    let mut present = occurrences.iter().cloned().collect::<BTreeSet<_>>();
     for (occurrence_id, operation) in root_operations {
         match operation.edit {
             groove::ivm::TerminalEdit::Insert { index, value, .. } => {
-                if let Some(existing) = occurrences
-                    .iter()
-                    .position(|current| current == &occurrence_id)
-                {
+                if !present.insert(occurrence_id.clone()) {
+                    let existing = occurrences
+                        .iter()
+                        .position(|current| current == &occurrence_id)
+                        .expect("present occurrence has a snapshot position");
                     occurrences.remove(existing);
                     snapshot.rows.remove(existing);
                     snapshot.root_count -= 1;
@@ -5733,6 +5881,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
                         "terminal root removal addressed a missing result",
                     ));
                 };
+                present.remove(&occurrence_id);
                 occurrences.remove(index);
                 snapshot.rows.remove(index);
                 snapshot.root_count -= 1;
@@ -5785,10 +5934,10 @@ fn apply_terminal_operations_to_subscription_snapshot(
     let mut removed = Vec::new();
     for occurrence_id in affected {
         let previous = before.get(&occurrence_id);
-        let current = occurrences
-            .iter()
-            .position(|current| current == &occurrence_id)
-            .map(|index| (index, &snapshot.rows[index]));
+        let current = snapshot_index
+            .roots
+            .get(&occurrence_id)
+            .map(|&index| (index, &snapshot.rows[index]));
         match (previous, current) {
             (None, Some((index, row))) => added.push(SubscriptionOutputRow {
                 occurrence_id,

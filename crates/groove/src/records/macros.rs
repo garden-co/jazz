@@ -814,6 +814,8 @@ macro_rules! define_record {
             $crate::records::macros::paste::paste! {
                 $(pub const [<FIELD_ $field:upper _IDX>]: usize = $idx;)*
             }
+            /// Names of the declared fields before the dynamic user-cell tail.
+            pub const PREFIX_FIELD_NAMES: &'static [&'static str] = &[$(stringify!($field)),*];
             pub const USER_BASE: usize = 0 $(+ { let _ = stringify!($field); 1 })*;
             pub const USER_CELLS: usize = Self::USER_BASE;
 

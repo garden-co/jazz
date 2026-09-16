@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, SchemaBuilder,
-    TablePolicies, TableSchema, Value,
+    ColumnType, JazzClient, ObjectId, Operation, PolicyExpr, SchemaBuilder, TablePolicies,
+    TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -320,7 +320,7 @@ async fn connect_ready_user(
 async fn inherited_select_policy_exposes_child_row_through_parent() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -364,7 +364,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
             let alice_rows = wait_for_query(
                 &alice,
                 jazz::query::Query::from("documents"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(25),
                 "alice sees forward-inherited document",
                 |rows| (rows.len() == 1 && rows[0].0 == document_id).then_some(rows),
@@ -375,7 +375,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
             let bob_rows = wait_for_query(
                 &bob,
                 jazz::query::Query::from("documents"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(3),
                 "bob does not see alice's forward-inherited document",
                 Some,
@@ -408,7 +408,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
 async fn reverse_inherited_select_retains_nested_source_inheritance() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = reverse_inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -449,15 +449,16 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(25),
                 "alice sees file through the attachment's inherited organization policy",
                 |rows| rows.iter().any(|(id, _)| *id == file_id).then_some(()),
             )
             .await;
             let bob_rows = bob
-                .query(query, Some(DurabilityTier::EdgeServer))
+                .query(query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("bob queries files");
             assert!(
                 bob_rows.iter().all(|(id, _)| *id != file_id),
@@ -487,7 +488,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
 async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chain() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -536,7 +537,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
             wait_for_query(
                 &alice,
                 jazz::query::Query::from("documents"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(25),
                 "alice sees multi-hop forward-inherited document",
                 |rows| (rows.len() == 1 && rows[0].0 == document_id).then_some(rows),
@@ -565,7 +566,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
 async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -620,7 +621,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
             wait_for_query(
                 &alice,
                 jazz::query::Query::from("shared_documents"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(25),
                 "alice sees document through one of two inherited parents",
                 |rows| (rows.len() == 1 && rows[0].0 == document_id).then_some(rows),
@@ -643,7 +644,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
 async fn inherited_select_policy_expands_both_forward_parent_branches() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_select_schema();
             publish_schema(&server, &schema).await;
 
@@ -704,7 +705,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
             wait_for_query(
                 &alice,
                 jazz::query::Query::from("shared_documents"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(25),
                 "alice sees document when both inherited parents expand to branches",
                 |rows| (rows.len() == 1 && rows[0].0 == document_id).then_some(rows),
@@ -732,7 +733,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
 async fn inherited_update_policy_allows_update_through_parent() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_update_schema();
 
             push_catalogue_in_memory(
@@ -794,6 +795,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
                 .expect("alice inserts child");
             let update_tx = alice_session
                 .update(
+                    "children",
                     child_id,
                     vec![("title".to_string(), Value::Text("published".to_string()))],
                 )
@@ -812,9 +814,10 @@ async fn inherited_update_policy_allows_update_through_parent() {
             let rows = alice
                 .query(
                     jazz::query::Query::from("children"),
-                    Some(DurabilityTier::EdgeServer),
+                    jazz::tools::ReadTier::Remote,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query children");
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].0, child_id);
@@ -846,7 +849,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
 async fn inherited_update_policy_allows_multi_hop_update_chain() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_update_schema();
 
             push_catalogue_in_memory(
@@ -908,6 +911,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                 .expect("alice inserts child");
             let update_tx = alice_session
                 .update(
+                    "children",
                     child_id,
                     vec![("title".to_string(), Value::Text("published".to_string()))],
                 )
@@ -945,7 +949,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
 async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_grant() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = inherited_update_schema();
 
             push_catalogue_in_memory(
@@ -1017,6 +1021,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 .expect("alice inserts child");
             let update_tx = alice_session
                 .update(
+                    "children",
                     child_id,
                     vec![
                         ("parent_id".to_string(), Value::Uuid(parent_b)),

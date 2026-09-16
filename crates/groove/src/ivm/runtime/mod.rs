@@ -38,8 +38,9 @@ use crate::ivm::{
     ValueComparison, VariantProjectOp, VariantProjectionTarget,
 };
 use crate::records::{
-    self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, RawProjectionField,
-    RawProjectionScratch, RecordDescriptor, Value, ValueType, collect_by_ordered_scalar,
+    self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, PreparedProjection,
+    RawProjectionField, RawProjectionScratch, RecordDescriptor, Value, ValueType,
+    collect_by_ordered_scalar,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
 use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, ScanRequest};
@@ -54,7 +55,9 @@ mod state;
 mod terminal;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
-use join::{AntiJoinState, ArrangementState, JoinState, SemiJoinState, touched_join_keys};
+use join::{
+    AntiJoinState, ArrangementState, JoinInput, JoinState, SemiJoinState, touched_join_keys,
+};
 use persist::apply_persist_delta;
 use recursion::{
     RecursiveNodes, RecursiveState, hydrate_recursive_arrangements, recursive_delta,
@@ -91,7 +94,7 @@ enum VariantProjectionCase {
     Project {
         source: RecordDescriptor,
         project: MapProjectOp,
-        raw_projection: Option<Arc<[RawProjectionField]>>,
+        raw_projection: Option<Arc<PreparedProjection>>,
         /// A Jazz schema-read boundary may exclude rows containing a case the
         /// target schema cannot represent. This is deliberately narrower than
         /// a general projection error: malformed values still fail loudly.
@@ -105,7 +108,7 @@ enum VariantProjectionCase {
         tag: u32,
         payload: RecordDescriptor,
         project: MapProjectOp,
-        raw_projection: Option<Arc<[RawProjectionField]>>,
+        raw_projection: Option<Arc<PreparedProjection>>,
     },
 }
 

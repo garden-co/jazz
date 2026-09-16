@@ -57,9 +57,9 @@ use crate::protocol::ReadViewKey;
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
-    ProgramFactEntry, ProgramSourceId, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef,
-    RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
+    ProgramFactEntry, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, RelationEdgeEntry,
+    ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
+    ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -76,6 +76,7 @@ mod prepared_bindings;
 mod query_read_sets;
 mod query_result_rows;
 mod unavailable_inputs;
+
 pub(crate) use local_availability_receipts::{
     LocalAvailabilityRecord, LocalAvailabilityWatermark, LocalRowAvailability,
     local_availability_record_descriptor,
@@ -107,6 +108,12 @@ const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 #[cfg(test)]
 thread_local! {
     static CLIENT_PHYSICAL_ROW_QUERY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COVERED_INPUT_SOURCE_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_covered_input_source_discoveries_for_test() -> usize {
+    COVERED_INPUT_SOURCE_DISCOVERIES.with(|calls| calls.replace(0))
 }
 
 #[cfg(test)]
@@ -305,7 +312,9 @@ where
     pub(crate) fn compiled_covered_input_sources_for_subscription(
         &self,
         subscription: SubscriptionKey,
-    ) -> Result<BTreeSet<ProgramSourceId>, Error> {
+    ) -> Result<CompiledScopeTables, Error> {
+        #[cfg(test)]
+        COVERED_INPUT_SOURCE_DISCOVERIES.with(|calls| calls.set(calls.get() + 1));
         let registered = self
             .unique_registered_binding_for_subscription(subscription)
             .ok_or(Error::InvalidStoredValue(
@@ -336,7 +345,7 @@ where
             Some(registered.binding_view_key),
             QueryAuthorizationMode::ClientLocal,
         )?;
-        Ok(query_program_source_requests(&request)
+        let tables = query_program_source_requests(&request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?
             .into_iter()
             .filter(|source_request| {
@@ -346,8 +355,17 @@ where
                         Some(SourceExpr::SettledBindingView { .. })
                     )
             })
-            .map(|source_request| source_request.source.program_source_id())
-            .collect())
+            .map(|source_request| source_request.source.table)
+            .collect::<BTreeSet<_>>();
+        tables
+            .into_iter()
+            .map(|table| {
+                Ok((
+                    self.scope_physical_table(request.reads.primary.read_schema, &table)?,
+                    table.into(),
+                ))
+            })
+            .collect()
     }
 
     async fn compile_current_query_program(
@@ -1133,15 +1151,20 @@ where
         request: &QueryProgramRequest,
     ) -> Result<
         (
-            BTreeMap<SourceId, InputSourceId>,
+            BTreeMap<SourceId, GraphBuilder>,
             BTreeMap<SourceId, RecordDescriptor>,
-            BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
+            BTreeMap<crate::ids::GlobalPhysicalTableId, maintained_views::CoveredInputSource>,
         ),
         Error,
     > {
         let mut runtime_sources = BTreeMap::new();
         let mut runtime_source_descriptors = BTreeMap::new();
         let mut sources = BTreeMap::new();
+        // Share only within this exact receiver authority scope/read schema.
+        // Occurrences retain their own row shapes and downstream operators;
+        // the input carries the union of their metadata, encoded once per row.
+        let mut table_metadata = BTreeMap::<_, BTreeMap<_, _>>::new();
+        let mut occurrences = Vec::new();
         for source_request in query_program_source_requests(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?
         {
@@ -1173,25 +1196,42 @@ where
                 read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
                     &table, &metadata,
                 );
-            let input = self.database.allocate_input_source(descriptor.clone());
-
-            let source_id = source_request.source.program_source_id();
-            if sources
-                .insert(
-                    source_id,
-                    maintained_views::CoveredInputSource {
-                        id: input,
-                        descriptor,
-                    },
-                )
-                .is_some()
-            {
-                return Err(Error::InvalidStoredValue(
-                    "duplicate compiled receiver program source identity",
-                ));
+            table_metadata
+                .entry(source_request.source.table.clone())
+                .or_default()
+                .extend(metadata);
+            occurrences.push((source_request.source, descriptor));
+        }
+        for (table_name, metadata) in table_metadata {
+            let table = self.table_in_schema(&table_name, request.reads.primary.read_schema)?;
+            let descriptor =
+                read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
+                    &table, &metadata,
+                );
+            let id = self.database.allocate_input_source(descriptor.clone());
+            sources.insert(
+                self.scope_physical_table(request.reads.primary.read_schema, &table_name)?,
+                maintained_views::CoveredInputSource {
+                    id,
+                    descriptor,
+                    table: table_name.into(),
+                },
+            );
+        }
+        for (occurrence, descriptor) in occurrences {
+            let shared = &sources[&self
+                .scope_physical_table(request.reads.primary.read_schema, &occurrence.table)?];
+            let mut graph = GraphBuilder::input_source(shared.id, shared.descriptor.clone());
+            if shared.descriptor != descriptor {
+                graph = graph.project(
+                    descriptor
+                        .fields()
+                        .iter()
+                        .map(|field| field.name.clone().expect("covered input fields are named")),
+                );
             }
-            runtime_sources.insert(source_request.source.clone(), input);
-            runtime_source_descriptors.insert(source_request.source.clone(), descriptor);
+            runtime_sources.insert(occurrence.clone(), graph);
+            runtime_source_descriptors.insert(occurrence, descriptor);
         }
         Ok((runtime_sources, runtime_source_descriptors, sources))
     }
@@ -1262,7 +1302,7 @@ where
     /// inputs are owned by a subscription, so retire the allocations here.
     async fn retire_covered_input_sources(
         &mut self,
-        sources: &BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
+        sources: &BTreeMap<crate::ids::GlobalPhysicalTableId, maintained_views::CoveredInputSource>,
     ) -> Result<(), Error> {
         self.database
             .retire_input_sources(sources.values().map(|source| source.id))
@@ -3590,11 +3630,9 @@ where
             let witnesses = self
                 .selected_deletion_witnesses(&authority_result_key, shape.schema_version())
                 .await?;
-            let (adds, removes) = local
+            transitions.supporting_changed |= local
                 .maintained
                 .replace_selected_deletion_witnesses(witnesses);
-            transitions.program_fact_adds.extend(adds);
-            transitions.program_fact_removes.extend(removes);
         }
         Ok((
             local.subscription,
@@ -3695,6 +3733,10 @@ where
         )
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_setup")
+    )]
     async fn open_seeded_maintained_subscription_view_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -3717,7 +3759,7 @@ where
             super::maintained_subscription_view::ResultTransitions,
             BTreeMap<String, TableSchema>,
             bool,
-            BTreeMap<ProgramSourceId, maintained_views::CoveredInputSource>,
+            BTreeMap<crate::ids::GlobalPhysicalTableId, maintained_views::CoveredInputSource>,
         ),
         Error,
     > {
@@ -3854,6 +3896,8 @@ where
         }
 
         let tables = program.lowered.maintained_terminal_tables.clone();
+        let targeted_refresh_tables = program.lowered.targeted_refresh_tables.clone();
+        let targeted_refresh_uncertain = program.lowered.targeted_refresh_uncertain;
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
         let binding_source_shape = program
             .request
@@ -3906,6 +3950,20 @@ where
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
         let mut maintained = MaintainedSubscriptionView::default();
+        maintained.physical_tables = self
+            .catalogue
+            .physical_mappings
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue(
+                "maintained scope schema has no physical mapping",
+            ))?
+            .identities
+            .tables
+            .iter()
+            .map(|(name, table)| (name.clone().into(), table.id))
+            .collect();
+        maintained.targeted_refresh_tables = targeted_refresh_tables;
+        maintained.targeted_refresh_uncertain = targeted_refresh_uncertain;
         maintained.edge_availability_owner = edge_availability_owner;
         maintained.set_read_view(read_view_key);
         // Resolve names from permanent physical catalogue identities, never
@@ -3970,6 +4028,7 @@ where
                 transitions
                     .result_payload_removes
                     .extend(snapshot_transitions.result_payload_removes);
+                transitions.supporting_changed |= snapshot_transitions.supporting_changed;
                 transitions
                     .program_fact_adds
                     .extend(snapshot_transitions.program_fact_adds);
@@ -4021,6 +4080,7 @@ where
                         transitions
                             .result_payload_removes
                             .extend(delta_transitions.result_payload_removes);
+                        transitions.supporting_changed |= delta_transitions.supporting_changed;
                         transitions
                             .program_fact_adds
                             .extend(delta_transitions.program_fact_adds);

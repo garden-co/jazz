@@ -22,10 +22,10 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-    /// Receiver-local mutable inputs for one exact authority-covered program
-    /// closure. The mapping is keyed by normalized source identity, never by
-    /// a table name, sink, collector, or storage prefix.
-    pub(super) covered_input_sources: BTreeMap<SourceId, groove::ivm::InputSourceId>,
+    /// Per-occurrence projections of receiver-local shared scope/table inputs.
+    /// The compiler grants each occurrence its exact row shape; sharing an
+    /// input never combines different authority scopes or downstream operators.
+    pub(super) covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
     /// The exact compiler-owned descriptor registered for each receiver
     /// source. Input lowering must reuse it rather than reconstructing an
     /// authored descriptor after the physical catalogue has selected a
@@ -186,7 +186,7 @@ where
         let (covered_input_source, covered_input_descriptor) =
             if request.visibility == RowVisibility::Visible {
                 (
-                    self.covered_input_sources.get(&request.source).copied(),
+                    self.covered_input_sources.get(&request.source).cloned(),
                     self.covered_input_descriptors.get(&request.source).cloned(),
                 )
             } else {
@@ -212,7 +212,7 @@ where
                 self.covered_input_sources.keys().collect::<Vec<_>>(),
             );
         }
-        if let Some(input_source) = covered_input_source
+        if let Some(input_source) = covered_input_source.as_ref()
             && (matches!(source, SourceExpr::SettledBindingView { .. })
                 // Strict remote source occurrences have no eligible local
                 // alternative. Aggregate output is synthetic, so its raw
@@ -240,7 +240,7 @@ where
             return Ok(ResolvedSource {
                 stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
-                graph: GraphBuilder::input_source(input_source, descriptor.clone()),
+                graph: input_source.clone(),
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
                     descriptor,
@@ -1010,37 +1010,13 @@ where
                     SourceGap::HistoricalStorageCut,
                 ));
             }
-            let needs_settle_position = request
-                .requirements
-                .metadata
-                .contains(&SourceMetadataRequirement::SettlePosition);
-            let mut metadata = BTreeMap::new();
-            if needs_settle_position {
-                metadata.insert(
-                    SourceMetadataRequirement::SettlePosition,
-                    SourceMetadataFields::SettlePosition {
-                        settle_position_field: "settle_position".to_owned(),
-                    },
-                );
-            }
-            let descriptor = current_row_descriptor_with_hidden_source_fields(&table, &metadata);
-            let base = self
+            let CurrentSourceGraph {
+                graph: base,
+                descriptor,
+                metadata,
+            } = self
                 .projected_historical_source_graph(request, &table, position)
                 .await?;
-            let base = if needs_settle_position {
-                base.project_fields(
-                    current_row_fields(&table)
-                        .into_iter()
-                        .map(ProjectField::named)
-                        .chain([ProjectField::null_typed(
-                            "settle_position",
-                            ValueType::Nullable(Box::new(ValueType::U64)),
-                        )])
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                base
-            };
             let graph = match &authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -1639,8 +1615,8 @@ where
         let graph = if let Some(input_source) = covered_input_source {
             // Online remote-if-possible composes the authority closure with the
             // eligible local-current overlay before it enters the same
-            // maintained program. The union is per normalized source
-            // occurrence; table-level union would conflate aliases/self-joins.
+            // maintained program. The input is shared, but overlay composition
+            // remains downstream of each occurrence's metadata projection.
             // Both sides can carry the same already-admitted version (the
             // local store retains received authority data), so select their
             // single current winner by the normal version identity before
@@ -1653,9 +1629,7 @@ where
                     request.source,
                 );
             }
-            let covered_descriptor = covered_input_descriptor
-                .expect("checked alongside compiler-owned covered input source");
-            let covered = GraphBuilder::input_source(input_source, covered_descriptor.clone());
+            let covered = input_source;
             let graph = if receiver_local_overlay {
                 // Existing cached rows outside this exact source occurrence
                 // cannot enter merely because they have a pending edit.
@@ -2572,31 +2546,47 @@ where
         request: &SourceRequest,
         table: &TableSchema,
         position: GlobalTime,
-    ) -> Result<GraphBuilder, SourceResolutionError> {
-        if self.can_use_bounded_historical_source(&request.source.table) {
+    ) -> Result<CurrentSourceGraph, SourceResolutionError> {
+        let rows = if self.can_use_bounded_historical_source(&request.source.table) {
             self.node
                 .query_engine_read_metrics
                 .source_global_time_range_scans += 1;
-            let rows = self
-                .node
+            self.node
                 .bounded_historical_current_rows(&request.source.table, position)
                 .await
-                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-            return inline_current_graph(table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut));
-        }
-        self.node.query_engine_read_metrics.source_full_scans += 1;
-        let rows = self
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?
+        } else {
+            self.node.query_engine_read_metrics.source_full_scans += 1;
+            self.node
+                .projected_historical_current_rows(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    position,
+                )
+                .await
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?
+        };
+        let schema_version_alias = self
             .node
-            .projected_historical_current_rows(
-                &request.source.table,
-                self.read_view.read_schema,
-                position,
-            )
+            .ensure_schema_version_alias(self.read_view.read_schema)
             .await
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-        inline_current_graph(table, rows)
-            .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))
+        // Historical rows must satisfy the same metadata contract as current
+        // and snapshot sources. Build their descriptor and declarations with
+        // the graph so version identity survives schema projection.
+        let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+            table,
+            rows,
+            schema_version_alias,
+            "historical",
+            &request.requirements,
+        )
+        .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+        Ok(CurrentSourceGraph {
+            graph,
+            descriptor,
+            metadata,
+        })
     }
 
     pub(crate) async fn projected_maintained_visible_current_source_graph(
@@ -4972,8 +4962,8 @@ pub(super) fn covered_input_source_metadata(
 }
 
 /// Encode one already-authorized current row for a receiver-owned covered
-/// input. The descriptor comes from the exact compiled source occurrence;
-/// callers must never synthesize it from a table or result collector.
+/// input. Its descriptor is the compiler's union of metadata required by that
+/// table's consumers within this authority scope, not a result collector.
 pub(super) fn covered_input_record(
     table: &TableSchema,
     descriptor: &RecordDescriptor,

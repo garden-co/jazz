@@ -1,5 +1,8 @@
 # BigLabel benchmark variant
 
+[metadata.ts](metadata.ts) owns the wallclock import descriptions, timing boundaries
+and row-throughput denominators used by the performance timeline.
+
 This package is a self-contained Rust model of BigLabel's read-heavy record-label
 workload. It intentionally duplicates the schema and deterministic fixture needed
 for measurement; it does not import application runtime helpers.

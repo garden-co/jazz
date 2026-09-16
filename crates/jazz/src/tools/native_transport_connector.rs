@@ -18,12 +18,23 @@ use crate::tools::AppId;
 use crate::tools::websocket_prelude_auth::AuthConfig;
 use crate::wire::WireTransport;
 
+/// Requested native peer-link admission. Scope-isolated relay admission requires
+/// explicit support from the authenticated upstream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeTransportLink {
+    #[default]
+    OrdinarySession,
+    ScopeIsolatedClientRelay,
+}
+
 /// Inputs shared by the public client and an edge server when opening a native
 /// peer link. The wake callback is only for newly staged inbound work: waking
 /// for outbound sends creates an empty-tick feedback loop in the synchronous
 /// database owner.
 #[derive(Clone)]
 pub struct NativeTransportRequest {
+    pub requested_link: NativeTransportLink,
     pub server_url: String,
     pub app_id: AppId,
     pub peer_identity: AuthorSubject,
@@ -34,6 +45,7 @@ pub struct NativeTransportRequest {
 impl std::fmt::Debug for NativeTransportRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeTransportRequest")
+            .field("requested_link", &self.requested_link)
             .field("server_url", &self.server_url)
             .field("app_id", &self.app_id)
             .field("peer_identity", &self.peer_identity)
@@ -196,6 +208,8 @@ mod tests {
         let app_id = AppId::random();
         let peer_identity = AuthorSubject::SYSTEM;
         let connected = futures::executor::block_on(connector.connect(NativeTransportRequest {
+            requested_link:
+                crate::tools::native_transport_connector::NativeTransportLink::OrdinarySession,
             server_url: "https://example.invalid".to_owned(),
             app_id,
             peer_identity,
@@ -223,6 +237,8 @@ mod tests {
     fn request_debug_redacts_all_authentication_material() {
         let marker = "native-connector-credential-marker-9af1";
         let request = NativeTransportRequest {
+            requested_link:
+                crate::tools::native_transport_connector::NativeTransportLink::OrdinarySession,
             server_url: "https://example.invalid".to_owned(),
             app_id: AppId::random(),
             peer_identity: AuthorSubject::SYSTEM,

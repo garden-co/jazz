@@ -9,6 +9,100 @@ use crate::node::CurrentRowPublicationField;
 use crate::node::query_eval::coerce_prepared_binding_value;
 use groove::records::{DescriptorField, FieldIdentity};
 
+/// Share execution only after proving the complete typed source/routing schema
+/// and graph equal, except for the explicitly known terminal role literal.
+/// Logical sinks remain separate contracts; no per-row identity cache is needed.
+pub(super) fn shared_witness_sinks(terminals: &[LoweredTerminal]) -> BTreeMap<String, String> {
+    let mut shared = BTreeMap::new();
+    for replacement in terminals {
+        let OutputTerminalSchema::Fact(ProgramFactOutput {
+            key: ProgramFactKey::ReplacementWitnesses,
+            terminal: replacement_role,
+            schema: ProgramFactSchema::ReplacementWitnesses(replacement_schema),
+        }) = &replacement.output
+        else {
+            continue;
+        };
+        let (version_role, version_tag, replacement_tag) = match replacement_role {
+            ProgramFactTerminal::ReplacementWitnessContent => (
+                ProgramFactTerminal::VersionWitnessContent,
+                "version_content",
+                "replacement_content",
+            ),
+            ProgramFactTerminal::ReplacementWitnessDeletion => (
+                ProgramFactTerminal::VersionWitnessDeletion,
+                "version_deletion",
+                "replacement_deletion",
+            ),
+            _ => continue,
+        };
+        for version in terminals {
+            if shared.values().any(|sink| sink == &version.sink) {
+                continue;
+            }
+            let OutputTerminalSchema::Fact(ProgramFactOutput {
+                key: ProgramFactKey::VersionWitnesses,
+                terminal,
+                schema: ProgramFactSchema::VersionWitnesses(version_schema),
+            }) = &version.output
+            else {
+                continue;
+            };
+            if *terminal != version_role || version_schema != replacement_schema {
+                continue;
+            }
+            let (
+                GraphBuilder::Project {
+                    input: version_input,
+                    fields: version_fields,
+                },
+                GraphBuilder::Project {
+                    input: replacement_input,
+                    fields: replacement_fields,
+                },
+            ) = (&version.graph, &replacement.graph)
+            else {
+                continue;
+            };
+            if version_input != replacement_input
+                || version_fields.len() != replacement_fields.len()
+            {
+                continue;
+            }
+            let mut role_fields = 0;
+            let equal = version_fields
+                .iter()
+                .zip(replacement_fields)
+                .all(|(left, right)| {
+                    if left.output_name == version_schema.role_field {
+                        role_fields += 1;
+                        left.output_name == right.output_name
+                            && left.output_identity == right.output_identity
+                            && left.expression
+                                == ProjectField::literal(
+                                    "event_kind",
+                                    Value::String(version_tag.into()),
+                                )
+                                .expression
+                            && right.expression
+                                == ProjectField::literal(
+                                    "event_kind",
+                                    Value::String(replacement_tag.into()),
+                                )
+                                .expression
+                    } else {
+                        left == right
+                    }
+                });
+            if equal && role_fields == 1 {
+                shared.insert(replacement.sink.clone(), version.sink.clone());
+                break;
+            }
+        }
+    }
+    shared
+}
+
 fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<String> {
     source
         .row_shape
@@ -220,7 +314,13 @@ pub(super) fn lowered_terminals(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_else(|| source_terminal_route_fields(source, &root_route_fields));
-    let visible_root_with_routes = if root_source_route_fields.is_empty() {
+    let visible_root_with_routes = if !flat_join_payload_fields(plan).is_empty() {
+        source_rows_for_visible_graph(
+            source,
+            closure.visible_root.clone(),
+            &root_source_route_fields,
+        )?
+    } else if root_source_route_fields.is_empty() {
         closure.visible_root.clone()
     } else {
         closure
@@ -297,10 +397,25 @@ pub(super) fn lowered_terminals(
                 &contribution_route_fields,
             )?
         } else {
+            let (visible_parent, parent_source) = match &contribution.parent {
+                Some(parent) => (
+                    covered_source_members.get(parent).cloned().ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Runtime(
+                            "nested join contribution requires its admitted parent".to_owned(),
+                        ))
+                    })?,
+                    resolved_sources.get(parent).ok_or_else(|| {
+                        single_gap_report(UnsupportedReason::Runtime(
+                            "nested join parent source was not resolved".to_owned(),
+                        ))
+                    })?,
+                ),
+                None => (closure.visible_root.clone(), source),
+            };
             join_contribution_membership_graph(
-                closure.visible_root.clone(),
+                visible_parent,
                 contribution,
-                source,
+                parent_source,
                 resolved_source,
                 &request.input.shape.nodes,
                 resolved_sources,
@@ -529,10 +644,13 @@ pub(super) fn lowered_terminals(
                         .iter()
                         .map(|field| (field.name.clone(), field.ty.clone())),
                 );
+                // Keep the session/parameter routes used to partition this
+                // terminal, even though they are not public result columns.
                 let graph = graph.clone().project_fields(
                     public_fields
                         .iter()
-                        .map(|field| ProjectField::named(&field.name)),
+                        .map(|field| ProjectField::named(&field.name))
+                        .chain(root_route_fields.iter().map(ProjectField::named)),
                 );
                 let public_field_names = public_fields
                     .iter()
@@ -724,16 +842,14 @@ pub(super) fn lowered_terminals(
                         request,
                         claim_route_fields.clone(),
                     )?;
-                    let contribution_graph = join_contribution_membership_graph(
-                        closure.visible_root.clone(),
-                        contribution,
-                        source,
-                        resolved_source,
-                        &request.input.shape.nodes,
-                        resolved_sources,
-                        request,
-                        &claim_route_fields,
-                    )?;
+                    let contribution_graph = covered_source_members
+                        .get(&contribution.source)
+                        .cloned()
+                        .ok_or_else(|| {
+                            single_gap_report(UnsupportedReason::Runtime(
+                                "join contribution has no admitted source rows".to_owned(),
+                            ))
+                        })?;
                     let graph = fact_terminal_graph(
                         fact,
                         contribution_graph,
@@ -3121,13 +3237,28 @@ pub(super) fn source_rows_for_visible_graph(
         version.tx_time_field,
         version.tx_node_field,
     ];
-    keys.extend(route_fields.iter().cloned());
-    Ok(GraphBuilder::semi_join(
-        source.graph.clone(),
-        visible,
-        keys.clone(),
-        keys,
-    ))
+    keys.extend(source.routing_fields.intersection(route_fields).cloned());
+    if route_fields.is_empty() {
+        return Ok(GraphBuilder::semi_join(
+            source.graph.clone(),
+            visible,
+            keys.clone(),
+            keys,
+        ));
+    }
+    // A joined table's policy may introduce a route absent from the root
+    // source. Recover the source row by exact version and shared routes,
+    // retaining every authority route from the admitted visible relation.
+    let mut fields = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+    fields.extend(
+        route_fields
+            .iter()
+            .map(|field| ProjectField::renamed(right_field(field), field.clone())),
+    );
+    Ok(
+        GraphBuilder::join(source.graph.clone(), visible, keys.clone(), keys)
+            .project_fields(fields),
+    )
 }
 
 /// Attach immutable version evidence to rows that have already passed the
@@ -3155,43 +3286,73 @@ fn content_version_witness_graph_from_visible_graph(
             inline_version_witness_fields_for_tagged_rows(source, event_kind)?,
         ),
     };
-    let witness_names = witness_fields
-        .iter()
-        .map(|field| field.output_name.clone())
-        .collect::<Vec<_>>();
-    let witnesses = witness_source.project_fields(witness_fields);
-    let version = version_witness_fields(&source.row_shape)?;
-    if routing_param_fields.is_empty() {
-        return Ok(GraphBuilder::semi_join(
-            witnesses,
-            visible_graph,
-            ["row_uuid", "tx_time", "tx_node_id"],
-            [
-                source.row_shape.row_uuid_field.clone(),
-                version.tx_time_field.clone(),
-                version.tx_node_field.clone(),
-            ],
-        ));
-    }
-    let mut fields = witness_names
-        .into_iter()
-        .map(|field| ProjectField::renamed(format!("right.{field}"), field))
-        .collect::<Vec<_>>();
-    fields.extend(
-        routing_param_fields
+    // Resolve selection against the raw carrier before expanding it into a
+    // terminal witness (which duplicates metadata and wraps authored cells).
+    let witness_keys = ["row_uuid", "tx_time", "tx_node_id"].map(|name| {
+        let field = witness_fields
             .iter()
-            .map(|field| ProjectField::renamed(format!("left.{field}"), field.clone())),
-    );
-    Ok(GraphBuilder::join(
-        visible_graph,
-        witnesses,
-        [
-            source.row_shape.row_uuid_field.clone(),
-            version.tx_time_field.clone(),
-            version.tx_node_field.clone(),
-        ],
-        ["row_uuid", "tx_time", "tx_node_id"],
-    )
+            .find(|field| field.output_name == name)
+            .expect("witness projection declares its exact version key");
+        let groove::ivm::ProjectExpr::Field(source) = &field.expression else {
+            unreachable!("witness identity is a source field")
+        };
+        source.clone()
+    });
+    let version = version_witness_fields(&source.row_shape)?;
+    let visible_keys = vec![
+        FieldRef::name(source.row_shape.row_uuid_field.clone()),
+        FieldRef::name(version.tx_time_field),
+        FieldRef::name(version.tx_node_field),
+    ];
+    if routing_param_fields.is_empty() {
+        return Ok(GraphBuilder::SemiJoin {
+            left: std::sync::Arc::new(witness_source),
+            right: std::sync::Arc::new(visible_graph),
+            left_on: witness_keys.into(),
+            right_on: visible_keys,
+            comparison: groove::ivm::ValueComparison::Exact,
+        }
+        .project_fields(witness_fields));
+    }
+
+    // A routed publication keeps the visibility relation's bag multiplicity
+    // and binding values. Groove prunes unused join input columns after
+    // binding the exact keys and the projection's field dependencies.
+    let mut fields = witness_fields;
+    for field in &mut fields {
+        use groove::ivm::ProjectExpr;
+        let key = match &mut field.expression {
+            ProjectExpr::Field(key)
+            | ProjectExpr::Nullable(key)
+            | ProjectExpr::NullableFlat(key)
+            | ProjectExpr::RecordField { source: key, .. }
+            | ProjectExpr::EnumTagRemap { source: key, .. }
+            | ProjectExpr::EnumRemap { source: key, .. }
+            | ProjectExpr::RecursiveEnumRemap { source: key, .. } => key,
+            ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
+                continue;
+            }
+        };
+        match key {
+            FieldRef::Name(name) | FieldRef::StoredName(name) => {
+                *key = FieldRef::stored_name(format!("right.{name}"));
+            }
+            FieldRef::Resolved(_) => unreachable!("witness carriers are bound by name"),
+        }
+    }
+    fields.extend(routing_param_fields.iter().map(|field| {
+        let mut projected = ProjectField::named(field);
+        projected.expression =
+            groove::ivm::ProjectExpr::Field(FieldRef::stored_name(format!("left.{field}")));
+        projected
+    }));
+    Ok(GraphBuilder::Join {
+        left: std::sync::Arc::new(visible_graph),
+        right: std::sync::Arc::new(witness_source),
+        left_on: visible_keys,
+        right_on: witness_keys.into(),
+        comparison: groove::ivm::ValueComparison::Exact,
+    }
     .project_fields(fields))
 }
 

@@ -1084,6 +1084,10 @@ self.database.finish_persistence(persisted)?;
             }
             return Ok(*alias);
         }
+        // Clear before the first await, not after successful persistence: a
+        // cancelled/failed writer must not leave an absence proof alive after
+        // its alias may have entered resident or durable storage.
+        self.absent_node_alias = None;
         let mut max_alias = self
             .node_aliases
             .values()

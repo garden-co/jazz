@@ -19,6 +19,15 @@ a durable contract.
 
 ## Work style
 
+### Performance experiment preflight
+
+Before implementing a performance trial, read
+[`dev/benchmarks/rejected-experiments.md`](dev/benchmarks/rejected-experiments.md)
+and search preserved branches plus open/closed PR descriptions for the same
+mechanism. Record the changed premise before repeating a rejected experiment.
+Do not infer an end-to-end win from reduced allocation requests or a local
+phase alone; preserve comparable workload and source/binary receipts.
+
 ### Durable follow-up and WIP visibility
 
 GitHub Issues are the durable follow-up system. Before an orchestrator session
@@ -97,6 +106,22 @@ boundary. Do not copy or share generated
 rebuild in the checkout whose tests you are running. The boundary is deliberate
 and fail-closed: native production can succeed even when a TypeScript consumer
 build/test subsequently fails.
+
+**Generated fingerprint expectations.** The NAPI `native-artifact-fingerprint.cjs`
+and Jazz Tools `src/runtime/native-artifact-fingerprint-{napi,wasm}.ts` are
+ignored build outputs, never source-controlled digest updates. After a fresh
+checkout or branch change, use `pnpm build:core` for release workspace artifacts
+or `pnpm build:correctness-artifacts` before TypeScript correctness consumers.
+Root `pnpm build` (also `build:all`) and `pnpm build:ci` likewise build both
+native prerequisites before deriving expectations and compiling TypeScript.
+`dev/rebuild-artifacts.sh` without arguments delegates to `pnpm build:core`;
+its explicit layers are partial rebuilds requiring an already assembled workspace.
+These paths regenerate expectations from the selected native artifacts; release
+CI derives them from the verified downloaded manifests before compiling Jazz
+Tools. Keep runtime mismatch checks and producer/consumer provenance checks
+enabled. The handwritten `native-artifact-fingerprints.ts` remains source.
+Tracked declaration-only `.d.ts` contracts support source-only checks such as RN
+scaffolds; they provide no runtime values and cannot replace generated artifacts.
 
 **Correctness-artifact cache boundary.** Native/WASM generations are producer
 state, not Turbo cache entries. A NAPI generation can retain many GiB of Cargo

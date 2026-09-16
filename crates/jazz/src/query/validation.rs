@@ -737,7 +737,28 @@ fn validate_join(
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
     let join_table = schema_table(schema, &join.table)?;
+    if join.target == JoinTarget::Uncorrelated {
+        if !join.on_column.is_empty()
+            || join.source_column.is_some()
+            || join.source_lookup.is_some()
+            || !join.correlated_filters.is_empty()
+        {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: join.table.clone(),
+                column: join.on_column.clone(),
+                target_table: "uncorrelated existence (no join keys)".to_owned(),
+            });
+        }
+        for predicate in &mut join.filters {
+            validate_predicate(&join_table, predicate, params)?;
+        }
+        for nested in &mut join.nested_joins {
+            validate_join(schema, &join_table, &join.table, nested, params)?;
+        }
+        return Ok(());
+    }
     match join.target {
+        JoinTarget::Uncorrelated => unreachable!("validated above"),
         JoinTarget::Column => {
             planner_column_type(&join_table, &join.on_column)?;
         }
@@ -748,6 +769,42 @@ fn validate_join(
                     column: join.on_column.clone(),
                 });
             }
+        }
+    }
+    // Explicit non-reference column equalities are ordinary existence joins.
+    // Keep the declared-reference checks below for UUID/array reference traversal.
+    if join.target == JoinTarget::Column
+        && join.source_lookup.is_none()
+        && let Some(source_column) = &join.source_column
+        && !root.references.contains_key(source_column)
+        && !join_table.references.contains_key(&join.on_column)
+    {
+        let source_type = planner_column_type(root, source_column)?;
+        let target_type = planner_column_type(&join_table, &join.on_column)?;
+        if !matches!(
+            non_null_column_type(source_type),
+            ColumnType::Uuid | ColumnType::Array(_)
+        ) && !matches!(
+            non_null_column_type(target_type),
+            ColumnType::Uuid | ColumnType::Array(_)
+        ) {
+            if !column_types_comparable(source_type, target_type) {
+                return Err(QueryError::OperandTypeMismatch);
+            }
+            for correlation in &join.correlated_filters {
+                if planner_column_type(root, &correlation.source_column)?
+                    != planner_column_type(&join_table, &correlation.join_column)?
+                {
+                    return Err(QueryError::OperandTypeMismatch);
+                }
+            }
+            for predicate in &mut join.filters {
+                validate_predicate(&join_table, predicate, params)?;
+            }
+            for nested in &mut join.nested_joins {
+                validate_join(schema, &join_table, &join.table, nested, params)?;
+            }
+            return Ok(());
         }
     }
     let target_table = if let Some(lookup) = &join.source_lookup {
@@ -808,6 +865,7 @@ fn validate_join(
         }
     }
     match join.target {
+        JoinTarget::Uncorrelated => unreachable!("validated above"),
         JoinTarget::Column => match join_table.references.get(&join.on_column) {
             Some(target) if target == &target_table => {}
             None if join.on_column == "id" && join.table == target_table => {}
@@ -1100,6 +1158,13 @@ fn validate_reachable(
         }
     }
     let team_table = match reachable.access_team_target {
+        JoinTarget::Uncorrelated => {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: reachable.access_table.clone(),
+                column: reachable.access_team_column.clone(),
+                target_table: "reachability requires a team reference".to_owned(),
+            });
+        }
         JoinTarget::Column => access
             .references
             .get(&reachable.access_team_column)
@@ -1291,6 +1356,9 @@ fn validate_predicate(
             );
             validate_predicate(&payload_table, payload, params)
         }
+        // Claims are dynamically typed and become literals when binding the session.
+        // Either can be checked for nullness without a statically nullable column.
+        Predicate::IsNull(Operand::Claim(_) | Operand::Literal(_)) => Ok(()),
         Predicate::IsNull(operand) => match operand_type(table, operand, params)? {
             Some(ColumnType::Nullable(_)) => Ok(()),
             Some(_) => Err(QueryError::OperandTypeMismatch),

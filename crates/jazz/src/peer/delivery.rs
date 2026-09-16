@@ -10,21 +10,10 @@ use crate::ids::RowUuid;
 #[cfg(debug_assertions)]
 use crate::tools::OutputOccurrenceId;
 
-pub(super) fn maintained_view_update_is_empty(
-    result_member_adds: &[ResultMemberEntry],
-    result_member_removes: &[ResultMemberEntry],
-    program_fact_adds: &[ProgramFactEntry],
-    program_fact_removes: &[ProgramFactEntry],
-) -> bool {
-    result_member_adds.is_empty()
-        && result_member_removes.is_empty()
-        && program_fact_adds.is_empty()
-        && program_fact_removes.is_empty()
-}
-
 /// Produce the one unambiguous unordered transition between two exact sets.
 /// Runtime terminals may have crossed intermediate states while a publisher
 /// drained; those intermediate operations are not peer-wire operations.
+#[cfg(test)]
 pub(super) fn canonical_set_delta<T: Ord + Clone>(
     predecessor: &BTreeSet<T>,
     successor: &BTreeSet<T>,

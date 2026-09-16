@@ -240,8 +240,51 @@ schema. Catalogue sequence establishes the only permitted projection order;
 receiving a later schema or a terminal cache does not authorize skipping a
 missing predecessor.
 
-Opening an existing database with a caller-supplied schema that disagrees with
-its durable genesis is a hard bootstrap error. A joiner with no local lineage
+Strict node recovery rejects a caller-supplied schema absent from the durable
+catalogue. A partial client replica may first discover an admitted durable schema
+and recover under that schema so its authenticated upstream connection can start.
+The requested application schema remains unadmitted: reads fail closed and view
+registration cannot author its lineage until an authority catalogue supplies it.
+An offline or unpublished target therefore cannot silently read using the old
+schema. Closing during this interval preserves the old catalogue, local rows,
+and pending writes. Recovery does not replace the durable genesis or manufacture
+physical mappings from the requested schema. This also applies to persistent
+backend replicas opened with complete-history attribution; strict serving-node
+opens retain their existing recovery contract. A remote read begun during this
+interval waits for the authenticated upstream's first full catalogue snapshot,
+then rejects if the requested schema is still absent. The serialized read's
+existing coverage deadline also bounds this admission wait. Local reads, retained
+prepared-query reads, point reads, subscriptions, and mutation admission do not
+fall back to the recovered schema. Cancellation releases the read's wait;
+shutdown, upstream failure, and disconnect resolve it with an error. Replacement
+connections own a new admission attempt, so late activity from an older
+connection cannot resolve that wait. Discovery uses a requested-schema point
+lookup, and only a miss needs the genesis-kind prefix and genesis-schema lookup;
+ordinary recovery still validates the entire durable catalogue once.
+
+A host-authenticated application session, or relay with one explicitly admitted
+session scope, receives the same full application catalogue snapshot before its
+first query that ordinary view delivery already sends. This is application-wide
+schema/lineage/physical-identity metadata, including policy expressions present
+in schema payloads; it does not carry application rows or grant row access.
+A generic relay with no admitted session scope gains no eager catalogue delivery.
+Authentication, application routing, and source catalogue readiness precede this
+announcement. An owner itself awaiting requested-schema admission must also wait
+for a validated snapshot from its current upstream before announcing its
+recovered catalogue to a downstream foreground; otherwise
+it could incorrectly reject that foreground's same requested schema as absent.
+A validated snapshot missing the requested schema is still forwarded so the
+foreground can reject explicitly. This failed initial admission does not wait
+for a future publication on an idle connection; after publication the caller
+reconnects or reopens to make a new admission attempt. Transient send backpressure retains the
+unannounced snapshot for retry. This eager application-session delivery occurs
+only before its first accepted snapshot on a physical connection. Resuming a
+cursor clears only its catalogue-announcement marker, so unchanged metadata is
+still delivered once and subscription resume state remains intact. Later changes continue
+to accompany ordinary view delivery. Idle session ticks do not clone or hash the
+full catalogue. Trusted authority/backend links retain continuous propagation.
+
+A joiner with no local lineage
 installs the authority's genesis record, then replays the dense Active/tombstone
 catalogue chain, then applies pointers and data; it never manufactures genesis
 from its preferred client schema.
@@ -584,6 +627,14 @@ the bytes as `v1.users`, applies the two lens operations, then feeds the logical
 terminal may render a selected `{ name, email_address }` app row, but that row
 is not sent as a replacement for Alice's authored version; dropping it and
 rerunning the local IVM produces the same result (ch. 8 §8.4.1).
+
+A relay that rebuilds a current-row input from an admitted authority witness
+must keep the witness's authored schema alias separate from the logical read
+schema. Before publishing a `VersionRecord`, it reloads the immutable history
+record at the exact physical table, branch, row, transaction, and layer. A table
+rename does not permit first-match lookup across branches: one transaction may
+write the same row UUID in two branches. These are runtime identity rules;
+they do not introduce a new durable or wire representation.
 
 ### 10.6 The lens op surface
 

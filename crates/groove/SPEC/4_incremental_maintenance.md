@@ -45,6 +45,16 @@ Invariant digest:
 - `INV-TICK-19`: Hydrating or querying a graph MUST NOT perturb an existing subscription stream's future tick deltas.
 - `INV-TICK-20`: Contextual recursive child state MUST NOT be persisted in `operator_states` after recursive recompute; retained child operator state outside `FrontierSource` context remains root-scoped.
 
+Subscription management handles are ephemeral and identify both the creating
+runtime namespace and its local subscription sequence. A handle from a replaced
+runtime MUST NOT address any subscription in its replacement, even when their
+local sequences match. Prepared-plan invalidation within the same runtime does
+not change handle ownership: retiring the old plan still unsubscribes its old
+handle before creating a replacement. These identities are not durable or wire
+encodings. The Jazz regression receipts are
+`full_rebuild_must_not_unsubscribe_another_replacement` and
+`plan_invalidation_retires_same_runtime_subscriptions`.
+
 ## Details
 
 ### 4.1 From commit to deltas

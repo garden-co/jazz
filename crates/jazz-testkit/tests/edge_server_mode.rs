@@ -86,7 +86,9 @@ async fn subscription_orders_by_unprojected_field() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = ranked_todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -132,7 +134,11 @@ async fn subscription_orders_by_unprojected_field() {
             );
 
             let tx = client
-                .update(ids[0], vec![("rank".to_owned(), Value::Integer(0))])
+                .update(
+                    "todos",
+                    ids[0],
+                    vec![("rank".to_owned(), Value::Integer(0))],
+                )
                 .expect("change only the unprojected ordering field");
             support::wait_for_edge_txs(
                 &client,
@@ -170,7 +176,9 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -230,7 +238,9 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -254,8 +264,9 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
 
             let default_query = jazz::query::Query::from("todos");
             let one_shot = client
-                .query(default_query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(default_query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("default-ordered one-shot query");
             assert_eq!(
                 one_shot.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
@@ -328,7 +339,9 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -351,8 +364,9 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
             let tie_query =
                 jazz::query::Query::from("todos").order_by("title", OrderDirection::Asc);
             let tied_rows = client
-                .query(tie_query, Some(DurabilityTier::EdgeServer))
+                .query(tie_query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query tied rows");
             assert_eq!(
                 tied_rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
@@ -399,6 +413,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
             let promoted = tied[2];
             let tx = client
                 .update(
+                    "todos",
                     promoted,
                     vec![("title".to_owned(), Value::Text("ahead".to_owned()))],
                 )
@@ -443,6 +458,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
 
             let tx = client
                 .update(
+                    "todos",
                     promoted,
                     vec![("title".to_owned(), Value::Text("zulu".to_owned()))],
                 )
@@ -472,7 +488,9 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -831,7 +849,7 @@ async fn connect_user_after_catalogue_bootstrap(
 
 async fn wait_for_row(
     client: &JazzClient,
-    tier: DurabilityTier,
+    tier: jazz::tools::ReadTier,
     row_id: ObjectId,
     expected: Vec<Value>,
     description: &str,
@@ -839,7 +857,7 @@ async fn wait_for_row(
     wait_for_query(
         client,
         todo_query(),
-        Some(tier),
+        tier,
         Duration::from_secs(30),
         description,
         |rows| {
@@ -944,7 +962,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     let member_rows = wait_for_query(
         member,
         jazz::query::Query::from("resources"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees resource through seeded recursive access policy",
         |query_rows| {
@@ -959,7 +977,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     wait_for_query(
         member,
         jazz::query::Query::from("data_entries"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees data entry through seeded recursive access policy",
         |query_rows| {
@@ -970,7 +988,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     wait_for_query(
         member,
         jazz::query::Query::from("mapping_rules"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees sibling mapping rule through same seeded recursive access policy",
         |query_rows| {
@@ -981,7 +999,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     wait_for_query(
         member,
         jazz::query::Query::from("data_entry_entries"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees grandchild through inherits over seeded access policy",
         |query_rows| {
@@ -993,7 +1011,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
     wait_for_query(
         member,
         jazz::query::Query::from("mapping_rule_entries"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(30),
         "member sees mapping rule child through inherits over sibling seeded access policy",
         |query_rows| {
@@ -1008,7 +1026,7 @@ async fn assert_policy_graph_member_rows(member: &JazzClient, rows: &PolicyGraph
 async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let server = JazzServer::start().await;
+            let server = JazzServer::start().await.expect("start test server");
             let schema = policy_graph_policy_schema();
             let app_id = server.app_id();
             let response = reqwest::Client::new()
@@ -1065,7 +1083,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
             wait_for_query(
                 &spy,
                 jazz::query::Query::from("resources"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(30),
                 "spy sees no resources through seeded recursive access policy",
                 |rows| rows.is_empty().then_some(rows),
@@ -1074,7 +1092,7 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
             wait_for_query(
                 &spy,
                 jazz::query::Query::from("data_entries"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(30),
                 "spy sees no inherited data entries through seeded recursive access policy",
                 |rows| rows.is_empty().then_some(rows),
@@ -1101,7 +1119,8 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
                     .with_data_dir(data_dir.path())
                     .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start()
-                    .await;
+                    .await
+                    .expect("start test server");
                 let admin = TestingClient::builder()
                     .with_server(&server)
                     .with_schema(schema.clone())
@@ -1120,7 +1139,8 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
                 .with_data_dir(data_dir.path())
                 .with_storage_factory(jazz_testkit::persistent_storage_factory())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let member = TestingClient::builder()
                 .with_server(&reopened)
                 .with_schema(schema.clone())
@@ -1155,7 +1175,8 @@ async fn edge_reconnects_after_established_core_drop() {
                     .start(),
             )
             .await
-            .expect("initial Core start timed out");
+            .expect("initial Core start timed out")
+            .expect("start Core server");
             let edge = tokio::time::timeout(
                 Duration::from_secs(10),
                 JazzServer::builder()
@@ -1166,7 +1187,8 @@ async fn edge_reconnects_after_established_core_drop() {
                     .start(),
             )
             .await
-            .expect("Edge start timed out");
+            .expect("Edge start timed out")
+            .expect("start Edge server");
             let edge_state = edge.server_state();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while edge_state.edge_upstream_health()
@@ -1201,7 +1223,8 @@ async fn edge_reconnects_after_established_core_drop() {
                     .start(),
             )
             .await
-            .expect("replacement Core start timed out");
+            .expect("replacement Core start timed out")
+            .expect("restart Core server");
             tokio::time::timeout(Duration::from_secs(5), async {
                 while edge_state.edge_upstream_health()
                     != jazz_server::EdgeUpstreamHealth::Connected
@@ -1239,7 +1262,8 @@ async fn edge_to_core_relay_retains_write_while_upstream_is_unavailable() {
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(format!("http://127.0.0.1:{core_port}"))
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_state = edge.server_state();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !matches!(
@@ -1272,7 +1296,8 @@ async fn edge_to_core_relay_retains_write_while_upstream_is_unavailable() {
                 .with_port(core_port)
                 .with_schema(schema)
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             tokio::time::timeout(Duration::from_secs(5), async {
                 while edge_state.edge_upstream_health()
                     != jazz_server::EdgeUpstreamHealth::Connected
@@ -1311,21 +1336,24 @@ async fn core_write_reaches_clients_on_both_edges() {
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_us = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_eu = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
 
             let alice =
                 connect_user_after_catalogue_bootstrap(&edge_us, schema.clone(), "alice-edge-us")
@@ -1377,7 +1405,7 @@ async fn core_write_reaches_clients_on_both_edges() {
             .await;
             wait_for_row(
                 &alice,
-                DurabilityTier::EdgeServer,
+                jazz::tools::ReadTier::Remote,
                 todo_id,
                 expected.clone(),
                 "alice's edge query contains the core write",
@@ -1385,7 +1413,7 @@ async fn core_write_reaches_clients_on_both_edges() {
             .await;
             wait_for_row(
                 &bob,
-                DurabilityTier::EdgeServer,
+                jazz::tools::ReadTier::Remote,
                 todo_id,
                 expected,
                 "bob's edge query contains the core write",
@@ -1422,21 +1450,24 @@ async fn edge_write_reaches_client_on_peer_edge() {
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_us = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
             let edge_eu = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
-                .await;
+                .await
+                .expect("start test server");
 
             let alice = connect_user(&edge_us, schema.clone(), "alice-edge-us-writer").await;
             let bob = connect_user(&edge_eu, schema, "bob-edge-eu-reader").await;
@@ -1470,7 +1501,7 @@ async fn edge_write_reaches_client_on_peer_edge() {
             .await;
             wait_for_row(
                 &bob,
-                DurabilityTier::EdgeServer,
+                jazz::tools::ReadTier::Remote,
                 todo_id,
                 expected,
                 "bob's edge query contains the peer-edge write",

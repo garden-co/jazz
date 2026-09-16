@@ -651,10 +651,13 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "pending edge parent alias must exist after allocation",
                 ))?;
-            batch.insert(
-                "jazz_pending_edges",
-                pending_edge_values(tx_node_alias, tx_id, parent_alias, parent, &coordinate)?,
-            );
+            self.stage_pending_parent_constraint(
+                &mut batch,
+                (tx_node_alias, tx_id),
+                (parent_alias, parent),
+                &coordinate,
+                false,
+            )?;
         }
         let pending_child_edges = {
             let mut edges = Vec::new();
@@ -780,7 +783,7 @@ where
             .prepare_and_stage_large_value(kind, &bytes)
             .await?;
         self.enforce_large_value_staging_policy(&staged).await?;
-        let descriptor = Value::Large(staged.value_ref.clone());
+        let descriptor = Value::Large(Box::new(staged.value_ref.clone()));
         *value = if nullable {
             Value::Nullable(Some(Box::new(descriptor)))
         } else {
@@ -1553,33 +1556,57 @@ where
         schema_version: SchemaVersionId,
     ) -> Result<Option<(DeletionEvent, (TxTime, NodeUuid))>, Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
-        // Physical current keys lead with the branch key. Prepend the shared
-        // (default) branch exactly as the canonical content-current lookup
-        // does before applying the logical row-UUID point lookup.
-        let point = groove::ivm::StaticScanSpec::Point(vec![
-            groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0)),
-        ]);
-        let global = GraphBuilder::table_scan(
-            physical_register_global_current_table_name(table_id),
-            shared_branch_scan(Some(point.clone())),
-        );
-        let ahead = GraphBuilder::table_scan(
-            physical_register_ahead_current_table_name(table_id),
-            shared_branch_scan(Some(point)),
-        );
-        let result = self
+        // Global has one current register per row; ahead is ordered by
+        // (branch, row, tx_time, tx_node_id). Its last entry is therefore
+        // exactly the candidate selected by the former union/arg-max graph.
+        let prefix = [
+            Value::Bytes(BranchKey::default().canonical_bytes()),
+            Value::Uuid(row_uuid.0),
+        ];
+        let global = self
             .database
-            .query_graph(GraphBuilder::arg_max_by(
-                GraphBuilder::union([global, ahead]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            ))
+            .primary_key_get_raw(&physical_register_global_current_table_name(table_id), &prefix)
             .await
             .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
-        let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
-            return Ok(None);
+        let ahead = self
+            .database
+            .primary_key_last_raw(&physical_register_ahead_current_table_name(table_id), &prefix)
+            .await
+            .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
+        let winner = match (&global, &ahead) {
+            (None, None) => return Ok(None),
+            (Some(value), None) | (None, Some(value)) => value,
+            (Some(global), Some(ahead)) => {
+                let g = global.record();
+                let a = ahead.record();
+                let key = |record: BorrowedRecord<'_>| -> Result<_, Error> {
+                    let malformed = |error| {
+                        Self::malformed_current_query_error(
+                            &table.name,
+                            row_uuid,
+                            GrooveDbError::RecordEncoding(error),
+                        )
+                    };
+                    Ok((
+                        record
+                            .get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
+                            .map_err(malformed)?,
+                        record
+                            .get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                            .map_err(malformed)?,
+                    ))
+                };
+                // Arg-max compares the stored node alias, then breaks ties
+                // with ascending encoded record bytes, not node UUID order.
+                let order = key(a)?.cmp(&key(g)?);
+                if order.is_gt() || (order.is_eq() && a.bytes() < g.bytes()) {
+                    ahead
+                } else {
+                    global
+                }
+            }
         };
-        let record = BorrowedRecord::new(&delta.record, &result.descriptor);
+        let record = winner.record();
         Ok(Some((
             deletion_event_from_value(
                 record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,

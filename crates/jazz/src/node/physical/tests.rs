@@ -86,6 +86,58 @@ mod variant_case_tests {
         fields
     }
 
+    // Internal layout equivalence is the contract here: public row results do
+    // not expose the physical names or ordering of a partial projection.
+    #[test]
+    fn physical_projection_names_match_storage_layouts_without_building_them() {
+        let public = PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("entries")
+                .column("body", PublicColumnType::Text)
+                .column("status", PublicColumnType::ScalarEnum {
+                    name: "state".to_owned(),
+                    variants: vec!["open".to_owned(), "closed".to_owned()],
+                }))
+            .build();
+        let schema = JazzSchema::new(&public).unwrap();
+        let table = &schema.tables[0];
+        let mut mapping = mapping(7, &[]).tables.remove("entries").unwrap();
+        for (index, column) in table.columns.iter().enumerate() {
+            mapping.columns.insert(column.name.clone(), PhysicalColumnId(index as u64 + 100));
+        }
+        let storage_tables = [
+            table.history_storage_table(),
+            table.global_current_storage_tables().remove(0),
+            table.rejected_versions_storage_table(),
+        ];
+        let prefixes = [HistoryRowRecord::USER_CELLS, GlobalCurrentRowRecord::USER_CELLS,
+            RejectedVersionRowRecord::USER_CELLS];
+        let all = table.columns.iter().map(|column| column.name.clone()).collect();
+        for present in [None, Some(BTreeSet::new()), Some(BTreeSet::from(["body".to_owned()])), Some(all)] {
+            let actual = [
+                physical_history_field_names_for_case(table, &mapping, present.as_ref()).unwrap(),
+                physical_current_field_names_for_case(table, &mapping, present.as_ref()).unwrap(),
+                physical_rejected_version_field_names_for_case(table, &mapping, present.as_ref()).unwrap(),
+            ];
+            for ((actual, storage), prefix) in actual.iter().zip(&storage_tables).zip(prefixes) {
+                let mut expected = storage.columns[..prefix].iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+                expected.extend(table.columns.iter()
+                    .filter(|column| present.as_ref().is_none_or(|set| set.contains(&column.name)))
+                    .map(|column| physical_user_column_field(mapping.columns[&column.name])));
+                expected.extend(storage.columns[prefix + table.columns.len()..].iter().map(|c| c.name.clone()));
+                assert_eq!(*actual, expected);
+            }
+        }
+        mapping.columns.remove("body");
+        assert!(physical_current_field_names(table, &mapping).is_err());
+        assert!(physical_history_field_names(table, &mapping).is_err());
+        assert!(physical_rejected_version_field_names(table, &mapping).is_err());
+        // A column absent from this variant does not require a mapping lookup.
+        let none = BTreeSet::new();
+        assert!(physical_current_field_names_for_case(table, &mapping, Some(&none)).is_ok());
+        assert!(physical_history_field_names_for_case(table, &mapping, Some(&none)).is_ok());
+        assert!(physical_rejected_version_field_names_for_case(table, &mapping, Some(&none)).is_ok());
+    }
+
     #[test]
     fn schema_layout_cases_allocate_durably_without_collisions() {
         let v1 = schema(1);
@@ -1133,16 +1185,16 @@ mod variant_case_tests {
         .unwrap();
         let json_root = json_prepared.value_ref.clone();
         assert!(
-            json_cell.create(&[Value::Large(json_root.clone())]).is_ok(),
+            json_cell.create(&[Value::Large(Box::new(json_root.clone()))]).is_ok(),
             "the JSON physical descriptor accepts its schema-derived large value"
         );
         assert!(
-            text_cell.create(&[Value::Large(json_root.clone())]).is_err(),
+            text_cell.create(&[Value::Large(Box::new(json_root.clone()))]).is_err(),
             "a JSON descriptor must not enter text physical storage"
         );
 
         let json_record = json_cell
-            .create(&[Value::Large(json_root.clone())])
+            .create(&[Value::Large(Box::new(json_root.clone()))])
             .expect("encode JSON physical cell");
         let replayed_values = text_cell.bind(&json_record).to_values().unwrap();
         let [Value::Large(replayed)] = replayed_values.as_slice() else {

@@ -513,6 +513,8 @@ fn spawn_edge_upstream_connector(
                 ..Default::default()
             };
             let bootstrap = connector.bootstrap_catalogue(NativeTransportRequest {
+                requested_link:
+                    jazz::tools::native_transport_connector::NativeTransportLink::OrdinarySession,
                 server_url: upstream_url.clone(),
                 app_id,
                 peer_identity: AuthorSubject::SYSTEM,
@@ -596,6 +598,8 @@ fn spawn_edge_upstream_connector(
             let wake_shell = shell.clone();
             let wake = Arc::new(move || wake_shell.notify_activity());
             let connect = connector.connect(NativeTransportRequest {
+                requested_link:
+                    jazz::tools::native_transport_connector::NativeTransportLink::OrdinarySession,
                 server_url: upstream_url.clone(),
                 app_id,
                 peer_identity: AuthorSubject::SYSTEM,

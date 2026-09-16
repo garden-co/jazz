@@ -13,7 +13,7 @@ JAZZ_CUSTOMER_IDENTITY=member JAZZ_CUSTOMER_PHASES=cold \
 JAZZ_CUSTOMER_SCALE=1.0 JAZZ_CUSTOMER_MAX_TICKS=200000 \
 JAZZ_REHYDRATE_TRACE=1 JAZZ_PROFILE_OUT=target/cold-settle-profile-receipt-20260728 \
 JAZZ_PROFILE_FREQUENCY=997 \
-  cargo bench -p jazz-sim --bench customer_cold_start --features profiling -- --nocapture
+  cargo run -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile --release
 ```
 
 Only the anonymized in-repo customer-shape fixture was used. The benchmark has

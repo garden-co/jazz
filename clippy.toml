@@ -1,0 +1,5 @@
+# Author identity is immutable. Only derived encoded-record caches use OnceLock;
+# manual Eq/Hash and stable Debug exclude them. Initializing these caches cannot
+# change an author or any containing query/authorization key.
+# Preserve Clippy's default immutable Bytes exemption as well.
+ignore-interior-mutability = ["bytes::Bytes", "jazz::ids::InternedAuthor"]

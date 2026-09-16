@@ -736,10 +736,10 @@ impl RejectedTransaction {
 
     /// Author that made the transaction.
     pub fn made_by(&self) -> AuthorSubject {
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(RejectedTransactionRowRecord::FIELD_MADE_BY_IDX)
+                .get_record(RejectedTransactionRowRecord::FIELD_MADE_BY_IDX)
                 .expect("valid rejected author"),
         )
         .expect("canonical rejected row author")

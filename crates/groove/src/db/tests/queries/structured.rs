@@ -1,6 +1,117 @@
 //! Structured collectors and nested result-tree behavior.
 
 use super::*;
+use crate::ivm::TerminalOperation;
+
+#[futures_test::test]
+async fn singleton_root_hydration_preserves_snapshot_rank_and_later_edits() {
+    let storage = MemoryStorage::new(&["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let graph = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("albums"),
+        ["id"],
+        [CollectByField::named("id"), CollectByField::named("title")],
+        [TopByOrder::desc("id")],
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let mut batch = database.open_batch();
+    for id in [8, 2, 3] {
+        batch.insert(
+            "albums",
+            vec![Value::U64(id), Value::String(format!("row-{id}"))],
+        );
+    }
+    database.commit_batch(batch).await.unwrap();
+    let expected = [2, 3, 8]
+        .map(|id| (vec![Value::U64(id), Value::String(format!("row-{id}"))], 1))
+        .to_vec();
+    assert_eq!(
+        database
+            .query_graph(graph.clone())
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        expected
+    );
+
+    let mut subscriptions = Vec::new();
+    for _ in 0..2 {
+        let subscription = database.subscribe([("roots", graph.clone())]).unwrap();
+        let initial = database
+            .next_multisink_subscription(&subscription)
+            .await
+            .unwrap();
+        assert_eq!(initial.sinks["roots"].to_values().unwrap(), expected);
+        let mut inserted = Vec::new();
+        for operation in &initial.terminal_sinks["roots"].operations {
+            let TerminalEdit::Insert { index, value, .. } = &operation.edit else {
+                panic!("fresh root must insert: {operation:?}");
+            };
+            let values = crate::records::OwnedRecord::new(value.clone(), operation.root_descriptor)
+                .to_values()
+                .unwrap();
+            // A hydration may assemble the final sequence through several
+            // Insert-at-zero operations; indexes address the evolving list.
+            inserted.insert(*index, values[0].clone());
+        }
+        assert_eq!(inserted, vec![Value::U64(8), Value::U64(3), Value::U64(2)]);
+        subscriptions.push(subscription);
+    }
+    let mut batch = database.open_batch();
+    batch.update(
+        "albums",
+        vec![Value::U64(3), Value::String("edited".into())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    for subscription in &subscriptions {
+        let update = database
+            .next_multisink_subscription(subscription)
+            .await
+            .unwrap();
+        let operations = &update.terminal_sinks["roots"].operations;
+        assert_eq!(operations.len(), 1);
+        let TerminalEdit::Update { value, .. } = &operations[0].edit else {
+            panic!("expected one payload update: {operations:?}");
+        };
+        assert_eq!(
+            crate::records::OwnedRecord::new(value.clone(), operations[0].root_descriptor)
+                .to_values()
+                .unwrap(),
+            vec![Value::U64(3), Value::String("edited".into())]
+        );
+    }
+    let mut batch = database.open_batch();
+    batch.delete("albums", PrimaryKeyValue::U64(8));
+    database.commit_batch(batch).await.unwrap();
+    for subscription in &subscriptions {
+        let update = database
+            .next_multisink_subscription(subscription)
+            .await
+            .unwrap();
+        assert!(matches!(
+            update.terminal_sinks["roots"].operations.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Remove { .. },
+                ..
+            }]
+        ));
+    }
+    assert_eq!(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![
+            (vec![Value::U64(2), Value::String("row-2".into())], 1),
+            (vec![Value::U64(3), Value::String("edited".into())], 1),
+        ]
+    );
+}
 
 #[futures_test::test]
 async fn collect_by_round_trips_ordered_explicit_child_ids() {
@@ -720,5 +831,70 @@ async fn collect_by_after_recursive_closure_keeps_recursive_state_outside_limit(
         large_output.iter().all(
             |(parent, _)| matches!(parent[1], Value::Array(ref children) if children.len() == 1)
         )
+    );
+}
+
+/// A completed root edit must survive while another sink resumes a recursive
+/// evaluation. The public multi-sink delivery must include both results.
+#[futures_test::test]
+async fn terminal_edits_survive_recursive_evaluation_continuations() {
+    let storage = MemoryStorage::new(&["edges"]).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    let roots = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("edges"),
+        ["id"],
+        [
+            CollectByField::named("id"),
+            CollectByField::named("src"),
+            CollectByField::named("dst"),
+        ],
+        [TopByOrder::asc("id")],
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let subscription = database
+        .subscribe([("roots", roots), ("reachable", reachability_collect_by(1))])
+        .unwrap();
+    while subscription.try_recv().is_ok() {}
+    let mut batch = database.open_batch();
+    for edge in 1..24 {
+        insert_edge(&mut batch, edge, edge, edge + 1);
+    }
+    database.commit_batch(batch).await.unwrap();
+    let mut root_inserts = Vec::new();
+    let mut reachable_inserts = 0;
+    let mut root_rows = Vec::new();
+    while let Ok(update) = subscription.try_recv() {
+        for (name, sink) in update.terminal_sinks {
+            for operation in sink.operations {
+                if let TerminalEdit::Insert { index, value, .. } = operation.edit {
+                    if name == "roots" {
+                        root_rows.push((
+                            index,
+                            crate::records::OwnedRecord::new(value, operation.root_descriptor)
+                                .to_values()
+                                .unwrap(),
+                        ));
+                        root_inserts.push(index);
+                    } else {
+                        reachable_inserts += 1;
+                    }
+                }
+            }
+        }
+    }
+    root_inserts.sort_unstable();
+    assert_eq!(root_inserts, (0..23).collect::<Vec<_>>());
+    assert_eq!(reachable_inserts, 23);
+    root_rows.sort_by_key(|(index, _)| *index);
+    assert_eq!(
+        root_rows
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>(),
+        (1..24)
+            .map(|id| vec![Value::U64(id), Value::U64(id), Value::U64(id + 1)])
+            .collect::<Vec<_>>()
     );
 }

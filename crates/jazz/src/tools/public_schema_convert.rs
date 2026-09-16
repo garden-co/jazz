@@ -7,7 +7,7 @@ use crate::groove::records::{
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
-    PolicyBranch, Predicate, Query, provider_claim_operand_key,
+    PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
@@ -645,6 +645,12 @@ fn convert_column_default(
         )
     })?;
     if matches!(value, Value::Null) {
+        if !column.nullable {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), column.name.as_str()),
+                "null default requires a nullable column",
+            ));
+        }
         return Ok(GrooveValue::Nullable(None));
     }
     // Record cells carry logical signed values. Groove applies its separate
@@ -933,7 +939,52 @@ fn convert_policy(
     path: &str,
     expr: &PolicyExpr,
 ) -> Result<Query, SchemaConversionError> {
-    convert_policy_with_native_select_inherits(schema, table_schema, table, path, expr, true)
+    convert_policy_with_native_select_inherits(
+        schema,
+        table_schema,
+        table,
+        path,
+        expr,
+        true,
+        &mut Vec::new(),
+    )
+}
+
+/// Expand only the current dependency path; sibling branches may reuse a policy.
+fn convert_expanded_inherited_policy(
+    schema: &Schema,
+    table_schema: &TableSchema,
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+    operation: Operation,
+    expansion_path: &mut Vec<(String, Operation)>,
+) -> Result<Query, SchemaConversionError> {
+    let key = (table.as_str().to_owned(), operation);
+    if let Some(start) = expansion_path.iter().position(|active| active == &key) {
+        let cycle = expansion_path[start..]
+            .iter()
+            .chain(std::iter::once(&key))
+            .map(|(table, operation)| format!("{table}.{operation}"))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        return Err(err(
+            format!("$.{}.{path}", table.as_str()),
+            format!("cyclic policy expansion under INHERITS_REFERENCING is unsupported: {cycle}"),
+        ));
+    }
+    expansion_path.push(key);
+    let result = convert_policy_with_native_select_inherits(
+        schema,
+        table_schema,
+        table,
+        path,
+        expr,
+        false,
+        expansion_path,
+    );
+    expansion_path.pop();
+    result
 }
 
 /// Convert a policy for a location where native SELECT inherits may or may not
@@ -947,6 +998,7 @@ fn convert_policy_with_native_select_inherits(
     path: &str,
     expr: &PolicyExpr,
     native_select_inherits: bool,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     // Do this before choosing a lowering path. In particular, an ExistsRel
     // nested below a boolean operator must not escape this validation merely
@@ -970,6 +1022,7 @@ fn convert_policy_with_native_select_inherits(
                     query,
                     expr,
                     native_select_inherits,
+                    expansion_path,
                 )?;
             }
             Ok(query)
@@ -984,6 +1037,7 @@ fn convert_policy_with_native_select_inherits(
                     &format!("{path}.Or[{index}]"),
                     expr,
                     native_select_inherits,
+                    expansion_path,
                 )?;
                 for branch in PolicyBranch::alternatives_from_query(branch) {
                     query = query.policy_branch(branch);
@@ -1005,6 +1059,7 @@ fn convert_policy_with_native_select_inherits(
             via_column,
             *max_depth,
             native_select_inherits,
+            expansion_path,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -1019,6 +1074,7 @@ fn convert_policy_with_native_select_inherits(
             *operation,
             source_table,
             via_column,
+            expansion_path,
         ),
         PolicyExpr::Exists {
             table: exists_table,
@@ -1032,7 +1088,7 @@ fn convert_policy_with_native_select_inherits(
             condition,
         ),
         PolicyExpr::ExistsRel { rel } => {
-            append_exists_rel_policy_clause(table, path, Query::from(table.as_str()), rel)
+            append_exists_rel_policy_clause(schema, table, path, Query::from(table.as_str()), rel)
         }
         _ => query_with_predicate_filters(
             table.as_str(),
@@ -1073,7 +1129,36 @@ fn append_policy_clause(
     query: Query,
     expr: &PolicyExpr,
     native_select_inherits: bool,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
+    // A clause conjoins the entire policy accumulated so far, including every
+    // alternative created by an earlier OR. Appending only to the false base
+    // would let those alternatives bypass this clause.
+    if !query.policy_branches.is_empty() {
+        let alternatives = PolicyBranch::alternatives_from_query(query);
+        let mut combined = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
+        for alternative in alternatives {
+            let mut branch = Query::from(table.as_str());
+            branch.filters = alternative.filters;
+            branch.joins = alternative.joins;
+            branch.reachable = alternative.reachable;
+            branch.inherits = alternative.inherits;
+            let branch = append_policy_clause(
+                schema,
+                table_schema,
+                table,
+                path,
+                branch,
+                expr,
+                native_select_inherits,
+                expansion_path,
+            )?;
+            for alternative in PolicyBranch::alternatives_from_query(branch) {
+                combined = combined.policy_branch(alternative);
+            }
+        }
+        return Ok(combined);
+    }
     match expr {
         PolicyExpr::And(exprs) => {
             let mut query = query;
@@ -1086,6 +1171,7 @@ fn append_policy_clause(
                     query,
                     expr,
                     native_select_inherits,
+                    expansion_path,
                 )?;
             }
             Ok(query)
@@ -1104,6 +1190,7 @@ fn append_policy_clause(
             via_column,
             *max_depth,
             native_select_inherits,
+            expansion_path,
         ),
         PolicyExpr::InheritsReferencing {
             operation,
@@ -1118,12 +1205,62 @@ fn append_policy_clause(
             *operation,
             source_table,
             via_column,
+            expansion_path,
         ),
         PolicyExpr::Exists {
             table: exists_table,
             condition,
         } => append_exists_policy_clause(schema, table, path, query, exists_table, condition),
-        PolicyExpr::ExistsRel { rel } => append_exists_rel_policy_clause(table, path, query, rel),
+        PolicyExpr::ExistsRel { rel } => {
+            append_exists_rel_policy_clause(schema, table, path, query, rel)
+        }
+        PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
+            let existing_branches = PolicyBranch::alternatives_from_query(query);
+            let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
+
+            for (index, expr) in exprs.iter().enumerate() {
+                let branch_query = convert_policy_with_native_select_inherits(
+                    schema,
+                    table_schema,
+                    table,
+                    &format!("{path}.Or[{index}]"),
+                    expr,
+                    native_select_inherits,
+                    expansion_path,
+                )?;
+                for branch in PolicyBranch::alternatives_from_query(branch_query) {
+                    for existing in &existing_branches {
+                        query = query.policy_branch(PolicyBranch {
+                            filters: existing
+                                .filters
+                                .iter()
+                                .chain(branch.filters.iter())
+                                .cloned()
+                                .collect(),
+                            joins: existing
+                                .joins
+                                .iter()
+                                .chain(branch.joins.iter())
+                                .cloned()
+                                .collect(),
+                            reachable: existing
+                                .reachable
+                                .iter()
+                                .chain(branch.reachable.iter())
+                                .cloned()
+                                .collect(),
+                            inherits: existing
+                                .inherits
+                                .iter()
+                                .chain(branch.inherits.iter())
+                                .cloned()
+                                .collect(),
+                        });
+                    }
+                }
+            }
+            Ok(query)
+        }
         _ => Ok(append_predicate_filters(
             query,
             predicate_filters_for_expr(table, path, expr)?,
@@ -1167,6 +1304,7 @@ fn predicate_filters_for_expr(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_inherited_referencing_policy(
     schema: &Schema,
     table: &TableName,
@@ -1175,6 +1313,7 @@ fn append_inherited_referencing_policy(
     operation: Operation,
     source_table: &str,
     via_column: &str,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     let source_table_name = TableName::new(source_table.to_owned());
     let source_schema = schema.get(&source_table_name).ok_or_else(|| {
@@ -1231,13 +1370,14 @@ fn append_inherited_referencing_policy(
     match source_filter {
         Ok(source_filter) => Ok(query.join_via(source_table, via_column, [source_filter])),
         Err(_) if policy_requires_branch(source_policy) => {
-            let source_query = convert_policy_with_native_select_inherits(
+            let source_query = convert_expanded_inherited_policy(
                 schema,
                 source_schema,
                 &source_table_name,
                 &format!("{path}.InheritsReferencing[{source_table}]"),
                 source_policy,
-                false,
+                operation,
+                expansion_path,
             )?;
             append_inherited_referencing_policy_branches(
                 query,
@@ -1320,6 +1460,7 @@ fn append_exists_policy_clause(
     let mut outer_correlations = Vec::new();
     let mut filters = Vec::new();
     let mut nested_exists = Vec::new();
+    let mut nested_exists_rel = Vec::new();
     let mut conditions = Vec::new();
     collect_policy_conjuncts(condition, &mut conditions);
 
@@ -1339,6 +1480,7 @@ fn append_exists_policy_clause(
                 table: nested_table,
                 condition: nested_condition,
             } => nested_exists.push((index, nested_table.as_str(), nested_condition.as_ref())),
+            PolicyExpr::ExistsRel { rel } => nested_exists_rel.push((index, rel)),
             other => filters.push(convert_policy_predicate(
                 &exists_table_name,
                 &format!("{path}.Exists[{index}]"),
@@ -1347,38 +1489,42 @@ fn append_exists_policy_clause(
         }
     }
 
-    if outer_correlations.is_empty() {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "core schema policies require EXISTS to include an equality against __jazz_outer_row",
+    let query = if outer_correlations.is_empty() {
+        let mut query = query;
+        query.joins.push(uncorrelated_exists_join(
+            exists_table.to_owned(),
+            filters,
+            Vec::new(),
         ));
-    }
-    let primary_index = outer_correlations
-        .iter()
-        .position(|correlation| correlation.join_column == "id")
-        .unwrap_or(0);
-    let primary = outer_correlations.remove(primary_index);
-    let join_column = primary.join_column;
-    let source_column = primary.source_column;
-    let correlated_filters = outer_correlations;
-
-    let query = if join_column == "id" {
-        query.join_via_row_id_with_correlations(
-            exists_table,
-            source_column,
-            correlated_filters,
-            filters,
-        )
-    } else if correlated_filters.is_empty() {
-        query.join_via_column(exists_table, join_column, source_column, filters)
+        query
     } else {
-        query.join_via_column_with_correlations(
-            exists_table,
-            join_column,
-            source_column,
-            correlated_filters,
-            filters,
-        )
+        let primary_index = outer_correlations
+            .iter()
+            .position(|correlation| correlation.join_column == "id")
+            .unwrap_or(0);
+        let primary = outer_correlations.remove(primary_index);
+        let join_column = primary.join_column;
+        let source_column = primary.source_column;
+        let correlated_filters = outer_correlations;
+
+        if join_column == "id" {
+            query.join_via_row_id_with_correlations(
+                exists_table,
+                source_column,
+                correlated_filters,
+                filters,
+            )
+        } else if correlated_filters.is_empty() {
+            query.join_via_column(exists_table, join_column, source_column, filters)
+        } else {
+            query.join_via_column_with_correlations(
+                exists_table,
+                join_column,
+                source_column,
+                correlated_filters,
+                filters,
+            )
+        }
     };
 
     // Legacy `Exists` has one outer-row scope, even when an all-of nests
@@ -1386,9 +1532,9 @@ fn append_exists_policy_clause(
     // proof about the protected row, not a join relative to the first proof
     // row. Lower it through this same correlated-join path so every declared
     // FK edge remains independently validated by the core query contract.
-    nested_exists
-        .into_iter()
-        .try_fold(query, |query, (index, nested_table, nested_condition)| {
+    let query = nested_exists.into_iter().try_fold(
+        query,
+        |query, (index, nested_table, nested_condition)| {
             append_exists_policy_clause(
                 schema,
                 table,
@@ -1396,6 +1542,18 @@ fn append_exists_policy_clause(
                 query,
                 nested_table,
                 nested_condition,
+            )
+        },
+    )?;
+    nested_exists_rel
+        .into_iter()
+        .try_fold(query, |query, (index, rel)| {
+            append_exists_rel_policy_clause(
+                schema,
+                table,
+                &format!("{path}.Exists[{index}]"),
+                query,
+                rel,
             )
         })
 }
@@ -1437,6 +1595,8 @@ struct PendingReachable {
 }
 
 struct LoweredRel {
+    // Compiler-only paths into `joins`; None marks an ambiguous repeated scope.
+    scope_paths: BTreeMap<String, Option<Vec<usize>>>,
     /// Row-producing relations name their output table. Scalar-key gathers do
     /// not: their projected `id` is consumed by the following access join.
     table: Option<String>,
@@ -1526,13 +1686,152 @@ fn validate_exists_rel_policy_join_conditions(
     }
 }
 
+// Outer references inside boolean predicates must not be mistaken for an
+// independent proof merely because no top-level equality could be extracted.
+fn rel_has_outer_references(rel: &RelExpr) -> bool {
+    fn value_is_outer(value: &RelValueRef) -> bool {
+        matches!(
+            value,
+            RelValueRef::OuterColumn(_) | RelValueRef::RowId(RowIdRef::Outer)
+        )
+    }
+    fn predicate_has_outer(predicate: &RelPredicateExpr) -> bool {
+        match predicate {
+            RelPredicateExpr::Cmp { right, .. } | RelPredicateExpr::Contains { right, .. } => {
+                value_is_outer(right)
+            }
+            RelPredicateExpr::In { values, .. } => values.iter().any(value_is_outer),
+            RelPredicateExpr::And(children) | RelPredicateExpr::Or(children) => {
+                children.iter().any(predicate_has_outer)
+            }
+            RelPredicateExpr::Not(child) | RelPredicateExpr::EnumMatch { payload: child, .. } => {
+                predicate_has_outer(child)
+            }
+            _ => false,
+        }
+    }
+    match rel {
+        RelExpr::TableScan { .. } => false,
+        RelExpr::Filter { input, predicate } => {
+            rel_has_outer_references(input) || predicate_has_outer(predicate)
+        }
+        RelExpr::Project { input, .. } => rel_has_outer_references(input),
+        RelExpr::Join { left, right, .. } => {
+            rel_has_outer_references(left) || rel_has_outer_references(right)
+        }
+        RelExpr::Union { inputs } => inputs
+            .iter()
+            .any(|arm| rel_has_outer_references(&arm.input)),
+        RelExpr::Gather { .. } => true,
+    }
+}
+
+fn join_has_outer_correlations(join: &JoinVia) -> bool {
+    !join.correlated_filters.is_empty() || join.nested_joins.iter().any(join_has_outer_correlations)
+}
+
+fn uncorrelated_exists_join(
+    table: String,
+    filters: Vec<Predicate>,
+    nested_joins: Vec<JoinVia>,
+) -> JoinVia {
+    JoinVia {
+        table,
+        on_column: String::new(),
+        target: JoinTarget::Uncorrelated,
+        source_column: None,
+        source_lookup: None,
+        correlated_filters: Vec::new(),
+        filters,
+        nested_joins,
+    }
+}
+
+/// Orient an inner-join tree from the source correlated to the protected row.
+/// Reversing an equality edge preserves existence, provided each source keeps
+/// its filters and every off-path branch remains attached to that same source.
+fn root_exists_rel_at_correlation(
+    table: &TableName,
+    path: &str,
+    lowered: &mut LoweredRel,
+) -> Result<(), SchemaConversionError> {
+    // Gather uses a separate access/frontier lowering path.
+    if !lowered.reachable.is_empty() || lowered.pending_reachable.is_some() {
+        return Ok(());
+    }
+    while !lowered
+        .filters
+        .iter()
+        .any(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+    {
+        let Some(index) = lowered.joins.iter().position(join_has_outer_correlations) else {
+            break;
+        };
+        let mut next = lowered.joins.remove(index);
+        let source_column = next.source_column.take().ok_or_else(|| {
+            err(
+                format!("$.{}.{path}", table.as_str()),
+                "core schema ExistsRel nested join is missing its source column",
+            )
+        })?;
+        let previous_table = lowered.table.replace(next.table).ok_or_else(|| {
+            err(
+                format!("$.{}.{path}", table.as_str()),
+                "core schema ExistsRel correlation requires a row-producing relation",
+            )
+        })?;
+        let reverse = JoinVia {
+            table: previous_table,
+            target: if source_column == "id" {
+                JoinTarget::RowId
+            } else {
+                JoinTarget::Column
+            },
+            on_column: source_column,
+            source_column: Some(next.on_column),
+            source_lookup: None,
+            correlated_filters: Vec::new(),
+            filters: std::mem::take(&mut lowered.filters)
+                .into_iter()
+                .map(|filter| filter.predicate)
+                .collect(),
+            nested_joins: std::mem::take(&mut lowered.joins),
+        };
+        lowered.filters = next
+            .filters
+            .into_iter()
+            .map(|predicate| LoweredRelPredicate {
+                predicate,
+                column: None,
+                value: None,
+            })
+            .chain(
+                next.correlated_filters
+                    .into_iter()
+                    .map(|correlation| LoweredRelPredicate {
+                        predicate: Predicate::All(Vec::new()),
+                        column: Some(correlation.join_column),
+                        value: Some(LoweredRelValue::OuterRow(correlation.source_column)),
+                    }),
+            )
+            .collect();
+        next.nested_joins.push(reverse);
+        lowered.joins = next.nested_joins;
+        // Scope routing is complete; these paths described the old orientation.
+        lowered.scope_paths.clear();
+    }
+    Ok(())
+}
+
 fn append_exists_rel_policy_clause(
+    schema: &Schema,
     table: &TableName,
     path: &str,
     mut query: Query,
     rel: &RelExpr,
 ) -> Result<Query, SchemaConversionError> {
-    let mut lowered = lower_exists_rel(table, path, rel)?;
+    let mut lowered = lower_exists_rel(schema, table, path, rel)?;
+    root_exists_rel_at_correlation(table, path, &mut lowered)?;
     let correlation_index = lowered
         .filters
         .iter()
@@ -1545,13 +1844,35 @@ fn append_exists_rel_policy_clause(
                 .filters
                 .iter()
                 .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
-        })
-        .ok_or_else(|| {
+        });
+    let Some(correlation_index) = correlation_index else {
+        if rel_has_outer_references(rel)
+            || !lowered.reachable.is_empty()
+            || lowered.pending_reachable.is_some()
+            || lowered.joins.iter().any(join_has_outer_correlations)
+        {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), path),
+                "uncorrelated ExistsRel cannot contain unresolved outer references or reachability",
+            ));
+        }
+        let proof_table = lowered.table.ok_or_else(|| {
             err(
                 format!("$.{}.{}", table.as_str(), path),
-                "core schema ExistsRel policies must include an outer row equality",
+                "uncorrelated ExistsRel requires a table relation",
             )
         })?;
+        query.joins.push(uncorrelated_exists_join(
+            proof_table,
+            lowered
+                .filters
+                .into_iter()
+                .map(|filter| filter.predicate)
+                .collect(),
+            lowered.joins,
+        ));
+        return Ok(query);
+    };
     let correlation = lowered.filters.remove(correlation_index);
     let Some(correlation_column) = correlation.column.clone() else {
         return Err(err(
@@ -1625,8 +1946,8 @@ fn append_exists_rel_policy_clause(
     })?;
 
     if !lowered.joins.is_empty() {
-        // The relation's left-most scan is the row correlated to the
-        // protected row. Its joins remain nested beneath that root; replacing
+        // The oriented root is the row correlated to the protected row.
+        // Its joins remain nested beneath that root; replacing
         // it with the first nested join loses the FK relation and produces a
         // `JoinNotRefCompatible` plan (for example task.block -> member.id).
         // Lift outer correlations on a nested join through its equality edge,
@@ -1702,13 +2023,119 @@ fn append_exists_rel_policy_clause(
     }
 }
 
+/// Resolve a column before dropping its relation scope from the core join tree.
+fn resolve_rel_column_route(
+    table: &TableName,
+    path: &str,
+    lowered: &LoweredRel,
+    column: &ColumnRef,
+) -> Result<Vec<usize>, SchemaConversionError> {
+    let Some(scope) = column.scope.as_deref() else {
+        return Ok(Vec::new());
+    };
+    match lowered.scope_paths.get(scope) {
+        Some(Some(route)) => Ok(route.clone()),
+        Some(None) => Err(err(
+            format!("$.{}.{path}", table.as_str()),
+            format!("ExistsRel column scope '{scope}' is ambiguous; use distinct aliases"),
+        )),
+        None => Err(err(
+            format!("$.{}.{path}", table.as_str()),
+            format!("ExistsRel column references unknown scope '{scope}'"),
+        )),
+    }
+}
+
+/// Assign conjuncts to their source before converting scoped columns to local names.
+/// OR/NOT expressions must stay intact: distributing them between existence joins
+/// would change which combinations of rows can authorize the protected row.
+fn append_scoped_rel_predicate(
+    table: &TableName,
+    path: &str,
+    lowered: &mut LoweredRel,
+    predicate: &RelPredicateExpr,
+) -> Result<(), SchemaConversionError> {
+    if let RelPredicateExpr::And(children) = predicate {
+        for child in children {
+            append_scoped_rel_predicate(table, path, lowered, child)?;
+        }
+        return Ok(());
+    }
+    let mut columns = Vec::new();
+    collect_rel_predicate_columns(predicate, &mut columns);
+    let mut routes = BTreeSet::new();
+    for column in columns {
+        let route = resolve_rel_column_route(table, path, lowered, column)?;
+        routes.insert(route);
+    }
+    if routes.len() > 1 {
+        return Err(err(
+            format!("$.{}.{path}", table.as_str()),
+            "ExistsRel Boolean filters spanning multiple sources are not supported",
+        ));
+    }
+    let route = routes.into_iter().next().unwrap_or_default();
+    let filters = rel_predicate_to_policy(table, path, predicate)?;
+    if route.is_empty() {
+        lowered.filters.extend(filters);
+    } else {
+        let mut joins = &mut lowered.joins;
+        for (position, index) in route.iter().enumerate() {
+            let join = &mut joins[*index];
+            if position + 1 == route.len() {
+                for filter in filters {
+                    match (filter.column, filter.value) {
+                        (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
+                            join.correlated_filters.push(JoinCorrelation {
+                                join_column,
+                                source_column,
+                            });
+                        }
+                        _ => join.filters.push(filter.predicate),
+                    }
+                }
+                return Ok(());
+            }
+            joins = &mut join.nested_joins;
+        }
+    }
+    Ok(())
+}
+
+fn collect_rel_predicate_columns<'a>(
+    predicate: &'a RelPredicateExpr,
+    columns: &mut Vec<&'a ColumnRef>,
+) {
+    match predicate {
+        RelPredicateExpr::And(children) | RelPredicateExpr::Or(children) => {
+            for child in children {
+                collect_rel_predicate_columns(child, columns);
+            }
+        }
+        RelPredicateExpr::Not(child) => collect_rel_predicate_columns(child, columns),
+        RelPredicateExpr::Cmp { left, .. }
+        | RelPredicateExpr::Contains { left, .. }
+        | RelPredicateExpr::In { left, .. } => columns.push(left),
+        // Enum payload fields are relative to the matched record, not relation sources.
+        RelPredicateExpr::IsNull { column }
+        | RelPredicateExpr::IsNotNull { column }
+        | RelPredicateExpr::EnumMatch { column, .. } => columns.push(column),
+        RelPredicateExpr::True | RelPredicateExpr::False => {}
+    }
+}
+
 fn lower_exists_rel(
+    schema: &Schema,
     table: &TableName,
     path: &str,
     rel: &RelExpr,
 ) -> Result<LoweredRel, SchemaConversionError> {
     match rel {
-        RelExpr::TableScan { table, .. } => Ok(LoweredRel {
+        RelExpr::TableScan { table, alias } => Ok(LoweredRel {
+            scope_paths: BTreeMap::from([(
+                alias.clone().unwrap_or_else(|| table.as_str().to_owned()),
+                Some(Vec::new()),
+            )]),
             table: Some(table.as_str().to_owned()),
             filters: Vec::new(),
             joins: Vec::new(),
@@ -1716,16 +2143,14 @@ fn lower_exists_rel(
             pending_reachable: None,
         }),
         RelExpr::Filter { input, predicate } => {
-            let mut lowered = lower_exists_rel(table, path, input)?;
-            lowered
-                .filters
-                .extend(rel_predicate_to_policy(table, path, predicate)?);
+            let mut lowered = lower_exists_rel(schema, table, path, input)?;
+            append_scoped_rel_predicate(table, path, &mut lowered, predicate)?;
             Ok(lowered)
         }
-        RelExpr::Project { input, .. } => lower_exists_rel(table, path, input),
+        RelExpr::Project { input, .. } => lower_exists_rel(schema, table, path, input),
         RelExpr::Gather {
             seed, step, bound, ..
-        } => lower_gather_rel(table, path, seed, step, bound),
+        } => lower_gather_rel(schema, table, path, seed, step, bound),
         RelExpr::Join {
             left,
             right,
@@ -1738,14 +2163,22 @@ fn lower_exists_rel(
                     "core schema ExistsRel policies only support inner joins",
                 ));
             }
-            let mut left = lower_exists_rel(table, path, left)?;
-            let right = lower_exists_rel(table, path, right)?;
+            let mut left = lower_exists_rel(schema, table, path, left)?;
+            let right = lower_exists_rel(schema, table, path, right)?;
             let Some(on) = on.first() else {
                 return Err(err(
                     format!("$.{}.{}", table.as_str(), path),
                     "core schema ExistsRel joins require a column equality",
                 ));
             };
+            let source_route = resolve_rel_column_route(table, path, &left, &on.left)?;
+            let target_route = resolve_rel_column_route(table, path, &right, &on.right)?;
+            if !target_route.is_empty() {
+                return Err(err(
+                    format!("$.{}.{path}", table.as_str()),
+                    "core schema ExistsRel join target must be the right relation's root source",
+                ));
+            }
             if let Some(pending) = left.pending_reachable.take() {
                 if on.left.column != "id" {
                     return Err(err(
@@ -1785,6 +2218,9 @@ fn lower_exists_rel(
                     .access_filters
                     .extend(left.filters.iter().map(|filter| filter.predicate.clone()));
                 return Ok(LoweredRel {
+                    // Filters above this access join constrain the access rows,
+                    // not the scalar frontier produced by Gather.
+                    scope_paths: right.scope_paths,
                     table: left.table,
                     filters: Vec::new(),
                     joins: left.joins,
@@ -1833,7 +2269,24 @@ fn lower_exists_rel(
                 filters,
                 nested_joins: right.joins,
             };
-            left.joins.push(join);
+            let mut joins = &mut left.joins;
+            for index in &source_route {
+                joins = &mut joins[*index].nested_joins;
+            }
+            let mut join_route = source_route;
+            join_route.push(joins.len());
+            joins.push(join);
+            for (scope, route) in right.scope_paths {
+                let route = route.map(|route| {
+                    let mut full_route = join_route.clone();
+                    full_route.extend(route);
+                    full_route
+                });
+                left.scope_paths
+                    .entry(scope)
+                    .and_modify(|route| *route = None)
+                    .or_insert(route);
+            }
             left.reachable.extend(right.reachable);
             Ok(left)
         }
@@ -1845,6 +2298,7 @@ fn lower_exists_rel(
 }
 
 fn lower_gather_rel(
+    schema: &Schema,
     table: &TableName,
     path: &str,
     seed: &RelExpr,
@@ -1854,6 +2308,21 @@ fn lower_gather_rel(
     let (from, seed) = lower_gather_seed(table, path, seed)?;
     let (edge_table, output_table, edge_member_column, edge_parent_column, edge_filters) =
         lower_gather_step(table, path, step)?;
+    // A scalar frontier has no materialized output table, but its projected
+    // FK still identifies the logical source used by scoped joins from Gather.
+    // Keep this separate from `table`: setting that would turn the key-only
+    // frontier into a row-producing relation and change reachability semantics.
+    let output_scope = output_table.clone().or_else(|| {
+        schema
+            .get(&TableName::new(edge_table.clone()))?
+            .columns
+            .columns
+            .iter()
+            .find(|column| column.name.as_str() == edge_parent_column)?
+            .references
+            .as_ref()
+            .map(|table| table.as_str().to_owned())
+    });
     let seed = if output_table.as_deref() == Some(seed.table.as_str())
         && seed.user_column.as_deref() == Some("id")
         && seed.team_column == "id"
@@ -1873,6 +2342,11 @@ fn lower_gather_rel(
         }
     };
     Ok(LoweredRel {
+        scope_paths: output_scope
+            .as_ref()
+            .map(|table| (table.clone(), Some(Vec::new())))
+            .into_iter()
+            .collect(),
         table: output_table,
         filters: Vec::new(),
         joins: Vec::new(),
@@ -2190,6 +2664,30 @@ fn rel_predicate_to_policy(
             }])
         }
         RelPredicateExpr::Cmp { left, op, right } => {
+            if matches!(right, RelValueRef::Literal(Value::Null)) {
+                let predicate = match op {
+                    RelPredicateCmpOp::Eq => {
+                        Predicate::IsNull(Operand::Column(left.column.clone()))
+                    }
+                    RelPredicateCmpOp::Ne => Predicate::Not(Box::new(Predicate::IsNull(
+                        Operand::Column(left.column.clone()),
+                    ))),
+                    RelPredicateCmpOp::Lt
+                    | RelPredicateCmpOp::Le
+                    | RelPredicateCmpOp::Gt
+                    | RelPredicateCmpOp::Ge => {
+                        return Err(err(
+                            format!("$.{}.{}", table.as_str(), path),
+                            "core schema ExistsRel NULL comparisons only support equality and inequality",
+                        ));
+                    }
+                };
+                return Ok(vec![LoweredRelPredicate {
+                    predicate,
+                    column: Some(left.column.clone()),
+                    value: None,
+                }]);
+            }
             let value = rel_value_to_policy_operand(table, path, right)?;
             let predicate = match (&value, op) {
                 (LoweredRelValue::Operand(operand), RelPredicateCmpOp::Eq) => {
@@ -2341,6 +2839,7 @@ fn append_inherited_policy(
     via_column: &str,
     max_depth: Option<usize>,
     native_select_inherits: bool,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     let column = table_schema
         .columns
@@ -2391,6 +2890,8 @@ fn append_inherited_policy(
             parent_table,
             via_column,
             parent_policy,
+            operation,
+            expansion_path,
         );
     }
 
@@ -2414,6 +2915,8 @@ fn append_inherited_policy_expanded_fallback(
     parent_table: &TableName,
     via_column: &str,
     parent_policy: &PolicyExpr,
+    operation: Operation,
+    expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
     let parent_filter = convert_policy_predicate(
         parent_table,
@@ -2425,13 +2928,14 @@ fn append_inherited_policy_expanded_fallback(
             Ok(query.join_via_row_id(parent_table.as_str(), via_column, [parent_filter]))
         }
         Err(_) if policy_requires_branch(parent_policy) => {
-            let parent_query = convert_policy_with_native_select_inherits(
+            let parent_query = convert_expanded_inherited_policy(
                 schema,
                 parent_schema,
                 parent_table,
                 &format!("{path}.Inherits[{parent_table}]"),
                 parent_policy,
-                false,
+                operation,
+                expansion_path,
             )?;
             append_inherited_policy_branches(
                 table,
@@ -2507,6 +3011,15 @@ fn inherited_parent_branch_to_child_query(
             .map(|lookup| lookup.row_id_source_column.clone())
             .or(source_column);
         query = match target {
+            JoinTarget::Uncorrelated => {
+                // An independent parent proof still requires the referenced
+                // parent row to exist. It cannot authorize a dangling FK.
+                query = query.join_via_row_id(parent_table.as_str(), via_column, Vec::new());
+                query
+                    .joins
+                    .push(uncorrelated_exists_join(join_table, filters, nested_joins));
+                query
+            }
             JoinTarget::Column => {
                 if let Some(source_column) = source_column {
                     let source_lookup = JoinSourceLookup {
@@ -2638,6 +3151,15 @@ fn convert_policy_predicate(
             value,
         } => {
             let left = convert_session_path_operand(table, path, path_segments)?;
+            if matches!(value, Value::Null) {
+                match op {
+                    CmpOp::Eq => return Ok(Predicate::IsNull(left)),
+                    CmpOp::Ne => {
+                        return Ok(Predicate::Not(Box::new(Predicate::IsNull(left))));
+                    }
+                    _ => {}
+                }
+            }
             let right = Operand::Literal(convert_policy_literal(table, path, value)?);
             Ok(match op {
                 CmpOp::Eq => Predicate::Eq(left, right),
@@ -2650,6 +3172,12 @@ fn convert_policy_predicate(
                 }
             })
         }
+        PolicyExpr::SessionIsNull { path: segments } => Ok(Predicate::IsNull(
+            convert_session_path_operand(table, path, segments)?,
+        )),
+        PolicyExpr::SessionIsNotNull { path: segments } => Ok(Predicate::Not(Box::new(
+            Predicate::IsNull(convert_session_path_operand(table, path, segments)?),
+        ))),
         PolicyExpr::IsNull { column } => Ok(Predicate::IsNull(Operand::Column(column.clone()))),
         PolicyExpr::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
             Operand::Column(column.clone()),
@@ -2673,6 +3201,13 @@ fn convert_policy_predicate(
             })
             .collect::<Result<Vec<_>, _>>()
             .map(|values| Predicate::In(Operand::Column(column.clone()), values)),
+        PolicyExpr::SessionContains {
+            path: segments,
+            value,
+        } => Ok(Predicate::Contains(
+            convert_session_path_operand(table, path, segments)?,
+            Operand::Literal(convert_policy_literal(table, path, value)?),
+        )),
         PolicyExpr::SessionInList {
             path: path_segments,
             values,
@@ -2726,15 +3261,15 @@ fn convert_session_path_operand(
     {
         return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
     }
-    if path_segments.len() == 2 && path_segments[0] == "claims" {
-        return Ok(Operand::Claim(provider_claim_operand_key(
-            &path_segments[1],
-        )));
+    if path_segments.len() >= 2 && path_segments[0] == "claims" {
+        return Ok(Operand::Claim(
+            crate::query::provider_claim_path_operand_key(&path_segments[1..]),
+        ));
     }
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
         format!(
-            "core schema policies only support session.user, session.authMode, and raw provider claims through session.claims[\"name\"]; got session.{}",
+            "core schema policies only support session.user, session.authMode, and provider claims through session.claims; got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -2781,6 +3316,7 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::provider_claim_operand_key;
     use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
     use crate::tools::object::ObjectId;
     use crate::tools::public_api::policy::{CmpOp, PolicyValue};
@@ -4326,6 +4862,101 @@ mod tests {
     }
 
     #[test]
+    fn converts_nested_or_with_correlated_exists_under_and_to_policy_branches() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("rooms").column("archived", ColumnType::Boolean))
+            .table(
+                TableSchemaBuilder::new("roomParticipants")
+                    .fk_column("room_id", "rooms")
+                    .column("session_user_id", ColumnType::Text),
+            )
+            .table(
+                TableSchemaBuilder::new("roomMetadata")
+                    .fk_column("room_id", "rooms")
+                    .column("owner_id", ColumnType::Text)
+                    .column("is_admin", ColumnType::Boolean)
+                    .policies(TablePolicies::new().with_update(
+                        Some(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "owner_id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
+                            },
+                            PolicyExpr::And(vec![
+                                PolicyExpr::Exists {
+                                    table: "rooms".to_owned(),
+                                    condition: Box::new(PolicyExpr::And(vec![
+                                        PolicyExpr::Cmp {
+                                            column: "id".to_owned(),
+                                            op: CmpOp::Eq,
+                                            value: PolicyValue::SessionRef(vec![
+                                                "__jazz_outer_row".to_owned(),
+                                                "room_id".to_owned(),
+                                            ]),
+                                        },
+                                        PolicyExpr::Cmp {
+                                            column: "archived".to_owned(),
+                                            op: CmpOp::Eq,
+                                            value: PolicyValue::Literal(Value::Boolean(false)),
+                                        },
+                                    ])),
+                                },
+                                PolicyExpr::Or(vec![
+                                    PolicyExpr::Cmp {
+                                        column: "is_admin".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::Literal(Value::Boolean(true)),
+                                    },
+                                    PolicyExpr::Exists {
+                                        table: "roomParticipants".to_owned(),
+                                        condition: Box::new(PolicyExpr::And(vec![
+                                            PolicyExpr::Cmp {
+                                                column: "room_id".to_owned(),
+                                                op: CmpOp::Eq,
+                                                value: PolicyValue::SessionRef(vec![
+                                                    "__jazz_outer_row".to_owned(),
+                                                    "room_id".to_owned(),
+                                                ]),
+                                            },
+                                            PolicyExpr::Cmp {
+                                                column: "session_user_id".to_owned(),
+                                                op: CmpOp::Eq,
+                                                value: PolicyValue::SessionRef(vec![
+                                                    "claims".to_owned(),
+                                                    "sub".to_owned(),
+                                                ]),
+                                            },
+                                        ])),
+                                    },
+                                ]),
+                            ]),
+                        ])),
+                        PolicyExpr::True,
+                    )),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let metadata = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "roomMetadata")
+            .unwrap();
+        let policy = metadata.write_policies.update_using.as_ref().unwrap();
+
+        assert_eq!(policy.filters, vec![Predicate::Any(Vec::new())]);
+        assert_eq!(policy.policy_branches.len(), 2);
+        assert_eq!(policy.policy_branches[0].joins.len(), 1);
+        assert_eq!(policy.policy_branches[0].joins[0].table, "rooms");
+        assert_eq!(policy.policy_branches[1].joins.len(), 2);
+        assert_eq!(policy.policy_branches[1].joins[0].table, "rooms");
+        assert_eq!(policy.policy_branches[1].joins[1].table, "roomParticipants");
+    }
+
+    #[test]
     fn converts_chat_public_or_membership_select_policy_to_branches() {
         let schema = SchemaBuilder::new()
             .table(
@@ -4402,7 +5033,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_policy_subset() {
+    fn rejects_unknown_session_root() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("todos")
@@ -4418,7 +5049,7 @@ mod tests {
 
         let error = convert_public_schema(&schema).unwrap_err();
         assert!(error.to_string().starts_with(
-            "$.todos.policies.select.using: core schema policies do not support SessionContains"
+            "$.todos.policies.select.using: core schema policies only support session.user"
         ));
     }
 

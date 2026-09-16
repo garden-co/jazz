@@ -489,7 +489,10 @@ async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
     let mut batch = database.open_batch();
     batch.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     batch.accept_large_value(staged.id);
     database.commit_batch(batch).await.unwrap();
@@ -497,7 +500,7 @@ async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
     let mut replay = database.open_batch();
     replay.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(staged.value_ref)],
+        vec![Value::U64(2), Value::Large(Box::new(staged.value_ref))],
     );
     replay.accept_large_value(staged.id);
     assert!(matches!(
@@ -581,7 +584,10 @@ async fn present_staged_receipt_has_no_implicit_ttl_and_is_accepted_atomically()
     let mut batch = database.open_batch();
     batch.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     batch.accept_large_value(staged.id);
     database.commit_batch(batch).await.unwrap();
@@ -614,7 +620,7 @@ async fn resident_large_value_acceptance_blocks_stale_eviction_and_reclamation()
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
     );
     insert.accept_large_value(staged.id);
     let applied = database.apply_batch(insert).await.unwrap();
@@ -671,7 +677,7 @@ async fn cross_receipt_eviction_defers_until_resident_publication_is_durable() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(accepted.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(accepted.value_ref))],
     );
     insert.accept_large_value(accepted.id);
     let applied = database.apply_batch(insert).await.unwrap();
@@ -748,7 +754,7 @@ async fn reclamation_uses_durable_zero_and_resident_references_as_a_veto() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(value_ref.clone())],
+        vec![Value::U64(1), Value::Large(Box::new(value_ref.clone()))],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -770,7 +776,7 @@ async fn reclamation_uses_durable_zero_and_resident_references_as_a_veto() {
     let mut first_activation = database.open_batch();
     first_activation.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(value_ref.clone())],
+        vec![Value::U64(2), Value::Large(Box::new(value_ref.clone()))],
     );
     let first_activation = database.apply_batch(first_activation).await.unwrap();
     assert_eq!(
@@ -821,7 +827,7 @@ async fn reclamation_uses_durable_zero_and_resident_references_as_a_veto() {
     let mut second_activation = database.open_batch();
     second_activation.insert(
         "objects",
-        vec![Value::U64(3), Value::Large(value_ref.clone())],
+        vec![Value::U64(3), Value::Large(Box::new(value_ref.clone()))],
     );
     let second_activation = database.apply_batch(second_activation).await.unwrap();
     database
@@ -1556,7 +1562,7 @@ async fn finalized_upload_promotion_is_atomic_and_retry_returns_its_one_receipt(
     let mut accepted = reopened.open_batch();
     accepted.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(prepared.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(prepared.value_ref))],
     );
     accepted.accept_large_value(receipt.id);
     reopened.commit_batch(accepted).await.unwrap();
@@ -2084,11 +2090,17 @@ async fn shared_durable_root_is_reclaimed_only_after_its_last_physical_record() 
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(2),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2498,7 +2510,10 @@ async fn pipelined_applied_batches_compose_large_value_root_references() {
     let mut first_batch = database.open_batch();
     first_batch.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(first_staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(first_staged.value_ref.clone())),
+        ],
     );
     first_batch.accept_large_value(first_staged.id);
     let first = database.apply_batch(first_batch).await.unwrap();
@@ -2506,7 +2521,10 @@ async fn pipelined_applied_batches_compose_large_value_root_references() {
     let mut second_batch = database.open_batch();
     second_batch.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(second_staged.value_ref.clone())],
+        vec![
+            Value::U64(2),
+            Value::Large(Box::new(second_staged.value_ref.clone())),
+        ],
     );
     second_batch.accept_large_value(second_staged.id);
     let second = database.apply_batch(second_batch).await.unwrap();
@@ -2574,7 +2592,10 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2677,7 +2698,10 @@ async fn corrupt_large_value_root_does_not_leave_a_publication_hole() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2739,7 +2763,7 @@ async fn cancelled_lifecycle_wait_does_not_leave_a_publication_hole() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2807,7 +2831,10 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
     );
     insert.accept_large_value(staged.id);
     database.commit_batch(insert).await.unwrap();
@@ -2943,7 +2970,7 @@ async fn missing_chunk_observer_completes_during_tick_before_lifecycle_lock() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
     );
     insert.accept_large_value(staged.id);
     let applied = database.apply_batch(insert).await.unwrap();
@@ -3020,7 +3047,10 @@ async fn sequential_cold_large_value_publications_do_not_deadlock_observer() {
     let mut first = database.open_batch();
     first.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(first_staged.value_ref)],
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(first_staged.value_ref)),
+        ],
     );
     first.accept_large_value(first_staged.id);
     let first = database.apply_batch(first).await.unwrap();
@@ -3040,7 +3070,10 @@ async fn sequential_cold_large_value_publications_do_not_deadlock_observer() {
     let mut second = database.open_batch();
     second.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(second_staged.value_ref)],
+        vec![
+            Value::U64(2),
+            Value::Large(Box::new(second_staged.value_ref)),
+        ],
     );
     second.accept_large_value(second_staged.id);
     let mut second_application = Box::pin(database.apply_batch(second));
@@ -3128,7 +3161,7 @@ async fn first_cold_publication_persists_before_resolver_without_deadlock() {
     let mut insert = database.open_batch();
     insert.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(staged.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
     );
     insert.accept_large_value(staged.id);
     let applied = database.apply_batch(insert).await.unwrap();
@@ -3229,7 +3262,7 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
     let mut first_batch = database.open_batch();
     first_batch.insert(
         "objects",
-        vec![Value::U64(1), Value::Large(first.value_ref)],
+        vec![Value::U64(1), Value::Large(Box::new(first.value_ref))],
     );
     first_batch.accept_large_value(first.id);
     let first = database.apply_batch(first_batch).await.unwrap();
@@ -3245,7 +3278,7 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
     let mut second_batch = database.open_batch();
     second_batch.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(second.value_ref)],
+        vec![Value::U64(2), Value::Large(Box::new(second.value_ref))],
     );
     second_batch.accept_large_value(second.id);
     let second = database.apply_batch(second_batch).await.unwrap();
@@ -3364,7 +3397,7 @@ async fn late_publication_metadata_write_failure_is_fatal_and_observable() {
     let mut second = database.open_batch();
     second.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(staged.value_ref)],
+        vec![Value::U64(2), Value::Large(Box::new(staged.value_ref))],
     );
     second.accept_large_value(staged.id);
     let second = database.apply_batch(second).await.unwrap();
@@ -3468,7 +3501,7 @@ async fn external_chunk_backend_error_cannot_forge_publication_durability_failur
     let mut second = database.open_batch();
     second.insert(
         "objects",
-        vec![Value::U64(2), Value::Large(staged.value_ref)],
+        vec![Value::U64(2), Value::Large(Box::new(staged.value_ref))],
     );
     second.accept_large_value(staged.id);
     let second = database.apply_batch(second).await.unwrap();
@@ -5601,5 +5634,328 @@ async fn persistence_receipts_cannot_settle_another_database() {
             .to_values()
             .unwrap(),
         [(vec![Value::U64(2), Value::String("second".to_owned())], 1)]
+    );
+}
+
+#[futures_test::test]
+async fn immutable_batch_is_idempotent_and_conflicts_abort_every_write() {
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut db = Database::new(schema, storage).await.unwrap();
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let record = |id, title: &str| {
+        descriptor
+            .create(&[Value::U64(id), Value::String(title.into())])
+            .unwrap()
+    };
+    let mut batch = db.open_batch();
+    assert_eq!(
+        batch
+            .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), record(1, "one"))
+            .await
+            .unwrap(),
+        EnsureExactOutcome::Inserted
+    );
+    assert_eq!(
+        batch
+            .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), record(1, "one"))
+            .await
+            .unwrap(),
+        EnsureExactOutcome::AlreadyIdentical
+    );
+    db.commit_batch(batch).await.unwrap();
+    let mut replay = db.open_batch();
+    assert_eq!(
+        replay
+            .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), record(1, "one"))
+            .await
+            .unwrap(),
+        EnsureExactOutcome::AlreadyIdentical
+    );
+    assert!(
+        replay.operations.is_empty(),
+        "identical history emits no writes or deltas"
+    );
+    db.commit_batch(replay).await.unwrap();
+    let mut conflict = db.open_batch();
+    assert_eq!(
+        conflict
+            .ensure_exact(&db, "albums", PrimaryKeyValue::U64(2), record(2, "two"))
+            .await
+            .unwrap(),
+        EnsureExactOutcome::Inserted
+    );
+    assert_eq!(
+        conflict
+            .ensure_exact(
+                &db,
+                "albums",
+                PrimaryKeyValue::U64(1),
+                record(1, "different")
+            )
+            .await
+            .unwrap(),
+        EnsureExactOutcome::Conflict
+    );
+    assert!(matches!(
+        db.commit_batch(conflict).await,
+        Err(Error::ImmutableBatchConflict)
+    ));
+    assert!(
+        db.primary_key_get_raw("albums", &[Value::U64(2)])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        db.primary_key_get_raw("albums", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .unwrap()
+            .raw(),
+        record(1, "one")
+    );
+    let mut usable = db.open_batch();
+    usable.insert(
+        "albums",
+        vec![Value::U64(3), Value::String("still usable".into())],
+    );
+    db.commit_batch(usable).await.unwrap();
+}
+
+#[futures_test::test]
+async fn immutable_batch_rejects_stale_resident_proofs() {
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut db = Database::new(schema, storage).await.unwrap();
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let mut old = db.open_batch();
+    old.ensure_exact(
+        &db,
+        "albums",
+        PrimaryKeyValue::U64(1),
+        descriptor
+            .create(&[Value::U64(1), Value::String("old".into())])
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut newer = db.open_batch();
+    newer.insert("albums", vec![Value::U64(1), Value::String("new".into())]);
+    let applied = db.apply_batch(newer).await.unwrap();
+    assert!(matches!(
+        db.apply_batch(old).await,
+        Err(Error::StaleImmutableBatch)
+    ));
+    db.finish_persistence(applied.persist().await).unwrap();
+    assert_eq!(
+        db.primary_key_get_raw("albums", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .unwrap()
+            .record()
+            .get_str(1)
+            .unwrap(),
+        "new"
+    );
+}
+
+#[futures_test::test]
+async fn immutable_batch_rejects_later_overwrite_and_other_database() {
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut db = Database::new(schema.clone(), storage).await.unwrap();
+    let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
+    let bytes = descriptor
+        .create(&[Value::U64(1), Value::String("original".into())])
+        .unwrap();
+    let mut batch = db.open_batch();
+    batch
+        .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), bytes.clone())
+        .await
+        .unwrap();
+    batch.update(
+        "albums",
+        vec![Value::U64(1), Value::String("overwrite".into())],
+    );
+    assert!(matches!(
+        db.commit_batch(batch).await,
+        Err(Error::ImmutableBatchConflict)
+    ));
+    assert!(
+        db.primary_key_get_raw("albums", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut batch = db.open_batch();
+    batch
+        .ensure_exact(&db, "albums", PrimaryKeyValue::U64(1), bytes)
+        .await
+        .unwrap();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut other = Database::new(schema, storage).await.unwrap();
+    assert!(matches!(
+        other.commit_batch(batch).await,
+        Err(Error::StaleImmutableBatch)
+    ));
+}
+
+// Internal because correct row output alone cannot prove batch-amortized
+// descriptor preparation. Exercise two stored layouts and verify their deltas.
+#[futures_test::test]
+async fn old_row_delta_descriptors_are_prepared_once_per_batch_variant() {
+    use super::super::storage_helpers::{PendingTableWrite, compute_table_deltas};
+    use crate::storage::{OwnedWriteOperation, RecordStore};
+
+    let table = crate::schema::TableSchema::new(
+        "variant_rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("label", ColumnType::String),
+        ],
+    )
+    .with_variant(1, ["id"])
+    .with_variant(2, ["id", "label"]);
+    let first = table.record_schema_for_variant(1).unwrap();
+    let second = table.record_schema_for_variant(2).unwrap();
+    let carrier = table.record_schema();
+    let schema = DatabaseSchema::new([table]);
+    let storage = MemoryStorage::new(&["variant_rows"]).unwrap();
+    let mut seeds = Vec::new();
+    let mut writes = Vec::new();
+    for id in 0..1000u64 {
+        let (tag, payload) = if id % 2 == 0 {
+            (1, first.create(&[Value::U64(id)]).unwrap())
+        } else {
+            (
+                2,
+                second
+                    .create(&[Value::U64(id), Value::String("row".into())])
+                    .unwrap(),
+            )
+        };
+        let key = id.to_be_bytes().to_vec();
+        seeds.push(OwnedWriteOperation::Set {
+            cf: "variant_rows".into(),
+            key: key.clone(),
+            value: crate::records::encode_variant_record(tag, &payload),
+        });
+        writes.push(PendingTableWrite::Delete {
+            table: "variant_rows".into(),
+            key,
+            descriptor: carrier,
+        });
+    }
+    storage.write_many(seeds).await.unwrap();
+    let stores = writes
+        .iter()
+        .map(|_| RecordStore::new(&storage, "variant_rows", &carrier))
+        .collect::<Vec<_>>();
+    crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
+    let deltas = compute_table_deltas(&writes, &stores, &schema)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.get()),
+        2
+    );
+    assert_eq!(deltas.len(), 2);
+    for group in deltas {
+        assert_eq!(
+            group.descriptor,
+            if group.variant_tag == 1 {
+                first
+            } else {
+                second
+            }
+        );
+        assert_eq!(group.deltas.len(), 500);
+        for delta in group.deltas {
+            assert_eq!(delta.weight, -1);
+            let record = group.descriptor.bind(&delta.record);
+            let id = record.get_u64(0).unwrap();
+            assert!(id < 1000);
+            assert_eq!(id % 2, u64::from(group.variant_tag - 1));
+            if group.variant_tag == 2 {
+                assert_eq!(record.get_str(1).unwrap(), "row");
+            }
+        }
+    }
+    storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: "variant_rows".into(),
+            key: writes[0].key().to_vec(),
+            value: crate::records::encode_variant_record(3, &[]),
+        }])
+        .await
+        .unwrap();
+    assert!(matches!(
+        compute_table_deltas(&writes[..1], &stores[..1], &schema).await,
+        Err(Error::UnknownTableVariant { version: 3, .. })
+    ));
+}
+
+#[futures_test::test]
+async fn direct_store_key_reads_validate_without_encoding_throwaway_records() {
+    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+        "checked_keys",
+        RecordDescriptor::new([
+            ("scope", ValueType::String),
+            (
+                "coordinate",
+                ValueType::Tuple(vec![ValueType::U16, ValueType::Bool]),
+            ),
+        ]),
+        RecordDescriptor::new([("value", ValueType::U64)]),
+    ));
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let db = Database::new(schema, storage).await.unwrap();
+    let store = db.direct_record_store("checked_keys").unwrap();
+    let key = [
+        "scope".into(),
+        Value::Tuple(vec![Value::U16(3), Value::Bool(true)]),
+    ];
+    store.set(&key, &[Value::U64(42)]).await.unwrap();
+    // Internal work counter supplements public behavior: key validation must
+    // not reconstruct a record just to discard its bytes.
+    crate::records::RECORD_ENCODE_COUNT.with(|count| count.set(0));
+    assert_eq!(
+        store
+            .get(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .get("value")
+            .unwrap(),
+        Value::U64(42)
+    );
+    assert_eq!(store.prefix(&key[..1]).await.unwrap().len(), 1);
+    assert_eq!(store.prefix(&[]).await.unwrap().len(), 1);
+    assert_eq!(
+        crate::records::RECORD_ENCODE_COUNT.with(|count| count.get()),
+        0
+    );
+    for invalid in [
+        vec![Value::U64(3)],
+        vec![
+            "scope".into(),
+            Value::Tuple(vec![Value::Bool(true), Value::U16(3)]),
+        ],
+        vec!["scope".into(), Value::Tuple(vec![Value::U16(3)])],
+        vec!["scope".into(), key[1].clone(), Value::U8(0)],
+    ] {
+        assert!(store.prefix(&invalid).await.is_err());
+    }
+    assert!(store.get(&key[..1]).await.is_err());
+    assert_eq!(
+        store
+            .get(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .get("value")
+            .unwrap(),
+        Value::U64(42)
     );
 }

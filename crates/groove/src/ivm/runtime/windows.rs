@@ -238,13 +238,13 @@ pub(super) fn collect_by_output_value(output_type: &ValueType, value: Value) -> 
 }
 
 fn collect_by_projected_value(
-    values: &[Value],
+    record: &BorrowedRecord<'_>,
     field: &CollectByProjection,
 ) -> Result<Value, IvmRuntimeError> {
-    let value = values
-        .get(field.field_idx)
-        .cloned()
-        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))?;
+    if field.field_idx >= record.descriptor().fields().len() {
+        return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx));
+    }
+    let value = record.get_idx(field.field_idx)?;
     if !field.unwrap_nullable {
         return Ok(value);
     }
@@ -388,9 +388,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
         if !emit || (before_weight > 0) == (after_weight > 0) {
             continue;
         }
-        let source_values = BorrowedRecord::new(delta.raw(), &input_desc)
-            .to_values()
-            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let source_input = BorrowedRecord::new(delta.raw(), &input_desc);
         let child_fields = direct_tree_slot
             .map(|slot| slot.child_fields.as_slice())
             .unwrap_or(collect_by.child_fields.as_slice());
@@ -406,7 +404,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
             .map(|(index, field)| {
                 Ok::<Value, IvmRuntimeError>(collect_by_output_value(
                     &child_descriptor.fields()[index].value_type,
-                    collect_by_projected_value(&source_values, field)?,
+                    collect_by_projected_value(&source_input, field)?,
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -570,9 +568,11 @@ fn update_collect_by_root_terminal_state(
     if !emit {
         state.groups.clear();
         state.roots.clear();
-        state.emitted_root_order.clear();
-        state.emitted_root_keys.clear();
+        state.emitted_root_order = Rc::default();
+        state.emitted_root_keys = Rc::default();
     }
+    let unique_group_sort = collect_by_sort_identifies_group(input_desc, collect_by);
+    let order_key = |group: &CollectByGroup| collect_by_root_order_key(group, unique_group_sort);
     let mut before = BTreeMap::<Vec<u8>, Option<Bytes>>::new();
     let mut before_order = BTreeMap::<Vec<u8>, Option<CollectByOrderKey>>::new();
     for delta in deltas {
@@ -591,10 +591,7 @@ fn update_collect_by_root_terminal_state(
         if !before_order.contains_key(&group_key) {
             before_order.insert(
                 group_key.clone(),
-                state
-                    .groups
-                    .get(&group_key)
-                    .and_then(collect_by_root_order_key),
+                state.groups.get(&group_key).and_then(order_key),
             );
         }
         let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
@@ -608,6 +605,17 @@ fn update_collect_by_root_terminal_state(
         .remove_empty_touched_groups(before.keys().cloned());
     if !emit {
         return Ok(Vec::new());
+    }
+
+    // If every touched group retains exactly the same total order key, no
+    // public position can change. Keep both public indexes shared with the
+    // previous staged state and render only the affected payloads. Comparing
+    // mere declared sort fields would be unsound when raw bytes break ties.
+    if before_order
+        .iter()
+        .all(|(root_key, before_key)| *before_key == state.groups.get(root_key).and_then(order_key))
+    {
+        return collect_by_root_payload_updates(input_desc, output_desc, collect_by, state, before);
     }
 
     // Capture the actual public sequence once before replacing changed sort
@@ -627,15 +635,15 @@ fn update_collect_by_root_terminal_state(
         if !state.emitted_root_keys.contains(root_key) {
             continue;
         }
-        if let Some(before_key) = before_key {
-            state.emitted_root_order.remove(before_key);
-        }
-        if let Some(after_key) = state
-            .groups
-            .get(root_key)
-            .and_then(collect_by_root_order_key)
-        {
-            state.emitted_root_order.insert(after_key, root_key.clone());
+        let after_key = state.groups.get(root_key).and_then(order_key);
+        if *before_key != after_key {
+            let order = Rc::make_mut(&mut state.emitted_root_order);
+            if let Some(before_key) = before_key {
+                order.remove(before_key);
+            }
+            if let Some(after_key) = after_key {
+                order.insert(after_key, root_key.clone());
+            }
         }
     }
 
@@ -649,11 +657,7 @@ fn update_collect_by_root_terminal_state(
     // non-empty.
     for root_key in before_order.keys() {
         if state.emitted_root_keys.contains(root_key)
-            && state
-                .groups
-                .get(root_key)
-                .and_then(collect_by_root_order_key)
-                .is_none()
+            && state.groups.get(root_key).and_then(order_key).is_none()
         {
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
@@ -663,7 +667,7 @@ fn update_collect_by_root_terminal_state(
                     key: root_key.clone(),
                 },
             });
-            state.emitted_root_keys.remove(root_key);
+            Rc::make_mut(&mut state.emitted_root_keys).remove(root_key);
             public_sequence.retain(|key| key != root_key);
         }
     }
@@ -697,11 +701,7 @@ fn update_collect_by_root_terminal_state(
         {
             continue;
         }
-        let Some(after_key) = state
-            .groups
-            .get(root_key)
-            .and_then(collect_by_root_order_key)
-        else {
+        let Some(after_key) = state.groups.get(root_key).and_then(order_key) else {
             continue;
         };
         if *before_key != after_key {
@@ -738,11 +738,7 @@ fn update_collect_by_root_terminal_state(
         if before_key.is_some() {
             continue;
         }
-        let Some(order_key) = state
-            .groups
-            .get(root_key)
-            .and_then(collect_by_root_order_key)
-        else {
+        let Some(order_key) = state.groups.get(root_key).and_then(order_key) else {
             // Retractions can reach a freshly reset collector before its
             // replacement hydration. Keep their negative maintenance state,
             // but do not manufacture a public occurrence without a positive
@@ -776,8 +772,8 @@ fn update_collect_by_root_terminal_state(
         // before this one because `inserts` is ordered by the same total key.
         let index = retained_final_order.partition_point(|(candidate, _)| candidate < &order_key)
             + new_roots_before;
-        state.emitted_root_order.insert(order_key, root_key.clone());
-        state.emitted_root_keys.insert(root_key.clone());
+        Rc::make_mut(&mut state.emitted_root_order).insert(order_key, root_key.clone());
+        Rc::make_mut(&mut state.emitted_root_keys).insert(root_key.clone());
         public_sequence.insert(index, root_key.clone());
         operations.push(TerminalOperation {
             root_descriptor: output_desc,
@@ -791,7 +787,30 @@ fn update_collect_by_root_terminal_state(
         });
     }
 
+    operations.extend(collect_by_root_payload_updates(
+        input_desc,
+        output_desc,
+        collect_by,
+        state,
+        before,
+    )?);
+    Ok(operations)
+}
+
+fn collect_by_root_payload_updates(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    state: &CollectByIncrementalState,
+    before: BTreeMap<Vec<u8>, Option<Bytes>>,
+) -> Result<Vec<TerminalOperation>, IvmRuntimeError> {
+    let mut operations = Vec::new();
     for (root_key, before_record) in before {
+        // A new root already emitted its Insert above. With no previous row,
+        // this pass cannot emit an Update, so do not render it a second time.
+        let Some(before_record) = before_record else {
+            continue;
+        };
         // `groups` can retain a root-collector maintenance group before it
         // has ever been presented to this terminal consumer. Without a prior
         // Insert, an Update would address no facade occurrence.
@@ -805,19 +824,16 @@ fn update_collect_by_root_terminal_state(
                 .collect::<Vec<_>>();
             collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
         })?;
+        // Removed roots were retracted before inserts/moves above.
+        let Some(after_record) = after_record else {
+            continue;
+        };
         if before_record == after_record {
             continue;
         }
-        let edit = match (before_record, after_record) {
-            // New roots were inserted above in final collector order.
-            (None, Some(_)) => continue,
-            (Some(_), Some(record)) => TerminalEdit::Update {
-                key: root_key.clone(),
-                value: record.to_vec(),
-            },
-            // Removed roots were retracted before inserts/moves above.
-            (Some(_), None) => continue,
-            (None, None) => continue,
+        let edit = TerminalEdit::Update {
+            key: root_key.clone(),
+            value: after_record.to_vec(),
         };
         operations.push(TerminalOperation {
             root_descriptor: output_desc,
@@ -829,11 +845,46 @@ fn update_collect_by_root_terminal_state(
     Ok(operations)
 }
 
-fn collect_by_root_order_key(group: &CollectByGroup) -> Option<CollectByOrderKey> {
+fn collect_by_sort_identifies_group(
+    input_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+) -> bool {
+    collect_by.group_field_indices.iter().all(|group_field| {
+        // Only fields actually consumed by the zipped sort-key builder count.
+        // These non-null scalar encodings distinguish every possible identity;
+        // in particular, do not extend this proof to canonicalized float zeros.
+        collect_by
+            .sort_field_indices
+            .iter()
+            .zip(&collect_by.sort_directions)
+            .any(|(sort_field, _)| sort_field == group_field)
+            && input_desc
+                .fields()
+                .get(*group_field)
+                .is_some_and(|field| matches!(field.value_type, ValueType::Uuid | ValueType::U64))
+    })
+}
+
+fn collect_by_root_order_key(
+    group: &CollectByGroup,
+    unique_group_sort: bool,
+) -> Option<CollectByOrderKey> {
     group
         .iter()
         .find(|(_, weight)| **weight > 0)
-        .map(|(order_key, _)| order_key.clone())
+        .map(|((sort_key, record), _)| {
+            // Per-group winner selection still uses the complete record bytes.
+            // Only the public index can omit them once distinct group identities
+            // necessarily have distinct sort prefixes.
+            (
+                sort_key.clone(),
+                if unique_group_sort {
+                    Bytes::new()
+                } else {
+                    record.clone()
+                },
+            )
+        })
 }
 
 pub(super) fn collect_by_root_from_records(
@@ -845,17 +896,13 @@ pub(super) fn collect_by_root_from_records(
     let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
         return Ok(None);
     };
-    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
-        .to_values()
-        .map_err(|error| {
-            IvmRuntimeError::InvalidCollectBy(format!("root input decode failed: {error}"))
-        })?;
+    let parent_input = BorrowedRecord::new(parent_record, &input_desc);
     let values = collect_by
         .parent_fields
         .iter()
         .enumerate()
         .map(|(index, field)| {
-            let value = collect_by_projected_value(&parent_values, field)?;
+            let value = collect_by_projected_value(&parent_input, field)?;
             let output_type = &output_desc.fields()[index].value_type;
             Ok::<Value, IvmRuntimeError>(collect_by_output_value(output_type, value))
         })
@@ -875,15 +922,13 @@ pub(super) fn collect_by_parent_from_records(
     let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
         return Ok(None);
     };
-    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
-        .to_values()
-        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let parent_input = BorrowedRecord::new(parent_record, &input_desc);
     let mut values = collect_by
         .parent_fields
         .iter()
         .enumerate()
         .map(|(index, field)| {
-            let value = collect_by_projected_value(&parent_values, field)?;
+            let value = collect_by_projected_value(&parent_input, field)?;
             let output_type = &output_desc.fields()[index].value_type;
             Ok::<Value, IvmRuntimeError>(collect_by_output_value(output_type, value))
         })
@@ -891,9 +936,7 @@ pub(super) fn collect_by_parent_from_records(
     let window = collect_by_window_from_records(input_desc, records, collect_by)?;
     let mut children = Vec::new();
     for (record, copies) in window {
-        let source_values = BorrowedRecord::new(&record, &input_desc)
-            .to_values()
-            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let source_input = BorrowedRecord::new(&record, &input_desc);
         let child_values = collect_by
             .child_fields
             .iter()
@@ -901,7 +944,7 @@ pub(super) fn collect_by_parent_from_records(
             .map(|(index, field)| {
                 Ok::<Value, IvmRuntimeError>(collect_by_output_value(
                     &collect_by.child_descriptor.fields()[index].value_type,
-                    collect_by_projected_value(&source_values, field)?,
+                    collect_by_projected_value(&source_input, field)?,
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -926,9 +969,7 @@ pub(super) fn collect_by_tree_parent_from_records(
     let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
         return Ok(None);
     };
-    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
-        .to_values()
-        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let parent_input = BorrowedRecord::new(parent_record, &input_desc);
     let mut values = collect_by
         .parent_fields
         .iter()
@@ -936,7 +977,7 @@ pub(super) fn collect_by_tree_parent_from_records(
         .map(|(index, field)| {
             Ok::<Value, IvmRuntimeError>(collect_by_output_value(
                 &output_desc.fields()[index].value_type,
-                collect_by_projected_value(&parent_values, field)?,
+                collect_by_projected_value(&parent_input, field)?,
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -990,13 +1031,11 @@ fn render_collect_by_slots(
                 {
                     continue;
                 }
-                let source_values = BorrowedRecord::new(record, &input_desc)
-                    .to_values()
-                    .map_err(IvmRuntimeError::RecordEncoding)?;
+                let source_input = BorrowedRecord::new(record, &input_desc);
                 let child_values = slot
                     .child_fields
                     .iter()
-                    .map(|field| collect_by_projected_value(&source_values, field))
+                    .map(|field| collect_by_projected_value(&source_input, field))
                     .collect::<Result<Vec<_>, _>>()?;
                 candidates
                     .entry(child_key_descriptor.create(&child_values)?.into())
@@ -1020,7 +1059,10 @@ fn render_collect_by_slots(
                             _ => Vec::new(),
                         });
                     }
-                    let id = collect_by_projected_value(&values, &slot.child_fields[0])?;
+                    let id = collect_by_projected_value(
+                        &BorrowedRecord::new(record, &input_desc),
+                        &slot.child_fields[0],
+                    )?;
                     if let Value::Uuid(id) = id {
                         by_id.insert(id, record.clone());
                     }
@@ -1037,9 +1079,7 @@ fn render_collect_by_slots(
             let selected = collect_by_slot_window_from_records(input_desc, candidates, slot)?;
             let mut children = Vec::with_capacity(selected.len());
             for record in selected {
-                let source_values = BorrowedRecord::new(&record, &input_desc)
-                    .to_values()
-                    .map_err(IvmRuntimeError::RecordEncoding)?;
+                let source_input = BorrowedRecord::new(&record, &input_desc);
                 let mut child_values = slot
                     .child_fields
                     .iter()
@@ -1047,7 +1087,7 @@ fn render_collect_by_slots(
                     .map(|(index, field)| {
                         Ok::<Value, IvmRuntimeError>(collect_by_output_value(
                             &slot.child_descriptor.fields()[index].value_type,
-                            collect_by_projected_value(&source_values, field)?,
+                            collect_by_projected_value(&source_input, field)?,
                         ))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1123,13 +1163,11 @@ pub(super) fn collect_by_expanded_window(
         if copies != 1 || expanded.contains_key(&occurrence) {
             return Err(IvmRuntimeError::DuplicateCollectByOccurrenceId);
         }
-        let values = BorrowedRecord::new(&record, &input_desc)
-            .to_values()
-            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let input = BorrowedRecord::new(&record, &input_desc);
         let tuple = collect_by
             .tuple_fields
             .iter()
-            .map(|field| collect_by_projected_value(&values, field))
+            .map(|field| collect_by_projected_value(&input, field))
             .collect::<Result<Vec<_>, _>>()?;
         expanded.insert(occurrence, output_desc.create(&tuple)?.into());
     }
@@ -1198,9 +1236,7 @@ fn collect_by_sort_key_for_fields(
     sort_field_indices: &[usize],
     sort_directions: &[TopByDirection],
 ) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
-    let values = BorrowedRecord::new(record, &descriptor)
-        .to_values()
-        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let input = BorrowedRecord::new(record, &descriptor);
     sort_field_indices
         .iter()
         .zip(sort_directions)
@@ -1209,10 +1245,7 @@ fn collect_by_sort_key_for_fields(
                 .fields()
                 .get(*field_idx)
                 .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?;
-            let value = values
-                .get(*field_idx)
-                .cloned()
-                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?;
+            let value = input.get_idx(*field_idx)?;
             Ok(TopBySortPart {
                 key: top_by_sort_value(&field.value_type, value)?,
                 direction: *direction,
@@ -1315,6 +1348,52 @@ pub(super) fn diff_record_windows(
     }
     debug_assert!(weights.values().all(|weight| *weight == 0));
     deltas
+}
+
+/// Unbounded, zero-offset membership is the positive part of each weight.
+/// Compare first/final weights for touched records, not complete windows.
+/// This helper does not compute generic root positions or finite boundaries.
+pub(super) fn update_unbounded_top_by_group(
+    descriptor: RecordDescriptor,
+    top_by: &TopByOp,
+    group: &mut CollectByGroup,
+    input: &[RecordDelta],
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    let mut touched = BTreeMap::<CollectByOrderKey, (i64, i64)>::new();
+    for delta in input {
+        let key = (
+            top_by_sort_key(descriptor, delta.raw(), top_by)?,
+            delta.record.clone(),
+        );
+        let weights = touched.entry(key.clone()).or_insert_with(|| {
+            let before = group.get(&key).copied().unwrap_or_default();
+            (before, before)
+        });
+        weights.1 += delta.weight;
+    }
+    let mut removed = Vec::new();
+    let mut added = Vec::new();
+    for (key, (before, after)) in touched {
+        // Negative internal bag weights are retained but not selected. Simply
+        // forwarding the input delta would publish phantom rows at -2 -> -1.
+        let weight = after.max(0) - before.max(0);
+        if weight != 0 {
+            let delta = RecordDelta {
+                record: key.1.clone(),
+                weight,
+            };
+            if weight < 0 {
+                removed.push(delta);
+            } else {
+                added.push(delta);
+            }
+        }
+        group.set(key, after);
+    }
+    // Match diff_record_windows: removals in old order, then additions in new
+    // order. Full encoded records break ties, just as in the retained index.
+    removed.extend(added);
+    Ok(removed)
 }
 
 pub(super) fn encoded_record_key_part(
@@ -1556,6 +1635,263 @@ mod root_terminal_tests {
                 }
             }
         }
+    }
+
+    // Internal work bound: the public Insert/Update stream cannot reveal a
+    // discarded second rendering of every newly inserted root.
+    #[test]
+    fn newly_inserted_roots_are_encoded_only_once() {
+        let input = record_descriptor();
+        let collect_by = collector();
+        let mut state = CollectByIncrementalState::default();
+        let deltas = (1..=100)
+            .map(|id| delta(id, id, "new", 1))
+            .collect::<Vec<_>>();
+        crate::records::RECORD_ENCODE_COUNT.with(|count| count.set(0));
+        let operations = update_unbounded_collect_by_terminal_state(
+            input,
+            input,
+            &collect_by,
+            None,
+            &mut state,
+            &deltas,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::records::RECORD_ENCODE_COUNT.with(|count| count.get()),
+            100
+        );
+        assert_eq!(operations.len(), 100);
+        assert!(
+            operations
+                .iter()
+                .all(|op| matches!(op.edit, TerminalEdit::Insert { .. }))
+        );
+        let mut roots = Vec::new();
+        apply_root_operations(&mut roots, &operations);
+        assert_eq!(roots.len(), 100);
+        assert!(roots.iter().all(|(_, rank)| rank == "new"));
+    }
+
+    // Internal ownership proof: public terminal edits cannot reveal whether
+    // untouched order indexes were copied, or a prepared tick mutated its
+    // predecessor. Observable ordering is covered by the multisink tests too.
+    #[test]
+    fn payload_only_root_updates_share_order_indexes_and_preserve_staged_state() {
+        let input = record_descriptor();
+        let mut collect_by = collector();
+        collect_by.sort_field_indices = vec![0, 1];
+        collect_by.sort_directions = vec![TopByDirection::Asc; 2];
+        assert!(collect_by_sort_identifies_group(input, &collect_by));
+        for count in [8, 200] {
+            let mut live = CollectByIncrementalState::default();
+            let initial = (1..=count)
+                .map(|id| delta(id, id, "before", 1))
+                .collect::<Vec<_>>();
+            let opened = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut live,
+                &initial,
+                true,
+            )
+            .unwrap();
+            let mut roots = Vec::new();
+            apply_root_operations(&mut roots, &opened);
+            let mut prepared = live.clone();
+            let updates = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut prepared,
+                &[delta(3, 3, "before", -1), delta(3, 3, "after", 1)],
+                true,
+            )
+            .unwrap();
+            assert!(matches!(
+                updates.as_slice(),
+                [TerminalOperation {
+                    edit: TerminalEdit::Update { .. },
+                    ..
+                }]
+            ));
+            assert!(Rc::ptr_eq(
+                &live.emitted_root_order,
+                &prepared.emitted_root_order
+            ));
+            assert!(Rc::ptr_eq(
+                &live.emitted_root_keys,
+                &prepared.emitted_root_keys
+            ));
+            apply_root_operations(&mut roots, &updates);
+            assert_eq!(roots[2], (root_key(3, 3), "after".to_owned()));
+            let old_group = live.groups.get(&root_key(3, 3)).unwrap();
+            assert_eq!(
+                collect_by_root_order_key(old_group, false).unwrap().1,
+                record(3, 3, "before")
+            );
+
+            // A real removal must detach both indexes; the old public state
+            // remains available if this prepared tick is discarded.
+            let removed = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut prepared,
+                &[delta(3, 3, "after", -2)],
+                true,
+            )
+            .unwrap();
+            assert!(matches!(
+                removed.as_slice(),
+                [TerminalOperation {
+                    edit: TerminalEdit::Remove { .. },
+                    ..
+                }]
+            ));
+            assert!(!Rc::ptr_eq(
+                &live.emitted_root_order,
+                &prepared.emitted_root_order
+            ));
+            assert!(!Rc::ptr_eq(
+                &live.emitted_root_keys,
+                &prepared.emitted_root_keys
+            ));
+            assert_eq!(live.emitted_root_order.len(), count as usize);
+            apply_root_operations(&mut roots, &removed);
+            let neutral = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut prepared,
+                &[delta(3, 3, "after", 1)],
+                true,
+            )
+            .unwrap();
+            assert!(neutral.is_empty());
+            let revived = update_collect_by_root_terminal_state(
+                input,
+                input,
+                &collect_by,
+                &mut prepared,
+                &[delta(3, 3, "after", 1)],
+                true,
+            )
+            .unwrap();
+            assert!(matches!(
+                revived.as_slice(),
+                [TerminalOperation {
+                    edit: TerminalEdit::Insert { index: 2, .. },
+                    ..
+                }]
+            ));
+            apply_root_operations(&mut roots, &revived);
+            assert_eq!(roots.len(), count as usize);
+            assert_eq!(roots[2], (root_key(3, 3), "after".to_owned()));
+        }
+    }
+
+    // Internal compiler-proof boundary: malformed/unsupported operator shapes
+    // must not accidentally erase a record-byte tie-break in a retained index.
+    #[test]
+    fn root_order_identity_proof_requires_injective_effective_sort_fields() {
+        let mut collect_by = collector();
+        assert!(collect_by_sort_identifies_group(
+            record_descriptor(),
+            &collect_by
+        ));
+        collect_by.sort_directions.truncate(2);
+        assert!(!collect_by_sort_identifies_group(
+            record_descriptor(),
+            &collect_by
+        ));
+        collect_by = collector();
+        collect_by.sort_field_indices = vec![2];
+        assert!(!collect_by_sort_identifies_group(
+            record_descriptor(),
+            &collect_by
+        ));
+        collect_by.group_field_indices = vec![0];
+        collect_by.sort_field_indices = vec![0];
+        for value_type in [
+            ValueType::F64,
+            ValueType::Nullable(Box::new(ValueType::Uuid)),
+            ValueType::String,
+        ] {
+            let desc = RecordDescriptor::new([("id", value_type)]);
+            assert!(!collect_by_sort_identifies_group(desc, &collect_by));
+        }
+        assert!(collect_by_sort_identifies_group(
+            RecordDescriptor::new([("id", ValueType::U64)]),
+            &collect_by
+        ));
+
+        // Without a unique declared prefix, the entire representative remains
+        // in the public key even when the declared sort value is unchanged.
+        let mut group = CollectByGroup::default();
+        group.set((Vec::new(), record(1, 1, "before")), 1);
+        assert_eq!(
+            collect_by_root_order_key(&group, false).unwrap().1,
+            record(1, 1, "before")
+        );
+        assert!(
+            collect_by_root_order_key(&group, true)
+                .unwrap()
+                .1
+                .is_empty()
+        );
+
+        // The fallback must replace its full-byte public key after a payload
+        // edit, even if this particular edit happens not to change the rank.
+        let mut collect_by = collector();
+        collect_by.sort_field_indices.clear();
+        collect_by.sort_directions.clear();
+        let input = record_descriptor();
+        let mut live = CollectByIncrementalState::default();
+        update_collect_by_root_terminal_state(
+            input,
+            input,
+            &collect_by,
+            &mut live,
+            &[delta(1, 1, "before", 1), delta(2, 2, "before", 1)],
+            true,
+        )
+        .unwrap();
+        let mut prepared = live.clone();
+        let edits = update_collect_by_root_terminal_state(
+            input,
+            input,
+            &collect_by,
+            &mut prepared,
+            &[delta(1, 1, "before", -1), delta(1, 1, "after", 1)],
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            edits.as_slice(),
+            [TerminalOperation {
+                edit: TerminalEdit::Update { .. },
+                ..
+            }]
+        ));
+        assert!(!Rc::ptr_eq(
+            &live.emitted_root_order,
+            &prepared.emitted_root_order
+        ));
+        assert!(
+            prepared
+                .emitted_root_order
+                .keys()
+                .any(|(_, bytes)| *bytes == record(1, 1, "after"))
+        );
+        assert!(
+            !prepared
+                .emitted_root_order
+                .keys()
+                .any(|(_, bytes)| *bytes == record(1, 1, "before"))
+        );
     }
 
     #[test]

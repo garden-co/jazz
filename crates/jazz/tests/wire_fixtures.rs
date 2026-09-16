@@ -317,7 +317,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         .expect("prepared fixture has its root")
         .clone();
 
-    vec![
+    let mut messages: Vec<_> = vec![
         (
             "authority_publication_two_complete_transactions",
             "AuthorityPublication",
@@ -506,21 +506,23 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     authorization_progress: Some(9),
                     opening_pending: false,
                 },
-                supporting_rows: vec![jazz::protocol::SupportingRow {
-                    physical_table: jazz::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
-                        [0x71; 16],
-                    )),
-                    version_table: "todos".to_owned().into(),
-                    row,
-                    version: RowVersionRefEntry {
-                        tx: tx_id,
-                        schema_version: Some(schema_version),
-                        layer: ResultRowLayer::Content,
-                        batch: Some(tx_id),
-                        branch_or_prefix: Some(Vec::new()),
-                        row_digest: None,
+                supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(vec![
+                    jazz::protocol::SupportingRow {
+                        physical_table: jazz::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                            [0x71; 16],
+                        )),
+                        version_table: "todos".to_owned().into(),
+                        row,
+                        version: RowVersionRefEntry {
+                            tx: tx_id,
+                            schema_version: Some(schema_version),
+                            layer: ResultRowLayer::Content,
+                            batch: Some(tx_id),
+                            branch_or_prefix: Some(Vec::new()),
+                            row_digest: None,
+                        },
                     },
-                }],
+                ]),
             }),
         ),
         (
@@ -532,7 +534,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
 
                 version_carriers: mixed_version_carriers(schema_version, author),
                 peer_payload_inventory: PeerPayloadInventory::default(),
-                supporting_rows: Vec::new(),
+                supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
             }),
         ),
         (
@@ -544,21 +546,23 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
 
                 version_carriers: Vec::new(),
                 peer_payload_inventory: PeerPayloadInventory::default(),
-                supporting_rows: vec![jazz::protocol::SupportingRow {
-                    physical_table: jazz::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
-                        [0x71; 16],
-                    )),
-                    version_table: "todos".to_owned().into(),
-                    row: RowUuid::from_bytes([0x79; 16]),
-                    version: RowVersionRefEntry {
-                        tx: tx_id,
-                        schema_version: Some(schema_version),
-                        layer: ResultRowLayer::Content,
-                        batch: Some(tx_id),
-                        branch_or_prefix: Some(vec![0x01]),
-                        row_digest: None,
+                supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(vec![
+                    jazz::protocol::SupportingRow {
+                        physical_table: jazz::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                            [0x71; 16],
+                        )),
+                        version_table: "todos".to_owned().into(),
+                        row: RowUuid::from_bytes([0x79; 16]),
+                        version: RowVersionRefEntry {
+                            tx: tx_id,
+                            schema_version: Some(schema_version),
+                            layer: ResultRowLayer::Content,
+                            batch: Some(tx_id),
+                            branch_or_prefix: Some(vec![0x01]),
+                            row_digest: None,
+                        },
                     },
-                }],
+                ]),
             }),
         ),
         (
@@ -690,6 +694,43 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
     ]
+    .into_iter()
+    .map(|(name, family, mut message)| {
+        match &mut message {
+            SyncMessage::ViewUpdate(view) | SyncMessage::AuthorizationScopeView { view, .. } => {
+                if let jazz::protocol::SupportingRowsUpdate::Snapshot { revision, .. } =
+                    &mut view.supporting_rows
+                {
+                    *revision = [0x51; 16];
+                }
+            }
+            _ => {}
+        }
+        (name, family, message)
+    })
+    .collect();
+    let (_, _, snapshot) = messages
+        .iter()
+        .find(|(name, _, _)| *name == "view_update_reset_with_covered_input")
+        .unwrap();
+    let SyncMessage::ViewUpdate(mut delta) = snapshot.clone() else {
+        unreachable!()
+    };
+    let old = delta.supporting_rows.added_rows()[0].clone();
+    let mut new = old.clone();
+    new.version.tx.time = TxTime(8);
+    delta.supporting_rows = jazz::protocol::SupportingRowsUpdate::Delta {
+        predecessor: [0x51; 16],
+        revision: [0x52; 16],
+        adds: vec![new],
+        removes: vec![old],
+    };
+    messages.push((
+        "view_update_physical_delta",
+        "ViewUpdate",
+        SyncMessage::ViewUpdate(delta),
+    ));
+    messages
 }
 
 fn result_row_entry(tx_id: TxId) -> ResultRowEntry {
@@ -786,7 +827,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v1",
+        fixture_set: "jazz-wire-message-frames-v2",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -1027,7 +1068,7 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
     }
 }
 
-/// Snapshots have only exact native row references; duplicate references are malformed.
+/// Untrusted admission rejects malformed references; the trusted encoder does not validate.
 #[test]
 fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
     let (_, _, message) = wire_fixture_messages()
@@ -1037,14 +1078,15 @@ fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
     let SyncMessage::ViewUpdate(mut view) = message else {
         unreachable!()
     };
-    view.supporting_rows.push(view.supporting_rows[0].clone());
-    assert!(encode_sync_message(&SyncMessage::ViewUpdate(view.clone())).is_err());
-    let bytes = postcard::to_allocvec(&SyncMessage::ViewUpdate(view.clone())).unwrap();
+    {
+        let duplicate = view.supporting_rows.added_rows()[0].clone();
+        view.supporting_rows.added_rows_mut().push(duplicate);
+    }
+    let bytes = encode_sync_message(&SyncMessage::ViewUpdate(view.clone())).unwrap();
     assert!(decode_sync_message(&bytes).is_err());
-    view.supporting_rows.pop();
-    view.supporting_rows[0].version_table = String::new().into();
-    assert!(encode_sync_message(&SyncMessage::ViewUpdate(view.clone())).is_err());
-    let bytes = postcard::to_allocvec(&SyncMessage::ViewUpdate(view)).unwrap();
+    view.supporting_rows.added_rows_mut().pop();
+    view.supporting_rows.added_rows_mut()[0].version_table = String::new().into();
+    let bytes = encode_sync_message(&SyncMessage::ViewUpdate(view)).unwrap();
     assert!(decode_sync_message(&bytes).is_err());
 }
 

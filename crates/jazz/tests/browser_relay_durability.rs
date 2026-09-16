@@ -414,7 +414,7 @@ fn open_persistent_browser_worker(
         },
     )))
     .expect("open persistent browser worker");
-    db.restore_browser_relay_pending_uploads()
+    block_on(db.restore_browser_relay_pending_uploads())
         .expect("restore browser relay pending uploads");
     db
 }
@@ -559,19 +559,21 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
             durability: DurabilityTier::Global,
         })],
         peer_payload_inventory: Default::default(),
-        supporting_rows: vec![jazz::protocol::SupportingRow {
-            physical_table,
-            version_table: "todos".to_owned().into(),
-            row,
-            version: RowVersionRefEntry {
-                tx: tx_id,
-                schema_version: Some(schema.version_id()),
-                layer: ResultRowLayer::Content,
-                batch: Some(tx_id),
-                branch_or_prefix: Some(vec![1, 0, 0, 0, 0]),
-                row_digest: None,
+        supporting_rows: jazz::protocol::SupportingRowsUpdate::snapshot(vec![
+            jazz::protocol::SupportingRow {
+                physical_table,
+                version_table: "todos".to_owned().into(),
+                row,
+                version: RowVersionRefEntry {
+                    tx: tx_id,
+                    schema_version: Some(schema.version_id()),
+                    layer: ResultRowLayer::Content,
+                    batch: Some(tx_id),
+                    branch_or_prefix: Some(vec![1, 0, 0, 0, 0]),
+                    row_digest: None,
+                },
             },
-        }],
+        ]),
     });
     assert!(
         block_on(worker.stage_upstream_message_for_test(&upstream, incomplete))
@@ -775,7 +777,7 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
 }
 
 /// A worker's initial empty view can arrive after the main thread has already
-/// published a newer optimistic row. The worker snapshot advances the durable
+/// authored a newer optimistic row. The worker snapshot advances the durable
 /// baseline, but must not replace the main thread's pending subscription view.
 #[test]
 fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
@@ -799,7 +801,10 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
         .expect("prepare filtered todos query");
     let mut subscription = block_on(main_thread.subscribe(&open_todos, ReadOpts::default()))
         .expect("subscribe to open todos");
-    assert_truthful_empty_local_opening(subscription.try_next_event());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "wait for the worker result"
+    );
 
     let insert = main_thread
         .insert(
@@ -810,10 +815,10 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
         .expect("insert optimistic open todo");
     let row = insert.row_uuid();
     let optimistic = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
-    assert!(optimistic.iter().any(|event| matches!(
-        event,
-        SubscriptionEvent::Delta { added, .. } if added.len() == 1
-    )));
+    assert!(
+        optimistic.is_empty(),
+        "the initial worker result is still pending"
+    );
 
     // FIFO makes the worker serve the subscription's initial empty view before
     // it ingests and acknowledges the later commit in this same tick.
@@ -835,10 +840,9 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
     );
     let after_ack = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
     assert!(
-        !after_ack
-            .iter()
-            .any(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. })),
-        "the worker's internal hydration must not reset the main subscription: {after_ack:?}"
+        matches!(after_ack.as_slice(), [SubscriptionEvent::Delta { reset: true, added, .. }]
+            if added.len() == 1 && added[0].row.row_uuid() == row),
+        "the first snapshot must preserve the optimistic row: {after_ack:?}"
     );
     assert_eq!(
         main_thread
@@ -1101,7 +1105,10 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
         .expect("prepare todos query");
     let mut subscription =
         block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
-    assert_truthful_empty_local_opening(subscription.try_next_event());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "wait for the worker result"
+    );
 
     let scheduler = Rc::new(CountingScheduler::default());
     worker.set_tick_scheduler(Some(scheduler.clone()));
@@ -1194,7 +1201,10 @@ fn browser_client_hydrates_local_structured_subscription_without_authority() {
         },
     ))
     .expect("subscribe to Local structured worker state");
-    assert_truthful_empty_local_opening(subscription.try_next_event());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "wait for the worker result"
+    );
 
     for _ in 0..3 {
         main_thread
@@ -1267,7 +1277,10 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
         .expect("prepare todos query");
     let mut subscription = block_on(main_thread.subscribe(&todos, ReadOpts::default()))
         .expect("open browser Local subscription");
-    assert_truthful_empty_local_opening(subscription.try_next_event());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "wait for the worker result"
+    );
 
     for _ in 0..8 {
         main_thread
@@ -1534,8 +1547,14 @@ fn worker_relay_forwards_upstream_subscription_rejection_to_every_group_member()
         .expect("open first browser subscription");
     let mut second = block_on(browser.subscribe(&todos, ReadOpts::default()))
         .expect("open second browser subscription");
-    assert_truthful_empty_local_opening(first.try_next_event());
-    assert_truthful_empty_local_opening(second.try_next_event());
+    assert!(
+        first.try_next_event().is_none(),
+        "wait for the worker result"
+    );
+    assert!(
+        second.try_next_event().is_none(),
+        "wait for the worker result"
+    );
 
     for _ in 0..5 {
         browser.tick().expect("send grouped browser subscriptions");
@@ -1781,7 +1800,10 @@ fn reopened_browser_worker_hydrates_local_subscription_without_query_warmup() {
         .expect("prepare todos query");
     let mut subscription =
         block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
-    assert_truthful_empty_local_opening(subscription.try_next_event());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "wait for the worker result"
+    );
 
     main_thread.tick().expect("send cold subscription request");
     let scheduler = Rc::new(CountingScheduler::default());
@@ -1849,7 +1871,10 @@ fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once
         .expect("prepare todos query");
     let mut subscription =
         block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
-    assert_truthful_empty_local_opening(subscription.try_next_event());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "wait for the worker result"
+    );
 
     let scheduler = Rc::new(CountingScheduler::default());
     worker.set_tick_scheduler(Some(scheduler.clone()));
@@ -1892,11 +1917,11 @@ fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once
 }
 
 /// Local and propagation are independent axes at a browser relay. A Local
-/// foreground read returns the worker's resident knowledge immediately, while
+/// foreground subscription waits for the worker's resident knowledge, while
 /// the default Full propagation still registers the exact upstream usage and
 /// later reconciles the authority membership into that same subscription.
 #[test]
-fn browser_client_local_full_returns_immediately_then_reconciles_upstream() {
+fn browser_client_local_full_waits_for_worker_then_reconciles_upstream() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
     let worker = open_db(0x25, alice, &schema);
@@ -1947,7 +1972,10 @@ fn browser_client_local_full_returns_immediately_then_reconciles_upstream() {
         },
     ))
     .expect("subscribe Local+Full through worker");
-    assert_truthful_empty_local_opening(subscription.try_next_event());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "wait for the worker result"
+    );
 
     main_thread.tick().expect("register Local+Full coverage");
     worker
@@ -2799,7 +2827,7 @@ fn remote_nested_query_is_derived_locally_from_terminal_free_authority_inputs() 
     assert!(
         authority_updates
             .iter()
-            .any(|update| { !update.supporting_rows.is_empty() }),
+            .any(|update| { !update.supporting_rows.added_rows().is_empty() }),
         "authority sent no typed covered input: {authority_updates:?}",
     );
 

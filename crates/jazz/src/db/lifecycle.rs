@@ -110,6 +110,11 @@ where
 
     /// Open a database over the supplied storage and recover local state.
     ///
+    /// If a persistent replica missed a schema publication, recovery uses its
+    /// admitted durable catalogue so networking can start. Application access
+    /// to the requested schema stays unavailable until the authority supplies
+    /// its published lineage; opening never publishes that schema locally.
+    ///
     /// ```rust
     /// # use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
     /// # use jazz::db::doctest_support::{block_on, schema, MemoryStorage};
@@ -139,15 +144,27 @@ where
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node =
-            NodeState::new(config.identity.node, config.schema.clone(), config.storage).await?;
+        let node = NodeState::new_client(
+            config.identity.node,
+            config.schema.clone(),
+            config.storage,
+            false,
+        )
+        .await?;
+        let requires_open_schema_admission =
+            !node.catalogue_schemas().contains_key(&schema_version_id);
         let node = Node::new(node);
-        node.restore_pending_uploads(config.identity)?;
+        if requires_open_schema_admission {
+            *node.open_schema_admission.borrow_mut() =
+                Some(PendingOpenSchema::new(schema_version_id));
+        }
+        node.restore_pending_uploads(config.identity).await?;
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
             schema_version_id,
             schema_view_is_fixed: false,
+            requires_open_schema_admission,
             schema_views,
             identity: config.identity,
             node: Rc::new(node),
@@ -236,6 +253,7 @@ where
             schema: config.schema,
             schema_version_id,
             schema_view_is_fixed: false,
+            requires_open_schema_admission: false,
             schema_views,
             identity: config.identity,
             node: Rc::new(Node::new(node)),
@@ -262,25 +280,50 @@ where
     /// This mode is intended for server shells and tests that own authoritative
     /// in-memory history rather than a partial client replica.
     pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
+        Self::open_history_complete_inner(config, false).await
+    }
+
+    async fn open_history_complete_inner(
+        config: DbConfig<S>,
+        recover_client: bool,
+    ) -> Result<Self, Error> {
         let schema_version_id = config.schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node = NodeState::new_history_complete(
-            config.identity.node,
-            config.schema.clone(),
-            config.storage,
-        )
-        .await?;
+        let node = if recover_client {
+            NodeState::new_client(
+                config.identity.node,
+                config.schema.clone(),
+                config.storage,
+                true,
+            )
+            .await?
+        } else {
+            NodeState::new_history_complete(
+                config.identity.node,
+                config.schema.clone(),
+                config.storage,
+            )
+            .await?
+        };
+        let requires_open_schema_admission =
+            !node.catalogue_schemas().contains_key(&schema_version_id);
+        let node = Node::new(node);
+        if requires_open_schema_admission {
+            *node.open_schema_admission.borrow_mut() =
+                Some(PendingOpenSchema::new(schema_version_id));
+        }
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
             schema_version_id,
             schema_view_is_fixed: false,
+            requires_open_schema_admission,
             schema_views,
             identity: config.identity,
-            node: Rc::new(Node::new(node)),
+            node: Rc::new(node),
             row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
@@ -306,7 +349,7 @@ where
     pub async unsafe fn open_history_complete_with_backend_attribution(
         config: DbConfig<S>,
     ) -> Result<Self, Error> {
-        let mut db = Self::open_history_complete(config).await?;
+        let mut db = Self::open_history_complete_inner(config, true).await?;
         db.backend_attribution = true;
         db.node
             .restore_backend_pending_uploads(db.identity.node)
@@ -333,13 +376,14 @@ where
         let node =
             NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
         let node = Node::new(node);
-        node.restore_pending_uploads(config.identity)?;
+        node.restore_pending_uploads(config.identity).await?;
         node.restore_edge_authority_uploads().await?;
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: bootstrap_schema,
             schema_version_id,
             schema_view_is_fixed: false,
+            requires_open_schema_admission: false,
             schema_views,
             identity: config.identity,
             node: Rc::new(node),
@@ -425,6 +469,9 @@ where
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
         let schema_version_id = schema.version_id();
         let schema_view_id = SchemaViewId::for_schema(&schema);
+        // A replica opened ahead of its durable catalogue must first receive
+        // the published lineage; view registration cannot manufacture it.
+        self.ensure_open_schema_admitted()?;
         self.admit_local_schema_view_if_needed(&schema).await?;
         {
             let node = self.node.node.borrow();
@@ -461,6 +508,7 @@ where
             schema,
             schema_version_id,
             schema_view_is_fixed: true,
+            requires_open_schema_admission: false,
             schema_views: Rc::clone(&self.schema_views),
             identity: self.identity,
             node: Rc::clone(&self.node),
@@ -600,9 +648,10 @@ where
         Ok(())
     }
 
-    /// Configure this database as the optimistic, non-durable side of a
-    /// browser client/worker pair. This must be called before application
-    /// writes begin.
+    /// Configure this database as an optimistic foreground whose upstream
+    /// owns Local durability (for example, a browser worker or native relay).
+    /// Full Local subscriptions wait for that owner's initial query answer.
+    /// This must be called before application writes or subscriptions begin.
     pub fn set_non_durable_client(&self) {
         self.node.set_non_durable_client();
     }
@@ -711,6 +760,7 @@ where
             schema: self.schema.clone(),
             schema_version_id: self.schema_version_id,
             schema_view_is_fixed: self.schema_view_is_fixed,
+            requires_open_schema_admission: self.requires_open_schema_admission,
             schema_views: Rc::clone(&self.schema_views),
             identity: self.identity,
             node: Rc::clone(&self.node),
@@ -732,6 +782,7 @@ where
             schema: self.schema.clone(),
             schema_version_id: self.schema_version_id,
             schema_view_is_fixed: self.schema_view_is_fixed,
+            requires_open_schema_admission: self.requires_open_schema_admission,
             schema_views: Rc::clone(&self.schema_views),
             identity: self.identity,
             node: Rc::clone(&self.node),
@@ -749,6 +800,7 @@ where
     }
 
     pub(super) fn ensure_mutation_operation_admitted(&self) -> Result<(), Error> {
+        self.ensure_open_schema_admitted()?;
         if self.owner_operation_admitted {
             Ok(())
         } else {
@@ -761,9 +813,10 @@ where
     /// node differs from the worker node, so ordinary local-origin recovery
     /// cannot discover them after a cold worker restart.
     #[doc(hidden)]
-    pub fn restore_browser_relay_pending_uploads(&self) -> Result<(), Error> {
+    pub async fn restore_browser_relay_pending_uploads(&self) -> Result<(), Error> {
         self.node
             .restore_browser_relay_pending_uploads(self.identity.author)
+            .await
     }
 
     /// Let a single-threaded host return resident writes synchronously while
@@ -1091,6 +1144,23 @@ where
         self.node.set_scheduler(scheduler);
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only access to the same host waker passed to Groove query
+    /// evaluation. Native relay receipts use this to model a storage future
+    /// becoming ready without introducing a second wake path.
+    #[doc(hidden)]
+    pub fn query_runtime_waker_for_test(&self) -> Option<Waker> {
+        self.node.query_runtime_waker()
+    }
+
+    /// Consume a query-runtime storage wake on the owner thread and dirty
+    /// subscriber links before the next peer tick. Ordinary host ticks are
+    /// unchanged when no storage wake is pending.
+    #[doc(hidden)]
+    pub fn mark_subscriber_connections_dirty_after_query_runtime_wake(&self) {
+        self.node
+            .mark_subscriber_connections_dirty_after_query_runtime_wake();
+    }
     /// Configure automatic edge-cache byte-budget eviction.
     ///
     /// `None` disables automatic eviction and preserves the historical manual
@@ -1382,6 +1452,13 @@ where
 
     #[allow(dead_code)]
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        self.refresh_subscriptions_for_tables(None).await
+    }
+
+    pub(super) async fn refresh_subscriptions_for_tables(
+        &self,
+        changed_tables: Option<&HashSet<String>>,
+    ) -> Result<usize, Error> {
         #[cfg(test)]
         if self.stall_next_subscription_refresh.replace(false) {
             std::future::pending::<()>().await;
@@ -1393,7 +1470,10 @@ where
                 "injected subscription refresh failure",
             ));
         }
-        let refreshed = self.node.refresh_subscriptions().await?;
+        let refreshed = self
+            .node
+            .refresh_subscriptions_with_tables(changed_tables)
+            .await?;
         if refreshed > 0 {
             self.node.mark_subscriber_connections_dirty();
         }
@@ -1466,6 +1546,24 @@ where
     /// Test/bench-only snapshot of sync-path counters.
     pub fn sync_metrics_for_test(&self) -> crate::node::SyncMetrics {
         self.node.node.borrow().sync_metrics().clone()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only count of maintained subscription rehydrate entrypoints.
+    pub fn maintained_subscription_rehydrate_attempts_for_test(&self) -> u64 {
+        self.node
+            .maintained_subscription_rehydrate_attempts_for_test()
+    }
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only snapshot of the subscriber dirty-generation boundary.
+    pub fn subscriber_dirty_epoch_for_test(&self) -> u64 {
+        self.node.subscriber_dirty_epoch_for_test()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only mirror of the server-shell progress boundary.
+    pub fn mark_subscriber_connections_dirty_for_test(&self) {
+        self.node.mark_subscriber_connections_dirty();
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -1615,6 +1713,8 @@ pub struct DbMaintainedSubscriptionFootprint {
     pub result_payloads_bytes: usize,
     /// Approximate heap bytes retained by WeightedVersionIndex.
     pub versions_bytes: usize,
+    /// Approximate heap bytes retained by the physical support frontier and journal.
+    pub supporting_frontier_bytes: usize,
     /// Approximate heap bytes retained by ReplacementIndex.
     pub replacements_bytes: usize,
     /// Approximate heap bytes retained by maintained-view indexes.
@@ -1650,6 +1750,7 @@ impl DbMaintainedSubscriptionFootprint {
             result_weights_bytes: footprint.maintained.result_weights_bytes,
             result_payloads_bytes: footprint.maintained.result_payloads_bytes,
             versions_bytes: footprint.maintained.versions_bytes,
+            supporting_frontier_bytes: footprint.maintained.supporting_frontier_bytes,
             replacements_bytes: footprint.maintained.replacements_bytes,
             maintained_heap_bytes: footprint.maintained.total_heap_bytes,
             terminal_schemas: footprint.terminal_schemas.terminal_schemas,

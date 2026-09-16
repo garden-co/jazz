@@ -103,6 +103,14 @@ where
         }
         let head_tx_ids = head_tx_ids.into_iter().collect::<Vec<_>>();
         let raw_head_tx_ids = raw_merge_head_tx_ids(&row_versions_by_tx, &head_tx_ids)?;
+        // Physical heads may retain older merge caches whose raw inputs are
+        // already dominated by one ordinary edit. There is no concurrent
+        // content left to reconcile; merging that singleton would turn each
+        // synthetic child into the next raw head and never reach quiescence.
+        // GSet still needs its history-based materialization below.
+        if raw_head_tx_ids.len() < 2 && !has_gset_column {
+            return Ok(PublicationOutcome::settled(Vec::new()));
+        }
         let mut parents = raw_head_tx_ids.clone();
         parents.sort();
         if row_versions_by_tx.values().any(|version| {
@@ -625,10 +633,29 @@ where
         Ok(None)
     }
 
+    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.merge_heads_stage"))]
     pub(crate) async fn write_merge_heads_for_bulk_content_versions(
         &mut self,
         batch: &mut DatabaseBatch,
         versions: &[VersionRow],
+    ) -> Result<(), Error> {
+        self.write_merge_heads_for_bulk_content_versions_with_empty_history(
+            batch,
+            versions,
+            &BTreeSet::new(),
+        )
+        .await
+    }
+
+    /// `empty_history_tables` is a local, pre-batch physical storage proof,
+    /// never a sender claim or absence inferred from a derived current index.
+    /// Only reset ingest passes it: every supplied version belongs to a new
+    /// Accepted transaction, and the same canonical batch installs all rows.
+    async fn write_merge_heads_for_bulk_content_versions_with_empty_history(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        versions: &[VersionRow],
+        empty_history_tables: &BTreeSet<PhysicalTableId>,
     ) -> Result<(), Error> {
         let mut by_row = BTreeMap::<(PhysicalTableId, BranchKey, RowUuid), Vec<&VersionRow>>::new();
         for version in versions {
@@ -641,6 +668,23 @@ where
             }
         }
         for ((table_id, branch_key, row_uuid), mut row_versions) in by_row {
+            if empty_history_tables.contains(&table_id) {
+                // Preserve the final staged value of each physical history
+                // primary key (branch, row, TxId), including schema aliases.
+                // There are no other persisted versions or fates to consult.
+                let mut by_tx = BTreeMap::new();
+                for version in row_versions {
+                    by_tx.insert(self.version_tx_id(version)?, version);
+                }
+                let versions = by_tx.into_values().cloned().collect::<Vec<_>>();
+                let candidates = (0..versions.len()).collect::<Vec<_>>();
+                let heads = content_head_indices(&versions, &candidates, &self.node_aliases)
+                    .into_iter()
+                    .map(|index| self.version_tx_id(&versions[index]))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                Self::write_merge_heads(batch, table_id, &branch_key, row_uuid, &heads)?;
+                continue;
+            }
             row_versions.sort_by_key(|version| {
                 let tx_id = self
                     .version_tx_id(version)
@@ -719,6 +763,7 @@ where
         Ok(())
     }
 
+    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.merge_heads_rebuild"))]
     pub(crate) async fn rebuild_merge_heads_after_history_commit(
         &mut self,
         rows: &BTreeSet<(PhysicalTableId, String, BranchKey, RowUuid)>,
@@ -743,7 +788,7 @@ where
         Ok(())
     }
 
-    async fn content_version_reaches_tx(
+    pub(super) async fn content_version_reaches_tx(
         &mut self,
         table_id: PhysicalTableId,
         branch_key: &BranchKey,
@@ -764,14 +809,36 @@ where
             if !seen.insert(tx_id) {
                 continue;
             }
-            for version in self.query_versions_for_tx(tx_id).await? {
-                if self.physical_table_id_for_version(&version)? == table_id
-                    && version.branch_key() == branch_key
-                    && version.row_uuid() == row_uuid
-                    && version.layer() == VersionLayer::Content
+            // Reachability is row-local. Preserve the transaction-presence and
+            // resident-cache semantics without materializing its sibling rows.
+            let Some(tx) = self.query_transaction(tx_id).await? else {
+                continue;
+            };
+            if self.query.tx_versions_cache.contains_key(&tx_id) {
+                for version in self
+                    .query_versions_for_tx_physical_coordinate(tx_id, table_id, row_uuid)
+                    .await?
                 {
-                    stack.extend(version.parents());
+                    if version.branch_key() == branch_key
+                        && version.layer() == VersionLayer::Content
+                    {
+                        stack.extend(version.parents());
+                    }
                 }
+            } else if let Some(version) = self
+                .query_exact_parent_version(
+                    tx_id,
+                    tx.node_alias,
+                    &ParentCoordinate {
+                        physical_table_id: table_id,
+                        branch_key: branch_key.clone(),
+                        row_uuid,
+                        layer: VersionLayer::Content,
+                    },
+                )
+                .await?
+            {
+                stack.extend(version.parents());
             }
         }
         Ok(false)
@@ -1261,30 +1328,14 @@ where
                     version.table(),
                     PhysicalWriteTarget::GlobalCurrent,
                 )?;
-                let mut values = self.public_current_values(
-                    &plan.source_table,
-                    version,
-                    Some(global_time),
-                )?;
-                self.remap_authored_enum_cells_for_physical(
-                    &mut values,
-                    &plan.source_table,
-                    &plan.source_mapping,
-                    &plan.physical_table,
-                    GlobalCurrentRowRecord::USER_CELLS,
-                )?;
-                let physical = OwnedRecord::new(
-                    plan.physical_descriptor.create(&values)?,
-                    plan.physical_descriptor,
-                );
+                // Validate node-local authored column aliases before deriving
+                // the current carrier; encoding itself retains trusted bytes.
+                let _ = self.authored_columns_for_version(version)?;
+                let physical = self.encode_physical_version_record(&plan, version, Some(global_time))?;
                 batch.update_raw(
                     plan.storage_table.clone(),
                     global_current_primary_key(version.branch_key(), version.row_uuid()),
-                    groove::records::VariantRecord::new(
-                        u32::try_from(version.schema_version_alias().0)
-                            .expect("schema aliases are allocated in Groove's variant-tag space"),
-                        physical,
-                    ),
+                    physical,
                 );
             }
             VersionLayer::Deletion => batch.update_raw(
@@ -1348,27 +1399,12 @@ where
                     version.table(),
                     PhysicalWriteTarget::AheadCurrent,
                 )?;
-                let mut values =
-                    self.public_current_values(&plan.source_table, version, None)?;
-                self.remap_authored_enum_cells_for_physical(
-                    &mut values,
-                    &plan.source_table,
-                    &plan.source_mapping,
-                    &plan.physical_table,
-                    GlobalCurrentRowRecord::USER_CELLS,
-                )?;
-                let physical = OwnedRecord::new(
-                    plan.physical_descriptor.create(&values)?,
-                    plan.physical_descriptor,
-                );
+                let _ = self.authored_columns_for_version(version)?;
+                let physical = self.encode_physical_version_record(&plan, version, None)?;
                 batch.insert_raw(
                     plan.storage_table.clone(),
                     history_primary_key(version),
-                    groove::records::VariantRecord::new(
-                        u32::try_from(version.schema_version_alias().0)
-                            .expect("schema aliases are allocated in Groove's variant-tag space"),
-                        physical,
-                    ),
+                    physical,
                 );
             }
             VersionLayer::Deletion => batch.insert_raw(
@@ -1399,6 +1435,7 @@ where
     }
 
     /// Build the physical current-source carrier consumed by Groove terminals.
+    #[cfg(test)]
     fn public_current_values(
         &mut self,
         table: &TableSchema,

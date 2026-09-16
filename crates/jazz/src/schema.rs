@@ -33,10 +33,9 @@ pub use crate::tools::public_schema_convert::SchemaConversionError;
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("61b9ef21-3195-50e8-87fc-2aa83a6f74e3");
 
-/// Direct groove record store used for persisted fast known-state facts.
+/// Retired cursor store, reserved only to discard legacy entries on open.
 pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
-/// Direct groove record store used for persisted settled result memberships.
-/// Direct groove record store used for persisted settled program facts.
+/// Retired scope store, reserved only to discard legacy entries on open.
 pub const SETTLED_PROGRAM_FACTS_STORE: &str = "jazz_settled_program_facts";
 /// Collision-checked directory from a fixed policy-binding digest to its full
 /// authority identity. Result-store keys remain bounded without reducing the

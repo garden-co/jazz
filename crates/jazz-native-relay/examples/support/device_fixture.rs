@@ -110,7 +110,8 @@ mod tests {
                         .with_jwks_url(issuer.endpoint())
                         .with_native_transport_connector(native_connector())
                         .start()
-                        .await;
+                        .await
+                        .expect("start test server");
                     let mut clients = Vec::new();
                     let mut dirs = Vec::new();
                     for scope in ["a", "b"] {
@@ -149,7 +150,7 @@ mod tests {
                         wait_for_query(
                             client,
                             Query::from("scope_rows"),
-                            Some(DurabilityTier::GlobalServer),
+                            jazz::tools::ReadTier::Remote,
                             Duration::from_secs(20),
                             "owner write reaches authority",
                             |rows| {
@@ -166,11 +167,9 @@ mod tests {
                     }
                     for (client, scope) in clients.iter().zip(["a", "b"]) {
                         let rows = client
-                            .query_with_read_tier(
-                                Query::from("scope_rows"),
-                                jazz::tools::ReadTier::Remote,
-                            )
+                            .query(Query::from("scope_rows"), jazz::tools::ReadTier::Remote)
                             .await
+                            .map(jazz::tools::test_support::ordinary_rows)
                             .unwrap();
                         assert_eq!(
                             rows.len(),

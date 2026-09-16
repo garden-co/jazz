@@ -9,7 +9,7 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) depends_on_context: Option<bool>,
     pub(super) input_signature: Option<Arc<NodeInputSignature>>,
     pub(super) input_generation: u64,
-    pub(super) raw_projection_fields: Option<Option<Arc<[RawProjectionField]>>>,
+    pub(super) raw_projection_fields: Option<Option<Arc<PreparedProjection>>>,
     pub(super) join_left_fields: Option<Arc<[String]>>,
     pub(super) join_right_fields: Option<Arc<[String]>>,
     pub(super) join_output_mapping: Option<Arc<[(usize, usize)]>>,
@@ -137,6 +137,41 @@ impl NodeState {
         )
     }
 
+    // Resolve each variant layout once for the batch, before projecting rows.
+    // A descriptor is interned, but constructing its fields is not free.
+    pub(super) fn group_source_rows<'a>(
+        table: &crate::schema::TableSchema,
+        rows: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
+        let mut grouped = HashMap::<u32, TableDelta>::default();
+        for stored in rows {
+            let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
+            let group = match grouped.entry(variant_tag) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let descriptor =
+                        table
+                            .record_schema_for_variant(variant_tag)
+                            .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
+                                table: table.name.clone(),
+                                version: u64::from(variant_tag),
+                            })?;
+                    entry.insert(TableDelta {
+                        table: table.name.clone(),
+                        variant_tag,
+                        descriptor,
+                        deltas: Vec::new(),
+                    })
+                }
+            };
+            group.deltas.push(RecordDelta {
+                record: Bytes::copy_from_slice(payload),
+                weight: 1,
+            });
+        }
+        Ok(grouped.into_values().collect())
+    }
+
     pub(super) fn update_table_source_from_inputs(
         input: &TableSourceOp,
         schema: &DatabaseSchema,
@@ -150,32 +185,13 @@ impl NodeState {
         let table_schema = schema
             .table(&input.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
-        let mut grouped = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-        for (_, stored) in inputs.rows(request)? {
-            let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                    table: input.table.clone(),
-                    version: u64::from(variant_tag),
-                })?;
-            grouped
-                .entry((variant_tag, descriptor))
-                .or_default()
-                .push(RecordDelta {
-                    record: Bytes::copy_from_slice(payload),
-                    weight: 1,
-                });
-        }
-        let table_deltas = grouped
-            .into_iter()
-            .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                table: input.table.clone(),
-                variant_tag,
-                descriptor,
-                deltas,
-            })
-            .collect::<Vec<_>>();
+        let table_deltas = Self::group_source_rows(
+            table_schema,
+            inputs
+                .rows(request)?
+                .iter()
+                .map(|(_, stored)| stored.as_slice()),
+        )?;
         Self::update_table_source(
             input,
             schema,
@@ -200,32 +216,10 @@ impl NodeState {
             let table_schema = schema
                 .table(&input.table)
                 .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
-            let mut grouped = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
-            for (_, stored) in rows {
-                let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
-                let descriptor = table_schema
-                    .record_schema_for_variant(variant_tag)
-                    .ok_or_else(|| IvmRuntimeError::UnknownTableVariant {
-                        table: input.table.clone(),
-                        version: u64::from(variant_tag),
-                    })?;
-                grouped
-                    .entry((variant_tag, descriptor))
-                    .or_default()
-                    .push(RecordDelta {
-                        record: Bytes::copy_from_slice(payload),
-                        weight: 1,
-                    });
-            }
-            let table_deltas = grouped
-                .into_iter()
-                .map(|((variant_tag, descriptor), deltas)| TableDelta {
-                    table: input.table.clone(),
-                    variant_tag,
-                    descriptor,
-                    deltas,
-                })
-                .collect::<Vec<_>>();
+            let table_deltas = Self::group_source_rows(
+                table_schema,
+                rows.iter().map(|(_, stored)| stored.as_slice()),
+            )?;
             return Self::update_table_source(
                 &TableSourceOp {
                     table: input.table.clone(),
@@ -581,9 +575,15 @@ impl NodeState {
         project: &MapProjectOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
-        raw_projection: Option<&[RawProjectionField]>,
+        raw_projection: Option<&PreparedProjection>,
         omit_unrepresentable_enum_rows: bool,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        if raw_projection.is_some_and(|plan| plan.reuses_input) {
+            return Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas: input.deltas.clone(),
+            });
+        }
         let omit_unrepresentable_enum_rows = omit_unrepresentable_enum_rows
             || project.expressions.iter().any(|expression| {
                 matches!(
@@ -601,18 +601,38 @@ impl NodeState {
             .sum::<usize>();
         let mut output = BytesMut::with_capacity(estimated_output_bytes);
         let mut spans = Vec::with_capacity(input.deltas.len());
-        let mut raw_projection_scratch = RawProjectionScratch::default();
         for delta in &input.deltas {
             let span = if let Some(fields) = raw_projection {
-                output_desc
-                    .project_raw_fields_into(
-                        &input.descriptor,
-                        delta.raw(),
-                        fields,
-                        &mut output,
-                        &mut raw_projection_scratch,
-                    )
-                    .map_err(IvmRuntimeError::RecordEncoding)?
+                let start = output.len();
+                let result = output_desc.project_raw_fields_into(
+                    &input.descriptor,
+                    delta.raw(),
+                    &fields.fields,
+                    &mut output,
+                    |index, output| {
+                        let value = project_field_value(
+                            &project.expressions[index],
+                            index,
+                            output_desc,
+                            &input.descriptor,
+                            delta.raw(),
+                        )?;
+                        let encoded = encode_projection_field_value(output_desc, index, value)?;
+                        output.extend_from_slice(&encoded);
+                        Ok::<_, IvmRuntimeError>(())
+                    },
+                );
+                match result {
+                    Ok(span) => span,
+                    Err(
+                        IvmRuntimeError::EnumTagProjectionAbsent { .. }
+                        | IvmRuntimeError::EnumProjectionAbsent { .. },
+                    ) if omit_unrepresentable_enum_rows => {
+                        output.truncate(start);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 let start = output.len();
                 let record = match project_record(
@@ -634,6 +654,8 @@ impl NodeState {
             };
             spans.push((span, delta.weight));
         }
+        #[cfg(feature = "cold-settle-attribution")]
+        crate::cold_settle_attribution::record_map_buffer(output.capacity(), output.len());
         let output = output.freeze();
         let deltas: Vec<_> = spans
             .into_iter()
@@ -654,7 +676,7 @@ impl NodeState {
         project: &MapProjectOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
-        raw_projection: Option<&[RawProjectionField]>,
+        raw_projection: Option<&PreparedProjection>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let payloads =
             Self::update_map_project(project, payload_desc, input, raw_projection, false)?;

@@ -245,7 +245,7 @@ async fn owner_policy_keeps_serving_v1_documents_to_v2_reader() {
 }
 
 async fn owner_policy_keeps_serving_v1_documents_to_v2_reader_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     publish_generation(&server, &[owner_schema_v1()], &[]).await;
     let (alice_ids, mallory_id) = seed_owner_documents_under_v1(&server, 3).await;
     publish_generation(
@@ -259,7 +259,7 @@ async fn owner_policy_keeps_serving_v1_documents_to_v2_reader_impl() {
     let rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees all of her v1-authored documents through the v2 generation",
         |rows| {
@@ -304,7 +304,7 @@ async fn owner_policy_still_denies_v1_documents_to_other_sessions_after_migratio
 }
 
 async fn owner_policy_still_denies_v1_documents_to_other_sessions_after_migration_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     publish_generation(&server, &[owner_schema_v1()], &[]).await;
     let (alice_ids, mallory_id) = seed_owner_documents_under_v1(&server, 2).await;
     publish_generation(
@@ -318,7 +318,7 @@ async fn owner_policy_still_denies_v1_documents_to_other_sessions_after_migratio
     let rows = wait_for_query(
         &mallory,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "mallory sees her own v1-authored document through the v2 generation",
         |rows| {
@@ -350,7 +350,6 @@ async fn owner_policy_still_denies_v1_documents_to_other_sessions_after_migratio
 /// fresh alice (v2) ──query──► owner + folder columns intact
 /// ```
 #[tokio::test]
-#[ignore = "#1779: alice's v2 update of her v1-authored row never settles at the edge (neither accepted nor rejected) when the published read policy is session-scoped; the same update settles under an allow-all head and a v2-authored row updates fine"]
 async fn v2_update_of_v1_document_preserves_untouched_columns() {
     tokio::task::LocalSet::new()
         .run_until(v2_update_of_v1_document_preserves_untouched_columns_impl())
@@ -358,7 +357,7 @@ async fn v2_update_of_v1_document_preserves_untouched_columns() {
 }
 
 async fn v2_update_of_v1_document_preserves_untouched_columns_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_full_catalogue(
         &server,
         &[owner_schema_v1(), owner_schema_v2()],
@@ -385,7 +384,11 @@ async fn v2_update_of_v1_document_preserves_untouched_columns_impl() {
     )
     .await;
     let transaction_id = alice
-        .update(doc_id, vec![("name".into(), Value::Text("renamed".into()))])
+        .update(
+            "documents",
+            doc_id,
+            vec![("name".into(), Value::Text("renamed".into()))],
+        )
         .expect("alice updates her v1 document through the v2 schema");
     wait_for_edge_txs(
         &alice,
@@ -426,7 +429,7 @@ async fn v2_update_denied_by_owner_policy_stays_rejected() {
 }
 
 async fn v2_update_denied_by_owner_policy_stays_rejected_impl() {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     push_full_catalogue(
         &server,
         &[owner_schema_v1(), owner_schema_v2()],
@@ -442,6 +445,7 @@ async fn v2_update_denied_by_owner_policy_stays_rejected_impl() {
     // local write is refused outright or the synced write settles rejected.
     let mallory = connect_user(&server, &owner_schema_v2(), MALLORY_ID).await;
     match mallory.update(
+        "documents",
         doc_id,
         vec![("name".into(), Value::Text("hijacked".into()))],
     ) {
@@ -649,7 +653,7 @@ enum V2CataloguePush {
 /// Starts the dependency-fixture server, seeds all rows under v1, then moves
 /// the active generation to v2.
 async fn migrated_membership_server(push: V2CataloguePush) -> (JazzServer, MembershipSeed) {
-    let server = JazzServer::start().await;
+    let server = JazzServer::start().await.expect("start test server");
     match push {
         V2CataloguePush::BeforeSeeding => {
             push_full_catalogue(
@@ -755,7 +759,7 @@ async fn one_shot_query_honors_v1_membership_dependency_impl() {
     let rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice's one-shot query returns the membership-granted v1 document",
         |rows| {
@@ -790,7 +794,7 @@ async fn one_shot_query_honors_v1_membership_dependency_impl() {
     let mallory_rows = wait_for_query(
         &mallory,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         STEADY_STATE_TIMEOUT,
         "mallory's one-shot query settles",
         Some,
@@ -849,7 +853,7 @@ async fn v2_document_with_v1_membership_dependency_is_served_impl() {
     let rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees both the v1 and the v2 document through her v1 membership",
         |rows| {
@@ -923,7 +927,7 @@ async fn local_query_honors_v1_membership_dependency_impl() {
     let local_rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::Local),
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         "alice's local-tier read shows the membership-granted document",
         |rows| {
@@ -941,8 +945,9 @@ async fn local_query_honors_v1_membership_dependency_impl() {
 
     let mallory = connect_user(&server, &membership_schema_v2(), MALLORY_ID).await;
     let mallory_rows = mallory
-        .query(Query::from("documents"), Some(DurabilityTier::Local))
+        .query(Query::from("documents"), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("mallory's local-tier read succeeds");
     assert!(
         mallory_rows.is_empty(),
@@ -1027,7 +1032,7 @@ async fn local_query_honors_v1_membership_for_v2_documents_impl() {
     let local_rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::Local),
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         "alice's local-tier read shows the v2 document granted by her v1 membership",
         |rows| {
@@ -1047,8 +1052,9 @@ async fn local_query_honors_v1_membership_for_v2_documents_impl() {
 
     let mallory = connect_user(&server, &membership_schema_v2(), MALLORY_ID).await;
     let mallory_rows = mallory
-        .query(Query::from("documents"), Some(DurabilityTier::Local))
+        .query(Query::from("documents"), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("mallory's local-tier read succeeds");
     assert!(
         mallory_rows.is_empty(),

@@ -8,3 +8,4 @@ native-loader.cjs
 native-loader.provenance.json
 native-binding.pointer.cjs
 correctness-native-binding.pointer.cjs
+native-artifact-fingerprint.cjs

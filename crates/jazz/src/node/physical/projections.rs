@@ -7,13 +7,45 @@ where
         schema_version: SchemaVersionId,
         logical_table: &str,
     ) -> Result<PhysicalTableId, Error> {
-        self.table_in_schema(logical_table, schema_version)?;
+        self.table_in_schema_ref(logical_table, schema_version)?;
         self.catalogue
             .physical_mappings
             .get(&schema_version)
             .and_then(|mapping| mapping.tables.get(logical_table))
             .map(|mapping| mapping.table_id)
             .ok_or(Error::InvalidStoredValue("physical table mapping missing"))
+    }
+    /// Resolve storage publication names to logical tables across every known
+    /// schema mapping. Local physical identities can differ from the identity
+    /// retained by a maintained view, so targeted refresh uses these names.
+    pub(crate) fn logical_table_names_for_storage_tables(
+        &self,
+        changed_tables: &std::collections::HashSet<String>,
+    ) -> std::collections::HashSet<String> {
+        let shared_deletion_history =
+            changed_tables.contains(SHARED_DELETION_HISTORY_TABLE);
+        self.catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| {
+                mapping.tables.iter().filter_map(|(logical_table, table)| {
+                    let table_id = table.table_id;
+                    let changed = shared_deletion_history
+                        || [
+                            physical_history_table_name(table_id),
+                            physical_register_table_name(table_id),
+                            physical_global_current_table_name(table_id),
+                            physical_register_global_current_table_name(table_id),
+                            physical_ahead_current_table_name(table_id),
+                            physical_register_ahead_current_table_name(table_id),
+                            physical_rejected_versions_table_name(table_id),
+                        ]
+                        .iter()
+                        .any(|name| changed_tables.contains(name));
+                    changed.then_some(logical_table.clone())
+                })
+            })
+            .collect()
     }
 
     pub(super) fn physical_table_id_for_version(

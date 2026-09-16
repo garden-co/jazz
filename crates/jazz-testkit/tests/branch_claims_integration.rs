@@ -4,9 +4,7 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
-use jazz::tools::{
-    ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value, policy_expr,
-};
+use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableSchema, Value, policy_expr};
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
@@ -132,7 +130,9 @@ async fn query_applies_claims_select_policy() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = branch_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -169,7 +169,7 @@ async fn query_applies_claims_select_policy() {
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "matching claim sees row",
                 |rows| rows.iter().any(|(id, _)| *id == room_id).then_some(()),
@@ -186,8 +186,9 @@ async fn query_applies_claims_select_policy() {
                 .await;
 
             let bob_rows = bob
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("bob queries rooms");
             assert!(
                 bob_rows.iter().all(|(id, _)| *id != room_id),
@@ -204,8 +205,9 @@ async fn query_applies_claims_select_policy() {
                 .await;
 
             let carol_rows = carol
-                .query(query, Some(DurabilityTier::EdgeServer))
+                .query(query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("carol queries rooms");
             assert!(
                 carol_rows.iter().all(|(id, _)| *id != room_id),
@@ -226,7 +228,9 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = numeric_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -270,7 +274,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
             wait_for_query(
                 &bigint_claim_user,
                 jazz::query::Query::from("integer_claim_rows"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "I64 claim matches I32 column",
                 |rows| {
@@ -293,7 +297,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
             wait_for_query(
                 &integer_claim_user,
                 jazz::query::Query::from("bigint_claim_rows"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "U32 claim matches I64 column",
                 |rows| {
@@ -323,7 +327,9 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = role_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -368,7 +374,7 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 wait_for_query(
                     &client,
                     in_list_query.clone(),
-                    Some(DurabilityTier::EdgeServer),
+                    jazz::tools::ReadTier::Remote,
                     QUERY_TIMEOUT,
                     "matching role sees SessionInList row",
                     |rows| {
@@ -381,7 +387,7 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 wait_for_query(
                     &client,
                     or_query.clone(),
-                    Some(DurabilityTier::EdgeServer),
+                    jazz::tools::ReadTier::Remote,
                     QUERY_TIMEOUT,
                     "matching role sees Or-of-equals row",
                     |rows| rows.iter().any(|(id, _)| *id == or_row_id).then_some(()),
@@ -416,12 +422,14 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                     .await;
 
                 let in_list_rows = client
-                    .query(in_list_query.clone(), Some(DurabilityTier::EdgeServer))
+                    .query(in_list_query.clone(), jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .unwrap_or_else(|error| panic!("{label} queries SessionInList rooms: {error}"));
                 let or_rows = client
-                    .query(or_query.clone(), Some(DurabilityTier::EdgeServer))
+                    .query(or_query.clone(), jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .unwrap_or_else(|error| panic!("{label} queries Or-of-equals rooms: {error}"));
 
                 assert!(
@@ -450,7 +458,9 @@ async fn subscription_matches_claims_select_query() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = branch_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -500,7 +510,7 @@ async fn subscription_matches_claims_select_query() {
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "matching claim one-shot sees row",
                 |rows| rows.iter().any(|(id, _)| *id == room_id).then_some(()),
@@ -533,8 +543,9 @@ async fn subscription_matches_claims_select_query() {
                 "wrong claim subscription should not see row: {bob_log:?}"
             );
             let bob_rows = bob
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("bob queries rooms");
             assert!(
                 bob_rows.iter().all(|(id, _)| *id != room_id),
@@ -567,8 +578,9 @@ async fn subscription_matches_claims_select_query() {
                 "missing claim subscription should not see row: {carol_log:?}"
             );
             let carol_rows = carol
-                .query(query, Some(DurabilityTier::EdgeServer))
+                .query(query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("carol queries rooms");
             assert!(
                 carol_rows.iter().all(|(id, _)| *id != room_id),
@@ -596,7 +608,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = admin_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone()).await.expect("start test server");
 
             let writer = TestingClient::builder()
                 .with_server(&server)
@@ -648,8 +660,9 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 .connect()
                 .await;
             let non_admin_rows = non_admin
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("non-admin sibling performs one-shot read");
             assert!(
                 non_admin_rows.is_empty(),
@@ -696,7 +709,9 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = branch_claims_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let admin = TestingClient::builder()
                 .with_server(&server)
@@ -756,8 +771,9 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 "simple claim route must not receive beta row: {simple_log:?}"
             );
             let simple_rows = simple
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("simple queries rooms");
             assert_eq!(
                 simple_rows.iter().filter(|(id, _)| *id == alpha_id).count(),
@@ -791,8 +807,9 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
             )
             .await;
             let admin_rows = admin_reader
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("admin queries rooms");
             assert!(
                 admin_rows.iter().any(|(id, _)| *id == alpha_id)
@@ -826,8 +843,9 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 "spy subscription must not receive rows: {spy_log:?}"
             );
             let spy_rows = spy
-                .query(query, Some(DurabilityTier::EdgeServer))
+                .query(query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("spy queries rooms");
             assert!(
                 spy_rows
@@ -853,7 +871,9 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = numeric_claims_write_gated_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
 
             let bigint_claim_user = TestingClient::builder()
                 .with_server(&server)

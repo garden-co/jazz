@@ -1251,44 +1251,14 @@ fn physical_history_field_names_for_case(
     mapping: &TablePhysicalMapping,
     present: Option<&BTreeSet<String>>,
 ) -> Result<Vec<String>, Error> {
-    let logical_descriptor = table.history_storage_table().record_schema();
-    let mut fields = logical_descriptor
-        .fields()
-        .iter()
-        .take(HistoryRowRecord::USER_CELLS)
-        .map(|field| {
-            field.name.clone().ok_or(Error::InvalidStoredValue(
-                "physical history system field unnamed",
-            ))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for column in &table.columns {
-        if present.is_some_and(|present| !present.contains(&column.name)) {
-            continue;
-        }
-        let column_id =
-            mapping
-                .columns
-                .get(&column.name)
-                .copied()
-                .ok_or(Error::InvalidStoredValue(
-                    "physical history column mapping missing",
-                ))?;
-        fields.push(physical_user_column_field(column_id));
-    }
-    fields.extend(
-        logical_descriptor
-            .fields()
-            .iter()
-            .skip(HistoryRowRecord::USER_CELLS + table.columns.len())
-            .map(|field| {
-                field.name.clone().ok_or(Error::InvalidStoredValue(
-                    "physical history trailing field unnamed",
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    );
-    Ok(fields)
+    physical_row_field_names(
+        table,
+        mapping,
+        present,
+        HistoryRowRecord::PREFIX_FIELD_NAMES,
+        &["authored_columns"],
+        "physical history column mapping missing",
+    )
 }
 
 pub(super) fn physical_current_field_names(
@@ -1303,44 +1273,14 @@ fn physical_current_field_names_for_case(
     mapping: &TablePhysicalMapping,
     present: Option<&BTreeSet<String>>,
 ) -> Result<Vec<String>, Error> {
-    let logical_descriptor = table.global_current_storage_tables()[0].record_schema();
-    let mut fields = logical_descriptor
-        .fields()
-        .iter()
-        .take(GlobalCurrentRowRecord::USER_CELLS)
-        .map(|field| {
-            field.name.clone().ok_or(Error::InvalidStoredValue(
-                "physical current system field unnamed",
-            ))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for column in &table.columns {
-        if present.is_some_and(|present| !present.contains(&column.name)) {
-            continue;
-        }
-        let column_id =
-            mapping
-                .columns
-                .get(&column.name)
-                .copied()
-                .ok_or(Error::InvalidStoredValue(
-                    "physical current column mapping missing",
-                ))?;
-        fields.push(physical_user_column_field(column_id));
-    }
-    fields.extend(
-        logical_descriptor
-            .fields()
-            .iter()
-            .skip(GlobalCurrentRowRecord::USER_CELLS + table.columns.len())
-            .map(|field| {
-                field.name.clone().ok_or(Error::InvalidStoredValue(
-                    "physical current trailing field unnamed",
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    );
-    Ok(fields)
+    physical_row_field_names(
+        table,
+        mapping,
+        present,
+        GlobalCurrentRowRecord::PREFIX_FIELD_NAMES,
+        &["authored_columns"],
+        "physical current column mapping missing",
+    )
 }
 
 fn physical_rejected_version_field_names(
@@ -1355,31 +1295,41 @@ fn physical_rejected_version_field_names_for_case(
     mapping: &TablePhysicalMapping,
     present: Option<&BTreeSet<String>>,
 ) -> Result<Vec<String>, Error> {
-    let logical_descriptor = table.rejected_versions_storage_table().record_schema();
-    let mut fields = logical_descriptor
-        .fields()
-        .iter()
-        .take(RejectedVersionRowRecord::USER_CELLS)
-        .map(|field| {
-            field.name.clone().ok_or(Error::InvalidStoredValue(
-                "physical rejected-version system field unnamed",
-            ))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    physical_row_field_names(
+        table,
+        mapping,
+        present,
+        RejectedVersionRowRecord::PREFIX_FIELD_NAMES,
+        &[],
+        "physical rejected-version column mapping missing",
+    )
+}
+
+// Naming a projection does not require constructing storage tables, indexes or
+// type registries. The fixed prefix comes from the record wrapper declaration;
+// user fields retain schema order and their durable physical column identities.
+fn physical_row_field_names(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+    present: Option<&BTreeSet<String>>,
+    prefix: &[&str],
+    suffix: &[&str],
+    missing_mapping: &'static str,
+) -> Result<Vec<String>, Error> {
+    let mut fields = Vec::with_capacity(prefix.len() + table.columns.len() + suffix.len());
+    fields.extend(prefix.iter().map(|name| (*name).to_owned()));
     for column in &table.columns {
         if present.is_some_and(|present| !present.contains(&column.name)) {
             continue;
         }
-        let column_id =
-            mapping
-                .columns
-                .get(&column.name)
-                .copied()
-                .ok_or(Error::InvalidStoredValue(
-                    "physical rejected-version column mapping missing",
-                ))?;
+        let column_id = mapping
+            .columns
+            .get(&column.name)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(missing_mapping))?;
         fields.push(physical_user_column_field(column_id));
     }
+    fields.extend(suffix.iter().map(|name| (*name).to_owned()));
     Ok(fields)
 }
 

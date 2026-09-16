@@ -872,6 +872,60 @@ describe("sortListByField", () => {
       });
       expect(result).toHaveLength(3);
     });
+
+    it("places nullish values first in ascending order while preserving their input order", () => {
+      const data = [
+        { id: "null-first", value: null },
+        { id: "high", value: 10 },
+        { id: "undefined-second", value: undefined },
+        { id: "negative", value: -2 },
+        { id: "low", value: 2 },
+        { id: "middle", value: 5 },
+      ];
+
+      const result = sortListByField(data, {
+        field: "value",
+        direction: "asc",
+      });
+
+      expect(result.map((item) => item.id)).toEqual([
+        "null-first",
+        "undefined-second",
+        "negative",
+        "low",
+        "middle",
+        "high",
+      ]);
+    });
+
+    it("places nullish values last in descending order and keeps pagination deterministic", () => {
+      const data = [
+        { id: "null-first", value: null },
+        { id: "high", value: 10 },
+        { id: "undefined-second", value: undefined },
+        { id: "negative", value: -2 },
+        { id: "low", value: 2 },
+        { id: "middle", value: 5 },
+      ];
+
+      const sorted = sortListByField(data, {
+        field: "value",
+        direction: "desc",
+      });
+
+      expect(sorted.map((item) => item.id)).toEqual([
+        "high",
+        "middle",
+        "low",
+        "negative",
+        "null-first",
+        "undefined-second",
+      ]);
+      expect(paginateList(sorted, 2, 4).map((item) => item.id)).toEqual([
+        "null-first",
+        "undefined-second",
+      ]);
+    });
   });
 });
 

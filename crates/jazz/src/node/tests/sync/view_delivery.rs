@@ -22,8 +22,6 @@ fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
         opening_pending: false,
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
     };
 
     let mut member_update = base();
@@ -34,23 +32,8 @@ fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
             if transition == "authority view update carries retired result members"
     ));
 
-    let mut payload_update = base();
-    payload_update
-        .program_fact_adds
-        .push(crate::protocol::ProgramFactEntry::ResultPayload(
-            crate::protocol::ResultMemberPayloadEntry {
-                member,
-                // Ingestion must reject this by kind before attempting to
-                // interpret the payload descriptor or bytes.
-                descriptor: Vec::new(),
-                record: Vec::new(),
-            },
-        ));
-    assert!(matches!(
-        crate::db::block_on(reader.apply_view_update(payload_update)),
-        Err(Error::InvalidAuthoritySourceClosure { transition, .. })
-            if transition == "authority view update carries a non-source closure fact"
-    ));
+    // Physical SupportingRowsUpdate cannot represent a rendered result payload.
+    // Retired wire tags are rejected by the wire corpus tests.
     assert!(
         reader
             .subscription_current_rows("todos", DurabilityTier::Local)
@@ -122,8 +105,6 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
         })
         .unwrap();
 
@@ -276,8 +257,6 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
         })
         .unwrap();
 
@@ -308,7 +287,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
     };
     assert!(version_bundles.is_empty());
     assert_eq!(peer_payload_inventory_refs, vec![tx_id]);
-    assert!(program_fact_adds.iter().any(|fact| matches!(
+    assert!(program_fact_adds.added_rows().iter().any(|fact| matches!(
         fact,
         input
             if input.row == row && input.version.tx == tx_id
@@ -331,8 +310,6 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
         })
         .unwrap();
 }
@@ -358,8 +335,6 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
         })
         .unwrap();
 

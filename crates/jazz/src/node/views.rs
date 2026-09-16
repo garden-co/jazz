@@ -13,47 +13,29 @@ use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::node::query_engine::left_field;
 use crate::protocol::{
-    KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry,
-    RowVersionRef, VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
+    KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry, RowVersionRef, SupportingRow,
+    VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
     build_version_carriers_from_singletons,
 };
 
 fn apply_covered_input_closure_admission_delta(
     state: &mut AuthorityResultState,
     cleared: bool,
-    adds: &[ProgramFactEntry],
-    removes: &[ProgramFactEntry],
+    adds: &[SupportingRow],
+    removes: &[SupportingRow],
 ) {
     if cleared {
-        state.covered_input_sources.clear();
         state.covered_input_versions.clear();
     }
-    for fact in removes {
-        match fact {
-            ProgramFactEntry::ProgramSourceCoverage(coverage) => {
-                state.covered_input_sources.remove(&coverage.source);
-            }
-            ProgramFactEntry::CoveredInput(input) => {
-                let key = CoveredInputCoordinate::from(input);
-                if state.covered_input_versions.get(&key) == Some(input) {
-                    state.covered_input_versions.remove(&key);
-                }
-            }
-            _ => {}
-        }
+    for input in removes {
+        state
+            .covered_input_versions
+            .remove(&CoveredInputCoordinate::from(input));
     }
-    for fact in adds {
-        match fact {
-            ProgramFactEntry::ProgramSourceCoverage(coverage) => {
-                state.covered_input_sources.insert(coverage.source.clone());
-            }
-            ProgramFactEntry::CoveredInput(input) => {
-                state
-                    .covered_input_versions
-                    .insert(CoveredInputCoordinate::from(input), input.clone());
-            }
-            _ => {}
-        }
+    for input in adds {
+        state
+            .covered_input_versions
+            .insert(CoveredInputCoordinate::from(input), input.clone());
     }
 }
 
@@ -66,18 +48,6 @@ fn maintained_view_tx_versions_contain_winner(
             && candidate.row_uuid() == winner.row_uuid()
             && candidate.layer() == winner.layer()
             && candidate.deletion() == winner.deletion()
-    })
-}
-
-fn maintained_view_find_content_witness<'a>(
-    tx_versions: &'a [VersionRow],
-    entry_table: &str,
-    row_uuid: RowUuid,
-) -> Option<&'a VersionRow> {
-    tx_versions.iter().find(|version| {
-        version.table() == entry_table
-            && version.row_uuid() == row_uuid
-            && version.deletion().is_none()
     })
 }
 
@@ -251,28 +221,6 @@ fn content_row_members_for_bundle(
         .collect()
 }
 
-/// Versions named by the maintained program's covered-input stream. Unlike a
-/// relation edge, this witness changes for an in-place nested update or an
-/// order-key replacement even when the public member set remains unchanged.
-fn covered_input_version_rows_for_bundle(
-    facts: &[ProgramFactEntry],
-) -> BTreeSet<(String, RowUuid, TxId)> {
-    facts
-        .iter()
-        .filter_map(|fact| match fact {
-            ProgramFactEntry::CoveredInput(input) => Some((
-                // Maintained witnesses are indexed by the logical source
-                // name. Bundle serialization normalizes that witness to its
-                // authored physical identity, matching `version_table`.
-                input.source.table.to_string(),
-                input.source_row,
-                input.version.tx,
-            )),
-            _ => None,
-        })
-        .collect()
-}
-
 pub(crate) fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
     use crate::query::{Operand, Predicate};
     fn scalar(operand: &Operand) -> bool {
@@ -311,6 +259,7 @@ pub(crate) fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
 }
 
 pub(crate) struct MaintainedViewBundleInputs<'a> {
+    pub(crate) supporting_update: Option<crate::protocol::SupportingRowsUpdate>,
     pub(crate) shape: &'a ValidatedQuery,
     pub(crate) has_default_read_view: bool,
     /// Selected-authority relays must forward their exact authority receipt;
@@ -332,8 +281,6 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) previous_result_set: BTreeSet<TxId>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
-    pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
-    pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
     pub(crate) identity: AuthorSubject,
     pub(crate) tier: DurabilityTier,
     /// Maintained fact and collector state. The current carrier consumes its
@@ -737,6 +684,7 @@ where
             .collect::<Vec<_>>();
         let update = self
             .view_update_for_maintained_result_members(MaintainedViewBundleInputs {
+                supporting_update: None,
                 shape,
                 has_default_read_view: true,
                 allow_authoritative_scalar_exit_refresh: true,
@@ -744,8 +692,6 @@ where
                 settled_through: self.clock.committed_global_time,
                 result_member_adds,
                 result_member_removes,
-                program_fact_adds: transitions.program_fact_adds,
-                program_fact_removes: transitions.program_fact_removes,
                 peer_complete_tx_payloads,
                 known_state: None,
                 complete_exclusive_payloads: false,
@@ -760,150 +706,156 @@ where
         update
     }
 
-    pub(crate) fn supporting_rows_for_facts(
+    pub(super) fn scope_physical_table(
         &self,
-        read_schema: SchemaVersionId,
-        facts: impl IntoIterator<Item = ProgramFactEntry>,
-    ) -> Result<Vec<crate::protocol::SupportingRow>, Error> {
-        let mut rows = BTreeSet::new();
-        for fact in facts {
-            let ProgramFactEntry::CoveredInput(input) = fact else {
-                continue;
-            };
-            let physical_table = self
-                .catalogue
-                .physical_mappings
-                .get(&read_schema)
-                .and_then(|mapping| mapping.identities.tables.get(input.source.table.as_str()))
-                .ok_or(Error::InvalidStoredValue(
-                    "supporting row physical table mapping missing",
-                ))?
-                .id;
-            rows.insert(crate::protocol::SupportingRow {
-                physical_table,
-                version_table: input.version_table,
-                row: input.source_row,
-                version: input.version,
-            });
-        }
-        Ok(rows.into_iter().collect())
+        schema: SchemaVersionId,
+        table: &str,
+    ) -> Result<crate::ids::GlobalPhysicalTableId, Error> {
+        self.catalogue
+            .physical_mappings
+            .get(&schema)
+            .and_then(|mapping| mapping.identities.tables.get(table))
+            .map(|table| table.id)
+            .ok_or(Error::InvalidStoredValue(
+                "scope physical table mapping missing",
+            ))
     }
 
-    // The wire supplies one ordinary physical dataset. Query scan occurrences
-    // are compiler-owned: every local occurrence scans the same supplied table.
-    // Internal source records are graph bookkeeping, not per-role peer evidence.
-    fn normalize_supporting_snapshot(
+    pub(super) fn scope_logical_table(
+        &self,
+        schema: SchemaVersionId,
+        physical: crate::ids::GlobalPhysicalTableId,
+    ) -> Result<groove::Intern<String>, Error> {
+        // Publication validation guarantees physical IDs are unique within a
+        // read schema. Names are compiler lookup metadata, never membership.
+        self.catalogue
+            .physical_mappings
+            .get(&schema)
+            .and_then(|mapping| {
+                mapping
+                    .identities
+                    .tables
+                    .iter()
+                    .find(|(_, table)| table.id == physical)
+                    .map(|(name, _)| name.clone().into())
+            })
+            .ok_or(Error::InvalidStoredValue(
+                "scope physical table is absent from read schema",
+            ))
+    }
+
+    // Preserve the physical frontier from wire to receiver. The only optional
+    // normalization is a fresh snapshot refreshing an already-live usage:
+    // derive its net delta to keep application listeners incremental.
+    fn normalize_supporting_update(
         &mut self,
         update: &mut ViewUpdateParts,
-        prior_snapshots: &mut BTreeMap<AuthorityResultKey, BTreeSet<ProgramFactEntry>>,
-    ) -> Result<(), Error> {
-        let Some(rows) = update.wire_rows.take() else {
-            return Ok(());
+        revisions: &mut BTreeMap<AuthorityResultKey, [u8; 16]>,
+    ) -> Result<Option<[u8; 16]>, Error> {
+        use crate::protocol::SupportingRowsUpdate;
+        let Some(wire) = update.wire_rows.as_ref() else {
+            return Ok(None);
+        };
+        let invalid = || Error::InvalidAuthoritySourceClosure {
+            subscription: update.subscription,
+            transition: "invalid supporting-set revision or predecessor".to_owned(),
         };
         if update.opening_pending {
-            if !rows.is_empty() {
-                return Err(Error::InvalidAuthoritySourceClosure {
-                    subscription: update.subscription,
-                    transition: "opening-pending marker carries supporting rows".to_owned(),
-                });
+            if !wire.is_snapshot() || !wire.added_rows().is_empty() {
+                return Err(invalid());
             }
             update.reset_input_set = false;
-            return Ok(());
+            return Ok(None);
         }
-        let Some(shape) = self.registered_shape(update.subscription.shape_id) else {
-            return Ok(());
-        };
-        let schema = shape.schema_version();
         let key = match self.authority_result_key_for_subscription(update.subscription) {
             Ok(key) => key,
             Err(Error::InvalidStoredValue(
                 "subscription referenced unregistered shape"
                 | "subscription referenced unregistered binding",
-            )) => return Ok(()),
+            )) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let sources = self.compiled_covered_input_sources_for_subscription(update.subscription)?;
-        let mut facts = BTreeSet::new();
-        let mut sources_by_table = BTreeMap::<_, Vec<_>>::new();
-        for source in &sources {
-            let physical = self
-                .catalogue
-                .physical_mappings
-                .get(&schema)
-                .and_then(|mapping| mapping.identities.tables.get(source.table.as_str()))
-                .ok_or(Error::InvalidStoredValue(
-                    "compiled source physical table mapping missing",
-                ))?
-                .id;
-            sources_by_table.entry(physical).or_default().push(source);
-            facts.insert(ProgramFactEntry::ProgramSourceCoverage(
-                crate::protocol::ProgramSourceCoverageEntry {
-                    source: source.clone(),
-                    complete: true,
-                },
-            ));
+        let revision = wire.revision();
+        if revision == [0; 16] {
+            return Err(invalid());
         }
-        let mut identities = BTreeSet::new();
-        for row in rows {
-            if !row.is_wire_valid() || !identities.insert(row.clone()) {
-                return Err(Error::InvalidAuthoritySourceClosure {
-                    subscription: update.subscription,
-                    transition: "invalid or duplicate supporting physical row version".to_owned(),
-                });
-            }
-            let Some(sources) = sources_by_table.get(&row.physical_table) else {
-                return Err(Error::InvalidAuthoritySourceClosure {
-                    subscription: update.subscription,
-                    transition: "supporting row physical table is outside the query dataset"
-                        .to_owned(),
-                });
-            };
-            // Index the compiler's occurrences once; a row need only visit
-            // occurrences of its own table, rather than every query source.
-            for source in sources {
-                facts.insert(ProgramFactEntry::CoveredInput(
-                    crate::protocol::CoveredInputEntry {
-                        source: (*source).clone(),
-                        version_table: row.version_table.clone(),
-                        source_row: row.row,
-                        version: row.version.clone(),
-                    },
-                ));
+        if let SupportingRowsUpdate::Delta { predecessor, .. } = wire {
+            let current = revisions.get(&key).copied().or_else(|| {
+                self.query
+                    .authority_results
+                    .get(&key)
+                    .and_then(|state| state.supporting_revision)
+            });
+            if current != Some(*predecessor)
+                || (*predecessor == revision
+                    && (!wire.added_rows().is_empty() || !wire.removed_rows().is_empty()))
+            {
+                return Err(invalid());
             }
         }
-
-        let previous = prior_snapshots.get(&key).cloned().or_else(|| {
-            self.query.authority_results.get(&key).and_then(|state| {
-                matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. }).then(|| {
+        update.reset_input_set = wire.is_snapshot();
+        if wire.is_snapshot()
+            && !revisions.contains_key(&key)
+            && let Some(state) = self.query.authority_results.get(&key)
+            && state.live_settled
+            && state.pending_authoritative_reset.is_none()
+            && matches!(state.source_closure, AuthoritySourceClosure::Claimed { .. })
+            && let Some(predecessor) = state.supporting_revision
+        {
+            let mut incoming = BTreeMap::new();
+            for row in wire.added_rows() {
+                if !row.is_wire_valid()
+                    || incoming
+                        .insert(CoveredInputCoordinate::from(row), row)
+                        .is_some()
+                {
+                    return Err(Error::InvalidAuthoritySourceClosure {
+                        subscription: update.subscription,
+                        transition: "invalid or duplicate supporting physical row coordinate"
+                            .to_owned(),
+                    });
+                }
+            }
+            let adds = incoming
+                .values()
+                .filter(|row| {
                     state
-                        .settled_program_facts
-                        .iter()
-                        .filter(|fact| fact.is_peer_source_closure_fact())
-                        .cloned()
-                        .collect()
+                        .covered_input_versions
+                        .get(&CoveredInputCoordinate::from(**row))
+                        != Some(**row)
                 })
-            })
-        });
-        if let Some(previous) = previous {
-            // Complete wire snapshots become one atomic local input transition.
-            // Replacing the dataset does not reopen the application's subscription.
+                .map(|row| (*row).clone())
+                .collect();
+            let removes = state
+                .covered_input_versions
+                .values()
+                .filter(|row| {
+                    incoming.get(&CoveredInputCoordinate::from(*row)).copied() != Some(*row)
+                })
+                .cloned()
+                .collect();
+            update.wire_rows = Some(SupportingRowsUpdate::Delta {
+                predecessor,
+                revision,
+                adds,
+                removes,
+            });
             update.reset_input_set = false;
-            update.program_fact_adds = facts.difference(&previous).cloned().collect();
-            update.program_fact_removes = previous.difference(&facts).cloned().collect();
-        } else {
-            update.reset_input_set = true;
-            update.program_fact_adds = facts.iter().cloned().collect();
-            update.program_fact_removes.clear();
         }
-        prior_snapshots.insert(key, facts);
-        Ok(())
+        revisions.insert(key, revision);
+        Ok(Some(revision))
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.publish_supporting_rows")
+    )]
     pub(crate) async fn view_update_for_maintained_result_members(
         &mut self,
         inputs: MaintainedViewBundleInputs<'_>,
     ) -> Result<SyncMessage, Error> {
         let MaintainedViewBundleInputs {
+            supporting_update,
             shape,
             has_default_read_view,
             allow_authoritative_scalar_exit_refresh,
@@ -915,8 +867,6 @@ where
             previous_result_set: _previous_result_set,
             result_member_adds,
             result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
             identity,
             tier,
             maintained_facts,
@@ -930,18 +880,16 @@ where
         // already use it.
         let allow_storage_witness_fallback = allow_storage_witness_fallback
             || maintained_facts.uses_storage_backed_result_materialization();
-        let program_fact_adds = program_fact_adds
-            .into_iter()
-            .filter(ProgramFactEntry::is_peer_source_closure_fact)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let program_fact_removes = program_fact_removes
-            .into_iter()
-            .filter(ProgramFactEntry::is_peer_source_closure_fact)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
+        let supporting_update = supporting_update.unwrap_or_else(|| {
+            crate::protocol::SupportingRowsUpdate::snapshot(
+                maintained_facts.supporting_rows().cloned().collect(),
+            )
+        });
+        let logical_tables = maintained_facts
+            .physical_tables
+            .iter()
+            .map(|(name, id)| (*id, name.as_str()))
+            .collect::<BTreeMap<_, _>>();
         let mut context = ViewEvaluationContext::default();
         let row_result_adds = content_row_members_for_bundle(
             &result_member_adds,
@@ -989,34 +937,32 @@ where
                 None
             })
             .collect::<BTreeSet<_>>();
-        let covered_input_add_rows = covered_input_version_rows_for_bundle(&program_fact_adds);
-        let mut wanted_add_rows_by_tx = row_result_adds
-            .iter()
-            .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
-            .chain(covered_input_add_rows)
-            .fold(
-                BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),
-                |mut by_tx, (table, row_uuid, tx_id)| {
-                    by_tx.entry(tx_id).or_default().insert((table, row_uuid));
-                    by_tx
-                },
-            );
+        let supporting_add_rows =
+            supporting_update
+                .added_rows()
+                .iter()
+                .map(|row| {
+                    let table = logical_tables.get(&row.physical_table).ok_or(
+                        Error::InvalidStoredValue("support body has no compiled physical table"),
+                    )?;
+                    Ok(((*table).to_owned(), row.row, row.version.tx))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+        let mut wanted_add_rows_by_tx = supporting_add_rows.into_iter().fold(
+            BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),
+            |mut by_tx, (table, row_uuid, tx_id)| {
+                by_tx.entry(tx_id).or_default().insert((table, row_uuid));
+                by_tx
+            },
+        );
         // Scalar publication can retract only its covered root source;
         // the receiver derives result removal from that source delta.
         let exit_candidates = row_result_removes
             .iter()
             .map(|(table, row, tx)| (table.to_string(), *row, *tx))
-            .chain(program_fact_removes.iter().filter_map(|fact| match fact {
-                ProgramFactEntry::CoveredInput(input)
-                    if input.source.path == [crate::protocol::ProgramSourceRole::Root] =>
-                {
-                    Some((
-                        input.source.table.to_string(),
-                        input.source_row,
-                        input.version.tx,
-                    ))
-                }
-                _ => None,
+            .chain(supporting_update.removed_rows().iter().filter_map(|row| {
+                let table = *logical_tables.get(&row.physical_table)?;
+                (table == shape.query().table).then(|| (table.to_owned(), row.row, row.version.tx))
             }))
             .collect::<BTreeSet<_>>();
         // A live scalar predicate exit retracts coverage, but a still-readable
@@ -1113,6 +1059,22 @@ where
             .map(|(table, row, tx)| (table.as_str(), *row, *tx))
             .collect::<BTreeSet<_>>();
         for (tx_id, wanted_rows) in &wanted_add_rows_by_tx {
+            // Scope membership and immutable-body availability are independent.
+            // A resumed physical snapshot still declares every input, while a
+            // cursor/exact inventory may omit its already-held native bodies.
+            // An inaccurate availability claim is handled by scoped row repair.
+            if wanted_rows.iter().all(|(table, row)| {
+                known_state_exact_refs.contains(&RowVersionRef::new(table.clone(), *row, *tx_id))
+            }) || if let Some(position) = known_state_position {
+                self.query_transaction_memo(*tx_id, &mut context)
+                    .await?
+                    .and_then(|tx| tx.global_time)
+                    .is_some_and(|time| time <= position)
+            } else {
+                false
+            } {
+                continue;
+            }
             if peer_complete_tx_payloads.contains(tx_id) {
                 peer_payload_inventory_refs.push(*tx_id);
                 continue;
@@ -1123,22 +1085,35 @@ where
             let tx_versions = tx_versions_cache
                 .entry(*tx_id)
                 .or_insert_with(|| maintained_facts.versions_by_tx(*tx_id));
+            // These checks only need content-witness presence, not a selected
+            // version. Index once rather than decoding row identities while
+            // scanning the transaction twice for every requested row. Keep
+            // the original version vector intact (including ordering and
+            // multiple versions/layers for a coordinate).
+            let mut content_coordinates = tx_versions
+                .iter()
+                .filter(|version| version.deletion().is_none())
+                .map(|version| (version.table().to_owned(), version.row_uuid()))
+                .collect::<BTreeSet<_>>();
             let mut needs_storage_fallback = false;
             for (entry_table, row_uuid) in wanted_rows {
-                if maintained_view_find_content_witness(tx_versions, entry_table, *row_uuid)
-                    .is_none()
-                {
-                    let (content_winner, _) =
-                        maintained_facts.replacement_for(entry_table, *row_uuid);
-                    if let Some(content_winner) = content_winner {
-                        if self.version_tx_id(&content_winner)? == *tx_id {
-                            tx_versions.push(content_winner);
+                let coordinate = (entry_table.clone(), *row_uuid);
+                if content_coordinates.contains(&coordinate) {
+                    continue;
+                }
+                let (content_winner, _) = maintained_facts.replacement_for(entry_table, *row_uuid);
+                if let Some(content_winner) = content_winner {
+                    if self.version_tx_id(&content_winner)? == *tx_id {
+                        if content_winner.deletion().is_none() {
+                            content_coordinates.insert((
+                                content_winner.table().to_owned(),
+                                content_winner.row_uuid(),
+                            ));
                         }
+                        tx_versions.push(content_winner);
                     }
                 }
-                if maintained_view_find_content_witness(tx_versions, entry_table, *row_uuid)
-                    .is_none()
-                {
+                if !content_coordinates.contains(&coordinate) {
                     needs_storage_fallback = true;
                 }
             }
@@ -1468,10 +1443,7 @@ where
                     authorization_progress: None,
                     opening_pending: false,
                 },
-                supporting_rows: self.supporting_rows_for_facts(
-                    shape.schema_version(),
-                    maintained_facts.active_peer_source_closure_facts(),
-                )?,
+                supporting_rows: supporting_update,
             },
         ))
     }
@@ -1481,7 +1453,7 @@ where
         &mut self,
         mut update: ViewUpdateParts,
     ) -> Result<(), Error> {
-        self.normalize_supporting_snapshot(&mut update, &mut BTreeMap::new())?;
+        let snapshot = self.normalize_supporting_update(&mut update, &mut BTreeMap::new())?;
         self.validate_received_view_update_global_time_durability(&update)
             .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
         self.validate_view_update_payloads(std::slice::from_ref(&update))
@@ -1501,19 +1473,25 @@ where
         )
         .await
         .map_err(|error| invalid_authority_source_closure_error(update.subscription, error))?;
-        self.apply_view_update_inner(update, None).await?;
+        self.apply_view_update_inner(update, None, snapshot).await?;
         self.install_compiled_covered_input_source_caches(compiled_source_caches);
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.receive_updates")
+    )]
     pub(crate) async fn apply_view_updates_in_batch(
         &mut self,
         mut updates: Vec<ViewUpdateParts>,
     ) -> Result<(), Error> {
         let mut prior_snapshots = BTreeMap::new();
+        let mut snapshots = Vec::with_capacity(updates.len());
         for update in &mut updates {
-            self.normalize_supporting_snapshot(update, &mut prior_snapshots)?;
+            snapshots.push(self.normalize_supporting_update(update, &mut prior_snapshots)?);
         }
+        drop(prior_snapshots);
         if updates.is_empty() {
             return Ok(());
         }
@@ -1584,18 +1562,14 @@ where
             .iter()
             .map(|bundle| bundle.tx.tx_id)
             .collect::<BTreeSet<_>>();
-        let bulk_candidate_bundles = preflight
+        let bulk_candidate_refs = preflight
             .bundles
             .iter()
             .filter(|(tx_id, bundle)| {
                 bulk_candidate_tx_ids.contains(tx_id)
                     && bundle.scope == crate::protocol::VersionBundleScope::CompleteTransaction
             })
-            .map(|(_, bundle)| bundle.clone())
-            .collect::<Vec<_>>();
-        let bulk_candidate_refs = bulk_candidate_bundles
-            .iter()
-            .map(VersionBundle::as_ref)
+            .map(|(_, bundle)| bundle.as_ref())
             .collect::<Vec<_>>();
         let bulk_loaded_tx_ids = self
             .ingest_reset_view_bundle_refs_in_bulk(
@@ -1610,16 +1584,29 @@ where
         for tx_id in &bulk_loaded_tx_ids {
             receiver_candidates.remove(tx_id);
         }
+        // Alias registration publishes metadata. Resolve every author, parent
+        // and schema before preparing any immutable row in this shared batch.
+        for bundle in receiver_candidates.values() {
+            self.ensure_node_alias(bundle.tx.tx_id.node).await?;
+            for version in &bundle.versions {
+                self.ensure_schema_version_alias(version.schema_version())
+                    .await?;
+                for parent in version.parents() {
+                    self.ensure_node_alias(parent.node).await?;
+                }
+            }
+        }
         let mut receiver_batch = self.database.open_batch();
         let mut receiver_batch_tx_ids = BTreeSet::new();
         let mut receiver_batch_global_times = Vec::new();
         let mut receiver_batch_content_versions = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
-        for bundle in receiver_candidates.values() {
+        let mut deferred_bundles = Vec::new();
+        for bundle in receiver_candidates.into_values() {
             let staged = self
                 .stage_view_bundle(
                     &mut receiver_batch,
-                    bundle,
+                    &bundle,
                     &mut receiver_batch_tx_ids,
                     &mut receiver_batch_global_times,
                     &mut receiver_batch_content_versions,
@@ -1627,6 +1614,8 @@ where
                 .await?;
             if staged {
                 receiver_batch_bundle_count += 1;
+            } else {
+                deferred_bundles.push(bundle);
             }
         }
         self.write_merge_heads_for_bulk_content_versions(
@@ -1655,12 +1644,20 @@ where
         }
         let mut preloaded_tx_ids = bulk_loaded_tx_ids;
         preloaded_tx_ids.extend(receiver_batch_tx_ids);
+        // Supplying preloaded IDs bypasses per-update bundle ingestion below,
+        // so deferred known transactions must explicitly apply their new fate.
+        for bundle in deferred_bundles {
+            let tx_id = bundle.tx.tx_id;
+            self.sync_metrics.receiver_per_bundle_ingests += 1;
+            self.ingest_view_bundle(bundle).await?;
+            preloaded_tx_ids.insert(tx_id);
+        }
         // Cross-subscription ordering within one receiver tick carries no
         // protocol semantics beyond per-link FIFO. Table writes are coalesced
         // above; per-subscription settled-state mutations still apply in
         // arrival order below.
-        for update in updates {
-            self.apply_view_update_inner(update, Some(&preloaded_tx_ids))
+        for (update, snapshot) in updates.into_iter().zip(snapshots) {
+            self.apply_view_update_inner(update, Some(&preloaded_tx_ids), snapshot)
                 .await?;
         }
         self.install_compiled_covered_input_source_caches(compiled_source_caches);
@@ -1690,8 +1687,8 @@ where
     ) -> Result<(), Error> {
         let bundle_refs = version_bundle_refs_for_carriers(carriers)?;
         let preflight = self.preflight_view_bundle_conflicts(&bundle_refs).await?;
-        for bundle in preflight.bundles.values() {
-            self.ingest_view_bundle(bundle.clone()).await?;
+        for bundle in preflight.bundles.into_values() {
+            self.ingest_view_bundle(bundle).await?;
         }
         Ok(())
     }
@@ -1699,12 +1696,13 @@ where
     /// Validate all row bundles carried by a receiver frame without changing
     /// storage or in-memory receiver state.
     fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {
+        let mut descriptors = BTreeMap::new();
         for update in updates {
             // An opening-pending marker makes no source or body claim. It
             // must not mutate a prior closure while withholding settlement.
             if update.opening_pending
-                && (!update.program_fact_adds.is_empty()
-                    || !update.program_fact_removes.is_empty()
+                && (!update.supporting_adds().is_empty()
+                    || !update.supporting_removes().is_empty()
                     || !update.version_carriers.is_empty()
                     || !update.peer_complete_tx_payload_refs.is_empty())
             {
@@ -1724,40 +1722,18 @@ where
                     transition: "authority view update carries retired result members".to_owned(),
                 });
             }
-            if update
-                .program_fact_adds
-                .iter()
-                .chain(&update.program_fact_removes)
-                .any(|fact| !fact.is_peer_source_closure_fact())
+            let adds = update.supporting_adds();
+            let removes = update.supporting_removes();
+            let added = adds.iter().collect::<BTreeSet<_>>();
+            let removed = removes.iter().collect::<BTreeSet<_>>();
+            if added.len() != adds.len()
+                || removed.len() != removes.len()
+                || !added.is_disjoint(&removed)
+                || adds.iter().chain(removes).any(|row| !row.is_wire_valid())
             {
                 return Err(Error::InvalidAuthoritySourceClosure {
                     subscription: update.subscription,
-                    transition: "authority view update carries a non-source closure fact"
-                        .to_owned(),
-                });
-            }
-            let added_facts = update.program_fact_adds.iter().collect::<BTreeSet<_>>();
-            if added_facts.len() != update.program_fact_adds.len() {
-                return Err(Error::InvalidAuthoritySourceClosure {
-                    subscription: update.subscription,
-                    transition: "duplicate source-closure addition".to_owned(),
-                });
-            }
-            let removed_facts = update.program_fact_removes.iter().collect::<BTreeSet<_>>();
-            if removed_facts.len() != update.program_fact_removes.len() {
-                return Err(Error::InvalidAuthoritySourceClosure {
-                    subscription: update.subscription,
-                    transition: "duplicate source-closure removal".to_owned(),
-                });
-            }
-            if update
-                .program_fact_removes
-                .iter()
-                .any(|fact| added_facts.contains(fact))
-            {
-                return Err(Error::InvalidAuthoritySourceClosure {
-                    subscription: update.subscription,
-                    transition: "overlapping source-closure add and remove".to_owned(),
+                    transition: "invalid or duplicate supporting physical row version".to_owned(),
                 });
             }
             for bundle in version_bundle_refs_for_carriers(&update.version_carriers)? {
@@ -1766,199 +1742,109 @@ where
                 // shared transaction boundary keeps view payloads from being
                 // a durable-ingress bypass for operation provenance.
                 self.admit_contribution_merge_for_storage(bundle.tx)?;
-                self.validate_view_payload_versions(bundle.versions)?;
+                self.validate_view_payload_versions_prepared(bundle.versions, &mut descriptors)?;
             }
         }
         Ok(())
     }
 
-    /// A reset with no source facts is an opening/coverage stamp, not proof
-    /// that a previously claimed exact closure became empty. The closure
-    /// state, rather than retired authority result members, owns that choice.
+    /// Only an explicit physical snapshot replaces a scope. Metadata-only
+    /// opening/deferred-completion stamps never clear retained membership.
     fn reset_replaces_authority_source_closure(
-        reset_input_set: bool,
-        has_source_facts: bool,
+        reset: bool,
+        has_scope: bool,
         opening_pending: bool,
-        state: Option<&AuthorityResultState>,
     ) -> bool {
-        reset_input_set
-            && !opening_pending
-            && (has_source_facts
-                || !matches!(
-                    state.map(|state| state.source_closure),
-                    Some(crate::node::AuthoritySourceClosure::Claimed { .. })
-                ))
+        reset && has_scope && !opening_pending
     }
 
-    /// Preflight only the source keys touched by an authority closure delta.
-    /// The receipt keeps indexes for these two exactness constraints, so an
-    /// ordinary successor remains O(changed), rather than cloning or scanning
-    /// its retained closure.
+    /// Stage only changed coordinates; no full predecessor copy for deltas.
     fn validate_covered_input_closure_admission(
         &mut self,
         updates: &[ViewUpdateParts],
-    ) -> Result<BTreeMap<AuthorityResultKey, BTreeSet<ProgramSourceId>>, Error> {
-        let mut compiled_source_caches = BTreeMap::new();
+    ) -> Result<BTreeMap<AuthorityResultKey, CompiledScopeTables>, Error> {
+        let mut caches = BTreeMap::new();
         let mut overlays = BTreeMap::<
             AuthorityResultKey,
             (
                 bool,
-                BTreeMap<crate::protocol::ProgramSourceId, bool>,
-                BTreeMap<CoveredInputCoordinate, Option<crate::protocol::CoveredInputEntry>>,
+                BTreeMap<CoveredInputCoordinate, Option<SupportingRow>>,
             ),
         >::new();
         for update in updates {
-            let Ok(authority_result_key) =
-                self.authority_result_key_for_subscription(update.subscription)
-            else {
-                // A detached subscription is a benign late-frame drop. Its
-                // normal admission path records that metric below.
+            let Ok(key) = self.authority_result_key_for_subscription(update.subscription) else {
                 continue;
             };
-            let compiled_sources = if let Some(compiled) = self
+            let tables = if let Some(tables) = self
                 .query
                 .authority_results
-                .get(&authority_result_key)
+                .get(&key)
                 .and_then(|state| state.compiled_covered_input_sources.as_ref())
             {
-                compiled
-            } else if let Some(compiled) = compiled_source_caches.get(&authority_result_key) {
-                compiled
+                tables
             } else {
-                let compiled = self
-                    .compiled_covered_input_sources_for_subscription(update.subscription)
-                    .map_err(|error| {
-                        invalid_authority_source_closure_error(update.subscription, error)
-                    })?;
-                compiled_source_caches.insert(authority_result_key.clone(), compiled);
-                compiled_source_caches
-                    .get(&authority_result_key)
-                    .expect("staged compiler source cache was installed")
+                if !caches.contains_key(&key) {
+                    caches.insert(
+                        key.clone(),
+                        self.compiled_covered_input_sources_for_subscription(update.subscription)?,
+                    );
+                }
+                &caches[&key]
             };
-            let overlay = overlays.entry(authority_result_key.clone()).or_default();
-            let state = self.query.authority_results.get(&authority_result_key);
-            let invalid = |transition| Error::InvalidAuthoritySourceClosure {
-                subscription: update.subscription,
-                transition,
-            };
-            let reset_replaces = Self::reset_replaces_authority_source_closure(
+            let state = self.query.authority_results.get(&key);
+            let (cleared, changes) = overlays.entry(key).or_default();
+            if Self::reset_replaces_authority_source_closure(
                 update.reset_input_set,
-                !update.program_fact_adds.is_empty() || !update.program_fact_removes.is_empty(),
+                update.wire_rows.is_some(),
                 update.opening_pending,
-                state,
-            );
-            if reset_replaces {
-                overlay.0 = true;
-                overlay.1.clear();
-                overlay.2.clear();
+            ) {
+                *cleared = true;
+                changes.clear();
             }
-            for fact in &update.program_fact_removes {
-                match fact {
-                    ProgramFactEntry::ProgramSourceCoverage(coverage) => {
-                        let _ = coverage;
-                        return Err(invalid(format!(
-                            "source coverage removal is reset-only: {:?}",
-                            coverage.source
-                        )));
+            let invalid = |message: &str| Error::InvalidAuthoritySourceClosure {
+                subscription: update.subscription,
+                transition: message.to_owned(),
+            };
+            for (rows, adding) in [
+                (update.supporting_removes(), false),
+                (update.supporting_adds(), true),
+            ] {
+                for row in rows {
+                    if !tables.contains_key(&row.physical_table) {
+                        return Err(invalid(
+                            "supporting physical table is outside compiled scope",
+                        ));
                     }
-                    ProgramFactEntry::CoveredInput(input) => {
-                        let key = CoveredInputCoordinate::from(input);
-                        let current = match overlay.2.get(&key) {
-                            Some(current) => current.clone(),
-                            None if overlay.0 => None,
-                            None => state
-                                .and_then(|state| state.covered_input_versions.get(&key).cloned()),
-                        };
-                        if current.as_ref() != Some(input) {
-                            return Err(invalid(format!(
-                                "covered input removal is absent from predecessor closure: {:?}",
-                                input.source
-                            )));
-                        }
-                        overlay.2.insert(key, None);
-                    }
-                    _ => {}
-                }
-            }
-            // Closure deltas are sets, not ordered instruction streams. Install
-            // coverage additions before validating the added content members.
-            for fact in &update.program_fact_adds {
-                if let ProgramFactEntry::ProgramSourceCoverage(coverage) = fact {
-                    if !reset_replaces {
-                        return Err(invalid("source coverage addition is reset-only".to_owned()));
-                    }
-                    if !coverage.complete {
-                        return Err(invalid("source coverage is incomplete".to_owned()));
-                    }
-                    if !compiled_sources.contains(&coverage.source) {
-                        return Err(invalid(format!(
-                            "source coverage names no compiled source occurrence: {:?}",
-                            coverage.source
-                        )));
-                    }
-                    overlay.1.insert(coverage.source.clone(), true);
-                }
-            }
-            // A reset is the sole full-closure claim. Its manifest must name
-            // every compiler-owned receiver source, including sources with no
-            // current content rows; incremental frames remain O(changed).
-            if reset_replaces
-                && (overlay.1.len() != compiled_sources.len()
-                    || !compiled_sources
-                        .iter()
-                        .all(|source| overlay.1.get(source).copied() == Some(true)))
-            {
-                return Err(invalid(format!(
-                    "reset source coverage does not exactly match compiled source set: expected {compiled_sources:?}, received {:?} (receiver is scope relay: {})",
-                    overlay.1,
-                    self.client_relay_scope().is_some()
-                )));
-            }
-            for fact in &update.program_fact_adds {
-                if let ProgramFactEntry::CoveredInput(input) = fact {
-                    if !compiled_sources.contains(&input.source) {
-                        return Err(invalid(format!(
-                            "covered input names no compiled source occurrence: {:?}",
-                            input.source
-                        )));
-                    }
-                    let source_is_covered =
-                        overlay.1.get(&input.source).copied().unwrap_or_else(|| {
-                            !overlay.0
-                                && state.is_some_and(|state| {
-                                    state.covered_input_sources.contains(&input.source)
-                                })
-                        });
-                    if !source_is_covered {
-                        return Err(invalid(format!(
-                            "covered input names a source absent from its coverage manifest: {:?}",
-                            input.source
-                        )));
-                    }
-                    let key = CoveredInputCoordinate::from(input);
-                    let current = match overlay.2.get(&key) {
-                        Some(current) => current.clone(),
-                        None if overlay.0 => None,
+                    let coordinate = CoveredInputCoordinate::from(row);
+                    let current = match changes.get(&coordinate) {
+                        Some(current) => current.as_ref(),
+                        None if *cleared => None,
                         None => {
-                            state.and_then(|state| state.covered_input_versions.get(&key).cloned())
+                            state.and_then(|state| state.covered_input_versions.get(&coordinate))
                         }
                     };
-                    if current.is_some() {
-                        return Err(invalid(format!(
-                            "covered input addition already has a predecessor member: {:?}",
-                            input.source
-                        )));
+                    if adding {
+                        if current.is_some() {
+                            return Err(invalid(
+                                "scope addition duplicates a retained physical coordinate",
+                            ));
+                        }
+                        changes.insert(coordinate, Some(row.clone()));
+                    } else {
+                        if current != Some(row) {
+                            return Err(invalid("scope removal is absent from exact predecessor"));
+                        }
+                        changes.insert(coordinate, None);
                     }
-                    overlay.2.insert(key, Some(input.clone()));
                 }
             }
         }
-        Ok(compiled_source_caches)
+        Ok(caches)
     }
 
     fn install_compiled_covered_input_source_caches(
         &mut self,
-        caches: BTreeMap<AuthorityResultKey, BTreeSet<ProgramSourceId>>,
+        caches: BTreeMap<AuthorityResultKey, CompiledScopeTables>,
     ) {
         for (key, compiled) in caches {
             self.query
@@ -2018,18 +1904,11 @@ where
         }
 
         for update in updates {
-            for input in update
-                .program_fact_adds
-                .iter()
-                .filter_map(|fact| match fact {
-                    ProgramFactEntry::CoveredInput(input) => Some(input),
-                    _ => None,
-                })
-            {
+            for input in update.supporting_adds() {
                 let coordinate = (
                     input.version.tx,
                     input.version_table.to_string(),
-                    input.source_row,
+                    input.row,
                     input.version.layer,
                     input.version.branch_or_prefix.clone().unwrap_or_default(),
                 );
@@ -2068,7 +1947,7 @@ where
 
     async fn covered_input_has_resident_body(
         &mut self,
-        input: &crate::protocol::CoveredInputEntry,
+        input: &SupportingRow,
         read_schema: SchemaVersionId,
     ) -> Result<bool, Error> {
         if self.query_transaction(input.version.tx).await?.is_none() {
@@ -2085,7 +1964,7 @@ where
     /// the physical table, row, layer, branch, or transaction being requested.
     pub(super) async fn covered_input_version(
         &mut self,
-        input: &crate::protocol::CoveredInputEntry,
+        input: &SupportingRow,
         read_schema: SchemaVersionId,
     ) -> Result<Option<VersionRow>, Error> {
         let Some(tx_node_alias) = self.node_aliases.get(&input.version.tx.node).copied() else {
@@ -2111,9 +1990,10 @@ where
         let Some(version) = self
             .query_version_by_alias_in_branch(
                 read_schema,
-                input.source.table.as_str(),
+                self.scope_logical_table(read_schema, input.physical_table)?
+                    .as_str(),
                 &branch_key,
-                input.source_row,
+                input.row,
                 layer,
                 input.version.tx.time,
                 tx_node_alias,
@@ -2141,9 +2021,10 @@ where
         &mut self,
         update: ViewUpdateParts,
         preloaded_tx_ids: Option<&BTreeSet<TxId>>,
+        normalized_snapshot: Option<[u8; 16]>,
     ) -> Result<(), Error> {
         let ViewUpdateParts {
-            wire_rows: _,
+            wire_rows: supporting_update,
             subscription,
             settled_through,
             defer_settlement,
@@ -2154,9 +2035,17 @@ where
             opening_pending,
             result_member_adds: _,
             result_member_removes: _,
-            program_fact_adds,
-            program_fact_removes,
         } = update;
+        let has_scope = supporting_update.is_some();
+        let (program_fact_adds, program_fact_removes) = match supporting_update {
+            Some(crate::protocol::SupportingRowsUpdate::Snapshot { rows, .. }) => {
+                (rows, Vec::new())
+            }
+            Some(crate::protocol::SupportingRowsUpdate::Delta { adds, removes, .. }) => {
+                (adds, removes)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
         let version_bundle_refs = version_bundle_refs_for_carriers(&version_carriers)?;
         match self.binding_view_key_for_subscription(subscription) {
             Ok(_) => {}
@@ -2178,11 +2067,16 @@ where
         // policy-scoped authority identity captured when that subscription was
         // admitted; never reconstruct or share it through BindingViewKey.
         let authority_result_key = self.authority_result_key_for_subscription(subscription)?;
+        // Invalidate before any mutation or suspension. A failed frame can
+        // alter provisional facts before advancing its generation, so a
+        // generation comparison alone would not be a sufficient cache proof.
+        if let Some(state) = self.query.authority_results.get_mut(&authority_result_key) {
+            state.supporting_revision = None;
+        }
         let reset_cleared_shared_state = Self::reset_replaces_authority_source_closure(
             reset_input_set,
-            !program_fact_adds.is_empty() || !program_fact_removes.is_empty(),
+            has_scope,
             opening_pending,
-            self.query.authority_results.get(&authority_result_key),
         );
         let pending_authoritative_reset_generation = reset_cleared_shared_state
             .then(|| self.allocate_authoritative_reset_generation())
@@ -2250,13 +2144,13 @@ where
                 .live_settled = false;
         }
         let version_bundles_is_empty = version_bundle_refs.is_empty();
-        if let Some(preflight) = &preflight {
-            for bundle in preflight.bundles.values() {
+        if let Some(preflight) = preflight {
+            for bundle in preflight.bundles.into_values() {
                 if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
                     continue;
                 }
                 self.sync_metrics.receiver_per_bundle_ingests += 1;
-                self.ingest_view_bundle(bundle.clone()).await?;
+                self.ingest_view_bundle(bundle).await?;
             }
         }
         // Retain the active peer payload inventory diagnostic independently
@@ -2268,8 +2162,8 @@ where
                 self.record_peer_payload_inventory_missing_fallback();
             }
         }
-        let persisted_fact_adds = program_fact_adds.clone();
-        let persisted_fact_removes = program_fact_removes.clone();
+        let scope_adds = program_fact_adds;
+        let scope_removes = program_fact_removes;
 
         if reset_cleared_shared_state {
             self.clear_settled_result_view(authority_result_key.clone());
@@ -2280,18 +2174,6 @@ where
                 .entry(authority_result_key.clone())
                 .or_default();
         }
-        {
-            let program_facts = &mut self
-                .query
-                .authority_results
-                .entry(authority_result_key.clone())
-                .or_default()
-                .settled_program_facts;
-            for fact in program_fact_removes {
-                program_facts.remove(&fact);
-            }
-            program_facts.extend(program_fact_adds);
-        }
         let state = self
             .query
             .authority_results
@@ -2300,8 +2182,8 @@ where
         apply_covered_input_closure_admission_delta(
             state,
             reset_cleared_shared_state,
-            &persisted_fact_adds,
-            &persisted_fact_removes,
+            &scope_adds,
+            &scope_removes,
         );
         if !defer_settlement && !opening_pending {
             let state = self
@@ -2324,15 +2206,7 @@ where
                 state.pending_authoritative_reset = Some(generation);
             }
         }
-        if !defer_settlement && !opening_pending {
-            self.persist_source_closure_delta_for_authority_result(
-                authority_result_key.clone(),
-                reset_cleared_shared_state,
-                &persisted_fact_adds,
-                &persisted_fact_removes,
-            )
-            .await?;
-        }
+
         if self
             .query
             .authority_results
@@ -2367,6 +2241,16 @@ where
             .entry(authority_result_key.clone())
             .or_default();
         state.applied_view_update_generation = state.applied_view_update_generation.wrapping_add(1);
+        #[cfg(any(test, feature = "testing"))]
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "view_applied runtime={} subscription={subscription:?} generation_before={} generation_after={} live={} opening={opening_pending} deferred={defer_settlement}",
+                self.groove_runtime_token,
+                state.applied_view_update_generation.wrapping_sub(1),
+                state.applied_view_update_generation,
+                state.live_settled
+            )
+        });
         // In the current wire contract, a non-deferred reset is the single
         // frame that claims a complete replacement frontier.  Do not infer an
         // empty closure from an opened result container or an incremental
@@ -2384,16 +2268,8 @@ where
             // applied as descriptor-bound runtime input deltas. They must not
             // be re-labelled as a complete reset merely because an authority
             // state map happens to contain the current closure.
-            let adds: BTreeSet<_> = persisted_fact_adds
-                .iter()
-                .filter(|fact| fact.is_peer_source_closure_fact())
-                .cloned()
-                .collect();
-            let removes: BTreeSet<_> = persisted_fact_removes
-                .iter()
-                .filter(|fact| fact.is_peer_source_closure_fact())
-                .cloned()
-                .collect();
+            let adds: BTreeSet<_> = scope_adds.iter().cloned().collect();
+            let removes: BTreeSet<_> = scope_removes.iter().cloned().collect();
             if !adds.is_empty() || !removes.is_empty() {
                 let crate::node::AuthoritySourceClosure::Claimed {
                     generation: predecessor_generation,
@@ -2420,20 +2296,24 @@ where
                 "JAZZ_COVERED_INPUT_TRACE stage=view_update_applied node={:?} reset={reset_input_set} deferred={defer_settlement} generation={} facts={} closure={:?}",
                 self.node_uuid,
                 state.applied_view_update_generation,
-                state.settled_program_facts.len(),
+                state.covered_input_versions.len(),
                 state.source_closure,
             );
         }
-        // Persist the closure receipt only after this frame has established
-        // whether it is an exact reset or a successor delta. Persisting
-        // earlier would leave a reopened receiver with facts but no claimed
-        // generation, forcing it to treat a durable exact closure as pending.
+        // Only this fully admitted in-process update establishes a predecessor.
+        // Neither membership nor transport revisions survive process restart.
         if !defer_settlement && !opening_pending {
-            self.persist_known_state_fact_for_authority_result(
-                authority_result_key,
-                settled_through,
-            )
-            .await?;
+            if let Some(state) = self.query.authority_results.get_mut(&authority_result_key)
+                && matches!(
+                    state.source_closure,
+                    crate::node::AuthoritySourceClosure::Claimed { .. }
+                )
+            {
+                // Only this exact successfully applied frame can install its
+                // normalized predecessor. Legacy/deferred/opening frames do
+                // not preserve an earlier frame's cache accidentally.
+                state.supporting_revision = normalized_snapshot;
+            }
         }
         Ok(())
     }
@@ -2635,14 +2515,17 @@ where
             .await?;
             return Ok(true);
         }
+        // Known complete transactions take the fate/update path below, after
+        // this batch commits. That path may publish independently and must not
+        // invalidate exact-match preparation for preceding new transactions.
+        if self.query_transaction(bundle.tx.tx_id).await?.is_some() {
+            return Ok(false);
+        }
         if bundle.tx.kind == TxKind::Exclusive {
             let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
                 Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
             })?;
             if bundle.versions.len() != complete_len {
-                return Ok(false);
-            }
-            if self.query_transaction(bundle.tx.tx_id).await?.is_some() {
                 return Ok(false);
             }
         }
@@ -2871,6 +2754,10 @@ where
     /// version under its authored schema. This producer-side normalization is
     /// deliberately before serialization; receivers reject non-identical
     /// duplicate row versions rather than repairing them.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.canonical_supporting_version")
+    )]
     pub(super) async fn canonical_history_version_for_maintained_witness(
         &mut self,
         version: &VersionRow,
@@ -2900,6 +2787,7 @@ where
                 .into_iter()
                 .filter(|candidate| {
                     candidate.row_uuid() == version.row_uuid()
+                        && candidate.branch_key() == version.branch_key()
                         && candidate.layer() == version.layer()
                 })
                 .filter_map(|candidate| self.physical_table_id_for_version(&candidate).ok())
@@ -2917,15 +2805,15 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "maintained witness schema version alias must exist",
             ))?;
-        let authored_table = match self.table_in_schema(version.table(), authored_schema) {
-            Ok(table) => table.clone(),
+        match self.table_in_schema_ref(version.table(), authored_schema) {
+            Ok(_) => {}
             Err(Error::TableNotFound(_)) => {
                 // A current-query source may have been projected through a
                 // later schema, so its logical name need not exist under the
                 // authored alias carried by its immutable history identity.
                 // Resolve it through the catalogue's unambiguous physical
                 // table id, then reload the actual stored row for the same
-                // physical table, row, transaction, and layer.  This is the
+                // physical table, branch, row, transaction, and layer. This is the
                 // same identity boundary used for repair payloads; reused or
                 // unknown logical names fail closed before history is read.
                 if let Some(canonical) = self
@@ -2934,6 +2822,7 @@ where
                     .into_iter()
                     .find(|candidate| {
                         candidate.row_uuid() == version.row_uuid()
+                            && candidate.branch_key() == version.branch_key()
                             && candidate.layer() == version.layer()
                             && self
                                 .physical_table_id_for_version(candidate)
@@ -2948,12 +2837,6 @@ where
             }
             Err(error) => return Err(error),
         };
-        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
-            authored_table.register_storage_table().record_schema()
-        } else {
-            authored_table.history_storage_table().record_schema()
-        };
-        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
 
         // A maintained witness is decoded from the current-query graph. Its
         // descriptor can be identical to history storage while selected-out
@@ -2989,6 +2872,15 @@ where
         // their authored descriptor is complete. `authored_columns` lets us
         // distinguish such a row from a query projection whose selected-out
         // authored cells were replaced by typed nulls.
+        // Only synthetic rows need a reconstructed descriptor. Ordinary rows
+        // returned above already carry the immutable store's authored layout.
+        let authored_table = self.table_in_schema(version.table(), authored_schema)?;
+        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
+            authored_table.register_storage_table().record_schema()
+        } else {
+            authored_table.history_storage_table().record_schema()
+        };
+        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
         let has_complete_authored_payload = has_authored_layout
             && (version.layer() == VersionLayer::Deletion
                 || match self.authored_columns_for_version(version)? {

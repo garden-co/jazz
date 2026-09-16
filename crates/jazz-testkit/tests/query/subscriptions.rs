@@ -112,6 +112,7 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
 
     pair.writer
         .update(
+            "todos",
             todo_id,
             vec![(
                 "title".to_string(),
@@ -130,7 +131,7 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
     .await;
 
     pair.writer
-        .update(todo_id, vec![("done".to_string(), Value::Boolean(true))])
+        .update("todos", todo_id, vec![("done".to_string(), Value::Boolean(true))])
         .expect("mark todo done");
 
     wait_for_subscription_update(
@@ -164,7 +165,9 @@ local_tokio_test! {
 /// subscription result.
 async fn subscribe_all_only_returns_rows_that_match_query() {
     let schema = subscription_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -307,6 +310,7 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
     for revision in 1..=RAPID_UPDATES {
         pair.writer
             .update(
+                "todos",
                 todo_id,
                 vec![(
                     "title".to_string(),
@@ -412,6 +416,7 @@ async fn reset_replacement_preserves_update_category_and_prior_order() {
         let prefix = if revision % 2 == 0 { 'z' } else { 'a' };
         pair.writer
             .update(
+                "todos",
                 moving_id,
                 vec![(
                     "title".to_owned(),
@@ -553,7 +558,7 @@ async fn authoritative_reconnect_reset_omits_prior_facade_member() {
     );
     let deleted_tx = pair
         .writer
-        .delete(removed_id)
+        .delete("todos", removed_id)
         .expect("delete row at authority")
         .expect("ordinary delete commits immediately");
     pair.writer
@@ -613,7 +618,9 @@ async fn subscribe_all_supports_condition_filters() {
     }
 
     let schema = subscription_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let writer = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
@@ -853,6 +860,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
     for revision in 1..=RAPID_UPDATES {
         client
             .update(
+                "todos",
                 todo_id,
                 vec![(
                     "title".to_string(),
@@ -866,7 +874,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
     let rows = wait_for_query(
         &client,
         query.clone(),
-        None,
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         format!("local client sees final bulk title {final_title}"),
         |rows| {

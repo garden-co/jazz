@@ -30,6 +30,12 @@ fn schema() -> JazzSchema {
         ColumnDescriptor::new("note", ColumnType::Text)
             .nullable()
             .default(PublicValue::Text("default note".to_owned())),
+        ColumnDescriptor::new("nullable_title", ColumnType::Text)
+            .nullable()
+            .default(PublicValue::Null),
+        ColumnDescriptor::new("nullable_count", ColumnType::Integer)
+            .nullable()
+            .default(PublicValue::Null),
     ]);
     let source = Schema::from([(
         TableName::new("events"),
@@ -84,6 +90,67 @@ fn stored_row(db: &Db<TestStorage>, row_id: RowUuid) -> BTreeMap<String, Value> 
                 .map(|value| (column.name().to_owned(), value))
         })
         .collect()
+}
+fn required_null_default_diagnostic(column_name: &'static str, column_type: ColumnType) -> String {
+    let source = Schema::from([(
+        TableName::new("events"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new(column_name, column_type).default(PublicValue::Null),
+            ]),
+            allow_all_policies(),
+        ),
+    )]);
+    JazzSchema::new(&source)
+        .expect_err("a required column cannot use a top-level null default")
+        .to_string()
+}
+
+#[test]
+fn required_text_null_default_is_rejected_during_schema_compilation() {
+    let diagnostic = required_null_default_diagnostic("title", ColumnType::Text);
+
+    assert!(
+        diagnostic.contains("$.events.title"),
+        "diagnostic must identify the invalid column: {diagnostic}"
+    );
+    assert!(
+        diagnostic.to_ascii_lowercase().contains("null"),
+        "diagnostic must identify the invalid null default: {diagnostic}"
+    );
+}
+
+#[test]
+fn required_integer_null_default_is_rejected_during_schema_compilation() {
+    let diagnostic = required_null_default_diagnostic("count", ColumnType::Integer);
+
+    assert!(
+        diagnostic.contains("$.events.count"),
+        "diagnostic must identify the invalid column: {diagnostic}"
+    );
+    assert!(
+        diagnostic.to_ascii_lowercase().contains("null"),
+        "diagnostic must identify the invalid null default: {diagnostic}"
+    );
+}
+
+#[test]
+fn nullable_null_defaults_materialize_as_null_for_omitted_columns() {
+    let db = open_db();
+
+    jazz::block_on(db.insert(
+        "events",
+        cells([("title", Value::String("created".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(4)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert row");
+
+    let stored = stored_row(&db, row(4));
+    assert_eq!(stored.get("nullable_title"), Some(&Value::Nullable(None)));
+    assert_eq!(stored.get("nullable_count"), Some(&Value::Nullable(None)));
 }
 
 #[test]

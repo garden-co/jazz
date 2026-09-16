@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use jazz::query::{OrderDirection, col, gt, lit, lt};
 use jazz::row_input;
-use jazz::tools::{ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value};
+use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use support::{
     TestingClient, has_added_id, wait_for_edge_query_ready, wait_for_query,
@@ -29,7 +29,9 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = bigint_schema();
-            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
             let client = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
@@ -58,7 +60,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
             wait_for_query(
                 &client,
                 ordered_query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "BIGINT rows order by signed amount",
                 |rows| {
@@ -91,7 +93,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
             wait_for_query(
                 &client,
                 filtered_query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "BIGINT predicates coerce integer literals and preserve i64 literals",
                 |rows| {

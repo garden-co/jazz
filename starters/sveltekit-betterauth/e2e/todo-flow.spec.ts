@@ -53,6 +53,38 @@ async function signOut(page: Page) {
   await expect(page.getByLabel("Email")).toBeVisible({ timeout: TIMEOUT });
 }
 
+test("rejects one-character passwords at the sign-up endpoint", async ({ page }) => {
+  const runId = Date.now();
+  const email = `short-password-${runId}@example.com`;
+
+  await page.goto("/", { waitUntil: "networkidle" });
+  const response = await page.request.post("/api/auth/sign-up/email", {
+    data: {
+      name: "Short Password User",
+      email,
+      password: "x",
+    },
+  });
+
+  expect(response.ok()).toBe(false);
+});
+
+test("accepts exactly eight-character passwords at the sign-up endpoint", async ({ page }) => {
+  const runId = Date.now();
+  const email = `eight-character-password-${runId}@example.com`;
+
+  await page.goto("/", { waitUntil: "networkidle" });
+  const response = await page.request.post("/api/auth/sign-up/email", {
+    data: {
+      name: "Eight Character User",
+      email,
+      password: "12345678",
+    },
+  });
+
+  expect(response.ok()).toBe(true);
+});
+
 test("todo persistence across sign-up→logout→login", async ({ page }) => {
   const runId = Date.now();
   const todo = `Todo ${runId}`;

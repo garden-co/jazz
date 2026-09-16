@@ -330,6 +330,14 @@ pub type ScanVisitor<'visitor> =
 /// absences. Successful writes through the same storage instance must be
 /// reflected by those resident reads. A backend may evict retained data; after
 /// eviction, a later read may become pending again.
+/// Result of comparing an encoded value without returning its body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueComparison {
+    Absent,
+    Identical,
+    Different,
+}
+
 pub trait OrderedKvStorage {
     /// Whether a read that yields once may be immediately re-polled by the
     /// caller without turning an external storage wait into a synchronous
@@ -354,6 +362,23 @@ pub trait OrderedKvStorage {
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>>;
+    /// Compare at the storage boundary. Backends can avoid cloning resident values.
+    /// This is a read, not a conditional mutation or a cross-writer reservation.
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        Box::pin(async move {
+            Ok(match self.get(cf, key).await? {
+                None => ValueComparison::Absent,
+                Some(value) if value == expected => ValueComparison::Identical,
+                Some(_) => ValueComparison::Different,
+            })
+        })
+    }
+
     /// Atomically install `value` only when `key` is absent. Returns the
     /// pre-existing value when another writer already installed one.
     fn put_if_absent(
@@ -468,6 +493,31 @@ pub trait OrderedKvStorage {
         })
     }
 
+    /// Persist a borrowed snapshot of already-owned operations. Backends may
+    /// build their native atomic batch directly; the portable fallback retains
+    /// the existing owned API and its acknowledgement classification.
+    fn write_many_borrowed_outcome<'a>(
+        &'a self,
+        operations: Vec<WriteOperation<'a>>,
+    ) -> StorageFuture<'a, WriteManyOutcome> {
+        self.write_many_outcome(
+            operations
+                .into_iter()
+                .map(|operation| match operation {
+                    WriteOperation::Set { cf, key, value } => OwnedWriteOperation::Set {
+                        cf: cf.to_owned(),
+                        key: key.to_vec(),
+                        value: value.to_vec(),
+                    },
+                    WriteOperation::Delete { cf, key } => OwnedWriteOperation::Delete {
+                        cf: cf.to_owned(),
+                        key: key.to_vec(),
+                    },
+                })
+                .collect(),
+        )
+    }
+
     /// Return known column-family names when the backend can enumerate them.
     ///
     /// This is intentionally optional so the ordered-KV contract stays small.
@@ -503,6 +553,15 @@ impl<S> OrderedKvStorage for Rc<S>
 where
     S: OrderedKvStorage,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        self.as_ref().compare_value(cf, key, expected)
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         self.as_ref().permits_eager_read_retry()
     }
@@ -588,6 +647,13 @@ where
         self.as_ref().write_many_outcome(operations)
     }
 
+    fn write_many_borrowed_outcome<'a>(
+        &'a self,
+        operations: Vec<WriteOperation<'a>>,
+    ) -> StorageFuture<'a, WriteManyOutcome> {
+        self.as_ref().write_many_borrowed_outcome(operations)
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.as_ref().column_family_names()
     }
@@ -597,6 +663,15 @@ impl<S> OrderedKvStorage for &S
 where
     S: OrderedKvStorage,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        S::compare_value(*self, cf, key, expected)
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         S::permits_eager_read_retry(*self)
     }
@@ -652,6 +727,13 @@ where
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, WriteManyOutcome> {
         S::write_many_outcome(*self, operations)
+    }
+
+    fn write_many_borrowed_outcome<'a>(
+        &'a self,
+        operations: Vec<WriteOperation<'a>>,
+    ) -> StorageFuture<'a, WriteManyOutcome> {
+        S::write_many_borrowed_outcome(*self, operations)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -977,6 +1059,18 @@ impl LayoutStorage {
 }
 
 impl OrderedKvStorage for LayoutStorage {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        Box::pin(async move {
+            let (cf, key) = self.physical_key(&cf, &key)?;
+            self.inner.compare_value(cf, key, expected).await
+        })
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             let (physical_cf, physical_key) = self.physical_key(&cf, &key)?;
@@ -1147,6 +1241,39 @@ impl OrderedKvStorage for LayoutStorage {
         })
     }
 
+    fn write_many_borrowed_outcome<'a>(
+        &'a self,
+        operations: Vec<WriteOperation<'a>>,
+    ) -> StorageFuture<'a, WriteManyOutcome> {
+        Box::pin(async move {
+            // Mapping owns only physical keys/names, never another value body.
+            // Complete all fallible mapping before entering the backend.
+            let mapped = operations
+                .iter()
+                .map(|operation| {
+                    let (cf, key) = match operation {
+                        WriteOperation::Set { cf, key, .. }
+                        | WriteOperation::Delete { cf, key } => (*cf, *key),
+                    };
+                    self.physical_key(cf, key)
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let mapped = match mapped {
+                Ok(mapped) => mapped,
+                Err(error) => return WriteManyOutcome::Uncommitted(error),
+            };
+            let operations = operations
+                .into_iter()
+                .zip(&mapped)
+                .map(|(operation, (cf, key))| match operation {
+                    WriteOperation::Set { value, .. } => WriteOperation::Set { cf, key, value },
+                    WriteOperation::Delete { .. } => WriteOperation::Delete { cf, key },
+                })
+                .collect();
+            self.inner.write_many_borrowed_outcome(operations).await
+        })
+    }
+
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.inner.column_family_names()
     }
@@ -1207,6 +1334,15 @@ impl BoxedStorage {
 }
 
 impl OrderedKvStorage for BoxedStorage {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        self.inner.compare_value(cf, key, expected)
+    }
+
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.inner.scan(request)
     }
@@ -1291,6 +1427,13 @@ impl OrderedKvStorage for BoxedStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, WriteManyOutcome> {
         self.inner.write_many_outcome(operations)
+    }
+
+    fn write_many_borrowed_outcome<'a>(
+        &'a self,
+        operations: Vec<WriteOperation<'a>>,
+    ) -> StorageFuture<'a, WriteManyOutcome> {
+        self.inner.write_many_borrowed_outcome(operations)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -1550,7 +1693,10 @@ pub(crate) enum StagedPointValue {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StagedWriteState {
-    operations: Vec<OwnedWriteOperation>,
+    // Immutable once shared. Appends use the unique tail or start a new block;
+    // a persistence snapshot never needs to hold a RefCell borrow across await.
+    operations: Vec<Rc<Vec<OwnedWriteOperation>>>,
+    operation_ends: Vec<usize>,
     latest_by_cf_key: Option<BTreeMap<String, BTreeMap<Vec<u8>, usize>>>,
     point_reads_without_index: usize,
 }
@@ -1562,18 +1708,38 @@ impl StagedWriteState {
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.operations.len()
+        self.operation_count()
+    }
+
+    fn operation_count(&self) -> usize {
+        self.operation_ends.last().copied().unwrap_or(0)
+    }
+
+    fn operation(&self, index: usize) -> &OwnedWriteOperation {
+        let block = self.operation_ends.partition_point(|end| *end <= index);
+        let start = if block == 0 {
+            0
+        } else {
+            self.operation_ends[block - 1]
+        };
+        &self.operations[block][index - start]
     }
 
     pub(crate) fn stage(&mut self, operation: OwnedWriteOperation) {
-        let index = self.operations.len();
+        let index = self.operation_count();
         if let Some(latest_by_cf_key) = &mut self.latest_by_cf_key {
             latest_by_cf_key
                 .entry(operation.cf().to_owned())
                 .or_default()
                 .insert(operation.key().to_vec(), index);
         }
-        self.operations.push(operation);
+        if let Some(tail) = self.operations.last_mut().and_then(Rc::get_mut) {
+            tail.push(operation);
+            *self.operation_ends.last_mut().expect("tail end") = index + 1;
+        } else {
+            self.operations.push(Rc::new(vec![operation]));
+            self.operation_ends.push(index + 1);
+        }
     }
 
     pub(crate) fn extend(&mut self, operations: impl IntoIterator<Item = OwnedWriteOperation>) {
@@ -1582,40 +1748,108 @@ impl StagedWriteState {
         }
     }
 
+    pub(crate) fn operations(&self) -> impl DoubleEndedIterator<Item = &OwnedWriteOperation> {
+        self.operations.iter().flat_map(|block| block.iter())
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<Rc<Vec<OwnedWriteOperation>>> {
+        self.operations.clone()
+    }
+
+    pub(crate) fn extend_shared(&mut self, snapshot: Vec<Rc<Vec<OwnedWriteOperation>>>) {
+        for block in snapshot {
+            if block.is_empty() {
+                continue;
+            }
+            let start = self.operation_count();
+            if let Some(index) = &mut self.latest_by_cf_key {
+                for (offset, operation) in block.iter().enumerate() {
+                    index
+                        .entry(operation.cf().to_owned())
+                        .or_default()
+                        .insert(operation.key().to_vec(), start + offset);
+                }
+            }
+            self.operation_ends.push(start + block.len());
+            self.operations.push(block);
+        }
+    }
+
     pub(crate) fn into_operations(self) -> Vec<OwnedWriteOperation> {
         self.operations
+            .into_iter()
+            .flat_map(|block| Rc::try_unwrap(block).unwrap_or_else(|block| (*block).clone()))
+            .collect()
     }
 
     fn latest_index(&mut self, cf: &ColumnFamilyName, key: &Key) -> Option<usize> {
         if self.latest_by_cf_key.is_none() {
-            if self.operations.len() < STAGED_OPS_BEFORE_POINT_INDEX
+            if self.operation_count() < STAGED_OPS_BEFORE_POINT_INDEX
                 && self.point_reads_without_index < STAGED_POINT_READS_BEFORE_INDEX
             {
                 self.point_reads_without_index += 1;
                 return self
-                    .operations
-                    .iter()
-                    .enumerate()
+                    .operations()
                     .rev()
-                    .find_map(|(index, operation)| {
-                        (operation.cf() == cf && operation.key() == key).then_some(index)
-                    });
+                    .position(|operation| operation.cf() == cf && operation.key() == key)
+                    .map(|reverse_index| self.operation_count() - reverse_index - 1);
             }
 
-            let mut latest_by_cf_key: BTreeMap<String, BTreeMap<Vec<u8>, usize>> = BTreeMap::new();
-            for (index, operation) in self.operations.iter().enumerate() {
-                latest_by_cf_key
-                    .entry(operation.cf().to_owned())
-                    .or_default()
-                    .insert(operation.key().to_vec(), index);
-            }
-            self.latest_by_cf_key = Some(latest_by_cf_key);
+            self.ensure_key_index();
         }
 
         self.latest_by_cf_key
             .as_ref()
             .and_then(|latest_by_cf_key| latest_by_cf_key.get(cf))
             .and_then(|latest_by_key| latest_by_key.get(key).copied())
+    }
+
+    fn ensure_key_index(&mut self) {
+        if self.latest_by_cf_key.is_some() {
+            return;
+        }
+        let mut latest_by_cf_key: BTreeMap<String, BTreeMap<Vec<u8>, usize>> = BTreeMap::new();
+        for (index, operation) in self.operations().enumerate() {
+            latest_by_cf_key
+                .entry(operation.cf().to_owned())
+                .or_default()
+                .insert(operation.key().to_vec(), index);
+        }
+        self.latest_by_cf_key = Some(latest_by_cf_key);
+    }
+
+    fn scan_snapshot(
+        &mut self,
+        cf: &str,
+        bounds: &ScanBounds,
+    ) -> VecDeque<(Vec<u8>, Option<Value>)> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        if self.operations.is_empty() || bounds.is_empty_range() {
+            return VecDeque::new();
+        }
+        self.ensure_key_index();
+        let Some(by_key) = self
+            .latest_by_cf_key
+            .as_ref()
+            .and_then(|by_cf| by_cf.get(cf))
+        else {
+            return VecDeque::new();
+        };
+        let (start, end) = match bounds {
+            ScanBounds::Prefix(prefix) => (prefix.as_slice(), prefix_successor(prefix)),
+            ScanBounds::Range { start, end } => (start.as_slice(), Some(end.clone())),
+        };
+        let upper = end.as_deref().map_or(Unbounded, Excluded);
+        by_key
+            .range::<[u8], _>((Included(start), upper))
+            .map(|(key, index)| {
+                let value = match self.operation(*index) {
+                    OwnedWriteOperation::Set { value, .. } => Some(value.clone()),
+                    OwnedWriteOperation::Delete { .. } => None,
+                };
+                (key.clone(), value)
+            })
+            .collect()
     }
 
     pub(crate) fn contains_key(&mut self, cf: &ColumnFamilyName, key: &Key) -> bool {
@@ -1698,7 +1932,7 @@ impl<'a, S: ?Sized> StagedWriteOverlay<'a, S> {
         let Some(index) = staged_writes.latest_index(cf, key) else {
             return StagedPointValue::Miss;
         };
-        match &staged_writes.operations[index] {
+        match staged_writes.operation(index) {
             OwnedWriteOperation::Set { value, .. } => StagedPointValue::Set(value.clone()),
             OwnedWriteOperation::Delete { .. } => StagedPointValue::Delete,
         }
@@ -1714,47 +1948,15 @@ impl<'a, S: ?Sized> StagedWriteOverlay<'a, S> {
     }
 }
 
-fn overlay_point_value(
-    mut value: Option<Value>,
-    operations: &[OwnedWriteOperation],
-    cf: &str,
-    key: &[u8],
-) -> Result<Option<Value>, Error> {
-    for operation in operations {
-        if operation.cf() != cf || operation.key() != key {
-            continue;
-        }
-        match operation {
-            OwnedWriteOperation::Set { value: set, .. } => value = Some(set.clone()),
-            OwnedWriteOperation::Delete { .. } => value = None,
-        }
-    }
-    Ok(value)
-}
-
-fn snapshot_staged_operations(
-    staged_writes: &RefCell<StagedWriteState>,
-    include: impl Fn(&OwnedWriteOperation) -> bool,
-) -> Vec<OwnedWriteOperation> {
-    staged_writes
-        .borrow()
-        .operations
-        .iter()
-        .filter(|operation| include(operation))
-        .cloned()
-        .collect()
-}
-
 /// Ordered cursor which merges the durable base with the staged transaction
 /// writes as the caller asks for batches.  It intentionally owns only the
 /// in-range staged keys; its base cursor remains lazy, so a logical limit does
 /// not turn a sparse staged overlay into a full base-prefix materialization.
 struct OverlayScanCursor<'a> {
     base: StorageScan<'a>,
-    staged: VecDeque<(Vec<u8>, Vec<OwnedWriteOperation>)>,
+    staged: VecDeque<(Vec<u8>, Option<Value>)>,
     base_entries: VecDeque<KeyValue>,
     base_done: bool,
-    cf: String,
     direction: ScanDirection,
     remaining: Option<usize>,
 }
@@ -1789,11 +1991,8 @@ impl OverlayScanCursor<'_> {
                 let staged_entry = choice.1.then(|| self.staged.pop_front()).flatten();
 
                 match staged_entry {
-                    Some((key, operations)) => {
-                        let base_value = base_entry.map(|(_, value)| value);
-                        if let Some(value) =
-                            overlay_point_value(base_value, &operations, &self.cf, &key)?
-                        {
+                    Some((key, value)) => {
+                        if let Some(value) = value {
                             return Ok(Some((key, value)));
                         }
                     }
@@ -1817,7 +2016,8 @@ impl StorageCursor for OverlayScanCursor<'_> {
                 return Ok(None);
             };
 
-            let mut values = Vec::with_capacity(batch_len);
+            // Short and empty scans should not reserve a full page.
+            let mut values = Vec::new();
             while values.len() < batch_len {
                 let Some(entry) = self.next_entry().await? else {
                     break;
@@ -1840,38 +2040,19 @@ fn overlay_scan<'a, S>(
 where
     S: OrderedKvStorage + ?Sized,
 {
-    let cf = request.cf.clone();
-    let bounds = request.bounds.clone();
-    let operations = snapshot_staged_operations(staged_writes, |operation| {
-        operation.cf() == cf
-            && match &bounds {
-                ScanBounds::Prefix(prefix) => operation.key().starts_with(prefix),
-                ScanBounds::Range { start, end } => {
-                    operation.key() >= start.as_slice() && operation.key() < end.as_slice()
-                }
-            }
-    });
+    // Capture only the final value per key at scan creation. Later staged
+    // writes must not change this cursor's overlay snapshot.
+    let mut staged = staged_writes
+        .borrow_mut()
+        .scan_snapshot(&request.cf, &request.bounds);
     Box::pin(async move {
-        let mut staged = BTreeMap::<Vec<u8>, Vec<OwnedWriteOperation>>::new();
-        for operation in operations {
-            staged
-                .entry(operation.key().to_vec())
-                .or_default()
-                .push(operation);
-        }
-
         // A base limit of only the logical result size is unsound: every
         // staged key whose final operation can remove it may consume one of
         // those physical entries without producing a logical result. A
         // Thus `limit + removals` is both a hard physical ceiling and enough base entries to fill the
         // requested logical result when they exist.
         let physical_max_items = request.max_items.map(|limit| {
-            let final_removals = staged
-                .values()
-                .filter(|operations| {
-                    matches!(operations.last(), Some(OwnedWriteOperation::Delete { .. }))
-                })
-                .count();
+            let final_removals = staged.iter().filter(|(_, value)| value.is_none()).count();
             limit.saturating_add(final_removals)
         });
         let base = base
@@ -1880,7 +2061,6 @@ where
                 ..request.clone()
             })
             .await?;
-        let mut staged = staged.into_iter().collect::<VecDeque<_>>();
         if request.direction == ScanDirection::Reverse {
             staged.make_contiguous().reverse();
         }
@@ -1889,7 +2069,6 @@ where
             staged,
             base_entries: VecDeque::new(),
             base_done: false,
-            cf: request.cf,
             direction: request.direction,
             remaining: request.max_items,
         }) as StorageScan<'a>)
@@ -1900,6 +2079,29 @@ impl<S: ?Sized> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<ValueComparison, Error>> {
+        Box::pin(async move {
+            {
+                let mut staged = self.staged_writes.borrow_mut();
+                if let Some(index) = staged.latest_index(&cf, &key) {
+                    return Ok(match staged.operation(index) {
+                        OwnedWriteOperation::Delete { .. } => ValueComparison::Absent,
+                        OwnedWriteOperation::Set { value, .. } if value == &expected => {
+                            ValueComparison::Identical
+                        }
+                        _ => ValueComparison::Different,
+                    });
+                }
+            }
+            self.base.compare_value(cf, key, expected).await
+        })
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         self.base.permits_eager_read_retry()
     }
@@ -2085,6 +2287,37 @@ pub mod conformance {
     where
         S: OrderedKvStorage,
     {
+        let key = b"comparison-only".to_vec();
+        assert_eq!(
+            storage
+                .compare_value("records".into(), key.clone(), b"first".to_vec())
+                .await
+                .unwrap(),
+            ValueComparison::Absent
+        );
+        storage
+            .set("records".into(), key.clone(), b"first".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .compare_value("records".into(), key.clone(), b"first".to_vec())
+                .await
+                .unwrap(),
+            ValueComparison::Identical
+        );
+        assert_eq!(
+            storage
+                .compare_value("records".into(), key.clone(), b"other".to_vec())
+                .await
+                .unwrap(),
+            ValueComparison::Different
+        );
+        assert_eq!(
+            storage.get("records".into(), key.clone()).await.unwrap(),
+            Some(b"first".to_vec())
+        );
+        storage.delete("records".into(), key).await.unwrap();
         storage
             .set("records".into(), b"user:2".to_vec(), b"two".to_vec())
             .await
@@ -3823,6 +4056,116 @@ mod tests {
             vec![(b"row:298".to_vec(), b"reverse-override".to_vec())]
         );
         assert_eq!(storage.take_scan_entries_materialized(), 2);
+    }
+
+    #[futures_test::test]
+    async fn staged_scan_keeps_final_values_and_its_open_snapshot() {
+        let storage = MemoryStorage::new(&["records", "other"]).unwrap();
+        let transaction = StorageTransaction::new(&storage);
+        transaction.stage_owned_operations(vec![
+            OwnedWriteOperation::set("records", b"a", b"old"),
+            OwnedWriteOperation::set("records", b"a", b"new"),
+            OwnedWriteOperation::set("records", b"b", b"removed"),
+            OwnedWriteOperation::delete("records", b"b"),
+            OwnedWriteOperation::delete("records", b"c"),
+            OwnedWriteOperation::set("records", b"c", b"restored"),
+            OwnedWriteOperation::set("other", b"a", b"other-family"),
+            OwnedWriteOperation::set("records", &[255, 0], b"high"),
+        ]);
+        let open = transaction
+            .scan(ScanRequest::range(
+                "records".into(),
+                b"a".to_vec(),
+                b"d".to_vec(),
+            ))
+            .await
+            .unwrap();
+        transaction.stage_owned_operations(vec![
+            OwnedWriteOperation::set("records", b"a", b"later"),
+            OwnedWriteOperation::set("records", b"b", b"revived"),
+            OwnedWriteOperation::set("records", b"d", b"outside-range"),
+        ]);
+        assert_eq!(
+            collect_scan(open).await.unwrap(),
+            vec![
+                (b"a".to_vec(), b"new".to_vec()),
+                (b"c".to_vec(), b"restored".to_vec()),
+            ]
+        );
+        let current = transaction
+            .scan(ScanRequest::range("records".into(), b"a".to_vec(), b"d".to_vec()).reversed())
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_scan(current).await.unwrap(),
+            vec![
+                (b"c".to_vec(), b"restored".to_vec()),
+                (b"b".to_vec(), b"revived".to_vec()),
+                (b"a".to_vec(), b"later".to_vec()),
+            ]
+        );
+        let high = transaction
+            .scan(ScanRequest::prefix("records".into(), vec![255]))
+            .await
+            .unwrap();
+        assert_eq!(
+            collect_scan(high).await.unwrap(),
+            vec![(vec![255, 0], b"high".to_vec())]
+        );
+        for (start, end) in [(b"d", b"a"), (b"a", b"a")] {
+            let empty = transaction
+                .scan(ScanRequest::range(
+                    "records".into(),
+                    start.to_vec(),
+                    end.to_vec(),
+                ))
+                .await
+                .unwrap();
+            assert!(collect_scan(empty).await.unwrap().is_empty());
+        }
+    }
+
+    /// Internal ownership proof: public storage results cannot distinguish
+    /// shared immutable payloads from identical deep copies. Appending Bob's
+    /// later write must not alter Alice's earlier publication snapshot.
+    #[test]
+    fn publication_snapshots_share_blocks_without_sharing_future_appends() {
+        let mut alice = StagedWriteState::from(
+            (0..100)
+                .map(|id| OwnedWriteOperation::set("records", vec![id], vec![id; 1024]))
+                .collect::<Vec<_>>(),
+        );
+        let snapshot = alice.snapshot();
+        let mut resident = StagedWriteState::default();
+        resident.extend_shared(snapshot.clone());
+        assert_eq!(snapshot.len(), 1);
+        assert!(Rc::ptr_eq(&snapshot[0], &resident.snapshot()[0]));
+        assert!(Rc::ptr_eq(&snapshot[0], &alice.snapshot()[0]));
+        assert_eq!(resident.latest_index("records", &[50]), Some(50));
+
+        alice.stage(OwnedWriteOperation::set(
+            "records",
+            vec![50],
+            b"Bob".to_vec(),
+        ));
+        assert_eq!(snapshot[0].len(), 100);
+        assert_eq!(alice.operation_count(), 101);
+        assert_eq!(resident.operation_count(), 100);
+        let bob = alice.snapshot();
+        assert_eq!(bob.len(), 2);
+        assert!(Rc::ptr_eq(&snapshot[0], &bob[0]));
+        resident.extend_shared(vec![Rc::clone(&bob[1])]);
+        assert_eq!(resident.latest_index("records", &[50]), Some(100));
+        assert_eq!(
+            resident.operation(100),
+            &OwnedWriteOperation::set("records", vec![50], b"Bob".to_vec())
+        );
+        let mut independent = resident.clone();
+        independent.stage(OwnedWriteOperation::delete("records", vec![50]));
+        assert_eq!(resident.operation_count(), 101);
+        assert_eq!(independent.operation_count(), 102);
+        assert_eq!(independent.into_operations().len(), 102);
+        assert_eq!(alice.into_operations(), resident.into_operations());
     }
 
     // Internal receipt: the regression is work performed inside the storage overlay and is not

@@ -1,3 +1,4 @@
+import { acquireBrowserPhysicalDatabaseEpoch } from "../../src/runtime/browser-physical-database-epoch.js";
 /**
  * Real-browser physical epoch receipts for the raw IndexedDB page store.
  * This intentionally bypasses MemoryPageStore and the SharedWorker: it writes
@@ -28,6 +29,46 @@ afterEach(async () => {
 });
 
 describe("IndexedDB physical epoch", () => {
+  it("reclaims pages only during one live Web Lock epoch and reopens the published closure", async () => {
+    const name = databaseName();
+    const epoch = await acquireBrowserPhysicalDatabaseEpoch(name);
+    const store = await IndexedDbPageStore.open(name);
+    try {
+      await store.claimBrowserWorkerEpoch(epoch.id, epoch);
+      store.claimTreeOwnership();
+      expect(store.canReclaimObsoletePages).toBe(true);
+      await expect(acquireBrowserPhysicalDatabaseEpoch(name)).rejects.toThrow("active in another");
+      await store.commit({
+        expectedGeneration: 0,
+        metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
+        pages: new Map([[1, new Uint8Array([1])]]),
+      });
+      await store.commit({
+        expectedGeneration: 1,
+        metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 2, nextPageId: 3 },
+        pages: new Map([[2, new Uint8Array([2])]]),
+        deletedPageIds: [1],
+      });
+      expect(await store.readPage(1)).toBeNull();
+      expect(await store.readPage(2)).toEqual(new Uint8Array([2]));
+      const release = store.releaseBrowserWorkerEpoch(epoch.id);
+      expect(store.canReclaimObsoletePages).toBe(false);
+      await release;
+    } finally {
+      store.close();
+      await epoch.release();
+    }
+    const reopened = await IndexedDbPageStore.open(name);
+    try {
+      expect(reopened.canReclaimObsoletePages).toBe(false);
+      expect((await reopened.metadata())?.rootPageId).toBe(2);
+      expect(await reopened.readPage(2)).toEqual(new Uint8Array([2]));
+      expect(await reopened.readPage(1)).toBeNull();
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("atomically installs one replica node when concurrent first opens share a physical database", async () => {
     const name = databaseName();
     const [first, second] = await Promise.all([

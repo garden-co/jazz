@@ -3,6 +3,114 @@
 use super::*;
 use groove::storage::{TestStorage, TestStorageOperation};
 
+/// Controlled storage is needed to hold the first terminal batch pending;
+/// JazzClient's test factory does not expose that boundary. Exercise Db's
+/// subscription stream, without inspecting the maintained graph's state.
+fn assert_cold_initial_subscription(seed_row: bool, matches: bool) {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd7; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd7; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd7))),
+    }))
+    .unwrap();
+    let expected = row(0xd7);
+    if seed_row {
+        // Db's storage-level insert accepts physical RowCells, unlike the
+        // JazzClient row_input! API used by end-to-end consumer tests.
+        db.insert(
+            "todos",
+            cells("persisted", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(expected),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.tick().unwrap();
+    }
+    let query = Query::from("todos").filter(eq(col("done"), lit(Value::Bool(!matches))));
+    let prepared = db.prepare_query(&query).unwrap();
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    assert!(
+        subscription.try_next_event().is_none(),
+        "pending storage is not an empty result"
+    );
+    db.refresh_subscriptions().unwrap();
+    assert!(
+        subscription.try_next_event().is_none(),
+        "refresh must preserve pending initialization"
+    );
+    control.resume();
+    let mut initial = None;
+    for _ in 0..16 {
+        db.refresh_subscriptions().unwrap();
+        if let Some(event) = subscription.try_next_event() {
+            initial = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        ..
+    }) = initial
+    else {
+        panic!("completed local evaluation must publish its initial reset, even offline or empty");
+    };
+    let expected_ids = if seed_row && matches {
+        vec![expected]
+    } else {
+        vec![]
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        expected_ids
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    db.refresh_subscriptions().unwrap();
+    assert!(
+        subscription.try_next_event().is_none(),
+        "initial reset is delivered exactly once"
+    );
+}
+
+/// One durable node opens a subscription while its populated storage is cold.
+/// Resuming storage must deliver the stored row as the very first result.
+#[test]
+fn cold_initial_subscription_waits_for_populated_snapshot() {
+    assert_cold_initial_subscription(true, true);
+}
+
+/// One durable node opens over an empty store. Completion with no row changes
+/// must end loading, without publishing before storage finishes.
+#[test]
+fn cold_initial_subscription_completes_empty_snapshot() {
+    assert_cold_initial_subscription(false, true);
+}
+
+/// A populated store can have no matching rows. Its completed empty query is
+/// distinguishable from the provisional empty graph while storage is pending.
+#[test]
+fn cold_initial_subscription_completes_filtered_empty_snapshot() {
+    assert_cold_initial_subscription(true, false);
+}
+
 #[test]
 fn reopened_wait_observer_yields_instead_of_sync_polling_cold_storage() {
     let schema = schema();
@@ -937,7 +1045,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
                     settled_through,
                     ..
                 }) if *settled_through > GlobalTime(0)
-                    && program_fact_adds.iter().any(|fact| {
+                    && program_fact_adds.added_rows().iter().any(|fact| {
                         matches!(fact,
                             input
                                 if input.version_table.as_str() == "todos"
@@ -3399,4 +3507,275 @@ fn cold_runtime_replacement_defers_empty_facade_until_local_snapshot_arrives() {
         added.is_empty(),
         "a subscription opened after the replacement must not inherit the retained facade"
     );
+}
+
+// These tests must reach the internal recovery boundary after evicting its
+// storage cache. Public open also hydrates unrelated metadata, which can hide
+// this particular cold scan. A child watchdog contains the historical busy
+// loop so a regression fails one test instead of hanging the suite.
+fn pending_restore_child(test_name: &str) -> bool {
+    const CHILD: &str = "JAZZ_PENDING_RESTORE_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test_name) {
+        return true;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD, test_name)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                status.success(),
+                "recovery child failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return false;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "recovery did not yield to asynchronous storage within 20s: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn cold_pending_restore_yields_and_recovers(relay: bool) {
+    use std::future::Future;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::task::{Context, Poll};
+    struct WakeCount(AtomicUsize);
+    impl futures::task::ArcWake for WakeCount {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let schema = schema();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0xdb; 16]),
+        author: AuthorSubject::for_test_bytes([0xdc; 16]),
+    };
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, _) = TestStorage::controlled(&refs);
+    let saved = storage.clone();
+    let db = block_on(Db::open(DbConfig::new(schema.clone(), storage, identity))).unwrap();
+    let tx_id = db
+        .insert(
+            "todos",
+            cells("pending recovery", false, identity.author),
+            Default::default(),
+        )
+        .unwrap()
+        .mergeable_tx_id();
+    block_on(db.close()).unwrap();
+    drop(db);
+    let storage = block_on(saved.reopen(families)).unwrap();
+    let control = storage.control();
+    let eviction = storage.clone();
+    let owner_node = if relay {
+        NodeUuid::from_bytes([0xdd; 16])
+    } else {
+        identity.node
+    };
+    let node = Node::new(block_on(NodeState::new(owner_node, schema, storage)).unwrap());
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let before = control.poll_count(TestStorageOperation::ScanOpen);
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = futures::task::waker(wakes.clone());
+    let mut cx = Context::from_waker(&waker);
+    let mut restore = Box::pin(async {
+        if relay {
+            node.restore_browser_relay_pending_uploads(identity.author)
+                .await
+        } else {
+            node.restore_pending_uploads(identity).await
+        }
+    });
+    assert!(matches!(restore.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(
+        control.poll_count(TestStorageOperation::ScanOpen),
+        before + 1
+    );
+    // The first storage poll deliberately self-wakes; the second parks on the
+    // externally controlled read. Recovery must preserve that real waker.
+    assert!(matches!(restore.as_mut().poll(&mut cx), Poll::Pending));
+    assert!(node.outbox.borrow().iter().next().is_none());
+    wakes.0.store(0, Ordering::SeqCst);
+    control.resume();
+    assert!(wakes.0.load(Ordering::SeqCst) > 0);
+    block_on(restore).unwrap();
+    assert_eq!(
+        node.outbox
+            .borrow()
+            .iter()
+            .map(|entry| entry.tx_id)
+            .collect::<Vec<_>>(),
+        vec![tx_id]
+    );
+    if relay {
+        assert!(
+            node.browser_relay_recovered_tx_ids
+                .borrow()
+                .contains(&tx_id)
+        );
+    }
+}
+
+#[test]
+fn cold_pending_upload_restore_yields_to_storage() {
+    if pending_restore_child(
+        "db::tests::node_runtime::cold_pending_upload_restore_yields_to_storage",
+    ) {
+        cold_pending_restore_yields_and_recovers(false);
+    }
+}
+
+#[test]
+fn cold_browser_relay_restore_yields_to_storage() {
+    if pending_restore_child(
+        "db::tests::node_runtime::cold_browser_relay_restore_yields_to_storage",
+    ) {
+        cold_pending_restore_yields_and_recovers(true);
+    }
+}
+
+#[test]
+fn local_acknowledgements_do_not_reprobe_retained_history() {
+    // Internal topology is necessary to count storage probes at the local
+    // acknowledgement boundary independently of unrelated query/persistence
+    // work. Writes and durability still use the ordinary Db API.
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xce; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xce; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xce))),
+    }))
+    .unwrap();
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let mut samples = Vec::new();
+    for i in 0..1500 {
+        let write = db
+            .insert(
+                "todos",
+                cells("retained local route", false, author),
+                Default::default(),
+            )
+            .unwrap();
+        db.tick().unwrap();
+        let tx_id = write.mergeable_tx_id();
+        register_local_fate_observer(&routes, tx_id, &queue);
+        if i == 149 || i == 1499 {
+            let before = control.point_read_count();
+            block_on(queue_local_acknowledgements(&routes, &db.node.node));
+            let reads = control.point_read_count() - before;
+            eprintln!("retained_routes={} status_storage_reads={reads}", i + 1);
+            samples.push(reads);
+        }
+    }
+    assert_eq!(
+        samples,
+        [0, 0],
+        "already acknowledged routes must not reread transaction history"
+    );
+    assert_eq!(
+        routes.borrow().len(),
+        1500,
+        "routes remain for terminal fates"
+    );
+    assert!(
+        queue.borrow().is_empty(),
+        "no duplicate local acknowledgements"
+    );
+    let tx_id = *routes.borrow().keys().next().unwrap();
+    let newcomer: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_fate_route(&routes, tx_id, &newcomer);
+    let before = control.point_read_count();
+    block_on(queue_local_acknowledgements(&routes, &db.node.node));
+    assert_eq!(
+        control.point_read_count() - before,
+        1,
+        "only the new queue needs a probe"
+    );
+    assert!(
+        matches!(newcomer.borrow().as_slice(), [SyncMessage::FateUpdate {
+        tx_id: received, fate: Fate::Pending, durability: Some(DurabilityTier::Local), ..
+    }] if *received == tx_id)
+    );
+    assert!(queue.borrow().is_empty());
+    let before = control.point_read_count();
+    block_on(queue_local_acknowledgements(&routes, &db.node.node));
+    assert_eq!(control.point_read_count(), before);
+    assert_eq!(newcomer.borrow().len(), 1, "acknowledge each queue once");
+
+    // A cancelled waiter must be pruned without reopening stored history.
+    let cancelled: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_fate_route(&routes, tx_id, &cancelled);
+    drop(cancelled);
+    block_on(queue_local_acknowledgements(&routes, &db.node.node));
+    assert_eq!(control.point_read_count(), before);
+    assert_eq!(routes.borrow()[&tx_id].len(), 2);
+
+    // Local acknowledgement must not consume either terminal fate route.
+    let global = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(1)),
+        durability: Some(DurabilityTier::Global),
+    };
+    route_local_fate(&routes, tx_id, &global);
+    assert!(matches!(
+        queue.borrow().last(),
+        Some(SyncMessage::FateUpdate {
+            durability: Some(DurabilityTier::Global),
+            ..
+        })
+    ));
+    assert!(matches!(
+        newcomer.borrow().last(),
+        Some(SyncMessage::FateUpdate {
+            durability: Some(DurabilityTier::Global),
+            ..
+        })
+    ));
+    assert!(!routes.borrow().contains_key(&tx_id));
+    let rejected_id = *routes.borrow().keys().next().unwrap();
+    let rejected = SyncMessage::FateUpdate {
+        tx_id: rejected_id,
+        fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+        global_time: None,
+        durability: Some(DurabilityTier::Edge),
+    };
+    route_local_fate(&routes, rejected_id, &rejected);
+    assert!(matches!(
+        queue.borrow().last(),
+        Some(SyncMessage::FateUpdate {
+            fate: Fate::Rejected(_),
+            ..
+        })
+    ));
+    assert!(!routes.borrow().contains_key(&rejected_id));
 }

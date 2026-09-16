@@ -16,7 +16,7 @@ use jazz::row_input;
 use jazz::tools::policy_expr::rel;
 use jazz::tools::public_schema::{RelPredicateCmpOp, RelValueRef, RowIdRef};
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, Schema, SchemaBuilder, TableSchema, Value, permissions,
+    ColumnType, JazzClient, Schema, SchemaBuilder, TableSchema, Value, permissions,
     policy_expr as pe,
 };
 use jazz_server::JazzServer;
@@ -156,7 +156,9 @@ async fn cold_client_receives_rows_granted_through_a_dependency_table() {
 
 async fn cold_client_receives_rows_granted_through_a_dependency_table_inner() {
     let schema = folder_grant_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_admin(&server, &schema).await;
 
     let (folder_id, _, folder_tx) = admin
@@ -205,7 +207,7 @@ async fn cold_client_receives_rows_granted_through_a_dependency_table_inner() {
     let local_rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::Local),
+        jazz::tools::ReadTier::LocalFirst,
         LOCAL_TIMEOUT,
         "alice proves bob's document locally",
         |rows| (rows.len() == 1 && rows[0].0 == doc_id).then_some(rows),
@@ -239,7 +241,9 @@ async fn cold_client_receives_transitively_required_dependency_rows() {
 
 async fn cold_client_receives_transitively_required_dependency_rows_inner() {
     let schema = membership_chain_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_admin(&server, &schema).await;
 
     let (folder_id, _, folder_tx) = admin
@@ -285,7 +289,7 @@ async fn cold_client_receives_transitively_required_dependency_rows_inner() {
     let local_rows = wait_for_query(
         &alice,
         Query::from("documents"),
-        Some(DurabilityTier::Local),
+        jazz::tools::ReadTier::LocalFirst,
         LOCAL_TIMEOUT,
         "alice proves the document locally through both dependency rows",
         |rows| (rows.len() == 1 && rows[0].0 == doc_id).then_some(rows),
@@ -322,7 +326,9 @@ async fn dependency_delivery_does_not_widen_visibility() {
 
 async fn dependency_delivery_does_not_widen_visibility_inner() {
     let schema = membership_chain_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_admin(&server, &schema).await;
 
     let (alice_folder_id, _, alice_folder_tx) = admin
@@ -409,7 +415,7 @@ async fn dependency_delivery_does_not_widen_visibility_inner() {
     let local_membership_rows = wait_for_query(
         &alice,
         Query::from("memberships"),
-        Some(DurabilityTier::Local),
+        jazz::tools::ReadTier::LocalFirst,
         LOCAL_TIMEOUT,
         "alice's local membership view stays limited to her own row",
         |rows| (rows.len() == 1 && rows[0].0 == alice_membership_id).then_some(rows),
@@ -419,7 +425,7 @@ async fn dependency_delivery_does_not_widen_visibility_inner() {
     let local_folder_rows = wait_for_query(
         &alice,
         Query::from("folders"),
-        Some(DurabilityTier::Local),
+        jazz::tools::ReadTier::LocalFirst,
         LOCAL_TIMEOUT,
         "alice's local folder view stays limited to her own folder",
         |rows| (rows.len() == 1 && rows[0].0 == alice_folder_id).then_some(rows),
@@ -452,7 +458,9 @@ async fn dependency_row_update_propagates_to_dependent_visibility() {
 
 async fn dependency_row_update_propagates_to_dependent_visibility_inner() {
     let schema = membership_chain_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = connect_admin(&server, &schema).await;
 
     let (folder_id, _, folder_tx) = admin
@@ -499,7 +507,7 @@ async fn dependency_row_update_propagates_to_dependent_visibility_inner() {
     // Revoke: deleting the membership row breaks the grant chain, so the
     // dependent document must leave alice's subscription.
     let revoke_tx = admin
-        .delete(membership_id)
+        .delete("memberships", membership_id)
         .expect("admin revokes alice's membership");
     support::wait_for_edge_txs(
         &admin,

@@ -676,7 +676,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_p
     };
     assert!(!peer_payload_inventory.opening_pending);
     assert!(
-        program_fact_adds.iter().any(|fact| matches!(
+        program_fact_adds.added_rows().iter().any(|fact| matches!(
             fact,
             input
                 if input.row == author

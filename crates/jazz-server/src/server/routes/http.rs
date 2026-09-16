@@ -1178,50 +1178,43 @@ pub(super) async fn publish_permissions_handler(
             .into_response();
     }
 
-    match state.catalogue.publish_permissions_bundle(
-        &state.catalogue_store,
+    match crate::server::runtime_catalogue::publish_permissions_and_runtime(
+        &state,
         schema_hash,
         permissions,
         expected_parent_bundle_object_id,
-    ) {
-        Ok(_) => match state
-            .catalogue
-            .current_permissions_head(&state.catalogue_store)
-        {
-            Ok(head) => {
-                if let Err(err) =
-                    crate::server::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
-                        .await
-                {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::internal(format!(
-                            "failed to bridge permissions head into server shell: {err}"
-                        ))),
-                    )
-                        .into_response();
-                }
-                let head = head.map(permissions_head_view);
-                (StatusCode::CREATED, Json(PermissionsHeadResponse { head })).into_response()
-            }
-            Err(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(format!(
-                    "failed to read published permissions head: {err}"
-                ))),
-            )
-                .into_response(),
-        },
-        Err(crate::server::catalogue::CatalogueError::WriteError(message))
-            if message.starts_with("stale permissions parent") =>
-        {
-            (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::bad_request(message)),
-            )
-                .into_response()
-        }
-        Err(err) => (
+    )
+    .await
+    {
+        Ok(head) => (
+            StatusCode::CREATED,
+            Json(PermissionsHeadResponse {
+                head: Some(permissions_head_view(head)),
+            }),
+        )
+            .into_response(),
+        Err(crate::server::runtime_catalogue::PermissionsPublicationError::Catalogue(
+            crate::server::catalogue::CatalogueError::WriteError(message),
+        )) if message.starts_with("stale permissions parent") => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::bad_request(message)),
+        )
+            .into_response(),
+        Err(crate::server::runtime_catalogue::PermissionsPublicationError::LineageUnavailable(
+            message,
+        )) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(message)),
+        )
+            .into_response(),
+        Err(crate::server::runtime_catalogue::PermissionsPublicationError::Bridge(message)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to bridge permissions head into server shell: {message}"
+            ))),
+        )
+            .into_response(),
+        Err(crate::server::runtime_catalogue::PermissionsPublicationError::Catalogue(err)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(format!(
                 "failed to publish permissions catalogue: {err}"

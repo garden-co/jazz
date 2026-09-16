@@ -9,6 +9,57 @@ mod materialization;
 mod publication;
 mod structured;
 
+/// Internal diagnostic: the native trace shows subscriptions refreshing in a
+/// different order from Groove ID allocation after a full catalogue rebuild.
+/// Public schemas/streams are used; only the rebuild boundary and registry
+/// order are controlled to reproduce that lifecycle without private stores.
+#[test]
+fn full_rebuild_must_not_unsubscribe_another_replacement() {
+    let db = block_on(doctest_support::open_todos_db()).expect("open fixture");
+    let prepared = db.prepare_query(&db.table("todos")).expect("prepare");
+    let mut first = block_on(db.subscribe(&prepared, ReadOpts::default())).expect("first");
+    let mut second = block_on(db.subscribe(&prepared, ReadOpts::default())).expect("second");
+    let _ = block_on(first.next_raw()).expect("first opening");
+    let _ = block_on(second.next_raw()).expect("second opening");
+    db.node.subscriptions.borrow_mut().reverse();
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .rebuild_groove_runtime_for_test()
+            .await
+            .expect("rebuild");
+    });
+    for _ in 0..4 {
+        block_on(db.node.refresh_subscriptions()).expect("replacement streams must remain live");
+    }
+}
+
+/// Alice invalidates prepared plans without replacing Groove. The old handles
+/// must still be retired, so each refresh leaves exactly two live subscriptions.
+/// Internal because only the node owner can distinguish these two boundaries.
+#[test]
+fn plan_invalidation_retires_same_runtime_subscriptions() {
+    let db = block_on(doctest_support::open_todos_db()).expect("open fixture");
+    let prepared = db.prepare_query(&db.table("todos")).expect("prepare");
+    let mut first = block_on(db.subscribe(&prepared, ReadOpts::default())).expect("first");
+    let mut second = block_on(db.subscribe(&prepared, ReadOpts::default())).expect("second");
+    block_on(first.next_raw()).expect("first opening");
+    block_on(second.next_raw()).expect("second opening");
+    for _ in 0..3 {
+        block_on(async {
+            db.node
+                .node
+                .lock()
+                .await
+                .invalidate_groove_runtime_for_test();
+        });
+        block_on(db.node.refresh_subscriptions()).expect("refresh");
+        assert_eq!(db.active_groove_subscriptions_for_test(), 2);
+    }
+}
+
 /// Internal because the test-only refresh rendezvous owns thread-local state.
 /// Dropping its caller handle must clear that state without recursively
 /// borrowing the registry, so a later owner refresh remains unblocked.

@@ -220,6 +220,9 @@ pub struct WriteContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<Session>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Canonical admitted author (`Session::author_subject()?.canonical()`),
+    /// whose identity may differ from the caller only in a trusted backend
+    /// context. Cannot accompany `session`.
     pub attribution: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,

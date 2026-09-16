@@ -14,6 +14,270 @@ fn schema_with_explicit_public_read() -> JazzSchema {
     )
 }
 
+fn open_memory_subscription_db(
+    author: AuthorSubject,
+    schema: &JazzSchema,
+) -> Db<groove::storage::MemoryStorage> {
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage: groove::storage::MemoryStorage::new(&refs).unwrap(),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xda; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xda))),
+    }))
+    .unwrap()
+}
+
+// A standalone memory cache owns its local view even while its remote peer
+// cannot respond. This distinguishes storage choice from foreground ownership.
+#[test]
+fn standalone_memory_subscription_does_not_wait_for_remote_upstream() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let db = open_memory_subscription_db(author, &schema);
+    let (up, _unresponsive_remote) = duplex();
+    let _upstream = block_on(db.connect_upstream(up));
+    let query = prepared(&db, &Query::from("todos"));
+    let mut stream = block_on(db.subscribe(&query, ReadOpts::default())).unwrap();
+    assert!(
+        matches!(stream.try_next_event(), Some(SubscriptionEvent::Delta { reset: true, added, .. }) if added.is_empty())
+    );
+}
+
+// Internal topology receipt: the public client factory cannot hold back an
+// owner connection while observing the foreground's raw subscription stream.
+fn assert_foreground_initial_owner_snapshot(seed_owner: bool) {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let owner = open_db(0xd8, author, &schema);
+    owner.set_relay_authority_session_owner_for_test();
+    let expected = row(0xd9);
+    if seed_owner {
+        owner
+            .insert(
+                "todos",
+                cells("saved", false, author),
+                crate::db::InsertOptions {
+                    row_id: Some(expected),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        owner.tick().unwrap();
+    }
+    let foreground = open_memory_subscription_db(author, &schema);
+    foreground.set_non_durable_client();
+    let query = prepared(&foreground, &Query::from("todos"));
+    let mut stream = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    for _ in 0..3 {
+        foreground.tick().unwrap();
+        assert!(
+            stream.try_next_event().is_none(),
+            "memory is not the owner's answer"
+        );
+    }
+    // LocalOnly explicitly observes this foreground, without contacting its owner.
+    let mut local = block_on(foreground.subscribe(
+        &query,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert!(
+        matches!(local.try_next_event(), Some(SubscriptionEvent::Delta { reset: true, added, .. }) if added.is_empty())
+    );
+    drop(local);
+    // A cancelled opening must not hold up a sibling's initial result.
+    let cancelled = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    drop(cancelled);
+    let (up, down) = duplex();
+    let upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = owner.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let mut initial = None;
+    for _ in 0..64 {
+        foreground.tick().unwrap();
+        owner.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            initial = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        settled: true,
+        ..
+    }) = initial
+    else {
+        panic!(
+            "owner result must complete the first snapshot, including an empty result: {initial:?}"
+        );
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        if seed_owner { vec![expected] } else { vec![] }
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    // Once initialized, losing upstream must not suppress ordinary local writes.
+    drop(upstream);
+    let offline = row(0xdb);
+    foreground
+        .insert(
+            "todos",
+            cells("offline", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(offline),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    foreground.tick().unwrap();
+    assert!(
+        matches!(stream.try_next_event(), Some(SubscriptionEvent::Delta { added, .. })
+        if added.iter().any(|row| row.row_uuid() == offline))
+    );
+}
+
+#[test]
+fn foreground_initial_subscription_waits_for_owner_rows() {
+    assert_foreground_initial_owner_snapshot(true);
+}
+
+#[test]
+fn foreground_initial_subscription_completes_empty_owner_answer() {
+    assert_foreground_initial_owner_snapshot(false);
+}
+
+// Internal topology receipt: ordinary single-Db subscriptions do not enter
+// the foreground owner's initial reset path. Observe only public stream output.
+#[test]
+fn foreground_owner_reset_preserves_flat_join_occurrences() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("users")
+                    .column("name", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("ownerId", "users")
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xe4; 16]);
+    let owner = open_db(0xe4, author, &schema);
+    owner.set_relay_authority_session_owner_for_test();
+    let user = row(0xe5);
+    owner
+        .insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String("user".to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(user),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for id in [row(0xe6), row(0xe7)] {
+        owner
+            .insert(
+                "todos",
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String("todo".to_owned())),
+                    (
+                        "ownerId".to_owned(),
+                        Value::Nullable(Some(Box::new(Value::Uuid(user.0)))),
+                    ),
+                ]),
+                crate::db::InsertOptions {
+                    row_id: Some(id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    owner.tick().unwrap();
+    let foreground = open_memory_subscription_db(author, &schema);
+    foreground.set_non_durable_client();
+    let query = prepared(
+        &foreground,
+        &Query::from("users").join_via_column("todos", "ownerId", "id", []),
+    );
+    let mut stream = block_on(foreground.subscribe(&query, ReadOpts::default())).unwrap();
+    assert!(stream.try_next_event().is_none());
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = owner.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let mut first = None;
+    for _ in 0..64 {
+        owner.tick().unwrap();
+        foreground.tick().unwrap();
+        if let Some(event) = stream.try_next_event() {
+            first = Some(event);
+            break;
+        }
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        added,
+        updated,
+        removed,
+        ..
+    }) = first
+    else {
+        panic!("expected a complete first join snapshot: {first:?}");
+    };
+    assert_eq!(added.len(), 2);
+    assert!(added.iter().all(|output| output.row_uuid() == user));
+    let expected = [row(0xe6), row(0xe7)].map(|todo| {
+        OutputOccurrenceId::new(ObjectId::from_uuid(user.0), [ObjectId::from_uuid(todo.0)])
+    });
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<BTreeSet<_>>(),
+        expected.iter().cloned().collect()
+    );
+    assert_eq!(
+        added.iter().map(|output| output.index).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    // Removing one joined row must address only that occurrence of the user.
+    owner
+        .delete("todos", row(0xe6), Default::default())
+        .unwrap();
+    let mut removed_occurrences = Vec::new();
+    for _ in 0..64 {
+        owner.tick().unwrap();
+        foreground.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            let SubscriptionEvent::Delta { removed, .. } = event else {
+                panic!("join subscription failed after its initial reset: {event:?}");
+            };
+            removed_occurrences.extend(removed.into_iter().map(|output| output.occurrence_id));
+        }
+        if !removed_occurrences.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(removed_occurrences, vec![expected[0].clone()]);
+}
+
 /// Alice's foreground receives Bob's persistent owner's truthful Local answer
 /// after cold storage resumes, without an authority or unsolicited polling.
 /// This covers host callback progress, not dependence on one specific wake:
@@ -152,6 +416,13 @@ fn cold_owner_local_delivery_progresses_only_on_host_wakes() {
                 .unwrap()
                 .pop_front()
                 .expect("Local delivery stalled without a scheduled host wake");
+            if owner == 0 {
+                // A real server-shell query wake marks the subscriber dirty
+                // before queuing this owner turn. Mirror that private bridge
+                // here because this test intentionally uses a generic host
+                // scheduler to control every turn.
+                relay.mark_subscriber_connections_dirty_for_test();
+            }
             if turns[owner].is_none() {
                 turns[owner] = Some(if owner == 0 {
                     Box::pin(async {
@@ -568,7 +839,11 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
                         "never-accepted version carriers must not leak after policy revocation"
                     );
                     assert!(
-                        !update.supporting_rows.iter().any(|fact| matches!(fact, _)),
+                        !update
+                            .supporting_rows
+                            .added_rows()
+                            .iter()
+                            .any(|fact| matches!(fact, _)),
                         "forbidden CoveredInput additions must not survive in the saved envelope"
                     );
                     self.after_revocation.borrow_mut().push(message.clone());
@@ -644,7 +919,11 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
             "blocked publication must contain sensitive row bytes"
         );
         assert!(
-            update.supporting_rows.iter().any(|fact| matches!(fact, _)),
+            update
+                .supporting_rows
+                .added_rows()
+                .iter()
+                .any(|fact| matches!(fact, _)),
             "blocked publication must contain an authorized input fact"
         );
     }
@@ -703,7 +982,7 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
             .is_empty()
     );
     assert!(after_revocation.borrow().iter().any(|message| matches!(message,
-        SyncMessage::ViewUpdate(update) if !update.peer_payload_inventory.opening_pending && update.supporting_rows.is_empty())),
+        SyncMessage::ViewUpdate(update) if !update.peer_payload_inventory.opening_pending && update.supporting_rows.added_rows().is_empty())),
         "replacement must carry a truthful empty snapshot");
     foreground.detach_query(attachment);
 }
@@ -1130,7 +1409,11 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
             for message in inbound.borrow().iter() {
                 if let SyncMessage::ViewUpdate(payload) = message
                     && !payload.peer_payload_inventory.opening_pending
-                    && payload.supporting_rows.iter().any(|fact| matches!(fact, _))
+                    && payload
+                        .supporting_rows
+                        .added_rows()
+                        .iter()
+                        .any(|fact| matches!(fact, _))
                 {
                     opening = Some(payload.clone());
                 }
@@ -1143,9 +1426,8 @@ fn scope_relay_forwards_registration_and_invalid_closure_errors_to_every_reader(
         let failure = if malformed_closure {
             // A complete snapshot cannot name the same physical row version
             // twice. The relay must reject it and expose that error below.
-            opening
-                .supporting_rows
-                .push(opening.supporting_rows[0].clone());
+            let duplicate = opening.supporting_rows.added_rows()[0].clone();
+            opening.supporting_rows.added_rows_mut().push(duplicate);
             SyncMessage::ViewUpdate(opening)
         } else {
             SyncMessage::SubscribeRejected {
@@ -1354,11 +1636,14 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
     assert!(!peer_payload_inventory.opening_pending);
     assert_eq!(peer_payload_inventory.authorization_progress, Some(2));
     assert_eq!(
-        covered_input_rows(program_fact_adds).len(),
+        covered_input_rows(program_fact_adds.added_rows()).len(),
         usize::from(replacement_row)
     );
     if let Some(fresh) = fresh {
-        assert_eq!(covered_input_rows(program_fact_adds), vec![fresh]);
+        assert_eq!(
+            covered_input_rows(program_fact_adds.added_rows()),
+            vec![fresh]
+        );
     }
 
     upstream.borrow_mut().tick().unwrap();
@@ -1577,6 +1862,13 @@ fn authorization_scope_rejects_unrelated_caller_intent() {
     };
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, identity);
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
     client_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -2097,9 +2389,9 @@ fn subscriber_cannot_spoof_authority_view_updates() {
                 ..Default::default()
             },
             supporting_rows: if opening_pending {
-                Vec::new()
+                crate::protocol::SupportingRowsUpdate::snapshot(Vec::new())
             } else {
-                Vec::new()
+                crate::protocol::SupportingRowsUpdate::snapshot(Vec::new())
             },
         })
     };
@@ -2165,6 +2457,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         payload.peer_payload_inventory.opening_pending = true;
         payload
             .supporting_rows
+            .added_rows_mut()
             .push(crate::protocol::SupportingRow {
                 physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(1)),
                 version_table: "todos".to_owned().into(),
@@ -2241,6 +2534,13 @@ fn oversized_register_shape_read_view_is_rejected_before_key_derivation_or_reten
     let subscriber =
         server.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x96; 16]));
 
+    // Finish authenticated startup before exercising the control under test.
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        client_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(client_transport.try_recv().is_none());
     client_transport
         .send(SyncMessage::RegisterShape {
             shape_id,
@@ -2533,7 +2833,10 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
             1,
             "refresh has one shared successor, not one per listener"
         );
-        assert_eq!(covered_input_rows(&updates[0].supporting_rows), vec![fresh]);
+        assert_eq!(
+            covered_input_rows(updates[0].supporting_rows.added_rows()),
+            vec![fresh]
+        );
     }
     client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&refresh));
@@ -2569,7 +2872,7 @@ fn identical_live_usages_share_one_ordered_upstream_transition() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::ViewUpdate(update) => {
-                Some(!covered_input_rows(&update.supporting_rows).contains(&fresh))
+                Some(!covered_input_rows(update.supporting_rows.added_rows()).contains(&fresh))
             }
             _ => None,
         })
@@ -2693,8 +2996,12 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
     let mut strict = prepared_subscribe(&foreground, &query, global_subscribe_opts()).unwrap();
     // The authority is connected but deliberately not driven. Local reads must
     // still receive the relay's cached/pending row, without a terminal error.
+    // This test drives a generic host scheduler, so mirror the server-shell
+    // owner bridge before each relay turn; production wake handling marks the
+    // relay subscriber dirty before requesting its next turn.
     for _ in 0..16 {
         foreground.tick().unwrap();
+        relay.mark_subscriber_connections_dirty_for_test();
         relay.tick().unwrap();
     }
     foreground.tick().unwrap();
@@ -2731,6 +3038,7 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
             )
             .unwrap();
         for _ in 0..16 {
+            relay.mark_subscriber_connections_dirty_for_test();
             relay.tick().unwrap();
             foreground.tick().unwrap();
         }
@@ -2749,6 +3057,7 @@ fn assert_scope_relay_local_read_before_authority(seed_cache: bool, with_include
         core.accept_scope_isolated_relay_subscriber(core_transport, author, BTreeMap::new(), 1);
     for _ in 0..16 {
         core.tick().unwrap();
+        relay.mark_subscriber_connections_dirty_for_test();
         relay.tick().unwrap();
         foreground.tick().unwrap();
     }
@@ -3094,8 +3403,11 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         );
         let (update_index, update) = updates[0];
         assert!(update_index < rejection_index);
-        assert_eq!(covered_input_rows(&update.supporting_rows), vec![fresh]);
-        assert!(!covered_input_rows(&update.supporting_rows).contains(&stale));
+        assert_eq!(
+            covered_input_rows(update.supporting_rows.added_rows()),
+            vec![fresh]
+        );
+        assert!(!covered_input_rows(update.supporting_rows.added_rows()).contains(&stale));
         sibling_authorization_progress.push(update.peer_payload_inventory.authorization_progress);
     }
     assert_eq!(
@@ -3313,4 +3625,55 @@ fn review_multiclause_cleanup(mode: u8) {
         0,
         "cancelled whole proof must retire earlier successful clause owners"
     );
+}
+
+// This scheduling boundary is internal: invalidate the accepted owner answer
+// before the waiting foreground polls it, while retaining its receipt counter.
+#[test]
+fn invalidated_owner_delivery_cannot_cover_a_waiting_local_read() {
+    let schema = schema_with_explicit_public_read();
+    let author = AuthorSubject::for_test_bytes([0xc5; 16]);
+    let relay = open_db(0x74, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let foreground = open_db(0x75, author, &schema);
+    foreground.set_non_durable_client();
+    let (up, down) = duplex();
+    let _upstream = block_on(foreground.connect_upstream(up));
+    let _subscriber = relay.accept_subscriber_with_claims(down, author, BTreeMap::new());
+    let query = prepared(&foreground, &Query::from("todos"));
+    let local = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::Full,
+        ..ReadOpts::default()
+    };
+    let waiting = foreground
+        .attach_query_with_opts(&query, local.clone())
+        .unwrap();
+    for _ in 0..16 {
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(foreground.query_attachment_is_covered(&waiting));
+    foreground
+        .node
+        .node
+        .borrow_mut()
+        .invalidate_subscription_scopes();
+    assert!(
+        !foreground.query_attachment_is_covered(&waiting),
+        "the counter alone must not revive an invalidated owner answer"
+    );
+    let refreshed = foreground.attach_query_with_opts(&query, local).unwrap();
+    assert!(!foreground.query_attachment_is_covered(&refreshed));
+    for _ in 0..16 {
+        relay.tick().unwrap();
+        foreground.tick().unwrap();
+    }
+    assert!(
+        foreground.query_attachment_is_covered(&waiting),
+        "fresh owner delivery releases the older read without upstream authority"
+    );
+    assert!(foreground.query_attachment_is_covered(&refreshed));
+    foreground.detach_query(waiting);
+    foreground.detach_query(refreshed);
 }

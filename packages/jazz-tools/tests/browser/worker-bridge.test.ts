@@ -1107,6 +1107,22 @@ describe("SharedWorker bridge with IndexedDB", () => {
     ctx.untrack(db);
   }
 
+  // Stops the current SharedWorker so the next createDb restores data from storage
+  async function shutdownDbAndWorker(db: Db, inspector?: MessagePort): Promise<void> {
+    const port = inspector ?? (await db.openInspectorControlPort());
+    port.start();
+    try {
+      const [context] = await listWorkerContexts(port);
+      expect(context).toBeDefined();
+      await db.shutdown();
+      untrack(db);
+      await waitForWorkerContextRelease(port, context!.dbName);
+      await terminateWorker(port);
+    } finally {
+      port.close();
+    }
+  }
+
   afterEach(async () => {
     for (const listener of errorListeners) {
       globalThis.removeEventListener("error", listener);
@@ -1639,6 +1655,54 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(after[0].title).toBe("Survive reload");
     expect(after[0].done).toBe(true);
   });
+
+  it("first local subscription snapshot returns no rows for an empty store", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("empty-snapshot") },
+      }),
+    );
+    const firstSnapshot = new Promise<Todo[]>((resolve) => {
+      trackSubscription(db.subscribe(allTodos, resolve, { tier: "local" }));
+    });
+    await expect(firstSnapshot).resolves.toEqual([]);
+  });
+
+  it("first local subscription snapshot contains persisted data", async () => {
+    const config = {
+      appId: "test-app",
+      secret: generateAuthSecret(),
+      driver: { type: "persistent" as const, dbName: uniqueDbName("first-snapshot-reopen") },
+    };
+    const seeded = track(await createDb(config));
+    const expected: { id: string; title: string; done: boolean }[] = [];
+    for (let index = 0; index < 3; index++) {
+      const inserted = seeded.insert(todos, { title: `Persisted ${index}`, done: false });
+      const row = await inserted.wait({ tier: "local" });
+      expected.push({ id: row.id, title: row.title, done: row.done });
+    }
+    await seeded.all(allTodos, { tier: "local" });
+    await shutdownDbAndWorker(seeded);
+
+    const reopened = track(await createDb(config));
+    const snapshots: (typeof expected)[] = [];
+    // Subscribe before any read or readiness wait can warm the reopened
+    // runtime. An empty callback followed by the stored rows must fail.
+    trackSubscription(
+      reopened.subscribe(
+        todos.orderBy("title"),
+        (rows) => snapshots.push(rows.map(({ id, title, done }) => ({ id, title, done }))),
+        { tier: "local" },
+      ),
+    );
+    await waitForCondition(
+      async () => snapshots.length > 0,
+      5000,
+      "The initial local snapshot should contain the persisted rows",
+    );
+    expect(snapshots[0]).toEqual(expected);
+  }, 15_000);
 
   it("deletes IndexedDB storage for the current namespace and keeps the same Db usable", async () => {
     const db = track(
@@ -2903,10 +2967,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     // worker restart below.
     const workerDbName = initialContext!.dbName;
     try {
-      await dbBeforeRestart.shutdown();
-      untrack(dbBeforeRestart);
-      await waitForWorkerContextRelease(inspectorControl, workerDbName);
-      await terminateWorker(inspectorControl);
+      await shutdownDbAndWorker(dbBeforeRestart, inspectorControl);
 
       const dbAfterAcknowledgement = track(await createPersistentDb(undefined));
       const replayAfterAckSpy = vi.fn();
@@ -2925,10 +2986,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       await sleep(500);
       expect(replayAfterAckSpy).not.toHaveBeenCalled();
 
-      await dbAfterAcknowledgement.shutdown();
-      untrack(dbAfterAcknowledgement);
-      await waitForWorkerContextRelease(secondInspectorControl, workerDbName);
-      await terminateWorker(secondInspectorControl);
+      await shutdownDbAndWorker(dbAfterAcknowledgement, secondInspectorControl);
 
       const dbAfterSecondRestart = track(await createPersistentDb(undefined));
       expect(await dbAfterSecondRestart.all(allTodos, { tier: "local" })).toEqual([
@@ -2984,10 +3042,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const [contextBeforeRestart] = await listWorkerContexts(inspectorBeforeRestart);
     expect(contextBeforeRestart).toBeDefined();
     const workerDbName = contextBeforeRestart!.dbName;
-    await dbBeforeRestart.shutdown();
-    untrack(dbBeforeRestart);
-    await waitForWorkerContextRelease(inspectorBeforeRestart, workerDbName);
-    await terminateWorker(inspectorBeforeRestart);
+    await shutdownDbAndWorker(dbBeforeRestart, inspectorBeforeRestart);
 
     const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
     const replayAfterRestartSpy = vi.fn();
@@ -3017,10 +3072,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "attached runtime should receive the restored worker's live rejection",
     );
 
-    await dbAfterRestart.shutdown();
-    untrack(dbAfterRestart);
-    await waitForWorkerContextRelease(inspectorAfterRestart, workerDbName);
-    await terminateWorker(inspectorAfterRestart);
+    await shutdownDbAndWorker(dbAfterRestart, inspectorAfterRestart);
 
     const dbAfterSecondRestart = track(await createPersistentDb(undefined));
     expect(await dbAfterSecondRestart.all(allTodos, { tier: "local" })).toEqual([]);
@@ -3077,15 +3129,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "foreground writes should be durable in the worker before restart",
     );
 
-    const firstInspector = await first.openInspectorControlPort();
-    firstInspector.start();
-    const [firstContext] = await listWorkerContexts(firstInspector);
-    expect(firstContext).toBeDefined();
-    const workerDbName = firstContext!.dbName;
-    await first.shutdown();
-    untrack(first);
-    await waitForWorkerContextRelease(firstInspector, workerDbName);
-    await terminateWorker(firstInspector);
+    await shutdownDbAndWorker(first);
 
     const successor = track(await createPersistentDb(syncServer.serverUrl));
     const mutationErrors = vi.fn();
@@ -3094,8 +3138,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
     // opening the inspector so this receipt observes the same public startup
     // path as an application's first local query.
     await successor.all(allTodos, { tier: "local" });
-    const successorInspector = await successor.openInspectorControlPort();
-    successorInspector.start();
 
     await waitForCondition(
       async () => {
@@ -3124,10 +3166,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       expect.objectContaining({ id: accepted.value.id, title: "accepted after worker restart" }),
     ]);
 
-    await successor.shutdown();
-    untrack(successor);
-    await waitForWorkerContextRelease(successorInspector, workerDbName);
-    await terminateWorker(successorInspector);
+    await shutdownDbAndWorker(successor);
 
     const later = track(await createPersistentDb(undefined));
     const laterErrors = vi.fn();

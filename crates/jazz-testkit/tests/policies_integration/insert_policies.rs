@@ -17,7 +17,9 @@ async fn rebac_insert_allowed_by_simple_policy() {
 
 async fn rebac_insert_allowed_by_simple_policy_inner() {
     let schema = rebac_test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -56,7 +58,9 @@ async fn rebac_insert_denied_by_simple_policy() {
 
 async fn rebac_insert_denied_by_simple_policy_inner() {
     let schema = rebac_test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -102,7 +106,9 @@ async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_wr
  {
     let notes_table = TableSchema::builder("notes").column("content", ColumnType::Text);
     let schema = SchemaBuilder::new().table(notes_table).build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client =
         connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
 
@@ -114,9 +120,10 @@ async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_wr
             Query::from("notes")
                 .filter(eq(col("id"), lit(*note_id.uuid())))
                 .select(["content"]),
-            None,
+            jazz::tools::ReadTier::LocalFirst,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query inserted note");
     assert_eq!(
         rows,
@@ -144,7 +151,9 @@ async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_expli
 async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy_inner() {
     let notes_table = TableSchema::builder("notes").column("content", ColumnType::Text);
     let schema = SchemaBuilder::new().table(notes_table).build();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client =
         connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
 
@@ -176,7 +185,9 @@ async fn rebac_two_clients_different_sessions() {
 
 async fn rebac_two_clients_different_sessions_inner() {
     let schema = rebac_test_schema();
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let alice = connect_ready_user(
         &server,
         &schema,
@@ -221,9 +232,10 @@ async fn rebac_two_clients_different_sessions_inner() {
     let alice_visible_docs: HashSet<_> = alice
         .query(
             Query::from("documents").select(["title"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents as alice")
         .into_iter()
         .map(|(id, _)| id)
@@ -240,9 +252,10 @@ async fn rebac_two_clients_different_sessions_inner() {
     let bob_visible_docs: HashSet<_> = bob
         .query(
             Query::from("documents").select(["title"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents as bob")
         .into_iter()
         .map(|(id, _)| id)
@@ -285,7 +298,9 @@ async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_n
         )
         .build();
 
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let client =
         connect_ready_user(&server, &schema, super::ALICE_ID, "tasks", READY_TIMEOUT).await;
 

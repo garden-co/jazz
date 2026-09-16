@@ -1,3 +1,8 @@
+import {
+  claimBrowserReclamationOwnership,
+  type BrowserPhysicalDatabaseEpoch,
+} from "./browser-physical-database-epoch.js";
+
 /** Durable IndexedDB metadata/page-store format, independent of browser IDB's schema version. */
 export const INDEXEDDB_BTREE_FORMAT_VERSION = 1;
 export const INDEXEDDB_BTREE_FORMAT_MAGIC = "jazz-idb-tree";
@@ -160,6 +165,49 @@ export class IndexedDbStorageInvalidatedError extends Error {
  */
 export class IndexedDbPageStore {
   private invalidated = false;
+  private reclamationOwnership: (() => boolean) | null = null;
+  private readonly treeClaims = new Set<number>();
+  private nextTreeToken = 0;
+  private readonly treeTransactions = new Set<Promise<unknown>>();
+  private ownershipRevision = 0;
+
+  /** One independently opened tree per exclusive owner; IdbTree clones share it. */
+  claimTreeOwnership(): number {
+    this.assertValid();
+    if (this.reclamationOwnership && (this.treeClaims.size > 0 || this.treeTransactions.size > 0)) {
+      throw new Error("IndexedDB reclamation owner already has a tree or pending transaction");
+    }
+    if (this.nextTreeToken === Number.MAX_SAFE_INTEGER)
+      throw new Error("IndexedDB tree token space exhausted");
+    const token = ++this.nextTreeToken;
+    this.treeClaims.add(token);
+    return token;
+  }
+
+  releaseTreeOwnership(token: number): void {
+    this.treeClaims.delete(token);
+  }
+
+  isTreeOwnershipActive(token: number): boolean {
+    return (
+      !this.invalidated &&
+      this.treeClaims.has(token) &&
+      (this.reclamationOwnership === null || this.reclamationOwnership())
+    );
+  }
+
+  /** Revoke cached handles first, then drain every already-started tree commit. */
+  async retireTreeOwnership(): Promise<void> {
+    this.treeClaims.clear();
+    await Promise.allSettled(this.treeTransactions);
+  }
+
+  get canReclaimObsoletePages(): boolean {
+    return (
+      !this.invalidated && this.treeClaims.size === 1 && this.reclamationOwnership?.() === true
+    );
+  }
+
   private replicaNodeBytes: Uint8Array | null = null;
   private readonly invalidationListeners = new Set<
     (error: IndexedDbStorageInvalidatedError) => void
@@ -338,9 +386,17 @@ export class IndexedDbPageStore {
    * origin-wide Web Lock. A successor may replace an epoch only after that
    * lock proves the preceding realm is no longer alive.
    */
-  async claimBrowserWorkerEpoch(epoch: string): Promise<void> {
+  async claimBrowserWorkerEpoch(
+    epoch: string,
+    ownership?: BrowserPhysicalDatabaseEpoch,
+  ): Promise<void> {
     if (!isBrowserWorkerEpoch(epoch)) throw new Error("Invalid browser worker epoch");
     this.assertValid();
+    if (ownership && (ownership.id !== epoch || this.treeClaims.size > 0)) {
+      throw new Error("IndexedDB reclamation ownership must precede tree construction");
+    }
+    const revision = this.ownershipRevision;
+    const proof = ownership ? claimBrowserReclamationOwnership(ownership, this.name) : null;
     const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
     const done = transactionDone(tx);
     tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
@@ -348,10 +404,18 @@ export class IndexedDbPageStore {
       INDEXEDDB_BROWSER_WORKER_EPOCH_KEY,
     );
     await done;
+    this.assertValid();
+    if (revision !== this.ownershipRevision) {
+      throw new Error("IndexedDB worker ownership was released while claiming");
+    }
+    this.reclamationOwnership = proof;
   }
 
   /** Delete only this realm's epoch; a stale realm must never clear its successor. */
   async releaseBrowserWorkerEpoch(epoch: string): Promise<void> {
+    this.treeClaims.clear();
+    this.ownershipRevision++;
+    this.reclamationOwnership = null;
     if (!isBrowserWorkerEpoch(epoch)) throw new Error("Invalid browser worker epoch");
     this.assertValid();
     const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
@@ -494,9 +558,16 @@ export class IndexedDbPageStore {
     return bytes.slice();
   }
 
-  async commit(commit: IndexedDbPageCommit): Promise<IndexedDbBtreeMetadata> {
+  async commit(commit: IndexedDbPageCommit, treeToken?: number): Promise<IndexedDbBtreeMetadata> {
     this.assertValid();
     assertCommit(commit);
+    if (treeToken !== undefined && !this.isTreeOwnershipActive(treeToken)) {
+      throw new Error("IndexedDB tree ownership has expired");
+    }
+    const requiresOwnership = (commit.deletedPageIds?.length ?? 0) > 0;
+    if (requiresOwnership && !this.canReclaimObsoletePages) {
+      throw new Error("IndexedDB page reclamation ownership is not active");
+    }
     const tx = relaxedReadWriteTransaction(this.db, [
       INDEXEDDB_BTREE_PAGES_STORE,
       INDEXEDDB_BTREE_METADATA_STORE,
@@ -532,6 +603,12 @@ export class IndexedDbPageStore {
       ) {
         throw new Error(`IndexedDB B-tree root page ${metadata.rootPageId} is missing`);
       }
+      if (treeToken !== undefined && !this.isTreeOwnershipActive(treeToken)) {
+        throw new Error("IndexedDB tree ownership expired before publication");
+      }
+      if (requiresOwnership && !this.canReclaimObsoletePages) {
+        throw new Error("IndexedDB page reclamation ownership expired before publication");
+      }
       for (const [pageId, bytes] of commit.pages) {
         if (bytes.byteLength > metadata.pageSize) {
           throw new Error(`IndexedDB B-tree page ${pageId} exceeds configured page size`);
@@ -564,23 +641,39 @@ export class IndexedDbPageStore {
     pageIds: readonly number[],
     pageBytes: readonly Uint8Array[],
     deletedPageIds: readonly number[],
+    treeToken?: number,
   ): Promise<IndexedDbBtreeMetadata> {
     if (pageIds.length !== pageBytes.length) {
       return Promise.reject(new Error("IDBTree page ids and page bytes have different lengths"));
     }
-    return this.commit({
-      expectedGeneration,
-      metadata: {
-        pageSize,
-        rootPageId: rootPageId < 0 ? null : rootPageId,
-        nextPageId,
+    const operation = this.commit(
+      {
+        expectedGeneration,
+        metadata: {
+          pageSize,
+          rootPageId: rootPageId < 0 ? null : rootPageId,
+          nextPageId,
+        },
+        pages: new Map(pageIds.map((pageId, index) => [pageId, pageBytes[index]!])),
+        deletedPageIds,
       },
-      pages: new Map(pageIds.map((pageId, index) => [pageId, pageBytes[index]!])),
-      deletedPageIds,
-    });
+      treeToken,
+    );
+    if (treeToken !== undefined) {
+      this.treeTransactions.add(operation);
+      void operation.then(
+        () => this.treeTransactions.delete(operation),
+        () => this.treeTransactions.delete(operation),
+      );
+    }
+    return operation;
   }
 
   close(): void {
+    this.treeClaims.clear();
+    this.invalidated = true;
+    this.ownershipRevision++;
+    this.reclamationOwnership = null;
     this.removeInvalidationListeners();
     this.db.close();
   }
@@ -623,6 +716,8 @@ export class IndexedDbPageStore {
   private invalidate(): void {
     if (this.invalidated) return;
     this.invalidated = true;
+    this.treeClaims.clear();
+    this.reclamationOwnership = null;
     this.removeInvalidationListeners();
     const error = new IndexedDbStorageInvalidatedError(this.name);
     for (const listener of this.invalidationListeners) listener(error);

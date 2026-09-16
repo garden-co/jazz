@@ -337,6 +337,7 @@ where
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| web_time::Instant::now());
         let mut pending_edges = Vec::new();
+        let mut pending_parent_time_bound = PendingParentTimeBound::Empty;
         for raw in self
             .database
             .primary_key_scan_raw("jazz_pending_edges", &[])
@@ -369,8 +370,10 @@ where
             // in-memory rejection graph only needs TxIds. Otherwise a corrupt
             // pending constraint could silently survive reopen.
             let _ = pending_edge_coordinate_from_record(record)?;
+            pending_parent_time_bound.observe(parent.time);
             pending_edges.push((child, parent));
         }
+        self.rejections.pending_parent_time_bound = pending_parent_time_bound;
         for (child, parent) in pending_edges {
             if self
                 .query_transaction(child)

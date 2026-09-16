@@ -437,19 +437,25 @@ where
         }
     }
 
-    /// Return the legacy transaction fate tuple.
+    /// Return the legacy transaction fate tuple by projecting stored status.
+    /// Payload author/contribution validation belongs to full transaction reads;
+    /// this read retains storage framing and status-field validation.
     pub async fn transaction_state(
         &mut self,
         tx_id: TxId,
     ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)> {
-        self.transaction_record(tx_id).await.map(|record| {
-            let durability = if self.pending_persistence.contains(&tx_id) {
-                DurabilityTier::None
-            } else {
-                record.durability
-            };
-            (record.fate, record.global_time, durability)
-        })
+        self.query_transaction_state(tx_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(fate, global_time, stored_durability)| {
+                let durability = if self.pending_persistence.contains(&tx_id) {
+                    DurabilityTier::None
+                } else {
+                    stored_durability
+                };
+                (fate, global_time, durability)
+            })
     }
 
     /// Return the durable audit record for a transaction, including rejected
@@ -487,7 +493,8 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(Some(author), false, false).await
+        self.below_global_transaction_ids(Some(author), false, false)
+            .await
     }
 
     /// A Global synchronization barrier also needs the authority timestamp.
@@ -496,7 +503,8 @@ where
         &mut self,
         author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
-        self.below_global_transaction_ids(Some(author), false, true).await
+        self.below_global_transaction_ids(Some(author), false, true)
+            .await
     }
 
     /// A trusted backend owns every author scope created by its node. Restrict
@@ -505,8 +513,12 @@ where
         &mut self,
         node: NodeUuid,
     ) -> Result<Vec<TxId>, Error> {
-        Ok(self.below_global_transaction_ids(None, false, true).await?
-            .into_iter().filter(|tx| tx.node == node).collect())
+        Ok(self
+            .below_global_transaction_ids(None, false, true)
+            .await?
+            .into_iter()
+            .filter(|tx| tx.node == node)
+            .collect())
     }
 
     /// Edge-host recovery includes accepted writes from every originating
@@ -536,11 +548,10 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            let made_by = RowAuthor::from_value(
-                record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-            )
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-            .as_author_subject();
+            let made_by =
+                RowAuthor::from_record(record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
+                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                    .as_author_subject();
             let durability = durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
@@ -549,7 +560,8 @@ where
                     fate != 1 || durability != DurabilityTier::Edge
                 } else {
                     !(fate == 0 || fate == 1)
-                        || (!include_missing_authority_timestamp && durability >= DurabilityTier::Global)
+                        || (!include_missing_authority_timestamp
+                            && durability >= DurabilityTier::Global)
                 }
             {
                 continue;
@@ -605,8 +617,8 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || RowAuthor::from_value(
-                    record.get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+                || RowAuthor::from_record(
+                    record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
                 )
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?
                 .as_author_subject()
@@ -643,91 +655,22 @@ where
         Some(TxId::new(time, self.resolve_node_alias(alias).await.ok()??))
     }
 
-    pub(crate) async fn persist_known_state_fact_for_authority_result(
-        &self,
-        authority_result_key: AuthorityResultKey,
-        settled_through: GlobalTime,
-    ) -> Result<(), Error> {
-        let closure_generation = self
-            .query
-            .authority_results
-            .get(&authority_result_key)
-            .and_then(|state| match state.source_closure {
-                crate::node::AuthoritySourceClosure::Claimed { generation } => Some(generation),
-                crate::node::AuthoritySourceClosure::Pending => None,
-            })
-            .unwrap_or(0);
-        self.database
-            .direct_record_store(KNOWN_STATE_FACTS_STORE)?
-            .set(
-                &known_state_fact_key(&authority_result_key),
-                &[
-                    Value::U64(settled_through.0),
-                    Value::U64(
-                        self.query
-                            .authority_results
-                            .get(&authority_result_key)
-                            .and_then(|state| state.authorization_progress)
-                            .unwrap_or(u64::MAX),
-                    ),
-                    // This is an exact-closure receipt, not `live_settled`.
-                    // It permits a reopened receiver to rebuild its own
-                    // descriptor-bound graph from the persisted CoveredInput
-                    // frontier, while a fresh remote read still waits for a
-                    // live authority handoff.
-                    Value::U64(closure_generation),
-                ],
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {
-        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        let keys = store
-            .prefix_entries(&[])
-            .await?
-            .into_iter()
-            .map(|entry| entry.key)
-            .collect::<Vec<_>>();
-        for key in keys {
-            store.delete(&key).await?;
+    /// Discard authority proof during rebuild or eviction, preserving live receipt ordering.
+    pub(crate) fn invalidate_subscription_scopes(&mut self) {
+        // Rebuild/eviction invalidates authority proof, not the ordering of
+        // receipts awaited by still-live foregrounds. Reusing generation one
+        // after invalidation can strand a read already waiting for > one.
+        // Keep only this process-local counter; no membership, settlement,
+        // predecessor, compiled source, or pending publication survives.
+        #[cfg(any(test, feature = "testing"))]
+        crate::delivery_diagnostics::record(|| format!("invalidate_scopes runtime={} receipts={}", self.groove_runtime_token(), self.query.authority_results.len()));
+        for state in self.query.authority_results.values_mut() {
+            *state = AuthorityResultState {
+                applied_view_update_generation: state.applied_view_update_generation,
+                ..AuthorityResultState::default()
+            };
         }
-        self.query.authority_results.clear();
-        self.clear_all_persisted_source_closures().await?;
-        Ok(())
-    }
-
-    pub(crate) async fn persist_source_closure_delta_for_authority_result(
-        &self,
-        authority_result_key: AuthorityResultKey,
-        cleared: bool,
-        fact_adds: &[ViewFactEntry],
-        fact_removes: &[ViewFactEntry],
-    ) -> Result<(), Error> {
-        self.persist_authority_policy_binding_directory(&authority_result_key)
-            .await?;
-        self.persist_settled_program_facts_delta(
-            authority_result_key,
-            cleared,
-            fact_adds,
-            fact_removes,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Install the exact policy identity behind the bounded result-store key.
-    /// A digest is an address only: a pre-existing unequal value is a
-    /// cryptographic collision (or corruption) and must fail closed.
-    async fn persist_authority_policy_binding_directory(
-        &self,
-        authority_result_key: &AuthorityResultKey,
-    ) -> Result<(), Error> {
-        let Some(policy) = &authority_result_key.policy_binding else {
-            return Ok(());
-        };
-        self.persist_policy_binding_directory(policy).await
+        self.query.retained_root_window_sources.clear();
     }
 
     async fn persist_policy_binding_directory(
@@ -735,7 +678,8 @@ where
         policy: &PolicyBindingKey,
     ) -> Result<(), Error> {
         let digest = policy.directory_digest();
-        let claims = policy.directory_value()
+        let claims = policy
+            .directory_value()
             .map_err(|_| Error::InvalidStoredValue("policy binding claims must encode"))?;
         let store = self
             .database
@@ -752,7 +696,10 @@ where
                     Error::InvalidStoredValue("policy binding directory subject is invalid")
                 })?,
                 existing.get_idx(1)?,
-            ).map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
+            )
+            .map_err(|_| {
+                Error::InvalidStoredValue("policy binding directory claims are invalid")
+            })?;
             if existing != *policy {
                 return Err(Error::InvalidStoredValue(
                     "policy binding digest aliases a distinct exact policy identity",
@@ -772,70 +719,22 @@ where
         Ok(())
     }
 
-    async fn persist_settled_program_facts_delta(
-        &self,
-        authority_result_key: AuthorityResultKey,
-        cleared: bool,
-        adds: &[ViewFactEntry],
-        removes: &[ViewFactEntry],
-    ) -> Result<(), Error> {
-        let store = self
-            .database
-            .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        if cleared {
-            let prefix = authority_result_store_prefix(&authority_result_key);
-            let keys = store
-                .prefix_entries(&prefix)
-                .await?
-                .into_iter()
-                .map(|entry| entry.key)
-                .collect::<Vec<_>>();
-            let mut operations = keys
-                .into_iter()
-                .map(|key| DirectRecordStoreWrite::Delete { key })
-                .collect::<Vec<_>>();
-            for fact in adds {
-                operations.push(settled_program_fact_storage_write(
-                    &authority_result_key,
-                    fact,
-                )?);
-            }
-            store.write_many(&operations).await?;
-            return Ok(());
-        }
-
-        let mut operations = Vec::with_capacity(removes.len() + adds.len());
-        for fact in removes {
-            operations.push(DirectRecordStoreWrite::Delete {
-                key: settled_program_fact_key(&authority_result_key, fact)?,
-            });
-        }
-        for fact in adds {
-            operations.push(settled_program_fact_storage_write(
-                &authority_result_key,
-                fact,
-            )?);
-        }
-        if !operations.is_empty() {
-            store.write_many(&operations).await?;
-        }
-        Ok(())
-    }
-
-    async fn clear_all_persisted_source_closures(&mut self) -> Result<(), Error> {
-        for store_name in [SETTLED_PROGRAM_FACTS_STORE] {
-            let store = self.database.direct_record_store(store_name)?;
-            let keys = store
+    /// Retired scope stores are disposable caches, never native data. Keep their
+    /// registered store identities so historical roots open, but interpret no
+    /// JPFK/JSIR payload, policy key, cursor or generation during recovery.
+    async fn discard_legacy_subscription_scopes(&self) -> Result<(), Error> {
+        for name in [KNOWN_STATE_FACTS_STORE, SETTLED_PROGRAM_FACTS_STORE] {
+            let store = self.database.direct_record_store(name)?;
+            let deletes = store
                 .prefix_entries(&[])
                 .await?
                 .into_iter()
-                .map(|entry| entry.key)
+                .map(|entry| DirectRecordStoreWrite::Delete { key: entry.key })
                 .collect::<Vec<_>>();
-            for key in keys {
-                store.delete(&key).await?;
+            if !deletes.is_empty() {
+                store.write_many(&deletes).await?;
             }
         }
-        self.query.retained_root_window_sources.clear();
         Ok(())
     }
 
@@ -843,166 +742,6 @@ where
         self.database.flush().await?;
         self.persist_clean_close_marker().await?;
         self.database.close().await?;
-        Ok(())
-    }
-
-    async fn recover_known_state_facts(&mut self) -> Result<(), Error> {
-        self.query.authority_results.clear();
-        self.query.retained_root_window_sources.clear();
-        // Validate the complete durable closure off to the side.  Open/recovery
-        // must not leave even a prefix of the recovered state resident when a
-        // later store entry is malformed.
-        let mut authority_results = BTreeMap::<AuthorityResultKey, AuthorityResultState>::new();
-        let mut policies = BTreeMap::<[u8; 32], crate::protocol::PolicyBindingKey>::new();
-        let policy_store = self
-            .database
-            .direct_record_store(AUTHORITY_POLICY_BINDINGS_STORE)?;
-        for entry in policy_store.prefix_entries(&[]).await? {
-            let [Value::Bytes(digest)] = entry.key.as_slice() else {
-                return Err(Error::InvalidStoredValue(
-                    "policy binding directory key must be one digest",
-                ));
-            };
-            let digest: [u8; 32] = digest
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::InvalidStoredValue("policy binding digest must be 32 bytes"))?;
-            let Value::String(subject) = entry.value.get_idx(0)? else {
-                return Err(Error::InvalidStoredValue(
-                    "policy binding directory subject must be string",
-                ));
-            };
-            let policy = crate::protocol::PolicyBindingKey::from_directory_value(
-                AuthorSubject::from_canonical(&subject).map_err(|_| {
-                    Error::InvalidStoredValue("policy binding directory subject is invalid")
-                })?,
-                entry.value.get_idx(1)?,
-            ).map_err(|_| Error::InvalidStoredValue("policy binding directory claims are invalid"))?;
-            if policy.directory_digest() != digest
-                || policies
-                    .insert(digest, policy.clone())
-                    .is_some_and(|previous| previous != policy)
-            {
-                return Err(Error::InvalidStoredValue(
-                    "policy binding directory digest does not name its exact policy identity",
-                ));
-            }
-        }
-        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        for entry in store.prefix_entries(&[]).await? {
-            let authority_result_key = resolve_stored_authority_result_key(
-                authority_result_key_from_store_prefix(
-                    &entry.key,
-                    "known-state authority result key must be valid",
-                )?,
-                &policies,
-                "known-state policy directory entry is missing",
-            )?;
-            let settled_through = match entry.value.get_idx(0)? {
-                Value::U64(value) => GlobalTime(value),
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state settled-through must be u64",
-                    ));
-                }
-            };
-            let state = authority_results.entry(authority_result_key).or_default();
-            // Recovery restores durable cache material and, when present, a
-            // fast cursor. It must not restore `live_settled`: a reopened
-            // process has no current exact authority handoff yet.
-            state.settled_through = (settled_through.0 != 0).then_some(settled_through);
-            match entry.value.get_idx(1)? {
-                Value::U64(progress) if progress != u64::MAX => {
-                    state.authorization_progress = Some(progress);
-                }
-                Value::U64(_) => {}
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state authorization progress must be u64",
-                    ));
-                }
-            }
-            match entry.value.get_idx(2)? {
-                Value::U64(generation) if generation != 0 => {
-                    state.source_closure =
-                        crate::node::AuthoritySourceClosure::Claimed { generation };
-                }
-                Value::U64(_) => {}
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state source-closure generation must be u64",
-                    ));
-                }
-            }
-        }
-        let store = self
-            .database
-            .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        for entry in store.prefix_entries(&[]).await? {
-            let Some((fact_digest, prefix)) = entry.key.split_last() else {
-                return Err(Error::InvalidStoredValue(
-                    "settled program fact key is empty",
-                ));
-            };
-            let authority_result_key = resolve_stored_authority_result_key(
-                authority_result_key_from_store_prefix(
-                    prefix,
-                    "settled program fact binding key must be valid",
-                )?,
-                &policies,
-                "settled program fact policy directory entry is missing",
-            )?;
-            let fact_digest = match fact_digest {
-                Value::Bytes(bytes) => bytes,
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "settled program fact digest must be bytes",
-                    ));
-                }
-            };
-            if fact_digest.len() != 32 {
-                return Err(Error::InvalidStoredValue(
-                    "settled program fact digest must be 32 bytes",
-                ));
-            }
-            let fact_bytes = match entry.value.get_idx(0)? {
-                Value::Bytes(bytes) => bytes,
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "settled program fact payload must be bytes",
-                    ));
-                }
-            };
-            if settled_program_fact_digest(&fact_bytes).as_slice() != fact_digest {
-                return Err(Error::InvalidStoredValue(
-                    "settled program fact payload does not match its digest",
-                ));
-            }
-            let fact = codec::program_fact_from_storage_bytes(&fact_bytes)?;
-            authority_results
-                .entry(authority_result_key)
-                .or_default()
-                .settled_program_facts
-                .insert(fact);
-        }
-        for state in authority_results.values_mut() {
-            state.covered_input_sources.clear();
-            state.covered_input_versions.clear();
-            for fact in &state.settled_program_facts {
-                match fact {
-                    ProgramFactEntry::ProgramSourceCoverage(coverage) if coverage.complete => {
-                        state.covered_input_sources.insert(coverage.source.clone());
-                    }
-                    ProgramFactEntry::CoveredInput(input) => {
-                        state
-                            .covered_input_versions
-                            .insert(CoveredInputCoordinate::from(input), input.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-        self.query.authority_results = authority_results;
         Ok(())
     }
 
@@ -1213,24 +952,24 @@ where
     /// logical table-prefix scan.
     pub async fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
         let mut total = 0_u64;
-        for class_cf in [
-            "__groove_class_history",
-            "__groove_class_register",
-            "__groove_class_global_current",
-            "__groove_class_ahead_current",
-            "__groove_class_changes",
-            "__groove_class_indices",
-            "__groove_class_content",
-            "__groove_class_meta",
-        ] {
+        for class_cf in self.try_current_schema()?.physical_column_families() {
             total += self
                 .database
-                .approximate_class_bytes(class_cf)
+                .approximate_class_bytes(&class_cf)
                 .await
                 .map_err(Error::Groove)?
                 .unwrap_or_default();
         }
         Ok(total)
+    }
+
+    /// All peer connections share the cached database-owner wake. Check and
+    /// register under the owner lock so settlement cannot race registration.
+    pub(crate) fn defer_catalogue_for_persistence(
+        &self,
+        waker: Option<&std::task::Waker>,
+    ) -> Result<bool, Error> {
+        Ok(self.database.wait_for_publication_settlement(waker)?)
     }
 
     pub(crate) fn groove_runtime_token(&self) -> u64 {
@@ -1246,6 +985,11 @@ where
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn invalidate_groove_runtime_for_test(&mut self) {
         self.groove_runtime_token = crate::node::next_groove_runtime_token();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn rebuild_groove_runtime_for_test(&mut self) -> Result<(), Error> {
+        self.rebuild_database_slot().await
     }
 
     /// Return metrics for the most recent committed storage batch, if any.

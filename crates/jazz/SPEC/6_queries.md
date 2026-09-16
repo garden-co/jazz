@@ -19,6 +19,16 @@ materialize a Groove source by launching another Jazz query. In particular,
 policy preparation, source resolution, and schema projection MUST NOT call the
 ordinary one-shot query pipeline to obtain an input relation.
 
+Jazz specifies exact row/version identities and policy/binding dependencies before
+requesting immutable supporting or replacement witnesses. The witness carrier
+is constructed after selection against the authorized visible relation. A routed
+selection retains its binding fields and multiplicity; narrowing must not allow
+one route or version to borrow another's visibility. This ordering changes only
+intermediate computation, not the witness's wire or storage representation.
+General column pruning belongs to Groove's resolved graph compiler: Jazz need
+not encode unused payload into existence-check inputs or prescribe a physical
+arrangement layout. This does not imply a second storage lookup.
+
 Lowering itself is synchronous and pure. The implementation separates any
 currently necessary asynchronous source preparation from
 `lower_resolved_query_program`: preparation produces owned declarative source
@@ -171,6 +181,12 @@ whose record is publicly returned. Flat joined output is a separate target AST
 form, described in §6.4.1. Conflating these two forms would make policy
 traversal accidentally promise a public tuple shape.
 
+An explicit source-column/target-column equality may also constrain membership
+through compatible non-reference columns, such as two text columns.
+This remains an existential join: matching joined rows do not produce
+public tuples. UUID and array reference traversals retain their declared-FK
+validation, and source-lookup traversals retain their existing reference rules.
+
 ### 6.1.1 Membership and containment filters
 
 Membership and containment semantics are core-owned query semantics. Binding
@@ -252,6 +268,14 @@ provenance; accountless readers have no ownership authority. Provider claims
 such as `sub` and `user_id` retain their admission-defined values. Additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
+
+Provider claim paths may traverse nested JSON object fields. Path segments are
+literal keys: `["claims", "org", "slug"]` differs from
+`["claims", "org.slug"]`. Traversal through a missing key or a non-object value
+is unbound and denies the corresponding predicate, including under negation.
+An explicit null leaf remains bound: it matches `IS NULL`, while a missing leaf
+does not. Arrays remain values for containment/membership; object traversal does
+not interpret numeric segments as array indexes.
 
 #### Prepared claim parameters
 
@@ -636,7 +660,14 @@ source resolver already applies source authorization and schema projection
 before lowered query composition (`crates/jazz/src/node/query_eval.rs:537-1066`,
 `2036-2184`); this target relies on that existing source boundary.
 
-### 6.4.2 Default result ordering
+### 6.4.2 Uncorrelated policy existence
+
+`Exists` and `ExistsRel` may test a relation without referencing the
+protected row. Lowering represents this as `JoinTarget::Uncorrelated`. A semijoin
+with no data keys retains each protected row once while the filtered proof relation
+is nonempty. Removing the last matching proof retracts the result.
+
+### 6.4.3 Default result ordering
 
 Ordering is a core-owned query semantic: it must be expressed in the lowered
 plan and carried through delivered results and delta positions, never
@@ -706,7 +737,7 @@ receiver-local collector alone turns them into application positions. This is
 what lets the same query remain meaningful when a local-first receiver also has
 eligible pending inputs that were absent from the authority's evaluation.
 
-### 6.4.3 Aggregate result representation
+### 6.4.4 Aggregate result representation
 
 An aggregate or grouped query returns its results through the same row-shaped
 surface as any other query, because a caller should not need a second result
@@ -789,7 +820,7 @@ delivery otherwise follows ch. 16 §16.6.
 These are representation requirements, not delivery-strategy requirements: a
 one-shot read, an initial snapshot, a maintained delta, and a settled subscriber
 read of the same aggregate at the same frontier MUST all reduce to the same
-represented result, per §6.4.2.
+represented result, per §6.4.3.
 
 Decision, Anselm 2026-08-07: a scalar global aggregate over no input rows
 delivers a present row — `0` for `count`, `NULL` for `sum`, `avg`, `min` and
@@ -925,7 +956,7 @@ surface. The test plan below records additional intended coverage.
   `row_input!`, and public query/subscription APIs. Do not introduce JSON-like
   schema, permission, or query definitions for this ordering coverage.
 
-### 6.11 Subsumed query and SQL notes
+### 6.8 Subsumed query and SQL notes
 
 The old QueryManager notes are now treated as migration context for this
 chapter's stable query vocabulary. Jazz keeps one normalized query AST for

@@ -1265,7 +1265,7 @@ fn handcrafted_large_descriptor_is_rejected_but_node_staged_preparation_can_publ
     .unwrap();
     let forged = MergeableCommit::new("todos", row(0x75), 10).cells(BTreeMap::from([
         ("title".to_owned(), Value::String("title".to_owned())),
-        ("body".to_owned(), Value::Large(prepared.value_ref.clone())),
+        ("body".to_owned(), Value::Large(Box::new(prepared.value_ref.clone()))),
     ]));
     assert!(matches!(
         node.commit_mergeable_settled(forged),

@@ -49,6 +49,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -732,18 +733,48 @@ struct NapiWireTransport {
 
 struct NapiTickScheduler {
     callback: std::sync::Arc<ThreadsafeFunction<String, ()>>,
+    pending: Arc<AtomicU8>,
+}
+
+fn napi_wake_mask(urgency: &str) -> u8 {
+    match urgency {
+        "immediate" => 1,
+        "deferred" => 2,
+        "after-current-turn" => 4,
+        _ => 0,
+    }
+}
+
+fn schedule_napi_wake(
+    callback: &ThreadsafeFunction<String, ()>,
+    pending: Option<&AtomicU8>,
+    urgency: &str,
+) {
+    let mask = napi_wake_mask(urgency);
+    if let Some(pending) = pending
+        && pending.fetch_or(mask, Ordering::AcqRel) & mask != 0
+    {
+        return;
+    }
+    let status = callback.call(
+        Ok(urgency.to_owned()),
+        ThreadsafeFunctionCallMode::NonBlocking,
+    );
+    if status != napi::Status::Ok
+        && let Some(pending) = pending
+    {
+        pending.fetch_and(!mask, Ordering::AcqRel);
+    }
 }
 
 struct NapiQueryRuntimeWake {
     callback: std::sync::Arc<ThreadsafeFunction<String, ()>>,
+    pending: Option<Arc<AtomicU8>>,
 }
 
 impl ArcWake for NapiQueryRuntimeWake {
     fn wake_by_ref(arc_self: &std::sync::Arc<Self>) {
-        let _ = arc_self.callback.call(
-            Ok("immediate".to_owned()),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
+        schedule_napi_wake(&arc_self.callback, arc_self.pending.as_deref(), "immediate");
     }
 }
 
@@ -754,10 +785,7 @@ impl CoreTickScheduler for NapiTickScheduler {
             CoreTickUrgency::Deferred => "deferred",
             CoreTickUrgency::AfterCurrentTurn => "after-current-turn",
         };
-        let _ = self.callback.call(
-            Ok(urgency.to_string()),
-            ThreadsafeFunctionCallMode::NonBlocking,
-        );
+        schedule_napi_wake(&self.callback, Some(&self.pending), urgency);
     }
 
     fn schedule_tick_after(&self, delay_ms: u64) {
@@ -770,6 +798,7 @@ impl CoreTickScheduler for NapiTickScheduler {
     fn query_runtime_waker(&self) -> Option<Waker> {
         Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
             callback: self.callback.clone(),
+            pending: Some(self.pending.clone()),
         })))
     }
 }
@@ -819,6 +848,7 @@ impl PendingNativeSubscription {
     pub fn set_wake(&self, callback: ThreadsafeFunction<String, ()>) {
         *self.wake.borrow_mut() = Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
             callback: std::sync::Arc::new(callback),
+            pending: None,
         })));
     }
 
@@ -2803,10 +2833,27 @@ impl NapiDb {
         .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
-    #[napi(js_name = "setTickScheduler")]
-    pub fn set_tick_scheduler(&self, callback: ThreadsafeFunction<String, ()>) -> napi::Result<()> {
+    #[napi(
+        js_name = "setTickScheduler",
+        ts_args_type = "callback: ((err: Error | null, arg: string) => void)"
+    )]
+    pub fn set_tick_scheduler(&self, callback: Function<'_, String, ()>) -> napi::Result<()> {
+        let pending = Arc::new(AtomicU8::new(0));
+        let delivered = pending.clone();
+        let callback = callback
+            .build_threadsafe_function::<String>()
+            .callee_handled::<true>()
+            .build_callback(move |context| {
+                // NAPI callbacks are separate host tasks: JS microtask coalescing
+                // cannot merge a native subscription burst after it is queued.
+                // Clear before calling JS so reentrant or concurrent progress
+                // can request the next turn without losing its wake.
+                delivered.fetch_and(!napi_wake_mask(&context.value), Ordering::AcqRel);
+                Ok(context.value)
+            })?;
         let scheduler = Rc::new(NapiTickScheduler {
             callback: std::sync::Arc::new(callback),
+            pending,
         });
         let db = self.inner.borrow();
         let db = db
@@ -4671,7 +4718,8 @@ impl JazzServer {
             opts.admin_secret.clone(),
             opts.backend_secret.clone(),
         )
-        .await;
+        .await
+        .map_err(napi::Error::from_reason)?;
 
         Ok(Self::from_inner(JazzServerInner::Core(server)))
     }
@@ -5182,7 +5230,8 @@ mod tests {
             "napi-stop-test-admin".to_owned(),
             "napi-stop-test-backend".to_owned(),
         )
-        .await;
+        .await
+        .expect("start NAPI test server");
         JazzServer::from_inner(JazzServerInner::Core(server))
     }
 
@@ -6087,7 +6136,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_claim_ingress_omits_recursive_json_but_keeps_scalar_prototype_names() {
+    fn identity_claim_ingress_preserves_nested_json_and_scalar_prototype_names() {
         let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
         let claims = crate::core_claims_from_json(
             author,
@@ -6100,8 +6149,8 @@ mod tests {
         )
         .expect("recursive metadata must not reject NAPI admission");
 
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("profile")));
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("mixed")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("profile")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("mixed")));
         assert_eq!(
             claims.get(&jazz::query::provider_claim_key("__proto__")),
             Some(&CoreValue::String("safe".to_owned()))

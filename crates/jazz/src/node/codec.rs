@@ -7,10 +7,7 @@
 
 use super::query_engine::{left_field, user_column_field};
 use super::*;
-use crate::protocol::{
-    CoveredInputEntry, ProgramSourceCoverageEntry, ProgramSourceId, ProgramSourceRole,
-    ResultRowLayer, RowVersionRefEntry, SnapshotRef,
-};
+use crate::protocol::{ResultRowLayer, SnapshotRef};
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
 use crate::tx::{
     BranchViewCopyBase, BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation,
@@ -202,14 +199,18 @@ impl records::RecordField for AuthorSubject {
 
 impl records::RecordField for RowAuthor {
     fn read_raw(bytes: &[u8], value_type: &records::ValueType) -> Result<Self, records::Error> {
-        RowAuthor::from_value(<Value as records::RecordField>::read_raw(
-            bytes, value_type,
-        )?)
-        .map_err(|_| records::Error::NonCanonicalRecord)
+        let records::ValueType::Record(descriptor) = value_type else {
+            return Err(records::Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        };
+        RowAuthor::from_record(descriptor.bind(bytes))
+            .map_err(|_| records::Error::NonCanonicalRecord)
     }
 
     fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
-        RowAuthor::from_value(record.get_idx(idx)?).map_err(|_| records::Error::NonCanonicalRecord)
+        RowAuthor::from_record(record.get_record(idx)?)
+            .map_err(|_| records::Error::NonCanonicalRecord)
     }
 
     fn to_value(&self) -> Value {
@@ -1901,29 +1902,74 @@ impl VersionRecord {
         schema_version: SchemaVersionId,
         authored_columns: Option<BTreeSet<String>>,
     ) -> Result<Self, Error> {
-        // Wire records remain the replicated immutable projection. Content and
-        // register rows now live in different storage tables, so projection at
-        // this API boundary is assembled from typed row accessors.
-        let cells = table
-            .columns
-            .iter()
-            .map(|column| stored.cell(table, &column.name))
-            .collect::<Result<Vec<_>, _>>()?;
-        VersionRecord::encode(
-            table,
+        let descriptor = version_record_descriptors(table).1;
+        let input = stored.record.borrowed();
+        let register = stored.is_register_record();
+        let raw = descriptor.create_with_encoded_fields::<Error>(
+            input.raw().len(),
+            |index, output| {
+                // Both stored layouts share the provenance prefix. Timestamps
+                // are packed HLC values in storage and milliseconds on wire.
+                let source = match index {
+                    0 => Some(HistoryRowRecord::FIELD_ROW_UUID_IDX),
+                    1 => Some(HistoryRowRecord::FIELD_PARENTS_IDX),
+                    2 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
+                    4 => Some(HistoryRowRecord::FIELD_UPDATED_BY_IDX),
+                    i if i >= WireRowRecord::USER_CELLS && !register => {
+                        Some(HistoryRowRecord::USER_CELLS + i - WireRowRecord::USER_CELLS)
+                    }
+                    _ => None,
+                };
+                if let Some(source) = source {
+                    let span = input.descriptor().field_span(input.raw(), source)?;
+                    output.extend_from_slice(&input.raw()[span]);
+                    return Ok(());
+                }
+                let value = match index {
+                    3 => Value::U64(stored.created_at().physical_ms()),
+                    5 => Value::U64(stored.updated_at().physical_ms()),
+                    6 => Value::Nullable(stored.deletion().map(|deletion| {
+                        Box::new(Value::EnumTag(match deletion {
+                            DeletionEvent::Deleted => 0,
+                            DeletionEvent::Restored => 1,
+                        }))
+                    })),
+                    _ => Value::Nullable(None),
+                };
+                descriptor.encode_field_into(index, &value, output)?;
+                Ok(())
+            },
+        )?;
+        #[cfg(test)]
+        {
+            // Application equality cannot detect changed durable bytes. Keep
+            // the former value-based encoder as an independent byte oracle.
+            let cells = table
+                .columns
+                .iter()
+                .map(|column| stored.cell(table, &column.name))
+                .collect::<Result<Vec<_>, _>>()?;
+            let expected = VersionRecord::encode(
+                table,
+                schema_version,
+                stored.row_uuid(),
+                stored.parents(),
+                stored.created_by(),
+                stored.created_at().physical_ms(),
+                stored.updated_by(),
+                stored.updated_at().physical_ms(),
+                &cells,
+                stored.deletion(),
+            )?;
+            assert_eq!(raw.as_slice(), expected.record().raw());
+        }
+        Ok(VersionRecord::new(
+            table.name.clone(),
             schema_version,
-            stored.row_uuid(),
-            stored.parents(),
-            stored.created_by(),
-            stored.created_at().physical_ms(),
-            stored.updated_by(),
-            stored.updated_at().physical_ms(),
-            &cells,
-            stored.deletion(),
+            OwnedRecord::new(raw, descriptor),
         )
-        .map(|record| record.with_branch_key(stored.branch_key().clone()))
-        .map(|record| record.with_authored_columns(authored_columns))
-        .map_err(Error::from)
+        .with_branch_key(stored.branch_key().clone())
+        .with_authored_columns(authored_columns))
     }
 }
 
@@ -2081,6 +2127,93 @@ pub(super) struct VersionRowParts {
     pub(super) deletion: Option<DeletionEvent>,
 }
 
+// Record layout depends on the table name (enum registry binding) and ordered
+// physical column shape, not defaults, indices, or policies. Compare the shape
+// itself: schema objects are mutable and a table name alone is insufficient.
+struct HistoryDescriptorCacheEntry {
+    table_name: String,
+    columns: Vec<(
+        String,
+        groove::schema::ColumnType,
+        crate::schema::LargeValueSemanticKind,
+    )>,
+    descriptor: records::RecordDescriptor,
+    wire_descriptor: records::RecordDescriptor,
+}
+
+#[cfg(test)]
+thread_local! {
+    static HISTORY_DESCRIPTOR_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn prepared_wire_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    version_record_descriptors(table).1
+}
+
+fn history_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    version_record_descriptors(table).0
+}
+
+fn version_record_descriptors(
+    table: &TableSchema,
+) -> (records::RecordDescriptor, records::RecordDescriptor) {
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<HistoryDescriptorCacheEntry>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(entry) = cache.iter().find(|entry| {
+            entry.table_name == table.name
+                && entry.columns.len() == table.columns.len()
+                && entry
+                    .columns
+                    .iter()
+                    .zip(&table.columns)
+                    .all(|((name, ty, kind), column)| {
+                        name == &column.name
+                            && ty == &column.column_type
+                            && kind == &column.large_value_kind
+                    })
+        }) {
+            return (entry.descriptor, entry.wire_descriptor);
+        }
+        #[cfg(test)]
+        HISTORY_DESCRIPTOR_BUILDS.with(|count| count.set(count.get() + 1));
+        let descriptor = table.authored_history_storage_table().record_schema();
+        let wire_descriptor = table.wire_record_descriptor();
+        // Bound retained preparation data even for applications with continual
+        // schema changes. Eviction affects preparation cost only, never bytes.
+        if cache.len() == 128 {
+            cache.remove(0);
+        }
+        cache.push(HistoryDescriptorCacheEntry {
+            table_name: table.name.clone(),
+            columns: table
+                .columns
+                .iter()
+                .map(|column| {
+                    (
+                        column.name.clone(),
+                        column.column_type.clone(),
+                        column.large_value_kind,
+                    )
+                })
+                .collect(),
+            descriptor,
+            wire_descriptor,
+        });
+        (descriptor, wire_descriptor)
+    })
+}
+
+pub(super) fn register_record_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    // Every table uses the same fixed deletion-register record fields.
+    static DESCRIPTOR: std::sync::OnceLock<records::RecordDescriptor> = std::sync::OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| table.register_storage_table().record_schema())
+}
+
 impl VersionRow {
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
@@ -2095,14 +2228,17 @@ impl VersionRow {
             history_values_from_parts(table, &parts)?
         };
         let record = if is_deletion {
-            owned_record_from_storage_values(&table.register_storage_table(), values)?
+            owned_record_from_storage_values_with_descriptor(
+                register_record_descriptor(table),
+                values,
+            )?
         } else {
             match history_descriptor {
                 Some(descriptor) => {
                     owned_record_from_storage_values_with_descriptor(descriptor, values)?
                 }
-                None => owned_record_from_storage_values(
-                    &table.authored_history_storage_table(),
+                None => owned_record_from_storage_values_with_descriptor(
+                    history_record_descriptor(table),
                     values,
                 )?,
             }
@@ -2133,34 +2269,115 @@ impl VersionRow {
                 "row version parents must be sorted and unique",
             ));
         }
-        let (storage_table, values) = if let Some(deletion) = version.deletion() {
-            (
-                table.register_storage_table(),
+        let deletion = version.deletion();
+        let descriptor = if deletion.is_some() {
+            register_record_descriptor(table)
+        } else {
+            history_record_descriptor(table)
+        };
+        let source = version.record().borrowed();
+        let source_descriptor = source.descriptor();
+        // Admission still requires an account-bearing row author, including the
+        // reserved SYSTEM identity. Preserve that check without rebuilding Values.
+        RowAuthor::from_persisted_subject(version.created_by())
+            .map_err(|_| Error::UnadmittedWriteAuthor)?;
+        RowAuthor::from_persisted_subject(version.updated_by())
+            .map_err(|_| Error::UnadmittedWriteAuthor)?;
+        let created_at = TxTime::from_physical_ms(version.created_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
+            .0;
+        let updated_at = TxTime::from_physical_ms(version.updated_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
+            .0;
+        let raw = descriptor.create_with_encoded_fields::<Error>(
+            source.raw().len() + 128,
+            |index, output| {
+                let source_index = match index {
+                    1 => Some(0),
+                    5 => Some(1),
+                    6 => Some(2),
+                    8 => Some(4),
+                    i if deletion.is_none() && i >= 10 && i < 10 + table.columns.len() => {
+                        Some(i - 10 + 7)
+                    }
+                    _ => None,
+                };
+                if let Some(source_index) = source_index {
+                    if source_descriptor
+                        .fields()
+                        .get(source_index)
+                        .is_some_and(|field| {
+                            field.value_type == descriptor.fields()[index].value_type
+                        })
+                    {
+                        let span = source_descriptor.field_span(source.raw(), source_index)?;
+                        output.extend_from_slice(&source.raw()[span]);
+                        return Ok(());
+                    }
+                }
+                let value = match index {
+                    0 => Value::Bytes(version.branch_key().canonical_bytes()),
+                    1 => Value::Uuid(version.row_uuid().0),
+                    2 => Value::U64(tx_time.0),
+                    3 => Value::U64(tx_node_alias.0),
+                    4 => Value::U64(schema_version_alias.0),
+                    5 => Value::Array(
+                        version
+                            .parents()
+                            .iter()
+                            .map(|parent| tx_id_value(*parent))
+                            .collect(),
+                    ),
+                    6 => row_author_value(version.created_by())?,
+                    7 => Value::U64(created_at),
+                    8 => row_author_value(version.updated_by())?,
+                    9 => Value::U64(updated_at),
+                    _ if deletion.is_some() => deletion_event_value(deletion.unwrap()),
+                    i if i < 10 + table.columns.len() => {
+                        let value = version.optional_cell_at(i - 10);
+                        if let Some(value) = value.as_ref() {
+                            validate_cell_value(&table.columns[i - 10], value)?;
+                        }
+                        Value::Nullable(value.map(Box::new))
+                    }
+                    _ => authored_column_ids_value(authored_columns.as_ref()),
+                };
+                descriptor.encode_field_into(index, &value, output)?;
+                Ok(())
+            },
+        )?;
+        #[cfg(test)]
+        {
+            // Compare the optimized representation boundary with the previous
+            // Value-based encoder across every ingress fixture in the unit suite.
+            let values = if let Some(deletion) = deletion {
                 register_values_from_wire(
                     version,
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
                     deletion,
-                )?,
-            )
-        } else {
-            (
-                table.authored_history_storage_table(),
+                )?
+            } else {
                 history_values_from_wire(
                     table,
                     version,
-                    authored_columns,
+                    authored_columns.clone(),
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
-                )?,
-            )
-        };
+                )?
+            };
+            assert_eq!(
+                raw,
+                descriptor.create(&values)?,
+                "borrowed wire ingest changed storage bytes"
+            );
+        }
         Ok(Self {
             table: groove::Intern::new(version.table().to_owned()),
             branch_key: version.branch_key().clone(),
-            record: owned_record_from_storage_values(&storage_table, values)?,
+            record: OwnedRecord::new(raw, descriptor),
         })
     }
 
@@ -2233,10 +2450,10 @@ impl VersionRow {
         } else {
             HistoryRowRecord::FIELD_CREATED_BY_IDX
         };
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(idx)
+                .get_record(idx)
                 .expect("valid created_by"),
         )
         .expect("canonical created_by")
@@ -2263,10 +2480,10 @@ impl VersionRow {
         } else {
             HistoryRowRecord::FIELD_UPDATED_BY_IDX
         };
-        RowAuthor::from_value(
+        RowAuthor::from_record(
             self.record
                 .borrowed()
-                .get_idx(idx)
+                .get_record(idx)
                 .expect("valid updated_by"),
         )
         .expect("canonical updated_by")
@@ -3273,12 +3490,6 @@ pub(super) fn contribution_merge_from_storage_record(
     Ok(provenance)
 }
 
-// Only authority-approved source closure facts have a durable representation.
-// V1 has exactly two dense tags; every other tag fails closed.
-const PROGRAM_FACT_STORAGE_MAGIC: &[u8; 4] = b"JPFK";
-const PROGRAM_FACT_STORAGE_VERSION: u8 = 1;
-const MAX_PROGRAM_FACT_STORAGE_BYTES: usize = 1024 * 1024;
-const MAX_PROGRAM_FACT_NESTING: usize = 32;
 const MAX_RUNTIME_RESULT_IDENTITY_BYTES: usize = 1024 * 1024;
 
 fn runtime_result_value_descriptor() -> records::RecordDescriptor {
@@ -3306,337 +3517,6 @@ pub(super) fn runtime_result_identity_bytes(
         ));
     }
     Ok(encoded)
-}
-
-struct ProgramFactStorageReader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> ProgramFactStorageReader<'a> {
-    fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .filter(|end| *end <= self.bytes.len())
-            .ok_or(Error::InvalidStoredValue(
-                "settled program fact encoding is truncated",
-            ))?;
-        let value = &self.bytes[self.offset..end];
-        self.offset = end;
-        Ok(value)
-    }
-    fn u8(&mut self) -> Result<u8, Error> {
-        Ok(self.take(1)?[0])
-    }
-    fn u32(&mut self) -> Result<u32, Error> {
-        Ok(u32::from_le_bytes(
-            self.take(4)?.try_into().expect("length checked"),
-        ))
-    }
-    fn u64(&mut self) -> Result<u64, Error> {
-        Ok(u64::from_le_bytes(
-            self.take(8)?.try_into().expect("length checked"),
-        ))
-    }
-    fn bytes(&mut self) -> Result<Vec<u8>, Error> {
-        let len = usize::try_from(self.u32()?)
-            .map_err(|_| Error::InvalidStoredValue("settled program fact length is too large"))?;
-        if len > MAX_PROGRAM_FACT_STORAGE_BYTES {
-            return Err(Error::InvalidStoredValue(
-                "settled program fact field is too large",
-            ));
-        }
-        Ok(self.take(len)?.to_vec())
-    }
-    fn string(&mut self) -> Result<String, Error> {
-        String::from_utf8(self.bytes()?)
-            .map_err(|_| Error::InvalidStoredValue("settled program fact string is invalid UTF-8"))
-    }
-    fn uuid(&mut self) -> Result<uuid::Uuid, Error> {
-        Ok(uuid::Uuid::from_bytes(
-            self.take(16)?.try_into().expect("length checked"),
-        ))
-    }
-    fn finish(&self) -> Result<(), Error> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(Error::InvalidStoredValue(
-                "settled program fact encoding has trailing bytes",
-            ))
-        }
-    }
-}
-
-fn program_fact_put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), Error> {
-    bytes.extend_from_slice(
-        &u32::try_from(value)
-            .map_err(|_| Error::InvalidStoredValue("settled program fact length is too large"))?
-            .to_le_bytes(),
-    );
-    Ok(())
-}
-fn program_fact_put_bytes(bytes: &mut Vec<u8>, value: &[u8]) -> Result<(), Error> {
-    if value.len() > MAX_PROGRAM_FACT_STORAGE_BYTES {
-        return Err(Error::InvalidStoredValue(
-            "settled program fact field is too large",
-        ));
-    }
-    program_fact_put_u32(bytes, value.len())?;
-    bytes.extend_from_slice(value);
-    Ok(())
-}
-fn program_fact_put_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), Error> {
-    program_fact_put_bytes(bytes, value.as_bytes())
-}
-fn program_fact_put_uuid(bytes: &mut Vec<u8>, value: uuid::Uuid) {
-    bytes.extend_from_slice(value.as_bytes());
-}
-fn program_fact_put_tx(bytes: &mut Vec<u8>, value: TxId) {
-    bytes.extend_from_slice(&value.time.0.to_le_bytes());
-    program_fact_put_uuid(bytes, value.node.0);
-}
-fn program_fact_tx(reader: &mut ProgramFactStorageReader<'_>) -> Result<TxId, Error> {
-    Ok(TxId::new(TxTime(reader.u64()?), NodeUuid(reader.uuid()?)))
-}
-fn program_fact_put_option<T>(
-    bytes: &mut Vec<u8>,
-    value: &Option<T>,
-    put: impl FnOnce(&mut Vec<u8>, &T) -> Result<(), Error>,
-) -> Result<(), Error> {
-    match value {
-        None => bytes.push(0),
-        Some(value) => {
-            bytes.push(1);
-            put(bytes, value)?;
-        }
-    };
-    Ok(())
-}
-fn program_fact_option<T>(
-    reader: &mut ProgramFactStorageReader<'_>,
-    get: impl FnOnce(&mut ProgramFactStorageReader<'_>) -> Result<T, Error>,
-) -> Result<Option<T>, Error> {
-    match reader.u8()? {
-        0 => Ok(None),
-        1 => get(reader).map(Some),
-        _ => Err(Error::InvalidStoredValue(
-            "settled program fact option tag is invalid",
-        )),
-    }
-}
-
-fn program_fact_put_source(bytes: &mut Vec<u8>, value: &ProgramSourceId) -> Result<(), Error> {
-    if !value.is_wire_valid() || value.path.len() > MAX_PROGRAM_FACT_NESTING {
-        return Err(Error::InvalidStoredValue(
-            "settled program fact source identity is invalid",
-        ));
-    }
-    program_fact_put_string(bytes, value.table.as_str())?;
-    program_fact_put_u32(bytes, value.path.len())?;
-    for role in &value.path {
-        match role {
-            ProgramSourceRole::Root => bytes.push(0),
-            ProgramSourceRole::Alias(name) => {
-                bytes.push(1);
-                program_fact_put_string(bytes, name)?;
-            }
-            ProgramSourceRole::RecursiveSeed(name) => {
-                bytes.push(2);
-                program_fact_put_string(bytes, name)?;
-            }
-            ProgramSourceRole::RecursiveStep(name) => {
-                bytes.push(3);
-                program_fact_put_string(bytes, name)?;
-            }
-            ProgramSourceRole::CorrelatedChild(name) => {
-                bytes.push(4);
-                program_fact_put_string(bytes, name)?;
-            }
-            ProgramSourceRole::Policy(name) => {
-                bytes.push(5);
-                program_fact_put_string(bytes, name)?;
-            }
-        }
-    }
-    Ok(())
-}
-fn program_fact_source(
-    reader: &mut ProgramFactStorageReader<'_>,
-) -> Result<ProgramSourceId, Error> {
-    let table: groove::Intern<String> = reader.string()?.into();
-    let len = usize::try_from(reader.u32()?)
-        .map_err(|_| Error::InvalidStoredValue("settled program fact source path is too large"))?;
-    if len == 0 || len > MAX_PROGRAM_FACT_NESTING {
-        return Err(Error::InvalidStoredValue(
-            "settled program fact source identity is invalid",
-        ));
-    }
-    let mut path = Vec::with_capacity(len);
-    for _ in 0..len {
-        path.push(match reader.u8()? {
-            0 => ProgramSourceRole::Root,
-            1 => ProgramSourceRole::Alias(reader.string()?),
-            2 => ProgramSourceRole::RecursiveSeed(reader.string()?),
-            3 => ProgramSourceRole::RecursiveStep(reader.string()?),
-            4 => ProgramSourceRole::CorrelatedChild(reader.string()?),
-            5 => ProgramSourceRole::Policy(reader.string()?),
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "settled program fact source role tag is invalid",
-                ));
-            }
-        });
-    }
-    let source = ProgramSourceId { table, path };
-    if !source.is_wire_valid() || source.path.len() > MAX_PROGRAM_FACT_NESTING {
-        return Err(Error::InvalidStoredValue(
-            "settled program fact source identity is invalid",
-        ));
-    }
-    Ok(source)
-}
-fn program_fact_put_version(bytes: &mut Vec<u8>, value: &RowVersionRefEntry) -> Result<(), Error> {
-    program_fact_put_tx(bytes, value.tx);
-    program_fact_put_option(bytes, &value.schema_version, |b, v| {
-        program_fact_put_uuid(b, v.0);
-        Ok(())
-    })?;
-    bytes.push(match value.layer {
-        ResultRowLayer::Content => 0,
-        ResultRowLayer::Deletion => 1,
-        ResultRowLayer::ContentOrDeletion => 2,
-    });
-    program_fact_put_option(bytes, &value.batch, |b, v| {
-        program_fact_put_tx(b, *v);
-        Ok(())
-    })?;
-    program_fact_put_option(bytes, &value.branch_or_prefix, |b, v: &Vec<u8>| {
-        program_fact_put_bytes(b, v)
-    })?;
-    program_fact_put_option(bytes, &value.row_digest, |b, v: &Vec<u8>| {
-        program_fact_put_bytes(b, v)
-    })
-}
-fn program_fact_version(
-    reader: &mut ProgramFactStorageReader<'_>,
-) -> Result<RowVersionRefEntry, Error> {
-    let tx = program_fact_tx(reader)?;
-    let schema_version = program_fact_option(reader, |r| Ok(SchemaVersionId(r.uuid()?)))?;
-    let layer = match reader.u8()? {
-        0 => ResultRowLayer::Content,
-        1 => ResultRowLayer::Deletion,
-        2 => ResultRowLayer::ContentOrDeletion,
-        _ => {
-            return Err(Error::InvalidStoredValue(
-                "settled program fact row layer tag is invalid",
-            ));
-        }
-    };
-    let batch = program_fact_option(reader, program_fact_tx)?;
-    let branch_or_prefix = program_fact_option(reader, |r| r.bytes())?;
-    let row_digest = program_fact_option(reader, |r| r.bytes())?;
-    Ok(RowVersionRefEntry {
-        tx,
-        schema_version,
-        layer,
-        batch,
-        branch_or_prefix,
-        row_digest,
-    })
-}
-pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<u8>, Error> {
-    let mut bytes = Vec::with_capacity(128);
-    bytes.extend_from_slice(PROGRAM_FACT_STORAGE_MAGIC);
-    bytes.push(PROGRAM_FACT_STORAGE_VERSION);
-    match fact {
-        ProgramFactEntry::ProgramSourceCoverage(v) => {
-            bytes.push(0);
-            program_fact_put_source(&mut bytes, &v.source)?;
-            bytes.push(u8::from(v.complete));
-        }
-        ProgramFactEntry::CoveredInput(v) => {
-            if !v.is_wire_valid() {
-                return Err(Error::InvalidStoredValue(
-                    "settled covered input identity is invalid",
-                ));
-            }
-            bytes.push(1);
-            program_fact_put_source(&mut bytes, &v.source)?;
-            program_fact_put_string(&mut bytes, v.version_table.as_str())?;
-            program_fact_put_uuid(&mut bytes, v.source_row.0);
-            program_fact_put_version(&mut bytes, &v.version)?;
-        }
-        _ => {
-            return Err(Error::InvalidStoredValue(
-                "only source closure facts may be persisted",
-            ));
-        }
-    }
-    if bytes.len() > MAX_PROGRAM_FACT_STORAGE_BYTES {
-        return Err(Error::InvalidStoredValue(
-            "settled program fact is too large",
-        ));
-    }
-    Ok(bytes)
-}
-
-pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramFactEntry, Error> {
-    if encoded.len() > MAX_PROGRAM_FACT_STORAGE_BYTES
-        || encoded.len() < 6
-        || &encoded[..4] != PROGRAM_FACT_STORAGE_MAGIC
-        || encoded[4] != PROGRAM_FACT_STORAGE_VERSION
-    {
-        return Err(Error::InvalidStoredValue(
-            "settled program fact encoding is invalid or unsupported",
-        ));
-    }
-    let mut r = ProgramFactStorageReader {
-        bytes: encoded,
-        offset: 5,
-    };
-    let tag = r.u8()?;
-    let fact = match tag {
-        0 => ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
-            source: program_fact_source(&mut r)?,
-            complete: match r.u8()? {
-                0 => false,
-                1 => true,
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "settled program fact boolean is invalid",
-                    ));
-                }
-            },
-        }),
-        1 => {
-            let input = CoveredInputEntry {
-                source: program_fact_source(&mut r)?,
-                version_table: r.string()?.into(),
-                source_row: RowUuid(r.uuid()?),
-                version: program_fact_version(&mut r)?,
-            };
-            if !input.is_wire_valid() {
-                return Err(Error::InvalidStoredValue(
-                    "settled covered input identity is invalid",
-                ));
-            }
-            ProgramFactEntry::CoveredInput(input)
-        }
-        _ => {
-            return Err(Error::InvalidStoredValue(
-                "settled source closure fact tag is invalid",
-            ));
-        }
-    };
-    r.finish()?;
-    if program_fact_storage_bytes(&fact)? != encoded {
-        return Err(Error::InvalidStoredValue(
-            "settled program fact encoding is not canonical",
-        ));
-    }
-    Ok(fact)
 }
 
 pub(super) fn transaction_values(
@@ -4063,6 +3943,7 @@ pub(super) fn history_values_from_parts(
     Ok(values)
 }
 
+#[cfg(test)]
 fn history_values_from_wire(
     table: &TableSchema,
     version: &VersionRecord,
@@ -4134,6 +4015,7 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
     ])
 }
 
+#[cfg(test)]
 fn register_values_from_wire(
     version: &VersionRecord,
     tx_node_alias: NodeAlias,
@@ -4221,6 +4103,7 @@ fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Erro
     ])
 }
 
+#[cfg(test)]
 pub(super) fn global_current_values(
     table: &TableSchema,
     version: &VersionRow,
@@ -4992,158 +4875,95 @@ pub(super) fn version_layer_string(layer: VersionLayer) -> String {
 mod authority_storage_codec_tests {
     use super::*;
 
-    fn tx(time: u64, node: u8) -> TxId {
-        TxId::new(TxTime(time), NodeUuid::from_bytes([node; 16]))
-    }
-
-    fn fixture_version() -> RowVersionRefEntry {
-        RowVersionRefEntry {
-            tx: tx(31, 0x33),
-            schema_version: Some(SchemaVersionId::from_bytes([0x34; 16])),
-            layer: ResultRowLayer::ContentOrDeletion,
-            batch: Some(tx(32, 0x35)),
-            branch_or_prefix: Some(vec![0x36]),
-            row_digest: Some(vec![0x37]),
-        }
-    }
-
-    fn fixture_source_with_all_roles() -> ProgramSourceId {
-        ProgramSourceId {
-            table: "tasks".to_owned().into(),
-            path: vec![
-                ProgramSourceRole::Root,
-                ProgramSourceRole::Alias("self".to_owned()),
-                ProgramSourceRole::RecursiveSeed("seed".to_owned()),
-                ProgramSourceRole::RecursiveStep("step".to_owned()),
-                ProgramSourceRole::CorrelatedChild("items".to_owned()),
-                ProgramSourceRole::Policy("read".to_owned()),
-            ],
-        }
-    }
-
-    // This is necessarily an internal test: raw durable keys are an engine
-    // boundary. Peer authority receipts persist only exact source-closure
-    // facts; lock those surviving tags and bytes without preserving retired
-    // authority-output fixtures as a compatibility contract.
+    // Internal because application values cannot reveal descriptor construction
+    // frequency or accidental reuse of a different physical enum registry.
     #[test]
-    fn peer_source_closure_storage_codec_has_permanent_tags_and_exact_fixtures() {
-        let version = fixture_version();
-        let facts = vec![
-            ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
-                source: fixture_source_with_all_roles(),
-                complete: true,
-            }),
-            ProgramFactEntry::CoveredInput(CoveredInputEntry {
-                source: fixture_source_with_all_roles(),
-                version_table: "a".to_owned().into(),
-                source_row: RowUuid::from_bytes([38; 16]),
-                version: version.clone(),
-            }),
-        ];
-        let encoded = facts
-            .iter()
-            .map(|fact| program_fact_storage_bytes(fact).unwrap())
-            .collect::<Vec<_>>();
-        for (expected_tag, (fact, bytes)) in [0, 1].into_iter().zip(facts.iter().zip(&encoded)) {
-            assert_eq!(&bytes[..4], PROGRAM_FACT_STORAGE_MAGIC);
-            assert_eq!(bytes[4], PROGRAM_FACT_STORAGE_VERSION);
-            assert_eq!(usize::from(bytes[5]), expected_tag);
-            assert_eq!(program_fact_from_storage_bytes(bytes).unwrap(), *fact);
+    fn version_descriptor_preparation_tracks_exact_schema_shape() {
+        use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+        let table = |name: &str, ty: ColumnType| {
+            JazzSchema::new(
+                &SchemaBuilder::new()
+                    .table(TableSchemaBuilder::new(name).column("payload", ty))
+                    .build(),
+            )
+            .unwrap()
+            .tables()[0]
+                .clone()
+        };
+        let text = table("descriptor_cache_test", ColumnType::Text);
+        let json = table("descriptor_cache_test", ColumnType::Json { schema: None });
+        let integer = table("descriptor_cache_test", ColumnType::Integer);
+        let enum_type = || ColumnType::ScalarEnum {
+            name: "state".into(),
+            variants: vec!["a".into(), "b".into()],
+        };
+        let enum_a = table("descriptor_cache_enum_a", enum_type());
+        let enum_b = table("descriptor_cache_enum_b", enum_type());
+        HISTORY_DESCRIPTOR_BUILDS.with(|count| count.set(0));
+        for table in [&text, &json, &integer, &enum_a, &enum_b] {
+            let expected = table.authored_history_storage_table().record_schema();
+            for _ in 0..100 {
+                assert_eq!(history_record_descriptor(table), expected);
+                assert_eq!(
+                    version_record_descriptors(table).1,
+                    table.wire_record_descriptor()
+                );
+                assert_eq!(
+                    register_record_descriptor(table),
+                    table.register_storage_table().record_schema()
+                );
+            }
+        }
+        assert_eq!(HISTORY_DESCRIPTOR_BUILDS.with(|count| count.get()), 5);
+        assert_ne!(
+            history_record_descriptor(&text),
+            history_record_descriptor(&json)
+        );
+        assert_ne!(
+            history_record_descriptor(&enum_a),
+            history_record_descriptor(&enum_b)
+        );
+        // Eviction must change only cost, not the selected record layout.
+        for index in 0..140 {
+            let other = table(
+                &format!("descriptor_cache_eviction_{index}"),
+                ColumnType::Text,
+            );
+            assert_eq!(
+                history_record_descriptor(&other),
+                other.authored_history_storage_table().record_schema()
+            );
         }
         assert_eq!(
-            encoded
-                .iter()
-                .map(|bytes| blake3::hash(bytes).to_hex().to_string())
-                .collect::<Vec<_>>(),
-            [
-                "fd98cfd31889fdf348eb52bdfe3f3cbf6ad4e9edcb3b1a0480d31ba79fc0bad8",
-                "793d84bda68361aa771f48cb27dfc111207e982ea0a297abbc5b5515d94416c5",
-            ]
+            history_record_descriptor(&text),
+            text.authored_history_storage_table().record_schema()
         );
     }
 
+    // Internal: these names are engine-owned lookup keys, not an application API.
     #[test]
-    fn covered_input_source_codec_pins_every_role_and_rejects_malformed_paths() {
-        let fact = ProgramFactEntry::CoveredInput(CoveredInputEntry {
-            source: fixture_source_with_all_roles(),
-            version_table: "tasks".to_owned().into(),
-            source_row: RowUuid::from_bytes([0x38; 16]),
-            version: fixture_version(),
-        });
-        let encoded = program_fact_storage_bytes(&fact).unwrap();
-        assert_eq!(
-            hex::encode(&encoded),
-            "4a50464b0101050000007461736b730600000000010400000073656c6602040000007365656403040000007374657004050000006974656d73050400000072656164050000007461736b73383838383838383838383838383838381f000000000000003333333333333333333333333333333301343434343434343434343434343434340201200000000000000035353535353535353535353535353535010100000036010100000037"
-        );
-        assert_eq!(program_fact_from_storage_bytes(&encoded).unwrap(), fact);
-
-        let source_offset = 6 + 4 + "tasks".len() + 4;
-        let mut unknown_role = encoded.clone();
-        unknown_role[source_offset] = 0xff;
-        assert!(program_fact_from_storage_bytes(&unknown_role).is_err());
-
-        let mut empty_path = encoded.clone();
-        let path_len_offset = 6 + 4 + "tasks".len();
-        empty_path[path_len_offset..path_len_offset + 4].copy_from_slice(&0_u32.to_le_bytes());
-        empty_path.remove(source_offset);
-        assert!(program_fact_from_storage_bytes(&empty_path).is_err());
-
-        let empty_alias = ProgramFactEntry::CoveredInput(CoveredInputEntry {
-            source: ProgramSourceId {
-                table: "tasks".to_owned().into(),
-                path: vec![ProgramSourceRole::Alias(String::new())],
-            },
-            version_table: "tasks".to_owned().into(),
-            source_row: RowUuid::from_bytes([0x39; 16]),
-            version: fixture_version(),
-        });
-        assert!(program_fact_storage_bytes(&empty_alias).is_err());
-
-        let mut trailing = encoded;
-        trailing.push(0);
-        assert!(program_fact_from_storage_bytes(&trailing).is_err());
-    }
-
-    #[test]
-    fn source_closure_storage_rejects_unknown_tags_and_malformed_bytes() {
-        // Internal codec boundary: callers cannot inject raw store bytes publicly.
-        let output = ProgramFactEntry::ResultPayload(crate::protocol::ResultMemberPayloadEntry {
-            member: ResultMemberEntry::row((
-                "todos".to_owned().into(),
-                RowUuid::from_bytes([0x11; 16]),
-                tx(7, 0x22),
-            )),
-            descriptor: Vec::new(),
-            record: Vec::new(),
-        });
-        assert!(matches!(
-            program_fact_storage_bytes(&output),
-            Err(Error::InvalidStoredValue(
-                "only source closure facts may be persisted"
-            ))
-        ));
-        let fact = ProgramFactEntry::ProgramSourceCoverage(ProgramSourceCoverageEntry {
-            source: fixture_source_with_all_roles(),
-            complete: true,
-        });
-        let encoded = program_fact_storage_bytes(&fact).unwrap();
-        for tag in (0..=255).filter(|tag| ![0, 1].contains(tag)) {
-            let mut unknown = encoded.clone();
-            unknown[5] = tag;
-            assert!(program_fact_from_storage_bytes(&unknown).is_err());
+    fn physical_version_name_resolution_preserves_exact_constructor_spelling() {
+        for id in [0, 1, 10, 1000, u64::MAX] {
+            let id = PhysicalTableId(id);
+            for (name, deletion) in [
+                (physical_history_table_name(id), false),
+                (physical_register_table_name(id), true),
+            ] {
+                assert_eq!(physical_version_table_id(&name, deletion), Some(id));
+                assert_eq!(physical_version_table_id(&name, !deletion), None);
+            }
         }
-        let mut wrong_version = encoded.clone();
-        wrong_version[4] += 1;
-        assert!(program_fact_from_storage_bytes(&wrong_version).is_err());
-        let mut trailing = encoded.clone();
-        trailing.push(0);
-        assert!(program_fact_from_storage_bytes(&trailing).is_err());
-        let mut noncanonical = encoded.clone();
-        *noncanonical.last_mut().unwrap() = 2;
-        assert!(program_fact_from_storage_bytes(&noncanonical).is_err());
-        for end in 0..encoded.len() {
-            assert!(program_fact_from_storage_bytes(&encoded[..end]).is_err());
+        for name in [
+            "jazz_physical__history",
+            "jazz_physical_01_history",
+            "jazz_physical_+1_history",
+            "jazz_physical_-1_history",
+            "jazz_physical_18446744073709551616_history",
+            "jazz_physical_1_history_extra",
+            "jazz_physical_1a_history",
+            "jazz_deletion_history",
+        ] {
+            assert_eq!(physical_version_table_id(name, false), None, "{name}");
         }
-        assert!(program_fact_from_storage_bytes(&postcard::to_allocvec(&fact).unwrap()).is_err());
     }
 }

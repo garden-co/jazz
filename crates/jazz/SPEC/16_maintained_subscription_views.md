@@ -83,41 +83,44 @@ not by accumulated view state. `groove/SPEC/INVARIANTS.md::INV-MV-1` and the mai
 differential oracle prove observable equivalence; they do not justify a
 full-state rebuild or full-state diff on the maintained path.
 
-#### Durable source closure facts
+#### Volatile subscription scope and retired cache stores
 
-`INV-QUERY-36` — Only `ProgramSourceCoverage` and `CoveredInput` have a
-persisted fact representation. The `jazz_settled_program_facts` direct store
-uses the authority prefix `[shape UUID, binding UUID, read-view UUID,
-policy-presence U8, policy-directory digest Bytes]`, followed by a 32-byte
-BLAKE3 derived key in domain `jazz.settled-program-fact-key.v1`. Its single
-`fact: Bytes` value contains the canonical fact whose bytes derive that digest.
-The policy directory and known-state source-closure generation remain separate
-validated stores. The receiver rebuilds terminal results through local IVM over
-these covered source versions; no output row or result member is recovered.
+Native rows, transaction history, pending writes and catalogue data persist.
+Subscription membership, source-closure generations, live settlement and
+body-dedup cursors are process-local. Reopen does not recover any authority
+scope or delta predecessor. Local-first evaluates eligible local data plus
+pending writes. Remote waits for a fresh complete v2 supporting snapshot;
+remote-if-possible does the same online and uses local knowledge only after
+explicit disconnect. Retaining native bytes does not prove remote membership.
 
-The fact bytes are ASCII `JPFK`, version byte `1`, then dense tag byte `0` for
-`ProgramSourceCoverage` or `1` for `CoveredInput`. Every other tag rejects.
-There is no persisted result-member store, `JRME`, or `JRSE` format.
+Local-current queries read retained Global-current and Ahead-current rows;
+they do not require a recovered node-wide read timestamp. Native transaction
+recovery preserves sparse causal dots on partial replicas. Neither the maximum
+retained transaction time nor a discarded subscription cursor is promoted to
+a complete-history frontier. Only history-complete nodes have that guarantee;
+remote query settlement remains an exact live subscription claim.
 
-- Tag `0`: source identity, then one boolean byte (`0` incomplete, `1` complete).
-- Tag `1`: source identity, version-table string, source-row UUID, version ref.
-- A string/byte field is little-endian `U32` byte length then exact bytes;
-  strings must be UTF-8. UUIDs are exactly 16 bytes. A source identity is its
-  table string followed by `U32` path length and ordered roles: `0` root,
-  `1` alias, `2` recursive seed, `3` recursive step, `4` correlated child,
-  `5` policy; every non-root role has one following string. Paths contain
-  1–32 roles and must satisfy the protocol's canonical source-identity rules.
-- A version ref is transaction (`U64` time, node UUID), optional schema UUID,
-  layer byte (`0` content, `1` deletion, `2` content-or-deletion), optional
-  batch transaction, optional branch/prefix bytes, optional row-digest bytes.
-  Each option is byte `0` absent or byte `1` followed by the declared value.
-  Covered-input table, row, and version identity must be wire-valid.
+The reserved `jazz_known_state_facts` and `jazz_settled_program_facts` stores
+are opened solely to delete historical cache entries. Their JPFK/JSIR payloads,
+keys and cursors are not interpreted as authority evidence, including malformed
+retired payloads. No new scope writer, encoder or decoder exists. The closed
+storage profile retains `jazz.subscription-program-fact-key.v1` as a reserved
+legacy family ID so old roots open; this does not introduce a new encoding or
+reuse that ID for new values. Native storage encodings and manifests remain
+unchanged. Shared policy/availability metadata has independent consumers and
+is not discarded with the scope cache.
 
-Total and individual byte fields are bounded to 1 MiB. Recovery validates the
-entire closure before resident query-state mutation: malformed, truncated,
-unknown-version/tag, trailing, noncanonical, oversized, or invalid source
-identity encodings reject. Add, remove, rewrite, and reopen use the same codec.
-The runtime protocol enum's serde layout is never a durable fact format.
+`legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows`
+pins both retired byte generations and native/pending retention;
+`retired_scope_payloads_never_restore_authority` covers malformed retired
+payloads. Cleanup must finish successfully before open returns; partial cleanup
+is safe to retry because no durable cursor or scope is ever recovered.
+
+Active subscriptions still maintain exact physical membership and predecessor
+revisions in memory. A retained process may use its own valid unevicted cursor
+for native-body dedup on reconnect, but a new process starts without one.
+Missing payloads remain subject to exact scoped repair. Eviction invalidates
+process-local scope/cursors before deleting any native bodies.
 
 #### Typed identity descriptor roles
 
@@ -154,7 +157,9 @@ The concrete v1 byte contracts are:
 - Immutable-version row blob: ASCII `JVRR`, byte `1`, descriptor byte length as
   little-endian `U32`, exactly that many Groove persisted-descriptor bytes, then
   canonical row bytes consuming the remainder. The enclosing sync message owns
-  the blob length and retains, in its declared order, table, schema UUID, branch,
+  the blob length (canonical Postcard unsigned varint followed by exactly that
+  many raw bytes; identical for a byte blob and a sequence of `u8`) and retains,
+  in its declared order, table, schema UUID, branch,
   this row blob, and authored-column set. The row blob is not a serde tuple of
   `RecordDescriptor` and bytes. Both unknown versions and the former incidental
   `OwnedRecord` representation are rejected.
@@ -329,6 +334,13 @@ edge/core connection is stalled. Ordinary upstream propagation remains enabled
 when requested. A standalone durable runtime can read its local storage directly
 and does not acquire this foreground delivery prerequisite.
 
+Within a live usage's lifetime, its applied-delivery generation remains
+monotonic across catalogue runtime rebuilds and cache eviction. These operations
+discard all authority proof, membership, and source predecessors; retaining the
+counter alone never establishes readiness. A fresh accepted delivery must still
+advance beyond any generation captured by an outstanding read. Process restart
+and final usage retirement may discard the counter.
+
 Source membership and stored row state are distinct. Scope withdrawal neither
 deletes nor redacts previously downloaded content. An actually admitted deletion
 version, however, updates locally known row state and suppresses that row in
@@ -390,10 +402,9 @@ equal-shaped predecessor's terminal cache or execute a separate semantic scan.
 Only final-pin release retires the stream. A subsequent usage opens a new wire
 identity; a retired stream's late reply cannot satisfy it. The receiver validates
 one ordered predecessor sequence, not duplicate sequences per local listener.
-A persisted settlement cursor alone cannot restore a claimed source closure:
-the complete source manifest and facts must accompany recovered cache state.
-A new usage after retirement awaits a fresh authority closure instead of lazily
-reviving only the old cursor.
+A process restart restores no scope or settlement cursor. A new remote usage
+awaits a fresh authority snapshot; a local-first usage reads eligible native
+data without reconstructing any old query membership.
 
 Sharing is determined by the lowered authority request, including its query,
 binding, read view, and policy scope. Downstream local-first and remote reads
@@ -834,12 +845,12 @@ Decision, Anselm 2026-08-07: the empty global aggregate row is **inside** the
 maintained surface, and follows SQL. A scalar global aggregate over no input
 rows delivers a present row reporting `0` for `count` and `NULL` for `sum`,
 `avg`, `min` and `max` — the same result a one-shot read produces, as ch. 6
-§6.4.2 requires. This chapter previously excluded it, which could not hold once
+§6.4.4 requires. This chapter previously excluded it, which could not hold once
 `groove/SPEC/3_queries_operators.md` specified the one-shot behaviour: a
 one-shot read would return a row where a subscription over the same query
 returned nothing.
 
-Its identity is the one already required by ch. 6 §6.4.3 `INV-QUERY-30`: a
+Its identity is the one already required by ch. 6 §6.4.4 `INV-QUERY-30`: a
 scalar global aggregate lowers to one fixed synthetic identity. That identity
 does not depend on a group key, so the empty case needs no special derivation —
 which is what makes the empty global row expressible at all. The empty row is

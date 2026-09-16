@@ -21,7 +21,7 @@ fi
 # the suites that GitHub will run. Check this before the producer admission so
 # an unsafe inherited control always gets its own actionable diagnostic.
 if [[ "${JAZZ_REQUIRE_CI_TEST_COMMANDS:-0}" == "1" ]]; then
-  for override in JAZZ_NODE_TEST_COMMAND JAZZ_BROWSER_TEST_COMMAND JAZZ_SKIP_JAZZ_TOOLS_BUILD; do
+  for override in JAZZ_NODE_TEST_COMMAND JAZZ_BROWSER_TEST_COMMAND JAZZ_SKIP_JAZZ_TOOLS_BUILD JAZZ_TEST_LOG_INTERVAL_SECONDS; do
     if printenv "${override}" >/dev/null 2>&1; then
       echo "${override} is a test-harness override and is forbidden by the CI-equivalent partition" >&2
       exit 1
@@ -55,6 +55,12 @@ node_tests_command=${JAZZ_NODE_TEST_COMMAND:-"pnpm test --filter=!moon-lander-re
 browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser"}
 node_tests_pid=""
 browser_tests_pid=""
+log_monitor_pid=""
+log_interval=${JAZZ_TEST_LOG_INTERVAL_SECONDS:-30}
+if [[ ! "${log_interval}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "JAZZ_TEST_LOG_INTERVAL_SECONDS must be a positive integer" >&2
+  exit 1
+fi
 log_dir=${RUNNER_TEMP:-/tmp}
 node_tests_log="${log_dir}/jazz-node-tests-$$.log"
 browser_tests_log="${log_dir}/jazz-browser-tests-$$.log"
@@ -82,8 +88,56 @@ if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
   export JAZZ_TEST_SEALED_TOOLS_DIST=1
 fi
 
+stop_log_monitor() {
+  if [[ -n "${log_monitor_pid}" ]]; then
+    kill -TERM -- "-${log_monitor_pid}" 2>/dev/null || true
+    wait "${log_monitor_pid}" 2>/dev/null || true
+    log_monitor_pid=""
+  fi
+}
+
+print_log_tail() {
+  local suite_log=$1
+  echo "--- ${suite_log} (last 16 KiB, at most 100 lines) ---"
+  if [[ -f "${suite_log}" ]]; then
+    tail -c 16384 "${suite_log}" | tail -n 100 || true
+    echo
+  fi
+}
+
+print_log_tails() {
+  print_log_tail "${node_tests_log}"
+  print_log_tail "${browser_tests_log}"
+}
+
+monitor_logs() {
+  # Cancellation may kill an outer Node/container process without delivering
+  # a trappable signal here. Publish progress beforehand, and stop within one
+  # tick if this runner disappears without invoking its cleanup trap.
+  local elapsed=0 index size
+  local sizes=(0 0)
+  local logs=("${node_tests_log}" "${browser_tests_log}")
+  while kill -0 "$$" 2>/dev/null; do
+    sleep 1
+    kill -0 "$$" 2>/dev/null || return
+    elapsed=$((elapsed + 1))
+    if (( elapsed >= log_interval )); then
+      for index in 0 1; do
+        size=$(wc -c < "${logs[$index]}")
+        if [[ "${size}" != "${sizes[$index]}" ]]; then
+          echo "TypeScript suites still running; bounded live log tail:"
+          print_log_tail "${logs[$index]}"
+          sizes[$index]=${size}
+        fi
+      done
+      elapsed=0
+    fi
+  done
+}
+
 terminate_children() {
   trap - INT TERM
+  stop_log_monitor
   for child_pid in "${node_tests_pid}" "${browser_tests_pid}"; do
     if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
       # Each suite starts in its own session, so this reaches pnpm and every
@@ -97,6 +151,12 @@ terminate_children() {
 
 interrupt() {
   local signal_status=$1
+  # Replay before waiting for children: a stuck shutdown must not hide the
+  # last test output. Bound bytes as well as lines (a test may print one huge
+  # line), and retain the complete regular files at the printed paths.
+  echo "TypeScript suites interrupted (exit ${signal_status}); retained log tails:"
+  stop_log_monitor
+  print_log_tails
   terminate_children
   exit "${signal_status}"
 }
@@ -115,18 +175,23 @@ bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
 node_tests_pid=$!
 bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
 browser_tests_pid=$!
+(trap - INT TERM; monitor_logs) &
+log_monitor_pid=$!
+echo "TypeScript live log monitor PID: ${log_monitor_pid}"
 set +m
 
 wait "${node_tests_pid}"
 node_tests_status=$?
 wait "${browser_tests_pid}"
 browser_tests_status=$?
+stop_log_monitor
 trap - INT TERM
 
 # GitHub's live log pipe can be nonblocking. Two concurrent Turbo/Vitest trees
 # writing directly to it can fail with EAGAIN even though the tests themselves
 # are healthy. Give each suite a blocking regular file, then replay both logs
-# after both process trees have terminated.
+# after both process trees have terminated. Only the bounded monitor writes
+# progress while tests run; test children never inherit the live log pipe.
 cat "${node_tests_log}"
 cat "${browser_tests_log}"
 rm -f "${node_tests_log}" "${browser_tests_log}"

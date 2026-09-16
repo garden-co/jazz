@@ -181,16 +181,9 @@ impl DirectRecordStore<'_> {
             }
             .into());
         }
-        let prefix_descriptor =
-            RecordDescriptor::new(self.key.fields().iter().take(values.len()).map(|field| {
-                (
-                    field.name.clone().expect("direct store fields are named"),
-                    field.value_type.clone(),
-                )
-            }));
-        let _ = prefix_descriptor.create(values)?;
         let mut bytes = Vec::new();
-        for value in values {
+        for (value, field) in values.iter().zip(self.key.fields()) {
+            records::ensure_value_type(value, &field.value_type)?;
             encode_primary_key_part(&mut bytes, value)?;
         }
         Ok(bytes)
@@ -528,6 +521,19 @@ where
 
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.storage.column_family_names()
+    }
+
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<crate::storage::ValueComparison, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.storage.compare_value(cf, key, expected)
     }
 
     fn get(
@@ -905,16 +911,20 @@ where
     // instead of allocating a second table name and primary-key buffer for
     // every write merely to track same-batch visibility.
     let mut overlay =
-        HashMap::<(&str, &[u8]), Option<Vec<u8>>>::with_capacity(pending_writes.len());
+        HashMap::<(&str, &[u8]), Option<(u32, &[u8])>>::with_capacity(pending_writes.len());
     // Accumulate directly into the homogeneous groups consumed by IVM. The
     // previous path allocated a singleton TableDelta (and Vec) per old/new
     // record, then hashed every group and record again in a second pass.
     let mut by_table = HashMap::<(&str, u32, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
+    // The schema is fixed for this batch. Old rows may use several variants,
+    // but each variant's descriptor needs preparation only once.
+    let mut old_descriptors = HashMap::<(&str, u32), RecordDescriptor>::new();
 
     for (write, store) in pending_writes.iter().zip(stores) {
         let overlay_key = (write.table(), write.key());
+        let stored_current;
         let current = if let Some(record) = overlay.get(&overlay_key) {
-            record.clone()
+            *record
         } else if matches!(
             write,
             PendingTableWrite::Set {
@@ -924,7 +934,11 @@ where
         ) {
             None
         } else {
-            store.get_raw(write.key()).await?
+            stored_current = store.get_raw(write.key()).await?;
+            stored_current
+                .as_deref()
+                .map(split_variant_record)
+                .transpose()?
         };
         if matches!(
             write,
@@ -942,14 +956,20 @@ where
         let table_schema = schema
             .table(write.table())
             .ok_or_else(|| Error::TableNotFound(write.table().to_owned()))?;
-        if let Some(current) = current.as_deref() {
-            let (variant_tag, payload) = split_variant_record(current)?;
-            let descriptor = table_schema
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| Error::UnknownTableVariant {
-                    table: table_schema.name.clone(),
-                    version: u64::from(variant_tag),
-                })?;
+        if let Some((variant_tag, payload)) = current {
+            let descriptor_key = (write.table(), variant_tag);
+            let descriptor = if let Some(descriptor) = old_descriptors.get(&descriptor_key) {
+                *descriptor
+            } else {
+                let descriptor = table_schema
+                    .record_schema_for_variant(variant_tag)
+                    .ok_or_else(|| Error::UnknownTableVariant {
+                        table: table_schema.name.clone(),
+                        version: u64::from(variant_tag),
+                    })?;
+                old_descriptors.insert(descriptor_key, descriptor);
+                descriptor
+            };
             *by_table
                 .entry((write.table(), variant_tag, descriptor))
                 .or_default()
@@ -969,7 +989,14 @@ where
                 .entry(bytes::Bytes::copy_from_slice(record))
                 .or_default() += 1;
         }
-        let next = write.stored_record();
+        let next = match write {
+            PendingTableWrite::Set {
+                variant_tag,
+                record,
+                ..
+            } => Some((*variant_tag, record.as_slice())),
+            PendingTableWrite::Delete { .. } => None,
+        };
         overlay.insert(overlay_key, next);
     }
 
@@ -990,26 +1017,4 @@ where
             })
         })
         .collect())
-}
-
-pub(super) fn record_store_for_table<'a, S>(
-    storage: &'a S,
-    table: &'a str,
-    key_descriptor: Option<RecordDescriptor>,
-    descriptor: &'a RecordDescriptor,
-) -> RecordStore<'a, S>
-where
-    S: OrderedKvStorage,
-{
-    let _ = key_descriptor;
-    RecordStore::new(storage, table, descriptor)
-}
-
-pub(super) fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
-    RecordDescriptor::new(
-        primary_key
-            .columns
-            .iter()
-            .map(|column| (column.column.clone(), column.key_type.column_type().clone())),
-    )
 }

@@ -1648,7 +1648,10 @@ fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUui
         // The receiver evaluates its result from covered inputs; authorities
         // no longer send a redundant result-member list. Count the disclosed
         // input closure, including relation support, when checking its cache.
-        for input in supporting_rows {
+        // This is the union of ever-disclosed cache rows across subscriptions,
+        // not one subscription's current membership. Scope removals do not
+        // delete cached native bodies or disclosures from other live queries.
+        for input in supporting_rows.added_rows() {
             rows.insert((input.version_table.to_string(), input.row));
         }
     }
@@ -1659,6 +1662,7 @@ fn result_output_count(update: &SyncMessage, table: &str) -> usize {
         SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             supporting_rows, ..
         }) => supporting_rows
+            .added_rows()
             .iter()
             .filter(|input| input.version_table.as_str() == table)
             .map(|input| input.row)

@@ -1335,3 +1335,47 @@ it("keeps session-scoped transaction reads on the client-local native method", a
   ]);
   expect(transactionReads).toBe(2);
 });
+
+it.each([
+  ["mergeable", "update"],
+  ["mergeable", "upsert"],
+  ["exclusive", "update"],
+  ["exclusive", "upsert"],
+] as const)(
+  "stages %s %s without synchronously reading a suspended owner's row",
+  (kind, operation) => {
+    const update = vi.fn();
+    const upsert = vi.fn();
+    const forbiddenRead = vi.fn(() => {
+      throw new Error("synchronous read would wait on the suspended owner");
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: forbiddenRead,
+            localCurrentRow: forbiddenRead,
+            updateInTransaction: update,
+            upsertInTransaction: upsert,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const id = createOpenTransactionId();
+    runtime.beginTransaction(kind, id);
+    const context = JSON.stringify({ transaction_id: id });
+    const row = "00000000-0000-0000-0000-000000000001";
+    runtime[operation]("todos", row, { title: { type: "Text", value: "patch" } }, context);
+    expect(operation === "update" ? update : upsert).toHaveBeenCalledTimes(1);
+    expect(forbiddenRead).not.toHaveBeenCalled();
+    runtime.rollbackTransaction(id);
+  },
+);

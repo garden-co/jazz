@@ -195,13 +195,11 @@ describe("withJazz", () => {
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID).toBeTruthy();
     expect(process.env.NEXT_PUBLIC_JAZZ_APP_ID).toBe(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID);
     expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBe(serverUrl);
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        `Open the inspector: https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
-          serverUrl!,
-        )}&appId=${encodeURIComponent(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID!)}&adminSecret=next-test-admin`,
-      ),
-    );
+    const inspectorLink = `https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
+      serverUrl!,
+    )}&appId=${encodeURIComponent(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID!)}`;
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining(inspectorLink));
+    expect(logSpy.mock.calls.flat().join("\n")).not.toContain("next-test-admin");
   }, 30_000);
 
   it("keeps a generated backend secret in the server process and out of returned Next config", async () => {

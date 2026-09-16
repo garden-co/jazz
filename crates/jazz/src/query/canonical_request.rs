@@ -259,6 +259,7 @@ fn canonical_reachable_key_with_seed_type(
     match reachable.access_team_target {
         JoinTarget::Column => {}
         JoinTarget::RowId => bytes.push(b'r'),
+        JoinTarget::Uncorrelated => bytes.push(b'e'),
     }
     put_bytes(&mut bytes, &canonical_operand_key(&reachable.from));
     put_len(&mut bytes, reachable.access_filters.len());
@@ -325,6 +326,7 @@ fn canonical_join_key(join: &JoinVia) -> Vec<u8> {
     match join.target {
         JoinTarget::Column => {}
         JoinTarget::RowId => bytes.push(b'r'),
+        JoinTarget::Uncorrelated => bytes.push(b'e'),
     }
     if let Some(column) = &join.source_column {
         bytes.push(b's');

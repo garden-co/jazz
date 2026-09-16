@@ -29,6 +29,28 @@ export type BrowserPhysicalDatabaseEpoch = {
   release(): Promise<void>;
 };
 
+const liveEpochs = new WeakMap<
+  BrowserPhysicalDatabaseEpoch,
+  {
+    databaseName: string;
+    active: () => boolean;
+    claimed: boolean;
+  }
+>();
+
+/** Consume the live lock proof once, for one page-store/tree owner. */
+export function claimBrowserReclamationOwnership(
+  epoch: BrowserPhysicalDatabaseEpoch,
+  databaseName: string,
+): () => boolean {
+  const state = liveEpochs.get(epoch);
+  if (!state || state.databaseName !== databaseName || !state.active() || state.claimed) {
+    throw new Error("IndexedDB reclamation requires an unclaimed live database Web Lock");
+  }
+  state.claimed = true;
+  return state.active;
+}
+
 type WebLock = object;
 type LockManagerLike = {
   request<T>(
@@ -78,7 +100,7 @@ export async function acquireBrowserPhysicalDatabaseEpoch(
           rejectEpoch(new BrowserPhysicalDatabaseBusyError(databaseName));
           return;
         }
-        resolveEpoch({
+        const owner: BrowserPhysicalDatabaseEpoch = {
           id,
           release: () => {
             if (!releaseRequested) {
@@ -87,13 +109,19 @@ export async function acquireBrowserPhysicalDatabaseEpoch(
             }
             return lockReleased;
           },
-        });
+        };
+        liveEpochs.set(owner, { databaseName, active: () => !releaseRequested, claimed: false });
+        resolveEpoch(owner);
         await released;
       },
     )
     .then(
-      () => resolveLockReleased(),
+      () => {
+        releaseRequested = true;
+        resolveLockReleased();
+      },
       (error: unknown) => {
+        releaseRequested = true;
         resolveLockReleased();
         rejectEpoch(error instanceof Error ? error : new Error(String(error)));
       },

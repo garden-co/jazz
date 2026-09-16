@@ -673,7 +673,8 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         panic!("expected snapshot");
     };
     assert_eq!(
-        refreshed.supporting_rows, initial_supporting_rows,
+        refreshed.supporting_rows.added_rows(),
+        initial_supporting_rows.added_rows(),
         "fresh evaluation confirms that suppressing the unchanged snapshot loses no row evidence"
     );
 

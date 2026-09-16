@@ -25,7 +25,7 @@ use crate::serving::{
 use crate::tools::native_transport_connector::{
     NativeTransportTerminal, NativeTransportTerminalFuture,
 };
-use crate::wire::{TransportError, WireFrame, WireTransport, decode_frame, decode_sync_message};
+use crate::wire::{TransportError, WireFrame, WireTransport};
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::task::LocalSpawnExt;
@@ -183,6 +183,47 @@ struct ServerShellTickScheduler {
 struct ServerShellTickState {
     queued: AtomicBool,
     delayed: AtomicBool,
+    deferred: AtomicBool,
+    query_wake_queued: AtomicBool,
+    #[cfg(test)]
+    deferred_timer_gate: Mutex<Option<ServerShellTimerGate>>,
+    #[cfg(test)]
+    delayed_timer_gate: Mutex<Option<ServerShellTimerGate>>,
+}
+
+#[cfg(test)]
+struct ServerShellTimerGate {
+    entered: std_mpsc::Sender<()>,
+    release: std_mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+fn wait_for_test_timer_gate(gate: &Mutex<Option<ServerShellTimerGate>>) {
+    let mut guard = match gate.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let gate = guard.take();
+    drop(guard);
+    if let Some(gate) = gate {
+        gate.entered
+            .send(())
+            .expect("timer test still waits for gate entry");
+        gate.release
+            .recv()
+            .expect("timer test releases the controlled timer");
+    } else {
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[cfg(test)]
+fn install_test_timer_gate(slot: &Mutex<Option<ServerShellTimerGate>>, gate: ServerShellTimerGate) {
+    let mut guard = match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.replace(gate);
 }
 
 /// A storage-future wake is translated back into one serialized shell turn.
@@ -194,7 +235,7 @@ struct ServerShellQueryRuntimeWake {
 
 impl ArcWake for ServerShellQueryRuntimeWake {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.scheduler.schedule_tick(TickUrgency::Immediate);
+        arc_self.scheduler.schedule_query_runtime_progress();
     }
 }
 
@@ -232,11 +273,59 @@ impl ServerShellTickScheduler {
             state.queued.store(false, Ordering::Release);
         }
     }
+
+    fn schedule_query_runtime_progress(&self) {
+        if self.state.query_wake_queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        let scheduler = self.clone();
+        if self
+            .jobs
+            .unbounded_send(ServerShellCommand::Run(Box::new(move |shell| {
+                scheduler
+                    .state
+                    .query_wake_queued
+                    .store(false, Ordering::Release);
+                shell.mark_subscriber_connections_dirty_after_query_runtime_wake();
+                scheduler.schedule_tick(TickUrgency::Immediate);
+            })))
+            .is_err()
+        {
+            state.query_wake_queued.store(false, Ordering::Release);
+        }
+    }
+
+    fn schedule_deferred_tick(&self) {
+        // Deferred work gets one bounded host-timer turn. The shell owner must
+        // remain available for inbound transport while an unresolved
+        // subscription or upload coalesces more work.
+        if self.state.deferred.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let jobs = self.jobs.clone();
+        let activity_tx = self.activity_tx.clone();
+        let io_wakers = Arc::clone(&self.io_wakers);
+        let state = Arc::clone(&self.state);
+        thread::spawn(move || {
+            #[cfg(test)]
+            wait_for_test_timer_gate(&state.deferred_timer_gate);
+            #[cfg(not(test))]
+            thread::sleep(std::time::Duration::from_millis(1));
+            state.deferred.store(false, Ordering::Release);
+            Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
+        });
+    }
 }
 
 impl TickScheduler for ServerShellTickScheduler {
-    fn schedule_tick(&self, _urgency: TickUrgency) {
-        Self::enqueue_tick(&self.jobs, &self.activity_tx, &self.io_wakers, &self.state);
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        match urgency {
+            TickUrgency::Deferred => self.schedule_deferred_tick(),
+            TickUrgency::Immediate | TickUrgency::AfterCurrentTurn => {
+                Self::enqueue_tick(&self.jobs, &self.activity_tx, &self.io_wakers, &self.state);
+            }
+        }
     }
 
     fn schedule_tick_after(&self, delay_ms: u64) {
@@ -244,6 +333,8 @@ impl TickScheduler for ServerShellTickScheduler {
         // and needs to keep accepting transport work while an upload waits for
         // its admission window. Coalesce same-window retry wakes, then return
         // to the owner queue from a tiny timer thread.
+        #[cfg(test)]
+        let _ = delay_ms;
         if self.state.delayed.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -252,6 +343,9 @@ impl TickScheduler for ServerShellTickScheduler {
         let io_wakers = Arc::clone(&self.io_wakers);
         let state = Arc::clone(&self.state);
         thread::spawn(move || {
+            #[cfg(test)]
+            wait_for_test_timer_gate(&state.delayed_timer_gate);
+            #[cfg(not(test))]
             thread::sleep(std::time::Duration::from_millis(delay_ms));
             state.delayed.store(false, Ordering::Release);
             Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
@@ -731,6 +825,15 @@ impl ServerRuntimeHandle {
         lens: crate::ids::MigrationLensId,
     ) -> Result<(bool, bool), String> {
         self.run(move |shell| Ok(shell.runtime_catalogue_contains(schema, lens)))
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn runtime_catalogue_contains_schema(
+        &self,
+        schema: SchemaVersionId,
+    ) -> Result<bool, String> {
+        self.run(move |shell| Ok(shell.runtime_catalogue_contains_schema(schema)))
             .await
     }
 
@@ -1226,7 +1329,9 @@ fn perform_shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
 }
 
 fn inbound_frame_phase(frame: &[u8]) -> String {
-    let Ok(frame) = decode_frame(frame) else {
+    // Diagnostic naming is not admission. Do not perform receipt validation
+    // or canonical re-encoding before the actual connection decoder runs.
+    let Ok(frame) = postcard::from_bytes::<WireFrame>(frame) else {
         return "malformed wire frame".to_owned();
     };
     let WireFrame::Message(envelope) = frame else {
@@ -1237,7 +1342,7 @@ fn inbound_frame_phase(frame: &[u8]) -> String {
             WireFrame::Message(_) => unreachable!("message handled above"),
         };
     };
-    match decode_sync_message(&envelope.payload) {
+    match postcard::from_bytes::<SyncMessage>(&envelope.payload) {
         Ok(message) => sync_message_name(&message).to_owned(),
         Err(_) => "malformed SyncMessage".to_owned(),
     }
@@ -1297,7 +1402,7 @@ fn notify_shell_activity(activity_tx: &watch::Sender<u64>) {
 mod tests {
     use super::*;
     use crate::protocol::{ReadViewKey, Subscribe, SubscriptionKey};
-    use crate::query::{BindingId, ShapeId};
+    use crate::query::{BindingId, Query, ShapeId};
     use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use crate::wire::{WireEnvelope, encode_frame, encode_sync_message};
     use futures::FutureExt;
@@ -1517,8 +1622,128 @@ mod tests {
         assert_eq!(inbound_frame_phase(&[0xff]), "malformed wire frame");
     }
 
+    // This internal receipt is necessary because the public shell API exposes
+    // tick effects but not the owner command queue or dirty-generation bridge.
+    // It proves a storage wake crosses the owner boundary once, marks the
+    // subscriber state, and queues the follow-up tick without an explicit host
+    // tick.
     #[test]
-    fn delayed_tick_keeps_the_native_shell_owner_live_and_does_not_replace_deferred_work() {
+    fn query_runtime_wake_marks_subscribers_and_queues_one_owner_tick() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let shape = Query::from("todos").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: ReadViewKey::default(),
+        };
+        let mut shell = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x76; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .unwrap();
+        let session = shell
+            .accept_subscriber_session(AuthorSubject::for_test_bytes([0x77; 16]))
+            .unwrap();
+        shell
+            .receive_frames(
+                session,
+                [
+                    encode_message(SyncMessage::RegisterShape {
+                        shape_id: shape.shape_id(),
+                        ast: crate::protocol::ShapeAst::from_validated(&shape),
+                        opts: crate::protocol::RegisterShapeOptions::default(),
+                    }),
+                    encode_message(SyncMessage::Subscribe(Subscribe {
+                        shape_id: shape.shape_id(),
+                        subscription,
+                        values: Vec::new(),
+                        known_state: None,
+                        delegated_session: None,
+                    })),
+                ],
+            )
+            .unwrap();
+        shell.tick().unwrap();
+        assert_eq!(
+            shell.maintained_subscription_rehydrate_attempts_for_test(),
+            1,
+            "the server registers and rehydrates the subscription once"
+        );
+        assert!(
+            !shell.take_frames(session).unwrap().is_empty(),
+            "the initial server subscription publishes one wire update"
+        );
+
+        let (jobs, mut receiver) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(ServerShellTickState::default()),
+        };
+        shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+        let wake = shell
+            .query_runtime_waker_for_test()
+            .expect("server shell always supplies a query-runtime waker");
+
+        wake.wake_by_ref();
+        wake.wake_by_ref();
+        let Some(ServerShellCommand::Run(mark_dirty_and_tick)) =
+            receiver.next().now_or_never().flatten()
+        else {
+            panic!("the first storage wake queues an owner command");
+        };
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "coalesced storage wakes queue one owner command"
+        );
+
+        let epoch_before = shell.subscriber_dirty_epoch_for_test();
+        mark_dirty_and_tick(&mut shell);
+        assert_eq!(
+            shell.subscriber_dirty_epoch_for_test(),
+            epoch_before.wrapping_add(1),
+            "the owner command marks subscriber state before ticking"
+        );
+        let Some(ServerShellCommand::RunAsync(tick)) = receiver.next().now_or_never().flatten()
+        else {
+            panic!("the owner command queues the follow-up shell tick");
+        };
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "one storage wake produces one follow-up shell tick"
+        );
+
+        assert_eq!(shell.metrics_snapshot().ticks, 1);
+        futures::executor::block_on(tick(&mut shell));
+        assert_eq!(shell.metrics_snapshot().ticks, 2);
+        assert_eq!(
+            shell.maintained_subscription_rehydrate_attempts_for_test(),
+            1,
+            "an unrelated query-runtime wake does not re-register or rehydrate"
+        );
+        assert!(
+            shell.take_frames(session).unwrap().is_empty(),
+            "an unrelated wake does not grow the network queue"
+        );
+    }
+
+    // This internal receipt is necessary because the timer threads' command
+    // queue and atomic coalescing are not observable through the public shell
+    // API. Controlled gates advance each timer explicitly; wall-clock sleeps
+    // would make the ordering assertion race with thread scheduling.
+    #[test]
+    fn deferred_tick_is_coalesced_and_admission_timer_remains_independent() {
         let (jobs, mut receiver) = mpsc::unbounded();
         let (activity_tx, _) = watch::channel(0_u64);
         let io_wakers = Arc::new(Mutex::new(Vec::new()));
@@ -1529,26 +1754,62 @@ mod tests {
             io_wakers,
             state: Arc::clone(&state),
         };
+        let (deferred_entered_tx, deferred_entered_rx) = std_mpsc::channel();
+        let (deferred_release_tx, deferred_release_rx) = std_mpsc::channel();
+        let (delayed_entered_tx, delayed_entered_rx) = std_mpsc::channel();
+        let (delayed_release_tx, delayed_release_rx) = std_mpsc::channel();
+        install_test_timer_gate(
+            &state.deferred_timer_gate,
+            ServerShellTimerGate {
+                entered: deferred_entered_tx,
+                release: deferred_release_rx,
+            },
+        );
+        install_test_timer_gate(
+            &state.delayed_timer_gate,
+            ServerShellTimerGate {
+                entered: delayed_entered_tx,
+                release: delayed_release_rx,
+            },
+        );
 
-        scheduler.schedule_tick_after(20);
+        scheduler.schedule_tick_after(100);
+        delayed_entered_rx
+            .recv()
+            .expect("admission timer reaches its controlled gate");
         assert!(
             receiver.next().now_or_never().is_none(),
             "an admission deadline must not enqueue an early shell tick"
         );
 
-        // Ordinary deferred work remains immediately serviceable while the
-        // separate timer waits. This is the native owner-liveness guarantee:
-        // the owner queue never sleeps for an upload admission window.
         scheduler.schedule_tick(TickUrgency::Deferred);
+        scheduler.schedule_tick(TickUrgency::Deferred);
+        deferred_entered_rx
+            .recv()
+            .expect("deferred timer reaches its controlled gate");
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "deferred work must not re-enter the owner synchronously"
+        );
+
+        deferred_release_tx
+            .send(())
+            .expect("release coalesced deferred owner turn");
         assert!(matches!(
-            receiver.next().now_or_never().flatten(),
+            futures::executor::block_on(receiver.next()),
             Some(ServerShellCommand::RunAsync(_))
         ));
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "coalesced deferred work queues one owner turn"
+        );
         state.queued.store(false, Ordering::Release);
 
-        std::thread::sleep(Duration::from_millis(40));
+        delayed_release_tx
+            .send(())
+            .expect("release independent admission owner turn");
         assert!(matches!(
-            receiver.next().now_or_never().flatten(),
+            futures::executor::block_on(receiver.next()),
             Some(ServerShellCommand::RunAsync(_))
         ));
     }

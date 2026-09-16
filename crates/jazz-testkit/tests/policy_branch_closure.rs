@@ -7,9 +7,7 @@ use jazz::tools::public_schema::{
     RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
-use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, PolicyExpr, Schema, SchemaBuilder, TableSchema, Value,
-};
+use jazz::tools::{ColumnType, JazzClient, PolicyExpr, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use support::{TestingClient, wait_for_query};
 
@@ -263,7 +261,7 @@ async fn visible_resource_labels(client: &JazzClient, expected_labels: &[&str]) 
     let rows = wait_for_query(
         client,
         jazz::query::Query::from("resources").select(["label"]),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(5),
         "member sees all resource policy branch results",
         |rows| {
@@ -292,7 +290,9 @@ fn labels_from_rows(mut rows: Vec<(jazz::tools::ObjectId, Vec<Value>)>) -> Vec<S
 
 async fn assert_policy_branch_closure(order: BranchOrder, expected_labels: Vec<&str>) {
     let schema = policy_branch_closure_schema(order);
-    let server = JazzServer::start_with_schema(schema.clone()).await;
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start test server");
     let admin = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())

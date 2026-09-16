@@ -566,6 +566,30 @@ impl ReopenableStorage for SqliteStorage {
 }
 
 impl OrderedKvStorage for SqliteStorage {
+    fn compare_value(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<groove::storage::ValueComparison, Error>> {
+        Box::pin(async move {
+            let cf = self.cf_id(&cf)?;
+            self.with_connection(|connection| {
+                let equal: Option<bool> = connection
+                    .prepare_cached("SELECT v = ?3 FROM kv WHERE cf = ?1 AND k = ?2")
+                    .map_err(backend)?
+                    .query_row(params![cf, key, expected], |row| row.get(0))
+                    .optional()
+                    .map_err(backend)?;
+                Ok(match equal {
+                    None => groove::storage::ValueComparison::Absent,
+                    Some(true) => groove::storage::ValueComparison::Identical,
+                    Some(false) => groove::storage::ValueComparison::Different,
+                })
+            })
+        })
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             let cf = self.cf_id(&cf)?;

@@ -154,11 +154,7 @@ export function withJazz(
     });
     if (!hasLoggedInspectorLink) {
       console.log(
-        `[jazz] Open the inspector: ${buildInspectorLink(
-          managed.serverUrl,
-          managed.appId,
-          managed.adminSecret,
-        )}`,
+        `[jazz] Open the inspector: ${buildInspectorLink(managed.serverUrl, managed.appId)}`,
       );
       hasLoggedInspectorLink = true;
     }

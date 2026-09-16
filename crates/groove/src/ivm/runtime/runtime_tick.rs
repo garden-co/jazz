@@ -46,7 +46,7 @@ struct EvaluationSession<'a> {
     relevant_nodes: HashSet<NodeId>,
     roots: HashSet<NodeId>,
     outputs: HashMap<NodeId, RecordDeltas>,
-    pending_outputs: HashMap<NodeId, RecordDeltas>,
+    pending_outputs: HashMap<NodeId, Arc<RecordDeltas>>,
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
@@ -106,7 +106,7 @@ pub(super) struct IncrementalEvaluation<'a> {
     pending_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
     /// Derived writes use the same sparse overlay as their evaluation reads.
     /// The owned flush future is retained across resident owner turns.
-    durable_writes: RefCell<StagedWriteState>,
+    durable_writes: Rc<RefCell<StagedWriteState>>,
     persist_flush: Option<PersistFlush<'a>>,
     /// No independent root remains after a scoped failure, so this tick must
     /// not publish its staged globals.
@@ -125,6 +125,16 @@ struct PendingResidentPublication {
 pub(crate) struct ResidentTick {
     pub(crate) metrics: TickMetrics,
     publication: PendingResidentPublication,
+    /// Completed durable-node writes belong to this exact publication, even
+    /// while query-only work remains queued. Sharing the sparse buffer lets
+    /// the facade stage it without searching unrelated pending evaluations.
+    durable_writes: Rc<RefCell<StagedWriteState>>,
+}
+
+impl ResidentTick {
+    pub(crate) fn take_durable_writes(&self) -> Vec<crate::storage::OwnedWriteOperation> {
+        std::mem::take(&mut *self.durable_writes.borrow_mut()).into_operations()
+    }
 }
 
 struct EvaluationFailure {
@@ -653,7 +663,45 @@ impl EvaluationWorkQueue {
     }
 }
 
-impl IncrementalEvaluation<'_> {
+impl<'a> IncrementalEvaluation<'a> {
+    fn poll_storage_flush(
+        &mut self,
+        indeterminate: &Rc<Cell<bool>>,
+        extraction_storage: Option<OwnedStorage<'a>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        if self.persist_flush.is_none() && !self.durable_writes.borrow().is_empty() {
+            let operations =
+                std::mem::take(&mut *self.durable_writes.borrow_mut()).into_operations();
+            let storage = extraction_storage.unwrap_or_else(|| self.storage.clone());
+            let indeterminate = Rc::clone(indeterminate);
+            self.persist_flush = Some(Box::pin(async move {
+                let mut attempt = PersistFlushAttempt {
+                    indeterminate,
+                    completed: false,
+                };
+                let result = match storage.as_ref().write_many_outcome(operations).await {
+                    WriteManyOutcome::Committed => Ok(()),
+                    WriteManyOutcome::Uncommitted(error) => Err(error.into()),
+                    WriteManyOutcome::PossiblyCommitted(error) => {
+                        attempt.indeterminate.set(true);
+                        Err(error.into())
+                    }
+                };
+                attempt.completed = true;
+                result
+            }));
+        }
+        if let Some(flush) = &mut self.persist_flush {
+            match flush.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => self.persist_flush = None,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+
     /// Base-table frontiers describe resident row visibility, not completion
     /// of every dependent evaluator branch. Publish them monotonically when
     /// this evaluation parks so independent snapshots cannot reuse an old
@@ -880,6 +928,9 @@ impl IncrementalEvaluation<'_> {
                 }
                 Poll::Pending => {
                     self.work_queue.requeue_yielded(node);
+                    self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+                    self.root_ordering_windows =
+                        std::mem::take(&mut evaluator.root_ordering_windows);
                     drop(evaluator);
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
@@ -902,6 +953,8 @@ impl IncrementalEvaluation<'_> {
             // Resident requests completed synchronously. Install their results
             // and resume the queue within this same public poll so resident
             // writes retain their same-tick visibility contract.
+            self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+            self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
             drop(evaluator);
             return self.poll(runtime, cx);
         }
@@ -1121,33 +1174,9 @@ impl IncrementalEvaluation<'_> {
         }
 
         drop(evaluator);
-        if self.persist_flush.is_none() && !self.durable_writes.borrow().is_empty() {
-            let operations = std::mem::take(self.durable_writes.get_mut()).into_operations();
-            let storage = self.storage.clone();
-            let indeterminate = Rc::clone(&runtime.persistence_indeterminate);
-            self.persist_flush = Some(Box::pin(async move {
-                let mut attempt = PersistFlushAttempt {
-                    indeterminate,
-                    completed: false,
-                };
-                let result = match storage.as_ref().write_many_outcome(operations).await {
-                    WriteManyOutcome::Committed => Ok(()),
-                    WriteManyOutcome::Uncommitted(error) => Err(error.into()),
-                    WriteManyOutcome::PossiblyCommitted(error) => {
-                        attempt.indeterminate.set(true);
-                        Err(error.into())
-                    }
-                };
-                attempt.completed = true;
-                result
-            }));
-        }
-        if let Some(flush) = &mut self.persist_flush {
-            match flush.as_mut().poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                Poll::Ready(Ok(())) => self.persist_flush = None,
-            }
+        match self.poll_storage_flush(&runtime.persistence_indeterminate, None, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(result) => result?,
         }
         self.install(runtime);
         runtime
@@ -1444,22 +1473,27 @@ impl<'a> EvaluationSession<'a> {
                         // requests; collapsing it with `Poll::Pending` causes a
                         // self-waking replay loop that can never hydrate a large
                         // indirect literal.
-                        Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
+                        // Interior results are already retained in the memo;
+                        // roots can borrow the same immutable bytes below.
+                        Poll::Ready(result) => result,
                     }
                 };
                 match result {
-                    Ok(mut records) => {
+                    Ok(records) => {
                         if self.work_queue.is_root(node) {
                             let mut materialized = Vec::with_capacity(records.deltas.len());
                             let mut blocked = false;
                             for delta in &records.deltas {
-                                match crate::large_values::materialize_record_attempt(
+                                match crate::large_values::materialize_record_borrowed_attempt(
                                     &records.descriptor,
                                     delta.raw(),
                                     &mut self.evaluation_inputs,
                                 ) {
                                     Ok(record) => materialized.push(RecordDelta {
-                                        record: record.into(),
+                                        record: match record {
+                                            std::borrow::Cow::Borrowed(_) => delta.record.clone(),
+                                            std::borrow::Cow::Owned(record) => record.into(),
+                                        },
                                         weight: delta.weight,
                                     }),
                                     Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
@@ -1498,8 +1532,13 @@ impl<'a> EvaluationSession<'a> {
                                 }
                                 continue;
                             }
-                            records.deltas = materialized;
-                            self.outputs.insert(node, records);
+                            self.outputs.insert(
+                                node,
+                                RecordDeltas {
+                                    descriptor: records.descriptor,
+                                    deltas: materialized,
+                                },
+                            );
                         }
                         self.work_queue.complete(node);
                     }
@@ -1539,6 +1578,11 @@ impl<'a> EvaluationSession<'a> {
                 return Poll::Ready(Ok(()));
             }
             if self.requests.has_pending() {
+                return Poll::Pending;
+            }
+            if !self.work_queue.temporal_waiting.is_empty() {
+                // Earlier evaluations own the continuation until their shared
+                // nodes are installed and the temporal barriers are released.
                 return Poll::Pending;
             }
             return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
@@ -1872,6 +1916,7 @@ impl IvmRuntime {
         })
         .await;
         let metrics = evaluation.metrics.clone();
+        let durable_writes = Rc::clone(&evaluation.durable_writes);
         match progress {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(failure)) => return Err(failure.into_error()),
@@ -1896,6 +1941,7 @@ impl IvmRuntime {
         };
         Ok(ResidentTick {
             metrics,
+            durable_writes,
             publication,
         })
     }
@@ -2185,6 +2231,40 @@ impl IvmRuntime {
         result
     }
 
+    /// Finish already-prepared durable writes in temporal order without
+    /// advancing query roots or waiting for their missing chunks. Durable nodes
+    /// are fully evaluated before an incremental session enters this queue.
+    pub(crate) fn poll_storage_extraction(
+        &mut self,
+        storage: &OwnedStorage<'static>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IvmRuntimeError>> {
+        let mut pending = self.pending_incremental.0.borrow_mut();
+        let order = pending.order.iter().copied().collect::<Vec<_>>();
+        for id in order {
+            if let Some(PendingEvaluation::Incremental(evaluation)) =
+                pending.evaluations.get_mut(&id)
+            {
+                match evaluation.poll_storage_flush(
+                    &self.persistence_indeterminate,
+                    Some(storage.clone()),
+                    cx,
+                ) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(result) => result?,
+                }
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    pub(crate) fn has_pending_storage_writes(&self) -> bool {
+        self.pending_incremental.0.borrow().evaluations.values().any(|evaluation| {
+            matches!(evaluation, PendingEvaluation::Incremental(evaluation)
+                if evaluation.persist_flush.is_some() || !evaluation.durable_writes.borrow().is_empty())
+        })
+    }
+
     pub(crate) fn has_pending_incremental(&self) -> bool {
         self.pending_incremental.is_pending()
     }
@@ -2393,7 +2473,7 @@ impl IvmRuntime {
             }
         }
         let current_tick = self.current_tick + 1;
-        let durable_writes = RefCell::new(StagedWriteState::default());
+        let durable_writes = Rc::new(RefCell::new(StagedWriteState::default()));
         let table_delta_records = table_deltas
             .iter()
             .map(|delta| delta.deltas.len())
@@ -2435,6 +2515,29 @@ impl IvmRuntime {
             .flatten()
             .copied()
             .collect::<HashSet<_>>();
+        // Structured collectors own their positional edits. Only plain outputs
+        // consume the generic before/after maps. Union demand across consumers
+        // because a TopBy node can be shared by both kinds of output. Preserve
+        // root_ordering_node metadata: hydration and scheduling still need it.
+        let mut root_ordering_windows = HashMap::default();
+        for subscription in affected_subscriptions
+            .iter()
+            .filter_map(|subscription| self.multisink_subscriptions.get(subscription))
+        {
+            for output in subscription
+                .outputs
+                .values()
+                .filter(|output| affected_nodes.contains(&output.node))
+            {
+                if let Some(ordering_node) = output.root_ordering_node
+                    && !output_is_structured_collect_by(&self.graph, output.node)?
+                {
+                    root_ordering_windows
+                        .entry(ordering_node)
+                        .or_insert_with(RootOrderingWindows::default);
+                }
+            }
+        }
         let mut retained_roots = affected_nodes
             .iter()
             .filter(|node| {
@@ -2488,7 +2591,7 @@ impl IvmRuntime {
             affected_subscriptions,
             pending_subscription_outputs: HashMap::default(),
             terminal_deltas: HashMap::default(),
-            root_ordering_windows: HashMap::default(),
+            root_ordering_windows,
             notification_publication,
             defer_notifications_until_durable,
             pending_resident_publication,

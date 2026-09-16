@@ -336,18 +336,66 @@ where
                 physical_current_field_names(&source_table, &source_mapping)?
             }
         };
-        let physical_descriptor = physical_write_descriptor(
-            &logical_descriptor,
-            &physical_names,
-            &physical_table,
-        )?;
+        let physical_descriptor =
+            physical_write_descriptor(&logical_descriptor, &physical_names, &physical_table)?;
+        let history_descriptor = source_table.history_storage_table().record_schema();
+        let enum_remaps =
+            self.prepare_authored_enum_cells_for_physical(&source_table, &source_mapping)?;
+        let current = target != PhysicalWriteTarget::History;
+        let user_cells = if current {
+            GlobalCurrentRowRecord::USER_CELLS
+        } else {
+            HistoryRowRecord::USER_CELLS
+        };
+        let write_fields = physical_descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                if current {
+                    match index {
+                        GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX => {
+                            return PhysicalWriteField::CreatedAtMillis;
+                        }
+                        GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX => {
+                            return PhysicalWriteField::UpdatedAtMillis;
+                        }
+                        GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX => {
+                            return PhysicalWriteField::GlobalTime;
+                        }
+                        _ => {}
+                    }
+                }
+                let source = if current && index > GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX {
+                    index - 1
+                } else {
+                    index
+                };
+                if let Some(column) = index.checked_sub(user_cells)
+                    && let Some(remaps) = enum_remaps.get(column)
+                    && (!remaps.scalar.is_empty() || !remaps.payload.is_empty())
+                {
+                    return PhysicalWriteField::Enum { source, column };
+                }
+                if history_descriptor.fields()[source].value_type == field.value_type {
+                    PhysicalWriteField::Copy(source)
+                } else {
+                    PhysicalWriteField::Decode(source)
+                }
+            })
+            .collect();
         let plan = Arc::new(PreparedPhysicalWritePlan {
             storage_table,
             source_table,
+            #[cfg(test)]
             source_mapping,
+            #[cfg(test)]
             physical_table,
             logical_descriptor,
             physical_descriptor,
+            history_descriptor,
+            write_fields,
+            enum_remaps,
         });
         self.catalogue
             .physical_write_plan_cache
@@ -393,33 +441,144 @@ where
         Ok(history_primary_key(version))
     }
 
-    pub(super) fn version_storage_primary_key_values(
+    /// Prepare authored-to-physical enum identities once per catalogue write
+    /// plan. Local ordinals cannot be copied across concurrently introduced
+    /// cases; the same prepared remaps serve history and current encoders.
+    fn prepare_authored_enum_cells_for_physical(
         &self,
-        version: &VersionRow,
-    ) -> Result<Vec<Value>, Error> {
-        if version.layer() == VersionLayer::Deletion {
-            let table_id = self.physical_table_id_for_version(version)?;
-            return Ok(vec![
-                Value::Bytes(version.branch_key().canonical_bytes()),
-                Value::U64(table_id.0),
-                Value::Uuid(version.row_uuid().0),
-                Value::U64(version.tx_time().0),
-                Value::U64(version.tx_node_alias().0),
-            ]);
+        source_table: &TableSchema,
+        source_mapping: &TablePhysicalMapping,
+    ) -> Result<Vec<EnumOccurrenceRemaps>, Error> {
+        let mut plans = Vec::with_capacity(source_table.columns.len());
+        for column in &source_table.columns {
+            let column_id = source_mapping.columns.get(&column.name).copied().ok_or(
+                Error::InvalidStoredValue("physical enum write column mapping missing"),
+            )?;
+            let mut remaps = EnumOccurrenceRemaps::default();
+            if let Some(authored_cases) = source_mapping.scalar_enum_cases.get(&column_id) {
+                let physical_cases =
+                    self.physical_scalar_enum_cases(source_mapping.table_id, column_id)?;
+                remaps.scalar.insert(
+                    "root".to_owned(),
+                    authored_cases
+                        .iter()
+                        .map(|identity| {
+                            physical_cases
+                                .iter()
+                                .position(|candidate| candidate == identity)
+                                .map(|tag| {
+                                    u8::try_from(tag).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "physical scalar enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+            }
+            if let Some(authored_cases) = source_mapping.payload_enum_cases.get(&column_id) {
+                let physical_cases =
+                    self.physical_payload_enum_cases(source_mapping.table_id, column_id)?;
+                remaps.payload.insert(
+                    "root".to_owned(),
+                    authored_cases
+                        .iter()
+                        .map(|identity| {
+                            physical_cases
+                                .iter()
+                                .position(|candidate| candidate == identity)
+                                .map(|tag| {
+                                    u32::try_from(tag).map_err(|_| {
+                                        Error::InvalidStoredValue(
+                                            "physical payload enum tag exhausted",
+                                        )
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+                remaps.payload_children.insert(
+                    "root".to_owned(),
+                    authored_cases
+                        .iter()
+                        .map(|identity| Some(global_case_path("root", identity)))
+                        .collect(),
+                );
+            }
+            if let Some(authored_paths) = source_mapping.nested_scalar_enum_cases.get(&column_id) {
+                for (path, authored_cases) in authored_paths {
+                    let physical_cases = self.physical_nested_scalar_enum_cases(
+                        source_mapping.table_id,
+                        column_id,
+                        path,
+                    )?;
+                    remaps.scalar.insert(
+                        path.clone(),
+                        authored_cases
+                            .iter()
+                            .map(|identity| {
+                                physical_cases
+                                    .iter()
+                                    .position(|candidate| candidate == identity)
+                                    .map(|tag| {
+                                        u8::try_from(tag).map_err(|_| {
+                                            Error::InvalidStoredValue(
+                                                "physical nested scalar enum tag exhausted",
+                                            )
+                                        })
+                                    })
+                                    .transpose()
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
+                }
+            }
+            if let Some(authored_paths) = source_mapping.nested_payload_enum_cases.get(&column_id) {
+                for (path, authored_cases) in authored_paths {
+                    let physical_cases = self.physical_nested_payload_enum_cases(
+                        source_mapping.table_id,
+                        column_id,
+                        path,
+                    )?;
+                    remaps.payload.insert(
+                        path.clone(),
+                        authored_cases
+                            .iter()
+                            .map(|identity| {
+                                physical_cases
+                                    .iter()
+                                    .position(|candidate| candidate == identity)
+                                    .map(|tag| {
+                                        u32::try_from(tag).map_err(|_| {
+                                            Error::InvalidStoredValue(
+                                                "physical nested payload enum tag exhausted",
+                                            )
+                                        })
+                                    })
+                                    .transpose()
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
+                    remaps.payload_children.insert(
+                        path.clone(),
+                        authored_cases
+                            .iter()
+                            .map(|identity| Some(global_case_path(path, identity)))
+                            .collect(),
+                    );
+                }
+            }
+            plans.push(remaps);
         }
-        Ok(vec![
-            Value::Bytes(version.branch_key().canonical_bytes()),
-            Value::Uuid(version.row_uuid().0),
-            Value::U64(version.tx_time().0),
-            Value::U64(version.tx_node_alias().0),
-        ])
+        Ok(plans)
     }
 
-    /// Re-encode every enum occurrence in a logical storage record before it
-    /// crosses into a physical table.  History, settled-current and
-    /// ahead-current writes share this boundary; allowing one of those paths
-    /// to raw-copy an authored tag would make the durable table internally
-    /// inconsistent after concurrent schema introductions.
+    // Retain the previous per-row remapper as the independent byte oracle.
+    // Storage/query equality alone cannot pin the physical enum representation.
+    #[cfg(test)]
     pub(super) fn remap_authored_enum_cells_for_physical(
         &self,
         values: &mut [Value],
@@ -606,170 +765,98 @@ where
             version.table(),
             PhysicalWriteTarget::History,
         )?;
-        // The authored row carries declaration-local enum ordinals.  Rewrite
-        // those cells through their durable global UUID identities before
-        // giving the record to the physical table; raw-copying would alias two
-        // concurrent siblings which both authored ordinal 2.
-        let mut values = version.record.to_values()?;
-        for (column_index, column) in plan.source_table.columns.iter().enumerate() {
-            let column_id = plan.source_mapping.columns.get(&column.name).copied().ok_or(
-                Error::InvalidStoredValue("physical scalar enum write column mapping missing"),
-            )?;
-            let value_index = HistoryRowRecord::USER_CELLS + column_index;
-            let value = values
-                .get_mut(value_index)
-                .ok_or(Error::InvalidStoredValue(
-                    "history scalar enum write field missing",
-                ))?;
-            let mut remaps = EnumOccurrenceRemaps::default();
-            if let Some(authored_cases) = plan.source_mapping.scalar_enum_cases.get(&column_id) {
-                let physical_cases =
-                    self.physical_scalar_enum_cases(plan.source_mapping.table_id, column_id)?;
-                remaps.scalar.insert(
-                    "root".to_owned(),
-                    authored_cases
-                        .iter()
-                        .map(|identity| {
-                            physical_cases
-                                .iter()
-                                .position(|candidate| candidate == identity)
-                                .map(|tag| {
-                                    u8::try_from(tag).map_err(|_| {
-                                        Error::InvalidStoredValue(
-                                            "physical scalar enum tag exhausted",
-                                        )
-                                    })
-                                })
-                                .transpose()
-                        })
-                        .collect::<Result<_, _>>()?,
-                );
-            }
-            if let Some(authored_cases) = plan.source_mapping.payload_enum_cases.get(&column_id) {
-                let physical_cases =
-                    self.physical_payload_enum_cases(plan.source_mapping.table_id, column_id)?;
-                remaps.payload.insert(
-                    "root".to_owned(),
-                    authored_cases
-                        .iter()
-                        .map(|identity| {
-                            physical_cases
-                                .iter()
-                                .position(|candidate| candidate == identity)
-                                .map(|tag| {
-                                    u32::try_from(tag).map_err(|_| {
-                                        Error::InvalidStoredValue(
-                                            "physical payload enum tag exhausted",
-                                        )
-                                    })
-                                })
-                                .transpose()
-                        })
-                        .collect::<Result<_, _>>()?,
-                );
-                remaps.payload_children.insert(
-                    "root".to_owned(),
-                    authored_cases
-                        .iter()
-                        .map(|identity| Some(global_case_path("root", identity)))
-                        .collect(),
-                );
-            }
-            if let Some(authored_paths) = plan.source_mapping.nested_scalar_enum_cases.get(&column_id) {
-                for (path, authored_cases) in authored_paths {
-                    let physical_cases = self.physical_nested_scalar_enum_cases(
-                        plan.source_mapping.table_id,
-                        column_id,
-                        path,
-                    )?;
-                    remaps.scalar.insert(
-                        path.clone(),
-                        authored_cases
-                            .iter()
-                            .map(|identity| {
-                                physical_cases
-                                    .iter()
-                                    .position(|candidate| candidate == identity)
-                                    .map(|tag| {
-                                        u8::try_from(tag).map_err(|_| {
-                                            Error::InvalidStoredValue(
-                                                "physical nested scalar enum tag exhausted",
-                                            )
-                                        })
-                                    })
-                                    .transpose()
-                            })
-                            .collect::<Result<_, _>>()?,
-                    );
-                }
-            }
-            if let Some(authored_paths) = plan.source_mapping.nested_payload_enum_cases.get(&column_id) {
-                for (path, authored_cases) in authored_paths {
-                    let physical_cases = self.physical_nested_payload_enum_cases(
-                        plan.source_mapping.table_id,
-                        column_id,
-                        path,
-                    )?;
-                    remaps.payload.insert(
-                        path.clone(),
-                        authored_cases
-                            .iter()
-                            .map(|identity| {
-                                physical_cases
-                                    .iter()
-                                    .position(|candidate| candidate == identity)
-                                    .map(|tag| {
-                                        u32::try_from(tag).map_err(|_| {
-                                            Error::InvalidStoredValue(
-                                                "physical nested payload enum tag exhausted",
-                                            )
-                                        })
-                                    })
-                                    .transpose()
-                            })
-                            .collect::<Result<_, _>>()?,
-                    );
-                    remaps.payload_children.insert(
-                        path.clone(),
-                        authored_cases
-                            .iter()
-                            .map(|identity| Some(global_case_path(path, identity)))
-                            .collect(),
-                    );
-                }
-            }
-            if remaps.scalar.is_empty() && remaps.payload.is_empty() {
-                continue;
-            }
-            let physical_type = plan.physical_table
-                .columns
-                .iter()
-                .find(|physical| physical.name == physical_user_column_field(column_id))
-                .map(|physical| &physical.column_type)
-                .ok_or(Error::InvalidStoredValue(
-                    "physical enum write column missing",
-                ))?;
-            let (Value::Nullable(Some(inner)), records::ValueType::Nullable(physical)) =
-                (value.clone(), physical_type)
-            else {
-                continue;
-            };
-            *value = Value::Nullable(Some(Box::new(remap_nested_enum_value(
-                *inner,
-                &column.column_type,
-                physical,
-                &remaps,
-                "root",
-            )?)));
-        }
         Ok((
             groove::Intern::new(plan.storage_table.clone()),
-            groove::records::ValidatedVariantRecord::create(
-                groove_variant_tag(version.schema_version_alias())?,
-                plan.physical_descriptor,
-                &values,
-            )?,
+            self.encode_physical_version_record(&plan, version, None)?,
         ))
+    }
+
+    /// Reuse encoded history fields; only current timestamps and enum tags
+    /// need representation changes. Plans belong to the catalogue and are
+    /// invalidated alongside physical registry/descriptor changes.
+    pub(super) fn encode_physical_version_record(
+        &self,
+        plan: &PreparedPhysicalWritePlan,
+        version: &VersionRow,
+        global_time: Option<GlobalTime>,
+    ) -> Result<groove::records::ValidatedVariantRecord, Error> {
+        let input = version.record.borrowed();
+        let matching_layout = input.descriptor() == plan.history_descriptor;
+        let encoded = groove::records::ValidatedVariantRecord::create_with_encoded_fields::<Error>(
+            groove_variant_tag(version.schema_version_alias())?,
+            plan.physical_descriptor,
+            input.raw().len() + 16,
+            |index, output| {
+                let value = match &plan.write_fields[index] {
+                    PhysicalWriteField::Copy(source) if matching_layout => {
+                        let span = input.descriptor().field_span(input.raw(), *source)?;
+                        output.extend_from_slice(&input.raw()[span]);
+                        return Ok(());
+                    }
+                    PhysicalWriteField::Copy(source) | PhysicalWriteField::Decode(source) => {
+                        input.get_idx(*source)?
+                    }
+                    PhysicalWriteField::CreatedAtMillis => {
+                        Value::U64(version.created_at().physical_ms())
+                    }
+                    PhysicalWriteField::UpdatedAtMillis => {
+                        Value::U64(version.updated_at().physical_ms())
+                    }
+                    PhysicalWriteField::GlobalTime => {
+                        Value::Nullable(global_time.map(|time| Box::new(Value::U64(time.0))))
+                    }
+                    PhysicalWriteField::Enum { source, column } => {
+                        let value = input.get_idx(*source)?;
+                        match (value, &plan.physical_descriptor.fields()[index].value_type) {
+                            (
+                                Value::Nullable(Some(inner)),
+                                records::ValueType::Nullable(physical),
+                            ) => Value::Nullable(Some(Box::new(remap_nested_enum_value(
+                                *inner,
+                                &plan.source_table.columns[*column].column_type,
+                                physical,
+                                &plan.enum_remaps[*column],
+                                "root",
+                            )?))),
+                            (value, _) => value,
+                        }
+                    }
+                };
+                plan.physical_descriptor
+                    .encode_field_into(index, &value, output)?;
+                Ok(())
+            },
+        )?;
+        #[cfg(test)]
+        {
+            // Internal byte oracle: public query equality cannot detect a
+            // different durable authored/physical enum or timestamp encoding.
+            let current = plan
+                .write_fields
+                .iter()
+                .any(|field| matches!(field, PhysicalWriteField::GlobalTime));
+            let mut values = if current {
+                global_current_values(&plan.source_table, version, global_time)?
+            } else {
+                version.record.to_values()?
+            };
+            self.remap_authored_enum_cells_for_physical(
+                &mut values,
+                &plan.source_table,
+                &plan.source_mapping,
+                &plan.physical_table,
+                if current {
+                    GlobalCurrentRowRecord::USER_CELLS
+                } else {
+                    HistoryRowRecord::USER_CELLS
+                },
+            )?;
+            assert_eq!(
+                encoded.record().raw(),
+                plan.physical_descriptor.create(&values)?
+            );
+        }
+        Ok(encoded)
     }
 
     /// Encode a deletion/register version into the fixed shared history table.
