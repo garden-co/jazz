@@ -11,11 +11,12 @@ async function runWrapper(
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const { promise, resolve } = Promise.withResolvers<{
-    status: number | null;
-    stdout: string;
-    stderr: string;
-  }>();
+  let resolve!: (value: { status: number | null; stdout: string; stderr: string }) => void;
+  const promise = new Promise<{ status: number | null; stdout: string; stderr: string }>(
+    (resolvePromise) => {
+      resolve = resolvePromise;
+    },
+  );
   const child = spawn(process.execPath, ["--no-warnings", wrapper, ...args], {
     cwd: options.cwd,
     env: options.env ?? process.env,
