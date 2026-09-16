@@ -18,6 +18,7 @@ const inspectorSaveApp = s.defineApp({
       title: s.string(),
       owner_id: s.uuid(),
       rank: s.bigint().optional(),
+      payload: s.bytes().optional(),
     },
     {},
   ),
@@ -29,8 +30,13 @@ const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy
   policy.todos.allowDelete.where({ owner_id: session.user.account });
 });
 
+let latestQuery: GenericQueryBuilder | null = null;
+
 vi.mock("jazz-tools/react", () => ({
-  useAll: () => ({ data: [], isLoading: false, error: null }),
+  useAll: (query: GenericQueryBuilder) => {
+    latestQuery = query;
+    return { data: [], isLoading: false, error: null };
+  },
   useDb: () => {
     if (!currentDb) throw new Error("Inspector integration Db is not initialized");
     return currentDb;
@@ -171,6 +177,7 @@ describe("TableDataGrid real Db save retries", () => {
 
   afterEach(async () => {
     cleanup();
+    latestQuery = null;
     currentDb = null;
     await policyApp?.shutdown();
     policyApp = null;
@@ -410,6 +417,52 @@ describe("TableDataGrid real Db save retries", () => {
         title: "exact rank",
         owner_id: permittedOwner,
         rank: exactValue,
+      }),
+    ]);
+  }, 30_000);
+  it("round-trips a BYTEA equality filter through the grid URL and query runtime", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    const exactPayload = new Uint8Array([0, 255]);
+    await setup.db
+      .insert(inspectorSaveApp.todos, {
+        title: "exact payload",
+        owner_id: permittedOwner,
+        payload: exactPayload,
+      })
+      .wait({ tier: "edge" });
+    await setup.db
+      .insert(inspectorSaveApp.todos, {
+        title: "nearby payload",
+        owner_id: permittedOwner,
+        payload: new Uint8Array([0, 254]),
+      })
+      .wait({ tier: "edge" });
+
+    currentDb = setup.db;
+    renderGrid();
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "payload" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "eq" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "0, 255" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    await waitFor(() => {
+      const query = latestQuery;
+      if (!query) throw new Error("TableDataGrid did not issue a query");
+      expect(JSON.parse(query._build()).conditions).toEqual([
+        { column: "payload", op: "eq", value: [0, 255] },
+      ]);
+    });
+
+    const query = latestQuery;
+    if (!query) throw new Error("TableDataGrid did not issue a query");
+    const rows = await setup.db.all(query, { tier: "edge" });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        title: "exact payload",
+        owner_id: permittedOwner,
+        payload: exactPayload,
       }),
     ]);
   }, 30_000);
