@@ -80,3 +80,44 @@ test("todo persistence across sign-up→logout→login", async ({ page }) => {
   });
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });
+
+test("rejected delete reports failure instead of claiming success", async ({ page }) => {
+  const runId = Date.now();
+  const credentials = {
+    name: "Delete Failure User",
+    email: `delete-failure-${runId}@example.com`,
+    password: "testpassword",
+  };
+  const todo = `Recover this todo ${runId}`;
+  let blockDelete = false;
+  let droppedDeleteFrame = false;
+
+  // The starter exposes only the browser harness; dropping this mutation's
+  // Jazz transport is the available public failure seam without importing
+  // private wire codecs or changing the starter's production setup.
+  await page.context().routeWebSocket("**", (socket) => {
+    const server = socket.connectToServer();
+    socket.onMessage((message) => {
+      if (blockDelete) {
+        droppedDeleteFrame = true;
+        void socket.close();
+        return;
+      }
+      server.send(message);
+    });
+  });
+
+  await page.goto("/");
+  await signUp(page, credentials);
+  await addTodo(page, todo);
+
+  blockDelete = true;
+  await page.getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByText(todo, { exact: true })).not.toBeVisible({ timeout: TIMEOUT });
+  const status = page.getByRole("status");
+  await expect(status).toBeVisible();
+  await expect(status).toContainText("Delete failed", { timeout: TIMEOUT });
+  expect(droppedDeleteFrame).toBe(true);
+  await expect(status).not.toContainText("Deleted");
+  await expect(status).not.toContainText("Saved locally");
+});
