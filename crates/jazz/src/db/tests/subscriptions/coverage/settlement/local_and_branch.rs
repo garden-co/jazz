@@ -128,8 +128,21 @@ fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
 }
 
 #[test]
-fn subscription_retains_a_plan_from_its_selected_authorization_mode() {
-    let schema = owner_id_public_schema();
+fn subscription_executes_its_selected_authorization_mode() {
+    // This stays internal solely to inspect provenance captured from the actual
+    // compiled program. The exact row assertions below exercise public Db APIs.
+    // Client-local reads see local inputs; serving reads must enforce policy.
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("messages")
+                .column("body", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(public_literal_eq(
+                    "body",
+                    PublicValue::Text("visible".into()),
+                ))),
+        ),
+    );
     let author = AuthorSubject::for_test_bytes([0x33; 16]);
     let db = open_db(0x33, author, &schema);
     db.set_identity_claims(
@@ -141,17 +154,59 @@ fn subscription_retains_a_plan_from_its_selected_authorization_mode() {
         &Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
     );
 
-    let client = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    for (id, body, owner_id) in [
+        (row(0x34), "visible", "alice"),
+        (row(0x35), "hidden", "alice"),
+        (row(0x36), "visible", "bob"),
+    ] {
+        // The public row-input macro has facade values; this text-only fixture
+        // converts them explicitly for the direct Db boundary under test.
+        let input = crate::row_input!("body" => body, "owner_id" => owner_id)
+            .into_iter()
+            .map(|(name, value)| {
+                let crate::tools::Value::Text(value) = value else {
+                    panic!("text fixture")
+                };
+                (name, Value::String(value))
+            })
+            .collect();
+        db.insert(
+            "messages",
+            input,
+            InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut client = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
     assert_eq!(
-        client.retained_plan_authorization_mode(),
+        client.compiled_authorization_mode(),
         Some(QueryAuthorizationMode::ClientLocal)
     );
-
-    let trusted =
-        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), author)).unwrap();
     assert_eq!(
-        trusted.retained_plan_authorization_mode(),
+        row_ids(&opened_rows(block_on(client.next_raw()).unwrap()))
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0x34), row(0x35)]),
+        "client execution binds the claim without reapplying serving policy"
+    );
+
+    let mut trusted = block_on(db.subscribe_for_identity(&prepared, opts, author)).unwrap();
+    assert_eq!(
+        trusted.compiled_authorization_mode(),
         Some(QueryAuthorizationMode::TrustedServing)
+    );
+    assert_eq!(
+        row_ids(&opened_rows(block_on(trusted.next_raw()).unwrap())),
+        vec![row(0x34)],
+        "serving execution binds the claim AND enforces the read policy"
     );
 }
 

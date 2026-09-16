@@ -59,6 +59,10 @@ struct VersionDecodePlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
+    /// Test receipt from the exact program passed to subscribe_lowered_program,
+    /// not from an unrelated prepared AppRows plan or caller-supplied label.
+    #[cfg(test)]
+    pub(crate) compiled_authorization_mode: Option<super::query_engine::QueryAuthorizationMode>,
     /// Keep reader exclusion inputs alive until the final serving view closes.
     pub(crate) edge_availability_owner:
         Option<std::sync::Arc<super::query_eval::EdgeAvailabilityOwner>>,
@@ -136,6 +140,8 @@ pub(crate) struct MaintainedSubscriptionView {
 impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
+            compiled_authorization_mode: None,
             edge_availability_owner: None,
             read_view: Default::default(),
             witness_table_names: BTreeMap::new(),

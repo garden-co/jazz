@@ -3934,6 +3934,8 @@ where
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
+        #[cfg(test)]
+        let compiled_authorization_mode = program.request.authorization_mode;
         let subscription = match self
             .subscribe_lowered_program(
                 program,
@@ -3955,6 +3957,10 @@ where
             eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
         }
         let mut maintained = MaintainedSubscriptionView::default();
+        #[cfg(test)]
+        {
+            maintained.compiled_authorization_mode = Some(compiled_authorization_mode);
+        }
         maintained.physical_tables = self
             .catalogue
             .physical_mappings

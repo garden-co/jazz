@@ -175,10 +175,8 @@ impl LocalMaintainedViewSubscription {
     }
 
     #[cfg(test)]
-    pub(crate) fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
-        self._retained_prepared_plan
-            .as_ref()
-            .map(|plan| plan.authorization_mode)
+    pub(crate) fn compiled_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
+        self.maintained.compiled_authorization_mode
     }
 
     #[cfg(feature = "testing")]
