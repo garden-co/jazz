@@ -107,3 +107,54 @@ test("successful packaged binding still returns its fingerprint", (t) => {
   `,
   );
 });
+
+test("package version mismatch stays visible beside a missing local candidate", (t) => {
+  fixture(
+    t,
+    {
+      "native-loader.cjs": `
+      const missing = Object.assign(new Error("Cannot find module './jazz-napi.linux-x64-gnu.node'"), { code: 'MODULE_NOT_FOUND' });
+      const mismatch = new Error('Native binding package version mismatch, expected 2.0.0-alpha.55 but got 2.0.0-alpha.54. You can reinstall dependencies to fix this issue.');
+      const loadErrors = [missing, mismatch];
+      const error = new Error('Cannot find native binding. npm has a bug related to optional dependencies. Please try npm i again', {
+        cause: loadErrors.reduce((err, cur) => { cur.cause = err; return cur; }),
+      });
+      globalThis.originalLoaderError = error;
+      throw error;
+    `,
+    },
+    `
+    assert.throws(() => require('./native-binding.cjs'), error => {
+      assert.match(error.message, /artifact could not be loaded/);
+      assert.match(error.message, /Native binding package version mismatch, expected 2.0.0-alpha.55 but got 2.0.0-alpha.54/);
+      assert.doesNotMatch(error.message, /artifact is missing/);
+      assert.equal(error.code, undefined);
+      assert.equal(error.cause, globalThis.originalLoaderError);
+      assert.equal(error.cause.cause.cause.code, 'MODULE_NOT_FOUND');
+      return true;
+    });
+  `,
+  );
+});
+
+test("all missing napi-rs candidates retain installation guidance", (t) => {
+  fixture(
+    t,
+    {
+      "native-loader.cjs": `
+      const local = Object.assign(new Error('Cannot find local binary'), { code: 'MODULE_NOT_FOUND' });
+      const pkg = Object.assign(new Error('Cannot find platform package', { cause: local }), { code: 'MODULE_NOT_FOUND' });
+      throw new Error('Cannot find native binding. Please try npm i again', { cause: pkg });
+    `,
+    },
+    `
+    assert.throws(() => require('./native-binding.cjs'), error => {
+      assert.match(error.message, /artifact is missing/);
+      assert.match(error.message, /reinstall matching Jazz package versions/);
+      assert.equal(error.code, 'MODULE_NOT_FOUND');
+      assert.equal(error.cause.cause.cause.code, 'MODULE_NOT_FOUND');
+      return true;
+    });
+  `,
+  );
+});
