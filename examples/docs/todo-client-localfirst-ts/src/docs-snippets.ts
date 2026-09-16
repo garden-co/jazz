@@ -213,8 +213,8 @@ export async function readProjectsWithTodos(db: Db) {
 
 // #region reading-require-includes-ts
 const requiredReferences = s.defineApp({
-  customers: s.table({ name: s.string() }),
-  orders: s.table({ customerId: s.ref("customers") }),
+  customers: s.table({ name: s.string() }, { ordersViaCustomer: s.reverse("orders", "customer") }),
+  orders: s.table({ customerId: s.uuid() }, { customer: s.rel("customers", "customerId") }),
 });
 
 export async function readOrdersWithRequiredCustomer(db: Db) {

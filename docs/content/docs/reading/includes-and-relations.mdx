@@ -37,8 +37,12 @@ Including a relation adds the resolved object alongside the foreign-key column&h
 
 ### Reverse relations
 
-When table A has a ref column pointing to table B, Jazz auto-derives a reverse relation on B that returns all matching A rows as an array. The naming convention is `{sourceTable}Via{RelationName}`&hairsp;—&hairsp;for example, if `todos` has `projectId: s.ref("projects")`,
-then `projects` gets a `todosViaProject` reverse relation.
+Declare reverse relations explicitly on the target table. For example, if `todos` declares
+`project: s.rel("projects", "projectId")`, `projects` can declare
+`todos: s.reverse("todos", "project")` and load it with `include({ todos: true })`.
+The reverse relation returns matching source rows as an array. Its name is your choice;
+Jazz does not generate an inverse or infer names from UUID columns. Existing examples may
+retain names such as `todosViaProject` through explicit declarations.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
