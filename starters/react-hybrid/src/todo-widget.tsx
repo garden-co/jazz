@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useDb, useAll } from "jazz-tools/react";
-import type { WriteHandle } from "jazz-tools";
+import { PersistedWriteRejectedError, type WriteHandle } from "jazz-tools";
 import { app } from "../schema";
 
 type DeleteWriteHandle = WriteHandle;
@@ -8,6 +8,7 @@ type DeleteOperation = {
   todoId: string;
   title: string;
   lifecycle: number;
+  transactionId: string;
   write: DeleteWriteHandle;
 };
 export function TodoWidget() {
@@ -20,16 +21,35 @@ export function TodoWidget() {
   const latestSaveFailed = useRef(false);
   const deleteLifecycle = useRef(0);
   const pendingDeletes = useRef(new Map<string, DeleteOperation>());
+  const deleteFailures = useRef(new Map<string, string>());
+
+  function renderDeleteStatus() {
+    const failure = deleteFailures.current.values().next().value as string | undefined;
+    setDeleteStatus(failure ?? (pendingDeletes.current.size > 0 ? "Deleting…" : null));
+  }
 
   useEffect(() => {
     const lifecycle = ++deleteLifecycle.current;
     pendingDeletes.current.clear();
+    deleteFailures.current.clear();
     setDeleteStatus(null);
+    const unsubscribe = db.onMutationError((event) => {
+      if (deleteLifecycle.current !== lifecycle) return;
+      for (const operation of pendingDeletes.current.values()) {
+        if (operation.transactionId !== event.transaction.transactionId) continue;
+        pendingDeletes.current.delete(operation.todoId);
+        deleteFailures.current.set(operation.todoId, `Delete failed: ${operation.title}`);
+        renderDeleteStatus();
+        break;
+      }
+    });
     return () => {
+      unsubscribe();
       if (deleteLifecycle.current === lifecycle) {
         deleteLifecycle.current += 1;
       }
       pendingDeletes.current.clear();
+      deleteFailures.current.clear();
     };
   }, [db]);
 
@@ -66,39 +86,57 @@ export function TodoWidget() {
 
   async function remove(todoId: string, title: string) {
     const lifecycle = deleteLifecycle.current;
+    deleteFailures.current.delete(todoId);
     setDeleteStatus("Deleting…");
 
     let write: DeleteWriteHandle;
     try {
       write = db.delete(app.todos, todoId);
     } catch {
-      if (deleteLifecycle.current === lifecycle) setDeleteStatus("Delete failed");
+      if (deleteLifecycle.current === lifecycle) {
+        deleteFailures.current.set(todoId, `Delete failed: ${title}`);
+        renderDeleteStatus();
+      }
       return;
     }
 
-    const operation: DeleteOperation = { todoId, title, lifecycle, write };
+    let transactionId: string;
+    try {
+      transactionId = await write.txId;
+    } catch {
+      if (deleteLifecycle.current === lifecycle) {
+        deleteFailures.current.set(todoId, `Delete failed: ${title}`);
+        renderDeleteStatus();
+      }
+      return;
+    }
+
+    if (deleteLifecycle.current !== lifecycle) return;
+    const operation: DeleteOperation = { todoId, title, lifecycle, transactionId, write };
     pendingDeletes.current.set(todoId, operation);
-    let failed = false;
+    let waitingForLocal = true;
     try {
       await write.wait({ tier: "local" });
+      waitingForLocal = false;
       await write.wait({ tier: "edge" });
-    } catch {
-      failed = true;
-      if (
-        deleteLifecycle.current === operation.lifecycle &&
-        pendingDeletes.current.get(operation.todoId) === operation
-      ) {
-        setDeleteStatus(`Delete failed: ${operation.title}`);
-      }
-    } finally {
       if (
         deleteLifecycle.current === operation.lifecycle &&
         pendingDeletes.current.get(operation.todoId) === operation
       ) {
         pendingDeletes.current.delete(operation.todoId);
-        if (!failed && pendingDeletes.current.size === 0) {
-          setDeleteStatus(null);
-        }
+        renderDeleteStatus();
+      }
+    } catch (error) {
+      if (
+        deleteLifecycle.current !== operation.lifecycle ||
+        pendingDeletes.current.get(operation.todoId) !== operation
+      ) {
+        return;
+      }
+      if (waitingForLocal || error instanceof PersistedWriteRejectedError) {
+        pendingDeletes.current.delete(operation.todoId);
+        deleteFailures.current.set(operation.todoId, `Delete failed: ${operation.title}`);
+        renderDeleteStatus();
       }
     }
   }
