@@ -53,6 +53,45 @@ const defaultedSchema = {
 };
 type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
 const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
+ 
+const irregularRelationSchema = {
+  categories: s.table({ label: s.string() }),
+  people: s.table({ name: s.string() }),
+  analyses: s.table({ summary: s.string() }),
+  statuses: s.table({ label: s.string() }),
+  records: s.table({
+    category_ids: s.array(s.ref("categories")),
+    person_ids: s.array(s.ref("people")),
+    analysis_ids: s.array(s.ref("analyses")),
+    status_ids: s.array(s.ref("statuses")),
+  }),
+};
+type IrregularRelationAppSchema = s.Schema<typeof irregularRelationSchema>;
+const irregularRelationApp: s.App<IrregularRelationAppSchema> = s.defineApp(
+  irregularRelationSchema,
+);
+
+const irregularQuery = irregularRelationApp.records
+  .include({ categories: true, people: true, analyses: true, statuses: true })
+  .requireIncludes();
+type IrregularRecord = s.RowOf<typeof irregularQuery>;
+
+it("uses canonical plural relation names for irregular array references", () => {
+  expect(JSON.parse(irregularQuery._build()).includes).toEqual({
+    categories: true,
+    people: true,
+    analyses: true,
+    statuses: true,
+  });
+  expectTypeOf<IrregularRecord["categories"]>().toEqualTypeOf<
+    Array<{ id: string; label: string }>
+  >();
+  expectTypeOf<IrregularRecord["people"]>().toEqualTypeOf<Array<{ id: string; name: string }>>();
+  expectTypeOf<IrregularRecord["analyses"]>().toEqualTypeOf<
+    Array<{ id: string; summary: string }>
+  >();
+  expectTypeOf<IrregularRecord["statuses"]>().toEqualTypeOf<Array<{ id: string; label: string }>>();
+});
 
 type Urgency = "low" | "high";
 
