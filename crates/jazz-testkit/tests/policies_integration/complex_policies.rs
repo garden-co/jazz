@@ -621,6 +621,194 @@ async fn exists_rel_join_grants_and_denies_correctly_inner(member_filter: Predic
     server.shutdown().await;
 }
 
+/// A chained equality must read B.code, not the same-named A.code.
+/// Bob matches B and may read; Dave matches only A and must remain denied.
+#[tokio::test]
+async fn exists_rel_chained_join_preserves_operand_sources() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_chained_join_preserves_operand_sources_inner(
+            true,
+        ))
+        .await;
+}
+
+/// The same source routing must work without an outer-row correlation.
+#[tokio::test]
+async fn uncorrelated_exists_rel_chained_join_preserves_operand_sources() {
+    tokio::task::LocalSet::new()
+        .run_until(exists_rel_chained_join_preserves_operand_sources_inner(
+            false,
+        ))
+        .await;
+}
+
+async fn exists_rel_chained_join_preserves_operand_sources_inner(correlated: bool) {
+    let relation = pe::table("grants")
+        .alias("a")
+        .join(
+            pe::table("links").alias("b"),
+            pe::rel::column("a", "group_slug"),
+            pe::rel::column("b", "group_slug"),
+        )
+        .join(
+            pe::table("members").alias("c"),
+            pe::rel::column("b", "code"),
+            pe::rel::column("c", "code"),
+        )
+        .where_(pe::rel::eq_session(
+            pe::rel::column("c", "user_id"),
+            "claims.sub",
+        ));
+    let relation = if correlated {
+        relation.where_(pe::rel::eq_outer(pe::rel::column("a", "document_id"), "id"))
+    } else {
+        relation
+    };
+    let schema = SchemaBuilder::new()
+        .table(make_title_documents_schema(
+            "documents",
+            permissions(|p| {
+                p.allow_read().where_(pe::exists(relation));
+                p.allow_insert().always();
+            }),
+        ))
+        .table(
+            TableSchema::builder("grants")
+                .fk_column("document_id", "documents")
+                .column("group_slug", ColumnType::Text)
+                .column("code", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("links")
+                .column("group_slug", ColumnType::Text)
+                .column("code", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("members")
+                .column("code", ColumnType::Text)
+                .column("user_id", ColumnType::Text),
+        )
+        .build();
+    let server = JazzServer::start_with_schema(schema.clone())
+        .await
+        .expect("start server");
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let doc = create_title_document(&admin, "Scoped chain").await;
+    admin
+        .insert(
+            "grants",
+            jazz::row_input!("document_id" => doc, "group_slug" => "eng", "code" => "wrong"),
+        )
+        .expect("insert grant");
+    admin
+        .insert(
+            "links",
+            jazz::row_input!("group_slug" => "eng", "code" => "correct"),
+        )
+        .expect("insert link");
+    admin
+        .insert(
+            "members",
+            jazz::row_input!("code" => "correct", "user_id" => super::BOB_ID),
+        )
+        .expect("insert bob");
+    let (_, _, tx) = admin
+        .insert(
+            "members",
+            jazz::row_input!("code" => "wrong", "user_id" => super::DAVE_ID),
+        )
+        .expect("insert dave");
+    jazz_testkit::wait_for_edge_txs(&admin, &[tx.expect("committed insert")]).await;
+    let bob = connect_ready_user(&server, &schema, super::BOB_ID, "documents", READY_TIMEOUT).await;
+    let dave =
+        connect_ready_user(&server, &schema, super::DAVE_ID, "documents", READY_TIMEOUT).await;
+    let rows = wait_for_rows(
+        &bob,
+        Query::from("documents"),
+        "Bob matches the joined source",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == doc
+                && rows[0].1 == title_document_values("Scoped chain"))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    let rows = wait_for_query(
+        &dave,
+        Query::from("documents"),
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "matching only the root code must not grant access",
+        Some,
+    )
+    .await;
+    assert!(rows.is_empty());
+    admin.shutdown().await.expect("shutdown admin");
+    bob.shutdown().await.expect("shutdown bob");
+    dave.shutdown().await.expect("shutdown dave");
+    server.shutdown().await;
+}
+
+/// Invalid join scopes must be rejected before executing authorization queries.
+#[tokio::test]
+async fn exists_rel_join_rejects_invalid_operand_scopes() {
+    for (left, right, expected) in [
+        ("missing", "memberships", "unknown scope 'missing'"),
+        ("grants", "missing", "unknown scope 'missing'"),
+    ] {
+        assert_join_policy_rejected(
+            pe::exists(
+                pe::table("document_grants")
+                    .alias("grants")
+                    .join(
+                        pe::table("group_memberships").alias("memberships"),
+                        pe::rel::column(left, "group_slug"),
+                        pe::rel::column(right, "group_slug"),
+                    )
+                    .where_(pe::rel::eq_outer(
+                        pe::rel::column("grants", "document_id"),
+                        "id",
+                    )),
+            ),
+            expected,
+        )
+        .await;
+    }
+    assert_join_policy_rejected(
+        pe::exists(pe::table("document_grants").alias("grants").join(
+            pe::table("group_memberships").alias("first").join(
+                pe::table("group_memberships").alias("second"),
+                pe::rel::column("first", "group_slug"),
+                pe::rel::column("second", "group_slug"),
+            ),
+            pe::rel::column("grants", "group_slug"),
+            pe::rel::column("second", "group_slug"),
+        )),
+        "join target must be the right relation's root source",
+    )
+    .await;
+    assert_join_policy_rejected(
+        pe::exists(
+            pe::table("document_grants")
+                .alias("same")
+                .join(
+                    pe::table("group_memberships").alias("same"),
+                    "group_slug",
+                    "group_slug",
+                )
+                .join(
+                    pe::table("group_memberships").alias("third"),
+                    pe::rel::column("same", "group_slug"),
+                    pe::rel::column("third", "group_slug"),
+                ),
+        ),
+        "scope 'same' is ambiguous",
+    )
+    .await;
+}
+
 /// Verifies that join queries apply `SELECT` policies to rows from joined
 /// tables, not only to the base table.
 #[tokio::test]

@@ -2014,6 +2014,29 @@ fn append_exists_rel_policy_clause(
     }
 }
 
+/// Resolve a column before dropping its relation scope from the core join tree.
+fn resolve_rel_column_route(
+    table: &TableName,
+    path: &str,
+    lowered: &LoweredRel,
+    column: &ColumnRef,
+) -> Result<Vec<usize>, SchemaConversionError> {
+    let Some(scope) = column.scope.as_deref() else {
+        return Ok(Vec::new());
+    };
+    match lowered.scope_paths.get(scope) {
+        Some(Some(route)) => Ok(route.clone()),
+        Some(None) => Err(err(
+            format!("$.{}.{path}", table.as_str()),
+            format!("ExistsRel column scope '{scope}' is ambiguous; use distinct aliases"),
+        )),
+        None => Err(err(
+            format!("$.{}.{path}", table.as_str()),
+            format!("ExistsRel column references unknown scope '{scope}'"),
+        )),
+    }
+}
+
 /// Assign conjuncts to their source before converting scoped columns to local names.
 /// OR/NOT expressions must stay intact: distributing them between existence joins
 /// would change which combinations of rows can authorize the protected row.
@@ -2033,26 +2056,7 @@ fn append_scoped_rel_predicate(
     collect_rel_predicate_columns(predicate, &mut columns);
     let mut routes = BTreeSet::new();
     for column in columns {
-        let route = match column.scope.as_deref() {
-            None => Vec::new(),
-            Some(scope) => match lowered.scope_paths.get(scope) {
-                Some(Some(route)) => route.clone(),
-                Some(None) => {
-                    return Err(err(
-                        format!("$.{}.{path}", table.as_str()),
-                        format!(
-                            "ExistsRel filter scope '{scope}' is ambiguous; use distinct aliases"
-                        ),
-                    ));
-                }
-                None => {
-                    return Err(err(
-                        format!("$.{}.{path}", table.as_str()),
-                        format!("ExistsRel filter references unknown scope '{scope}'"),
-                    ));
-                }
-            },
-        };
+        let route = resolve_rel_column_route(table, path, lowered, column)?;
         routes.insert(route);
     }
     if routes.len() > 1 {
@@ -2157,6 +2161,14 @@ fn lower_exists_rel(
                     "core schema ExistsRel joins require a column equality",
                 ));
             };
+            let source_route = resolve_rel_column_route(table, path, &left, &on.left)?;
+            let target_route = resolve_rel_column_route(table, path, &right, &on.right)?;
+            if !target_route.is_empty() {
+                return Err(err(
+                    format!("$.{}.{path}", table.as_str()),
+                    "core schema ExistsRel join target must be the right relation's root source",
+                ));
+            }
             if let Some(pending) = left.pending_reachable.take() {
                 if on.left.column != "id" {
                     return Err(err(
@@ -2247,18 +2259,24 @@ fn lower_exists_rel(
                 filters,
                 nested_joins: right.joins,
             };
-            let join_index = left.joins.len();
+            let mut joins = &mut left.joins;
+            for index in &source_route {
+                joins = &mut joins[*index].nested_joins;
+            }
+            let mut join_route = source_route;
+            join_route.push(joins.len());
+            joins.push(join);
             for (scope, route) in right.scope_paths {
-                let route = route.map(|mut route| {
-                    route.insert(0, join_index);
-                    route
+                let route = route.map(|route| {
+                    let mut full_route = join_route.clone();
+                    full_route.extend(route);
+                    full_route
                 });
                 left.scope_paths
                     .entry(scope)
                     .and_modify(|route| *route = None)
                     .or_insert(route);
             }
-            left.joins.push(join);
             left.reachable.extend(right.reachable);
             Ok(left)
         }

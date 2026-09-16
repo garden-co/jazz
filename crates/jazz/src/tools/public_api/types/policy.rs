@@ -701,6 +701,10 @@ pub mod policy_expr {
         }
 
         /// Join another relation on one column equality.
+        /// Scoped left columns may refer to any source already joined into this
+        /// relation. The right column must refer to the right relation's root
+        /// source; other right-hand scopes are rejected during schema conversion.
+        /// Unscoped columns refer to the root of their respective relation.
         pub fn join(
             self,
             right: Relation,
