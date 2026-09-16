@@ -216,6 +216,22 @@ pub(super) fn primary_key_bytes(
     }
     Ok(bytes)
 }
+pub(super) fn validate_raw_primary_key(
+    table: &TableSchema,
+    variant_tag: u32,
+    record_schema: RecordDescriptor,
+    record: &[u8],
+    key: &[u8],
+) -> Result<(), Error> {
+    let derived_key = primary_key_bytes(table, variant_tag, record_schema, record)?;
+    if derived_key != key {
+        return Err(Error::InvalidDirectRecordStoreKey(format!(
+            "raw record primary key mismatch for table {}",
+            table.name
+        )));
+    }
+    Ok(())
+}
 
 impl Database {
     pub(super) fn decode_stored_key_value<'a>(
