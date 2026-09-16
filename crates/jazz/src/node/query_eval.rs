@@ -3385,6 +3385,13 @@ where
                 .map(crate::query::relation_output_projection)
                 .transpose()?
                 .map(|(_, columns)| columns),
+            result_relation_projections: shape
+                .query()
+                .relation
+                .as_ref()
+                .filter(|relation| crate::query::relation_union_parts(&relation.rel).is_some())
+                .map(crate::query::relation_union_leaf_projections)
+                .transpose()?,
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),

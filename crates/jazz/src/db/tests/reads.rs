@@ -1360,13 +1360,16 @@ fn relation_union_all_maintained_projection_is_selected_by_arm() {
         rel: RelationExpr::Union {
             inputs: vec![
                 arm("left", "source", "name", "name", "left-name"),
-                arm("right", "source", "nickname", "nickname", "right-nickname"),
+                arm("right", "source", "nickname", "name", "right-name"),
             ],
         },
     };
     let display_name = |row: &CurrentRow| {
         let (descriptor, raw) = row.encoded_record();
-        descriptor.bind(raw).get("displayName").unwrap().clone()
+        match descriptor.bind(raw).get("displayName").unwrap().clone() {
+            Value::Nullable(Some(value)) => *value,
+            value => value,
+        }
     };
     let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
     assert_eq!(

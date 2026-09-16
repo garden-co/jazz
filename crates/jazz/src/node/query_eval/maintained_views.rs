@@ -20,6 +20,8 @@ pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) result_schema_version: SchemaVersionId,
     pub(super) result_select: Option<Vec<String>>,
     pub(super) result_relation_projection: Option<Vec<crate::query::RelationProjectColumn>>,
+    pub(super) result_relation_projections:
+        Option<BTreeMap<String, Vec<crate::query::RelationProjectColumn>>>,
     pub(super) result_set: BTreeSet<ResultMemberEntry>,
     pub(super) result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     pub(super) program_facts: BTreeSet<ProgramFactEntry>,
@@ -113,6 +115,43 @@ impl LocalMaintainedViewSubscription {
     /// authorization result.
     pub(crate) fn initial_snapshot_received(&self) -> bool {
         self.initial_received
+    }
+
+    pub(super) fn relation_projection_for_member(
+        &self,
+        member: &ResultMemberEntry,
+    ) -> Result<Option<&Vec<crate::query::RelationProjectColumn>>, Error> {
+        let occurrence = super::public_result_member_occurrence_id(
+            member,
+            self.result_table.as_str(),
+            self.result_query.aggregate.is_some(),
+        )?
+        .ok_or(Error::InvalidStoredValue(
+            "maintained union member has no occurrence identity",
+        ))?;
+        self.relation_projection_for_occurrence(&occurrence)
+    }
+
+    pub(super) fn relation_projection_for_occurrence(
+        &self,
+        occurrence: &OutputOccurrenceId,
+    ) -> Result<Option<&Vec<crate::query::RelationProjectColumn>>, Error> {
+        let Some(projections) = &self.result_relation_projections else {
+            return Ok(self.result_relation_projection.as_ref());
+        };
+        let label = occurrence
+            .union_arms()
+            .iter()
+            .find_map(|(position, label)| (*position == 0).then_some(label))
+            .ok_or(Error::InvalidStoredValue(
+                "maintained union member has no position-0 arm label",
+            ))?;
+        projections
+            .get(label)
+            .map(Some)
+            .ok_or(Error::InvalidStoredValue(
+                "maintained union member has an unknown arm label",
+            ))
     }
 }
 
@@ -242,6 +281,15 @@ impl LocalMaintainedViewSubscription {
                 .unwrap_or_default()
             + result_set_bytes
             + result_payloads_bytes
+            + self
+                .result_relation_projections
+                .as_ref()
+                .map(|projections| {
+                    postcard::to_allocvec(projections)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
             + program_facts_bytes;
         LocalMaintainedViewSubscriptionFootprint {
             maintained,
@@ -386,6 +434,13 @@ where
                 .map(crate::query::relation_output_projection)
                 .transpose()?
                 .map(|(_, columns)| columns),
+            result_relation_projections: shape
+                .query()
+                .relation
+                .as_ref()
+                .filter(|relation| crate::query::relation_union_parts(&relation.rel).is_some())
+                .map(crate::query::relation_union_leaf_projections)
+                .transpose()?,
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),

@@ -153,6 +153,112 @@ pub(crate) fn relation_output_projection(
     })?;
     Ok((scope, columns))
 }
+/// Return the projection for every leaf of a retained relation UNION.
+///
+/// Labels use the same length-prefixed path encoding as executable UNION
+/// lowering, so a maintained member can select its exact arm projection.
+pub(crate) fn relation_union_leaf_projections(
+    relation: &RelationQuery,
+) -> Result<BTreeMap<String, Vec<RelationProjectColumn>>, QueryError> {
+    let mut projections = BTreeMap::new();
+    collect_relation_union_leaf_projections(&relation.rel, None, None, &mut projections)?;
+    Ok(projections)
+}
+
+fn collect_relation_union_leaf_projections(
+    expr: &RelationExpr,
+    label: Option<&str>,
+    inherited: Option<Vec<RelationProjectColumn>>,
+    projections: &mut BTreeMap<String, Vec<RelationProjectColumn>>,
+) -> Result<(), QueryError> {
+    match expr {
+        RelationExpr::Union { inputs } => {
+            for arm in inputs {
+                let arm_label = label.map_or_else(
+                    || arm.label.clone(),
+                    |prefix| compose_union_arm_path(prefix, &arm.label),
+                );
+                collect_relation_union_leaf_projections(
+                    &arm.input,
+                    Some(&arm_label),
+                    inherited.clone(),
+                    projections,
+                )?;
+            }
+        }
+        RelationExpr::Project { input, columns } if relation_expr_contains_union(input) => {
+            collect_relation_union_leaf_projections(
+                input,
+                label,
+                inherited.or_else(|| Some(columns.clone())),
+                projections,
+            )?;
+        }
+        RelationExpr::Filter { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => {
+            collect_relation_union_leaf_projections(input, label, inherited, projections)?;
+        }
+        RelationExpr::Project { columns, .. } => {
+            let label = label.ok_or_else(|| {
+                relation_unification_error("UNION leaf projection has no arm label")
+            })?;
+            if projections.insert(
+                label.to_owned(),
+                inherited.unwrap_or_else(|| columns.clone()),
+            ).is_some() {
+                return Err(relation_unification_error(
+                    "UNION leaf projection labels must be unique",
+                ));
+            }
+        }
+        RelationExpr::TableScan { .. }
+        | RelationExpr::Join { .. }
+        | RelationExpr::Gather { .. }
+        | RelationExpr::Distinct { .. } => {
+            let label = label.ok_or_else(|| {
+                relation_unification_error("UNION leaf has no output projection")
+            })?;
+            let columns = if let Some(columns) = inherited {
+                columns
+            } else {
+                relation_projection_from_expr(expr)?
+                    .map(|(_, columns)| columns)
+                    .ok_or_else(|| relation_unification_error("UNION leaf has no output projection"))?
+            };
+            if projections.insert(label.to_owned(), columns).is_some() {
+                return Err(relation_unification_error(
+                    "UNION leaf projection labels must be unique",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn relation_expr_contains_union(expr: &RelationExpr) -> bool {
+    match expr {
+        RelationExpr::Union { .. } => true,
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Filter { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => relation_expr_contains_union(input),
+        RelationExpr::Join { left, right, .. } => {
+            relation_expr_contains_union(left) || relation_expr_contains_union(right)
+        }
+        RelationExpr::TableScan { .. }
+        | RelationExpr::Gather { .. }
+        | RelationExpr::Distinct { .. } => false,
+    }
+}
+
+/// Encode a nested semantic UNION arm path without relying on a user label
+/// separator.
+pub(crate) fn compose_union_arm_path(prefix: &str, label: &str) -> String {
+    format!("{}:{prefix}{}:{label}", prefix.len(), label.len())
+}
 
 fn relation_projection_from_expr(
     expr: &RelationExpr,
