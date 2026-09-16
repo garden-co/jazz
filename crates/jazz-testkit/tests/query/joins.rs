@@ -1,5 +1,5 @@
 use jazz::query::{Query, col, eq, lit, table};
-use jazz::tools::{DurabilityTier, OrderedRowDelta, QueryResult, ResultKey, Value};
+use jazz::tools::{OrderedRowDelta, QueryResult, ResultKey, Value};
 
 use crate::common::{
     ClientPair, QUERY_TIMEOUT, create_file, create_file_part, create_org, create_post, create_team,
@@ -68,7 +68,7 @@ async fn subscribe_all_join_emits_when_matching_joined_row_is_inserted() {
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "join query contains newly matched row",
         |rows| (rows.len() == 1).then_some(rows),
@@ -117,7 +117,7 @@ async fn subscribe_all_join_returns_base_and_joined_table_values() {
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "join query returns combined tuple",
         |rows| (rows.len() == 1).then_some(rows),
@@ -161,7 +161,7 @@ async fn subscribe_all_join_filter_on_joined_table_column() {
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "join query filters by joined table title",
         |rows| (rows.len() == 1).then_some(rows),
@@ -200,7 +200,7 @@ async fn subscribe_all_join_filter_on_scoped_alias_columns() {
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "join query filters by scoped aliases",
         |rows| (rows.len() == 1).then_some(rows),
@@ -255,7 +255,7 @@ async fn subscribe_all_supports_hop_queries_via_projected_joins() {
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "hop query rows",
         |rows| (rows.len() == 1).then_some(rows),
@@ -319,7 +319,7 @@ async fn subscribe_all_reacts_to_scalar_fk_updates_in_projected_join_queries() {
     let initial_rows = wait_for_query_results(
         &pair.subscriber,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "initial team row",
         |rows| {
@@ -331,13 +331,13 @@ async fn subscribe_all_reacts_to_scalar_fk_updates_in_projected_join_queries() {
     let team_a_key = initial_rows[0].key.clone();
 
     pair.writer
-        .update(user_id, vec![("team_id".to_string(), Value::Uuid(team_b))])
+        .update("users", user_id, vec![("team_id".to_string(), Value::Uuid(team_b))])
         .expect("move user to new team");
 
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "updated team row",
         |rows| {
@@ -404,7 +404,7 @@ async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries
     let initial_rows = wait_for_query_results(
         &pair.subscriber,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "initial file part row",
         |rows| {
@@ -418,6 +418,7 @@ async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries
 
     pair.writer
         .update(
+            "files",
             file_id,
             vec![("parts".to_string(), Value::Array(vec![Value::Uuid(part_b)]))],
         )
@@ -426,7 +427,7 @@ async fn subscribe_all_reacts_to_uuid_array_fk_updates_in_projected_join_queries
     let rows = wait_for_query_results(
         &pair.subscriber,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "updated file part row",
         |rows| {

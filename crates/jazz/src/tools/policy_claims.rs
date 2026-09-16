@@ -139,10 +139,9 @@ pub fn json_number_to_policy_claim(
     Ok(Value::F64(value))
 }
 
-/// Project one JSON provider value into Groove's non-recursive policy value
-/// corpus. Objects, including arrays that contain an object at any depth, are
-/// intentionally omitted rather than rejecting an otherwise valid session.
-/// The original JSON remains available to the handler/session surface.
+/// Project JSON provider values into the existing policy value corpus.
+/// Objects are represented as a tuple of key/value tuples.
+/// JSON arrays remain arrays, so object fields and array elements cannot be confused.
 pub fn json_value_to_policy_claim(
     value: serde_json::Value,
     origin: NumericClaimOrigin,
@@ -167,8 +166,48 @@ pub fn json_value_to_policy_claim(
             }
             Some(Value::Array(projected))
         }
-        serde_json::Value::Object(_) => None,
+        serde_json::Value::Object(fields) => {
+            let fields = fields.into_iter().collect::<BTreeMap<_, _>>();
+            let mut entries = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                let Some(value) = json_value_to_policy_claim(value, origin)? else {
+                    return Ok(None);
+                };
+                entries.push(Value::Tuple(vec![Value::String(name), value]));
+            }
+            Some(Value::Tuple(entries))
+        }
     })
+}
+
+/// Resolve literal path segments, never splitting provider keys on dots.
+pub(crate) fn policy_claim_at_path(
+    claims: &BTreeMap<String, Value>,
+    path: &[String],
+) -> Option<Value> {
+    if let Some(name) = crate::query::author_claim_path_key(path) {
+        return claims.get(&name).cloned();
+    }
+    let (root, tail) = match path {
+        [namespace, name, tail @ ..] if namespace == "claims" => (provider_claim_key(name), tail),
+        [name] => (name.clone(), &[][..]),
+        _ => return None,
+    };
+    let mut value = claims.get(&root)?.clone();
+    for segment in tail {
+        let Value::Tuple(entries) = value else {
+            return None;
+        };
+        value = entries.into_iter().find_map(|entry| match entry {
+            Value::Tuple(mut pair)
+                if pair.len() == 2 && pair[0] == Value::String(segment.clone()) =>
+            {
+                pair.pop()
+            }
+            _ => None,
+        })?;
+    }
+    Some(value)
 }
 
 #[cfg(test)]
@@ -299,14 +338,20 @@ mod tests {
     }
 
     #[test]
-    fn policy_projection_omits_recursive_json_without_rejecting_scalars() {
+    fn policy_projection_preserves_objects_and_arrays() {
         assert_eq!(
             json_value_to_policy_claim(
                 json!(["editor", { "nested": true }]),
                 NumericClaimOrigin::JavaScript,
             )
             .unwrap(),
-            None
+            Some(Value::Array(vec![
+                Value::String("editor".into()),
+                Value::Tuple(vec![Value::Tuple(vec![
+                    Value::String("nested".into()),
+                    Value::Bool(true)
+                ])])
+            ]))
         );
         assert_eq!(
             json_value_to_policy_claim(
@@ -314,7 +359,10 @@ mod tests {
                 NumericClaimOrigin::ExactJson
             )
             .unwrap(),
-            None
+            Some(Value::Tuple(vec![Value::Tuple(vec![
+                Value::String("profile".into()),
+                Value::String("handler-only".into())
+            ])]))
         );
         assert_eq!(
             json_value_to_policy_claim(json!("editor"), NumericClaimOrigin::JavaScript).unwrap(),

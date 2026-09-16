@@ -6571,6 +6571,65 @@ mod tests {
         );
     }
 
+    // Byte receipts belong here because integration results cannot detect an
+    // accidental change to persisted policy-claim node encoding.
+    #[test]
+    fn nested_policy_claim_v1_encoding_receipt() {
+        let path = vec!["org".to_owned(), "slug".to_owned()];
+        let key = crate::query::provider_claim_path_operand_key(&path);
+        assert_eq!(key.as_bytes(), b"\0claim-path-v1:3:org4:slug");
+        assert_eq!(
+            crate::query::operand_claim_path(&key),
+            vec!["claims", "org", "slug"]
+        );
+        assert_eq!(
+            crate::query::provider_claim_path_operand_key(&["org.slug".into()]).as_bytes(),
+            b"\0claims:org.slug"
+        );
+        let unusual = vec!["".to_owned(), "é:x".to_owned()];
+        let key = crate::query::provider_claim_path_operand_key(&unusual);
+        assert_eq!(key.as_bytes(), "\0claim-path-v1:0:4:é:x".as_bytes());
+        assert_eq!(crate::query::operand_claim_path(&key)[1..], unusual);
+
+        let object = crate::tools::policy_claims::json_value_to_policy_claim(
+            serde_json::json!({"slug": "north", "revoked": null}),
+            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            object,
+            Value::Tuple(vec![
+                Value::Tuple(vec![Value::String("revoked".into()), Value::Nullable(None)]),
+                Value::Tuple(vec![
+                    Value::String("slug".into()),
+                    Value::String("north".into())
+                ]),
+            ])
+        );
+        let claims = BTreeMap::from([(crate::query::provider_claim_key("org"), object)]);
+        let encoded = policy_binding_directory_claims_value(&claims).unwrap();
+        let Value::Array(nodes) = &encoded else {
+            panic!("claim node array")
+        };
+        let mut receipt = blake3::Hasher::new();
+        for node in nodes {
+            let Value::Record(record) = node else {
+                panic!("claim node record")
+            };
+            receipt.update(&(record.raw().len() as u64).to_le_bytes());
+            receipt.update(record.raw());
+        }
+        assert_eq!(
+            receipt.finalize().to_hex().as_str(),
+            "475d72b7c78a532386605e6391d57c02f6a69eae69993c97cb2e4414bd9d52b4"
+        );
+        assert_eq!(
+            policy_binding_directory_claims_from_value(encoded).unwrap(),
+            claims
+        );
+    }
+
     #[test]
     fn policy_binding_directory_uses_typed_claim_nodes_without_an_opaque_blob() {
         // A relay durable directory must preserve the exact session snapshot,

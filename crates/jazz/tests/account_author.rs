@@ -47,7 +47,7 @@ async fn linked_identities_share_account_ownership_but_not_exact_authorship() {
             .expect("author writes row");
     }
     let root_filtered = client
-        .query_results_with_read_tier(
+        .query(
             Query::from("owned").filter(jazz::query::eq(
                 jazz::query::col("$createdBy.account"),
                 jazz::query::lit(jazz::groove::records::Value::Uuid(uuid::Uuid::from_u128(1))),
@@ -65,7 +65,7 @@ async fn linked_identities_share_account_ownership_but_not_exact_authorship() {
     {
         for (table, expected) in [("exact", exact_count), ("owned", owned_count)] {
             let rows = reader
-                .query_results_with_read_tier(Query::from(table), ReadTier::LocalFirst)
+                .query(Query::from(table), ReadTier::LocalFirst)
                 .await
                 .expect("read admitted account scope");
             assert_eq!(rows.len(), expected, "{table} visibility for reader");
@@ -122,7 +122,7 @@ async fn anonymous_account_claim_does_not_match_system_authorship() {
     );
     for (table, expected) in [("owned", 0), ("exact", 0), ("anonymous_readable", 1)] {
         let rows = anonymous
-            .query_results_with_read_tier(Query::from(table), ReadTier::LocalFirst)
+            .query(Query::from(table), ReadTier::LocalFirst)
             .await
             .expect("anonymous scoped read");
         assert_eq!(rows.len(), expected, "{table} anonymous visibility");

@@ -40,13 +40,13 @@ describe("admitted websocket policy claims", () => {
       exp: 2,
       aud: "app",
       role: "reader",
-      metadata: { ignored: true },
+      metadata: { enabled: true },
     });
     expect(
       policyClaimsForAdmittedWebSocket(
         JSON.stringify({ jwt_token, backend_session: { claims: { role: "wrong" } } }),
       ),
-    ).toEqual({ role: "reader" });
+    ).toEqual({ role: "reader", metadata: { enabled: true } });
     expect(
       policyClaimsForAdmittedWebSocket(
         JSON.stringify({

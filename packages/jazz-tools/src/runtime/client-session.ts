@@ -115,14 +115,14 @@ const REGISTERED_JWT_POLICY_FIELDS = new Set(["sub", "exp", "nbf", "iat", "iss",
 function isPolicyClaimValue(value: unknown): boolean {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
-  return Array.isArray(value) && value.every(isPolicyClaimValue);
+  if (Array.isArray(value)) return value.every(isPolicyClaimValue);
+  return isRecord(value) && Object.values(value).every(isPolicyClaimValue);
 }
 
 /**
- * Project decoded JWT metadata into Groove's deliberately non-recursive
- * local advisory policy corpus. The server independently verifies its JWT. This is kept separate from `PublicSession.claims`: registered
- * transport/security fields are verified identity, not provider policy data;
- * objects are handler metadata, not policy values.
+ * Preserve scalar, array, and nested object claims for local policy evaluation.
+ * The server independently verifies its JWT. Registered transport/security
+ * fields remain verified identity rather than provider policy data.
  */
 export function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> {
   const claims: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
