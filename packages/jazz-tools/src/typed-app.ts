@@ -11,11 +11,6 @@ import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
-import {
-  validateRelationCatalogue,
-  type Relation,
-  type RelationCatalogue,
-} from "./codegen/relation-analyzer.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import {
   PROVENANCE_MAGIC_COLUMNS,
@@ -129,18 +124,13 @@ export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
 }>;
 
 declare const definedSchemaBrand: unique symbol;
-declare const definedRelationCatalogueBrand: unique symbol;
-export interface Schema<
-  TSchema extends SchemaDefinition = SchemaDefinition,
-  TCatalogue extends RelationCatalogue | undefined = undefined,
-> {
+export interface Schema<TSchema extends SchemaDefinition = SchemaDefinition> {
   readonly [definedSchemaBrand]: CompactSchema<TSchema>;
-  readonly [definedRelationCatalogueBrand]: TCatalogue;
 }
 
 export type DefinedSchema<TSchema extends SchemaDefinition = SchemaDefinition> = Schema<TSchema>;
 
-type SchemaLike = SchemaDefinition | Schema<any, RelationCatalogue | undefined>;
+type SchemaLike = SchemaDefinition | Schema<any>;
 type SchemaColumns<TSchema extends SchemaDefinition> = CompactSchema<TSchema>;
 type InvalidRefTargetEntries<TSchema extends SchemaDefinition> = {
   [TTable in Extract<keyof SchemaColumns<TSchema>, string>]: {
@@ -180,14 +170,11 @@ type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
     };
 
 type NormalizedSchema<TSchema extends SchemaLike> =
-  TSchema extends Schema<infer TDefinition, any>
+  TSchema extends Schema<infer TDefinition>
     ? CompactSchema<TDefinition>
     : TSchema extends SchemaDefinition
       ? CompactSchema<TSchema>
       : never;
-
-type SchemaCatalogue<TSchema extends SchemaLike> =
-  TSchema extends Schema<any, infer TCatalogue> ? TCatalogue : undefined;
 
 type TableName<TSchema extends SchemaLike> = Extract<keyof NormalizedSchema<TSchema>, string>;
 type ColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Extract<
@@ -456,17 +443,11 @@ type ForwardRelationEntry<
       : never
     : never;
 
-type DerivedForwardRelationEntries<
-  TSchema extends SchemaLike,
-  TTable extends TableName<TSchema>,
-> = {
+type ForwardRelationEntries<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in ColumnName<TSchema, TTable>]: ForwardRelationEntry<TSchema, TTable, TColumn>;
 }[ColumnName<TSchema, TTable>];
 
-type DerivedReverseRelationEntryUnion<
-  TSchema extends SchemaLike,
-  TTable extends TableName<TSchema>,
-> = {
+type ReverseRelationEntryUnion<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TSourceTable in TableName<TSchema>]: {
     [TColumn in ColumnName<TSchema, TSourceTable>]: ColumnBuilderReferences<
       BuilderForColumn<TSchema, TSourceTable, TColumn>
@@ -480,41 +461,6 @@ type DerivedReverseRelationEntryUnion<
       : never;
   }[ColumnName<TSchema, TSourceTable>];
 }[TableName<TSchema>];
-
-type CatalogueRelationEntries<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
-  SchemaCatalogue<TSchema> extends infer TCatalogue
-    ? TCatalogue extends RelationCatalogue
-      ? TTable extends keyof TCatalogue["relations"]
-        ? TCatalogue["relations"][TTable][number] extends infer TRelation
-          ? TRelation extends {
-              name: infer TName extends string;
-              toTable: infer TTarget extends string;
-              isArray: infer TIsArray extends boolean;
-              nullable: infer TNullable extends boolean;
-            }
-            ? {
-                name: TName;
-                toTable: Extract<TTarget, TableName<TSchema>>;
-                isArray: TIsArray;
-                nullable: TNullable;
-              }
-            : never
-          : never
-        : never
-      : never
-    : never;
-
-type ForwardRelationEntries<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = [
-  SchemaCatalogue<TSchema>,
-] extends [undefined]
-  ? DerivedForwardRelationEntries<TSchema, TTable>
-  : CatalogueRelationEntries<TSchema, TTable>;
-
-type ReverseRelationEntryUnion<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = [
-  SchemaCatalogue<TSchema>,
-] extends [undefined]
-  ? DerivedReverseRelationEntryUnion<TSchema, TTable>
-  : CatalogueRelationEntries<TSchema, TTable>;
 
 type ForwardRelationMap<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TRelation in ForwardRelationEntries<TSchema, TTable> as TRelation["name"]]: Omit<
@@ -1472,40 +1418,6 @@ export interface Query<
   }): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
 }
 
-type SliceCatalogueRelation<
-  TRelation extends Relation,
-  TTables extends readonly string[],
-> = TRelation extends unknown
-  ? TRelation["toTable"] extends TTables[number]
-    ? TRelation
-    : never
-  : never;
-
-type SliceCatalogueRelations<
-  TCatalogue extends RelationCatalogue,
-  TTables extends readonly string[],
-> = {
-  [TTable in Extract<keyof TCatalogue["relations"], TTables[number]>]: ReadonlyArray<
-    SliceCatalogueRelation<TCatalogue["relations"][TTable][number], TTables>
-  >;
-};
-
-type SliceCatalogue<TSchema extends SchemaLike, TTables extends readonly string[]> =
-  SchemaCatalogue<TSchema> extends infer TCatalogue
-    ? TCatalogue extends RelationCatalogue
-      ? {
-          readonly version: TCatalogue["version"];
-          readonly schemaHash: TCatalogue["schemaHash"];
-          readonly relations: SliceCatalogueRelations<TCatalogue, TTables>;
-        }
-      : undefined
-    : undefined;
-
-type SchemaSlice<
-  TSchema extends SchemaLike,
-  TTables extends readonly TableName<TSchema>[],
-> = Schema<Pick<NormalizedSchema<TSchema>, TTables[number]>, SliceCatalogue<TSchema, TTables>>;
-
 export interface Table<TTable extends string, TSchema extends SchemaLike> extends Query<
   TTable,
   {},
@@ -1549,6 +1461,11 @@ export type App<TSchema extends SchemaLike> = Simplify<
 >;
 
 export type TypedApp<TSchema extends SchemaLike> = App<TSchema>;
+
+type SchemaSlice<
+  TSchema extends SchemaLike,
+  TTables extends readonly TableName<TSchema>[],
+> = Schema<Pick<NormalizedSchema<TSchema>, TTables[number]>>;
 
 export interface SliceableApp<TSchema extends SchemaLike> {
   readonly wasmSchema: WasmSchema;
@@ -1727,36 +1644,16 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
  * export const app: s.App<AppSchema> = s.defineApp(schema);
  * ```
  */
-type SchemaWithCatalogue<
-  TSchema extends Schema<any, RelationCatalogue | undefined>,
-  TCatalogue extends RelationCatalogue,
-> = TSchema extends Schema<infer TDefinition, any> ? Schema<TDefinition, TCatalogue> : never;
-
-export function defineApp<
-  const TSchema extends Schema<any, RelationCatalogue | undefined>,
-  const TCatalogue extends RelationCatalogue,
->(definition: TSchema, catalogue: TCatalogue): App<SchemaWithCatalogue<TSchema, TCatalogue>>;
-export function defineApp<
-  const TSchema extends SchemaDefinition,
-  const TCatalogue extends RelationCatalogue,
->(
-  definition: TSchema & ValidateSchemaRefs<TSchema> & ValidateSchemaColumnNames<TSchema>,
-  catalogue: TCatalogue,
-): App<Schema<TSchema, TCatalogue>>;
-export function defineApp<const TSchema extends Schema<any, RelationCatalogue | undefined>>(
-  definition: TSchema,
-): App<TSchema>;
+export function defineApp<const TSchema extends Schema<any>>(definition: TSchema): App<TSchema>;
 export function defineApp<const TSchema extends SchemaDefinition>(
   definition: TSchema & ValidateSchemaRefs<TSchema> & ValidateSchemaColumnNames<TSchema>,
 ): App<Schema<TSchema>>;
 export function defineApp(
-  definition: SchemaDefinition | Schema<any, RelationCatalogue | undefined>,
-  catalogue?: RelationCatalogue,
+  definition: SchemaDefinition | Schema<any>,
 ): App<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
-  if (catalogue) validateRelationCatalogue(wasmSchema, catalogue);
   return createAppForTables(
     Object.keys(normalizedDefinition),
     wasmSchema,
@@ -1778,34 +1675,18 @@ export function defineApp(
  * export const orgApp = app.slice("teams", "projects", "members");
  * ```
  */
-export function defineSliceableApp<
-  const TSchema extends Schema<any, RelationCatalogue | undefined>,
-  const TCatalogue extends RelationCatalogue,
->(
+export function defineSliceableApp<const TSchema extends Schema<any>>(
   definition: TSchema,
-  catalogue: TCatalogue,
-): SliceableApp<SchemaWithCatalogue<TSchema, TCatalogue>>;
-export function defineSliceableApp<
-  const TSchema extends SchemaDefinition,
-  const TCatalogue extends RelationCatalogue,
->(
-  definition: TSchema & ValidateSchemaColumnNames<TSchema>,
-  catalogue: TCatalogue,
-): SliceableApp<Schema<TSchema, TCatalogue>>;
-export function defineSliceableApp<
-  const TSchema extends Schema<any, RelationCatalogue | undefined>,
->(definition: TSchema): SliceableApp<TSchema>;
+): SliceableApp<TSchema>;
 export function defineSliceableApp<const TSchema extends SchemaDefinition>(
   definition: TSchema & ValidateSchemaColumnNames<TSchema>,
 ): SliceableApp<Schema<TSchema>>;
 export function defineSliceableApp(
-  definition: SchemaDefinition | Schema<any, RelationCatalogue | undefined>,
-  catalogue?: RelationCatalogue,
+  definition: SchemaDefinition | Schema<any>,
 ): SliceableApp<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
-  if (catalogue) validateRelationCatalogue(wasmSchema, catalogue);
 
   return {
     wasmSchema,
