@@ -116,8 +116,9 @@ fn empty_in_parameter_normalizes_to_false_without_late_missing_param() {
         let shape = query.validate_runtime(&schema).unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
         let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
-        let Some(RowSetExpr::Filter { predicate, .. }) =
-            normalized.nodes.get(&RowSetNodeId("query:filter".to_owned()))
+        let Some(RowSetExpr::Filter { predicate, .. }) = normalized
+            .nodes
+            .get(&RowSetNodeId("query:filter".to_owned()))
         else {
             panic!("expected a normalized filter node");
         };
