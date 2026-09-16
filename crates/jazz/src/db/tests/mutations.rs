@@ -1411,6 +1411,41 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
 }
 
 #[test]
+fn large_string_json_pointer_rejects_malformed_trailing_text_like_inline() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let inline_source = r#"[{"selected":42}] trailing"#;
+    let large_source = format!(
+        "{inline_source}{}",
+        "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES)
+    );
+    assert!(large_source.len() > groove::large_values::INLINE_VALUE_MAX_BYTES);
+
+    let inline_row = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells(inline_source, false),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let large_row = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&large_source, false),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+
+    let inline_error = block_on(db.read_json_pointer("todos", inline_row, "title", "/0/selected"))
+        .expect_err("inline String must reject malformed trailing JSON text");
+    let large_error = block_on(db.read_json_pointer("todos", large_row, "title", "/0/selected"))
+        .expect_err("indirect String must reject malformed trailing JSON text");
+    assert_eq!(large_error.code, inline_error.code);
+    assert_eq!(large_error.message, inline_error.message);
+}
+
+#[test]
 fn partial_value_update_publishes_text_splice_and_ordinary_patch_atomically() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
