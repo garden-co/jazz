@@ -123,6 +123,47 @@ it("keeps one delete failure visible when a concurrent delete succeeds", async (
     await act(async () => root.unmount());
   }
 });
+
+it("keeps a delete failure visible while another delete starts", async () => {
+  const first = { id: "todo-retained", title: "Keep the failed task", done: false };
+  const second = { id: "todo-next", title: "Delete next", done: false };
+  const firstRejection = deferred<void>();
+  const secondCompletion = deferred<void>();
+  const { container, root } = await mountTodos(
+    [first, second],
+    new Map([
+      [first.id, { txId: Promise.resolve("tx-retained"), wait: () => firstRejection.promise }],
+      [second.id, { txId: Promise.resolve("tx-next"), wait: () => secondCompletion.promise }],
+    ]),
+  );
+
+  try {
+    await act(async () => {
+      container.querySelectorAll<HTMLButtonElement>("button[aria-label='Delete']")[0]!.click();
+    });
+    firstRejection.reject(new Error("delete denied"));
+    await flushAsyncWork();
+    expect(container.querySelector<HTMLElement>("[role='status']")!.textContent).toContain(
+      first.title,
+    );
+
+    await act(async () => {
+      container.querySelectorAll<HTMLButtonElement>("button[aria-label='Delete']")[0]!.click();
+    });
+    await flushAsyncWork();
+    expect(container.querySelector<HTMLElement>("[role='status']")!.textContent).toContain(
+      first.title,
+    );
+
+    secondCompletion.resolve();
+    await flushAsyncWork();
+    expect(container.querySelector<HTMLElement>("[role='status']")!.textContent).toContain(
+      first.title,
+    );
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
 it("keeps a locally durable delete optimistic when edge confirmation loses transport", async () => {
   const todo = { id: "todo-transport", title: "Keep this deletion", done: false };
   const edgeFailure = new Error("transport unavailable");
