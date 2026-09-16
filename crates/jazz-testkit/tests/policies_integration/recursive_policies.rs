@@ -191,8 +191,12 @@ async fn create_team(client: &JazzClient, name: &str) -> ObjectId {
         .0
 }
 
-async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team: ObjectId) {
-    let (_, _, transaction_id) = client
+async fn create_team_edge(
+    client: &JazzClient,
+    child_team: ObjectId,
+    parent_team: ObjectId,
+) -> ObjectId {
+    let (edge_id, _, transaction_id) = client
         .insert(
             "team_edges",
             jazz::row_input!("child_team" => Value::Uuid(child_team), "parent_team" => Value::Uuid(parent_team)))
@@ -208,6 +212,7 @@ async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team
     .await
     .expect("team edge settlement timed out")
     .expect("team edge must reach the server");
+    edge_id
 }
 
 async fn create_team_membership(client: &JazzClient, user_id: &str, team_id: ObjectId) {
@@ -672,10 +677,11 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
 
 /// Verifies that a recursive gather graph with a diamond topology does not
 /// emit duplicate visibility changes when a second path reaches a team that was
-/// already granting access.
+/// already granting access. Removing one path preserves visibility; removing
+/// the last path revokes access in queries and the existing subscription.
 ///
-/// Actors: bob holds the subscription, admin grows the diamond, and the root
-/// team remains the single grant source for the document.
+/// Actors: bob holds the subscription, admin grows then removes the diamond,
+/// and the root team remains the single grant source for the document.
 ///
 /// ```text
 /// initial path: leaf ─► mid_a ─► root ─► document grant
@@ -704,7 +710,7 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
     let mid_a = create_team(&admin, "mid-a").await;
     let mid_b = create_team(&admin, "mid-b").await;
     let leaf = create_team(&admin, "leaf").await;
-    create_team_edge(&admin, leaf, mid_a).await;
+    let first_path_edge = create_team_edge(&admin, leaf, mid_a).await;
     create_team_edge(&admin, mid_a, root).await;
     create_team_membership(&admin, super::BOB_ID, leaf).await;
 
@@ -745,11 +751,11 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
     .await;
     bob_log.clear();
 
-    create_team_edge(&admin, leaf, mid_b).await;
+    let second_path_edge = create_team_edge(&admin, leaf, mid_b).await;
     create_team_edge(&admin, mid_b, root).await;
 
     let rows_after_second_path = bob
-        .query(query, jazz::tools::ReadTier::Remote)
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
         .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents after second recursive path");
@@ -770,6 +776,51 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
         !has_any_change(&bob_log, doc_id),
         "an already-visible recursive grant must not emit duplicate deltas: log={bob_log:?}"
     );
+
+    bob_log.clear();
+    let tx = admin
+        .delete("team_edges", first_path_edge)
+        .expect("remove first recursive path")
+        .expect("edge deletion transaction");
+    jazz_testkit::wait_for_edge_txs(&admin, &[tx]).await;
+    let remaining_rows = bob
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("query documents with one remaining path");
+    assert_eq!(
+        remaining_rows,
+        vec![(doc_id, title_document_values("Diamond Grant"))]
+    );
+    collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
+    assert!(
+        !has_any_change(&bob_log, doc_id),
+        "removing one of two paths must preserve subscription visibility: log={bob_log:?}"
+    );
+
+    bob_log.clear();
+    let tx = admin
+        .delete("team_edges", second_path_edge)
+        .expect("remove last recursive path")
+        .expect("edge deletion transaction");
+    jazz_testkit::wait_for_edge_txs(&admin, &[tx]).await;
+    wait_for_query(
+        &bob,
+        query,
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "no recursive path must mean no visible document",
+        |rows| rows.is_empty().then_some(()),
+    )
+    .await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "last recursive path removal revokes subscription visibility",
+        |log| has_removed(log, doc_id),
+    )
+    .await;
 
     admin.shutdown().await.expect("shutdown admin");
     bob.shutdown().await.expect("shutdown bob");

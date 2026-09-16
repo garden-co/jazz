@@ -441,26 +441,28 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that EXISTS_REL scans require an explicit SELECT policy on the
-/// scanned table under enforcing mode.
+/// An uncorrelated EXISTS_REL insert policy may use private admin grants.
+/// Alice's insert settles, Bob's is rejected, and neither can read the grant.
 #[tokio::test]
-#[ignore = "#1759: schema conversion requires ExistsRel policies to include an outer-row equality"]
-async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
+async fn uncorrelated_exists_rel_insert_uses_private_grants() {
     tokio::task::LocalSet::new()
-        .run_until(
-            local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table_inner(),
-        )
+        .run_until(uncorrelated_exists_rel_insert_uses_private_grants_inner())
         .await;
 }
 
-async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table_inner() {
+async fn uncorrelated_exists_rel_insert_uses_private_grants_inner() {
     let projects_policies = permissions(|p| {
+        p.allow_read().always();
         p.allow_insert().where_(pe::exists(
             pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
         ));
     });
     let schema = SchemaBuilder::new()
-        .table(TableSchema::builder("admins").column("user_id", ColumnType::Text))
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(permissions(|p| p.allow_read().never())),
+        )
         .table(
             TableSchema::builder("projects")
                 .column("name", ColumnType::Text)
@@ -470,7 +472,7 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
     let server = JazzServer::start_with_schema(schema.clone())
         .await
         .expect("start test server");
-    let client = connect_ready_client(
+    let backend = connect_ready_client(
         &server,
         &schema,
         "exists-rel-admin",
@@ -478,20 +480,86 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
         Duration::from_secs(30),
     )
     .await;
-
-    client
+    let (_, _, grant_tx) = backend
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
-        .expect("seed admin row");
+        .expect("seed private admin grant");
+    jazz_testkit::wait_for_edge_txs(&backend, &[grant_tx.expect("grant transaction")]).await;
 
-    let err = client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let (_, _, bob_tx) = bob
+        .insert("projects", crate::row_input!("name" => "bob project"))
+        .expect("stage Bob's optimistic insert");
+    let rejection = bob
+        .wait_for_transaction(
+            bob_tx.expect("Bob transaction"),
+            jazz::tools::DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect_err("server must reject Bob without a matching grant");
+    assert_transaction_policy_denied(rejection);
+    let (_, _, alice_tx) = alice
         .insert("projects", crate::row_input!("name" => "alice project"))
-        .expect_err(
-            "enforcing mode should deny EXISTS_REL scans when the scanned table lacks an explicit SELECT policy",
-        );
-    assert_client_policy_denied(err, "projects", Operation::Insert);
+        .expect("stage Alice's insert");
+    alice
+        .wait_for_transaction(
+            alice_tx.expect("Alice transaction"),
+            jazz::tools::DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect("private grant authorizes Alice's insert");
 
-    client.shutdown().await.expect("shutdown client");
+    let projects = wait_for_query(
+        &backend,
+        Query::from("projects").select(["name"]),
+        jazz::tools::ReadTier::Remote,
+        Duration::from_secs(5),
+        "only Alice's project is accepted",
+        Some,
+    )
+    .await;
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].1, vec![Value::Text("alice project".into())]);
+
+    for reader in [&alice, &bob] {
+        for tier in [
+            jazz::tools::ReadTier::LocalFirst,
+            jazz::tools::ReadTier::Remote,
+        ] {
+            let grants = wait_for_query(
+                reader,
+                Query::from("admins"),
+                tier,
+                Duration::from_secs(5),
+                "supporting admin grants stay private",
+                Some,
+            )
+            .await;
+            assert!(
+                grants.is_empty(),
+                "policy evaluation must not expose admin grants"
+            );
+        }
+    }
+
+    alice.shutdown().await.expect("shutdown Alice");
+    bob.shutdown().await.expect("shutdown Bob");
+    backend.shutdown().await.expect("shutdown backend");
     server.shutdown().await;
 }
 
