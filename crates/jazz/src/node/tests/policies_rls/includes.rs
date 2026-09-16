@@ -1,10 +1,12 @@
 // Required and holes include semantics under row-level security.
 
 fn required_include_rls_schema() -> JazzSchema {
+    use crate::tools::test_support::AllowAllForTesting;
     build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
                 PublicTableSchemaBuilder::new("roots")
+                    .allow_all_for_testing()
                     .column("title", PublicColumnType::Text)
                     .fk_column("target", "targets"),
             )
@@ -336,6 +338,7 @@ fn seed_null_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
 }
 
 fn multi_segment_required_include_rls_schema() -> JazzSchema {
+    use crate::tools::test_support::AllowAllForTesting;
     build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -348,6 +351,7 @@ fn multi_segment_required_include_rls_schema() -> JazzSchema {
                     .column("title", PublicColumnType::Text)
                     .fk_column("org", "orgs"),
             )
+            .allow_all_for_testing()
             .table(
                 PublicTableSchemaBuilder::new("orgs")
                     .column("title", PublicColumnType::Text)

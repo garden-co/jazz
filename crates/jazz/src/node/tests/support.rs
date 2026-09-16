@@ -1,3 +1,4 @@
+use crate::tools::test_support::AllowAllForTesting;
 fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])
 }
@@ -179,7 +180,8 @@ fn public_owner_policies(column: &str) -> PublicTablePolicies {
 fn schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .allow_all_for_testing(),
     )
 }
 fn global_winner_tx<S>(
@@ -728,11 +730,13 @@ fn open_history_complete_node_with_schema(
 }
 fn two_column_schema() -> JazzSchema {
     build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("title", PublicColumnType::Text)
-                .column("body", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text),
+            )
+            .allow_all_for_testing(),
     )
 }
 
@@ -740,35 +744,41 @@ fn todos_notes_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
-            .table(PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text)),
+            .table(PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text))
+            .allow_all_for_testing(),
     )
 }
 
 fn renamed_tasks_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(PublicTableSchemaBuilder::new("tasks").column("name", PublicColumnType::Text)),
+            .table(PublicTableSchemaBuilder::new("tasks").column("name", PublicColumnType::Text))
+            .allow_all_for_testing(),
     )
 }
 
 fn evolved_todos_name_body_schema() -> JazzSchema {
     build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("name", PublicColumnType::Text)
-                .column("body", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("name", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text),
+            )
+            .allow_all_for_testing(),
     )
 }
 
 fn catalogue_v3_schema() -> JazzSchema {
     build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("title", PublicColumnType::Text)
-                .column("body", PublicColumnType::Text)
-                .column("archived", PublicColumnType::Boolean),
-        ),
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text)
+                    .column("archived", PublicColumnType::Boolean),
+            )
+            .allow_all_for_testing(),
     )
 }
 
@@ -964,7 +974,8 @@ impl PerNodeKnowledge {
             self.subscription_entries.clear();
         }
         let result_add_keys = program_fact_adds
-            .added_rows().iter()
+            .added_rows()
+            .iter()
             .map(|input| (input.version.tx, input.row))
             .collect::<BTreeSet<_>>();
         let table_schema = owner_policy_schema().tables[0].clone();
@@ -980,10 +991,12 @@ impl PerNodeKnowledge {
             }
         }
         for input in program_fact_adds.removed_rows() {
-            self.subscription_entries.remove(&(input.version.tx, input.row));
+            self.subscription_entries
+                .remove(&(input.version.tx, input.row));
         }
         for input in program_fact_adds.added_rows() {
-            self.subscription_entries.insert((input.version.tx, input.row));
+            self.subscription_entries
+                .insert((input.version.tx, input.row));
         }
         for bundle in &normalized_bundles {
             if usize::try_from(bundle.tx.n_total_writes).ok() == Some(bundle.versions.len()) {
@@ -1064,7 +1077,8 @@ fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<Rocks
         "full view recomputation should carry bundles for every visible member"
     );
     let result_rows = program_fact_adds
-        .added_rows().iter()
+        .added_rows()
+        .iter()
         .filter_map(|fact| match fact {
             input if input.version.layer == crate::protocol::ResultRowLayer::Content => {
                 Some(input.row)
@@ -1435,7 +1449,8 @@ fn assert_view_update_only_references_rows(update: &SyncMessage, expected_rows: 
     // named here must have a matching CoveredInput and no policy/proof-only
     // row may escape merely because it contributed to an authorized result.
     let covered_rows = program_fact_adds
-        .added_rows().iter()
+        .added_rows()
+        .iter()
         .map(|input| input.row)
         .collect::<BTreeSet<_>>();
     assert_eq!(covered_rows, expected_rows, "covered closure rows differ");

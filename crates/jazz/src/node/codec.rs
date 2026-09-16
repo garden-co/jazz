@@ -4363,6 +4363,7 @@ pub(super) fn sort_current_rows(rows: &mut [CurrentRow]) {
 /// Build a current row from cells that are already app-facing values.
 ///
 /// Build a row from ordinary app-facing cells.
+#[cfg(test)]
 pub(super) fn current_row_from_cells(
     table: &TableSchema,
     row_uuid: RowUuid,

@@ -1795,19 +1795,18 @@ fn relation_snapshot_schema() -> JazzSchema {
 fn relation_snapshot_policy_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
             .table(
-                PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text),
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .fk_column("todo_id", "todos"),
             )
+            .allow_all_for_testing()
             .table(
                 PublicTableSchemaBuilder::new("todos")
                     .column("title", PublicColumnType::Text)
                     .fk_column("owner_id", "users")
                     .policies(public_owner_policies("owner_id")),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("comments")
-                    .column("body", PublicColumnType::Text)
-                    .fk_column("todo_id", "todos"),
             ),
     )
 }
@@ -1815,20 +1814,7 @@ fn relation_snapshot_policy_schema() -> JazzSchema {
 fn routed_nested_collector_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("todos")
-                    .column("title", PublicColumnType::Text)
-                    .fk_column("owner_id", "users")
-                    .policies(
-                        PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
-                            "owner_id",
-                            vec!["claims".to_owned(), "sub".to_owned()],
-                        )),
-                    ),
-            )
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("comments")
                     .column("body", PublicColumnType::Text)
@@ -1838,6 +1824,18 @@ fn routed_nested_collector_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("attachments")
                     .column("name", PublicColumnType::Text)
                     .fk_column("todo_id", "todos"),
+            )
+            .allow_all_for_testing()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("owner_id", "users")
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
+                            "owner_id",
+                            vec!["claims".to_owned(), "sub".to_owned()],
+                        ),
+                    )),
             ),
     )
 }
@@ -1855,7 +1853,8 @@ fn forward_include_schema() -> JazzSchema {
                     .column("name", PublicColumnType::Text)
                     .nullable_fk_column("profile", "profiles")
                     .array_fk_column("members", "profiles"),
-            ),
+            )
+            .allow_all_for_testing(),
     )
 }
 

@@ -77,7 +77,8 @@ fn recursive_reachable_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("teamAccess")
                     .fk_column("doc", "docs")
                     .fk_column("team", "teams"),
-            ),
+            )
+            .allow_all_for_testing(),
     )
 }
 

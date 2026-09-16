@@ -330,12 +330,15 @@ fn old_schema_commit_units_stay_in_authored_variant_after_pointer_flip() {
 #[test]
 fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
     let pinned = owner_policy_schema();
-    let evolved = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("name", PublicColumnType::Text)
-            .column("extra_owner", PublicColumnType::Uuid)
-            .column("owner_id", PublicColumnType::Uuid),
-    ));
+    let evolved = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("name", PublicColumnType::Text)
+                .column("extra_owner", PublicColumnType::Uuid)
+                .column("owner_id", PublicColumnType::Uuid)
+                .policies(public_owner_policies("owner_id")),
+        ),
+    );
     let evolved_payload = SchemaVersion::new(evolved.clone());
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x46), evolved.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x47), pinned.clone());
@@ -368,7 +371,8 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
                     },
                 ],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
