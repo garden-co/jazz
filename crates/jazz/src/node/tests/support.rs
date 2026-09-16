@@ -1,4 +1,4 @@
-use crate::tools::test_support::AllowAllForTesting;
+use crate::tools::test_support::AllowAll;
 fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])
 }
@@ -181,7 +181,7 @@ fn schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 fn global_winner_tx<S>(
@@ -736,7 +736,7 @@ fn two_column_schema() -> JazzSchema {
                     .column("title", PublicColumnType::Text)
                     .column("body", PublicColumnType::Text),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 
@@ -745,7 +745,7 @@ fn todos_notes_schema() -> JazzSchema {
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
             .table(PublicTableSchemaBuilder::new("notes").column("body", PublicColumnType::Text))
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 
@@ -753,7 +753,7 @@ fn renamed_tasks_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("tasks").column("name", PublicColumnType::Text))
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 
@@ -765,7 +765,7 @@ fn evolved_todos_name_body_schema() -> JazzSchema {
                     .column("name", PublicColumnType::Text)
                     .column("body", PublicColumnType::Text),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 
@@ -778,7 +778,7 @@ fn catalogue_v3_schema() -> JazzSchema {
                     .column("body", PublicColumnType::Text)
                     .column("archived", PublicColumnType::Boolean),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 

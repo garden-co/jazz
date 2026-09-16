@@ -440,7 +440,7 @@ fn strict_upstream_install_waits_for_existing_peer_and_cancels_without_admission
 
 #[test]
 fn restarted_edge_forwards_complete_publication_without_original_clients() {
-    use crate::tools::test_support::AllowAllForTesting;
+    use crate::tools::test_support::AllowAll;
     // Internal topology test: inspect exact merge authorship and the durable
     // outbox while exercising the real peer-connection scheduler/storage.
     let schema = build_public_db_test_schema(
@@ -450,7 +450,7 @@ fn restarted_edge_forwards_complete_publication_without_original_clients() {
                     .column("title", PublicColumnType::Text)
                     .column("body", PublicColumnType::Text),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     );
     let edge_id = NodeUuid::from_bytes([0xe6; 16]);
     let core_id = NodeUuid::from_bytes([0xc6; 16]);

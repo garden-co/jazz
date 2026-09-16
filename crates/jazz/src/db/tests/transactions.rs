@@ -2253,8 +2253,8 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
 /// re-authorized as bob, while the handle commit consumes that bound identity.
 #[test]
 fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
-    use crate::tools::test_support::AllowAllForTesting;
-    let schema = doctest_support::schema().allow_all_for_testing();
+    use crate::tools::test_support::AllowAll;
+    let schema = doctest_support::schema().allow_all();
     let db = open_db(0x11, AuthorSubject::for_test_bytes([0xa1; 16]), &schema);
     let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);

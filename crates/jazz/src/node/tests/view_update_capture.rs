@@ -990,7 +990,7 @@ fn member_cells(owner: AuthorSubject, title: &str, root: RowUuid) -> BTreeMap<St
 }
 
 fn recursive_rls_capture_schema() -> JazzSchema {
-    use crate::tools::test_support::AllowAllForTesting;
+    use crate::tools::test_support::AllowAll;
     let recursive_policy = crate::test_public_schema::seeded_recursive_access_policy(
         "doc_access",
         "doc",
@@ -1019,7 +1019,7 @@ fn recursive_rls_capture_schema() -> JazzSchema {
                     .fk_column("member", "teams")
                     .fk_column("parent", "teams"),
             )
-            .allow_all_for_testing()
+            .allow_all()
             .table(
                 PublicTableSchemaBuilder::new("docs")
                     .column("title", PublicColumnType::Text)

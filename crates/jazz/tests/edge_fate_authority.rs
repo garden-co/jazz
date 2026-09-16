@@ -41,7 +41,7 @@ fn identity(node_byte: u8, author: AuthorSubject) -> DbIdentity {
 }
 
 fn schema() -> JazzSchema {
-    use jazz::tools::test_support::AllowAllForTesting;
+    use jazz::tools::test_support::AllowAll;
     compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -49,7 +49,7 @@ fn schema() -> JazzSchema {
                     .column("title", ColumnType::Text)
                     .column("completed", ColumnType::Boolean),
             )
-            .allow_all_for_testing()
+            .allow_all()
             .build(),
     )
 }

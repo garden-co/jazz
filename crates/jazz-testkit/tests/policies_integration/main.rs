@@ -1,4 +1,4 @@
-use jazz::tools::test_support::AllowAllForTesting;
+use jazz::tools::test_support::AllowAll;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -82,7 +82,7 @@ fn rebac_test_schema() -> Schema {
 fn provenance_notes_schema() -> Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("notes").column("title", ColumnType::Text))
-        .allow_all_for_testing()
+        .allow_all()
         .build()
 }
 

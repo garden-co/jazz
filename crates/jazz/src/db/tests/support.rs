@@ -1,7 +1,7 @@
 //! Shared test transports, fixtures, and assertion helpers.
 
 use super::*;
-use crate::tools::test_support::AllowAllForTesting;
+use crate::tools::test_support::AllowAll;
 
 /// Receive the next subscriber payload relevant to direct protocol assertions.
 /// A subscriber begins by publishing its trusted catalogue prerequisite; tests
@@ -1046,7 +1046,7 @@ pub(super) fn schema() -> JazzSchema {
                     .column("done", PublicColumnType::Boolean)
                     .column("owner", PublicColumnType::Uuid),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 
@@ -1206,7 +1206,7 @@ pub(super) fn owner_id_public_schema() -> JazzSchema {
                     .column("body", PublicColumnType::Text)
                     .column("owner_id", PublicColumnType::Text),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 
@@ -1264,7 +1264,7 @@ pub(super) fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
                     .column("user_id", PublicColumnType::Uuid)
                     .column("role", PublicColumnType::Text),
             )
-            .allow_all_for_testing()
+            .allow_all()
             .table(public_resource_table_builder(
                 "res_a",
                 resource_policy,
@@ -1310,7 +1310,7 @@ fn public_resource_access_table_builder(
     resource_table: &str,
 ) -> PublicTableSchemaBuilder {
     PublicTableSchemaBuilder::new(name)
-        .allow_all_for_testing()
+        .allow_all()
         .fk_column("resource", resource_table)
         .fk_column("team", "group")
         .column("grant_role", PublicColumnType::Text)
@@ -1319,7 +1319,7 @@ fn public_resource_access_table_builder(
 
 fn public_group_entry_table_builder() -> PublicTableSchemaBuilder {
     PublicTableSchemaBuilder::new("group_entry")
-        .allow_all_for_testing()
+        .allow_all()
         .fk_column("member_id", "group")
         .fk_column("target_id", "group")
         .column("administrator", PublicColumnType::Boolean)
@@ -1606,7 +1606,7 @@ pub(super) fn relation_schema() -> JazzSchema {
                     .column("body", PublicColumnType::Text)
                     .fk_column("todo_id", "todos"),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 
@@ -1705,7 +1705,7 @@ pub(super) fn relation_hop_schema() -> JazzSchema {
 }
 
 pub(super) fn access_edge_include_schema() -> JazzSchema {
-    use crate::tools::test_support::AllowAllForTesting;
+    use crate::tools::test_support::AllowAll;
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
@@ -1714,7 +1714,7 @@ pub(super) fn access_edge_include_schema() -> JazzSchema {
                     .fk_column("resource_id", "teams")
                     .fk_column("team_id", "teams"),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 
@@ -1723,7 +1723,7 @@ pub(super) fn policy_relation_schema() -> JazzSchema {
         PublicSchemaBuilder::new()
             .table(
                 PublicTableSchemaBuilder::new("todos")
-                    .allow_all_for_testing()
+                    .allow_all()
                     .column("title", PublicColumnType::Text),
             )
             .table(
@@ -1768,7 +1768,7 @@ pub(super) fn cells(title: &str, done: bool, owner: AuthorSubject) -> RowCells {
 }
 
 pub(super) fn issue_schema() -> JazzSchema {
-    use crate::tools::test_support::AllowAllForTesting;
+    use crate::tools::test_support::AllowAll;
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
@@ -1792,7 +1792,7 @@ pub(super) fn issue_schema() -> JazzSchema {
                     .fk_column("issue", "issues")
                     .column("tag", PublicColumnType::Text),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 

@@ -7,7 +7,7 @@ fn joined_issue_query() -> Query {
 }
 
 fn indexed_documents_schema() -> JazzSchema {
-    use crate::tools::test_support::AllowAllForTesting;
+    use crate::tools::test_support::AllowAll;
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -17,12 +17,12 @@ fn indexed_documents_schema() -> JazzSchema {
                     .column("title", PublicColumnType::Text)
                     .index_only(["team"]),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 
 fn multi_index_documents_schema() -> JazzSchema {
-    use crate::tools::test_support::AllowAllForTesting;
+    use crate::tools::test_support::AllowAll;
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -32,7 +32,7 @@ fn multi_index_documents_schema() -> JazzSchema {
                     .column("title", PublicColumnType::Text)
                     .index_only(["team", "active"]),
             )
-            .allow_all_for_testing(),
+            .allow_all(),
     )
 }
 

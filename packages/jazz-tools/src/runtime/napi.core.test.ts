@@ -1,4 +1,4 @@
-import { allowAllForTesting } from "./testing/allow-all-for-testing.js";
+import { allowAll } from "./testing/allow-all.js";
 import { schema as s } from "../index.js";
 import { translateQuery } from "./query-adapter.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -100,7 +100,7 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
-const OPEN_TEST_SCHEMA = allowAllForTesting(TEST_SCHEMA);
+const OPEN_TEST_SCHEMA = allowAll(TEST_SCHEMA);
 
 const DEFAULTS_SCHEMA: WasmSchema = {
   counters: {
