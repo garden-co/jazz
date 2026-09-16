@@ -683,7 +683,7 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: ${fromColumn},
-    }),
+    }, {}),
   },
   to: {
     users: s.table({
