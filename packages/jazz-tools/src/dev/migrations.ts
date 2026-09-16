@@ -139,7 +139,15 @@ function renderSchemaWitness(schema: WasmSchema): string {
         ([name, relation]) =>
           `${JSON.stringify(name)}: s.${relation.kind === "forward" ? "rel" : "reverse"}(${JSON.stringify(relation.table)}, ${JSON.stringify(relation.kind === "forward" ? relation.column : relation.relation)}),`,
       );
-      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})`;
+      const index =
+        tableSchema.indexed_columns === undefined
+          ? ""
+          : `.indexOnly(${JSON.stringify(tableSchema.indexed_columns)})`;
+      const branch =
+        tableSchema.branchBy === undefined
+          ? ""
+          : `.branchBy(${JSON.stringify(tableSchema.branchBy)})`;
+      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${branch}`;
     });
 
   if (tableEntries.length === 0) {
@@ -348,6 +356,28 @@ function renderMigrationBody(
   } while (dependencies.size !== count);
   const witnessFrom = pickWitnessSchema(fromSchema, [...dependencies]);
   const witnessTo = pickWitnessSchema(toSchema, [...dependencies]);
+  const addsReference = migratableTables.some((tableName) =>
+    toSchema[tableName]!.columns.some(
+      (column) =>
+        column.references &&
+        fromSchema[tableName]!.columns.some(
+          (source) => source.name === column.name && !source.references,
+        ),
+    ),
+  );
+  if (addsReference) {
+    // The witness renderer does not preserve structural defaults. Do not
+    // silently turn a default-bearing transition into a safe identity lens.
+    for (const schema of [witnessFrom, witnessTo]) {
+      for (const [tableName, table] of Object.entries(schema)) {
+        const column = table.columns.find((column) => column.default !== undefined);
+        if (column)
+          throw new Error(
+            `Cannot generate reference migration: schema witness "${tableName}.${column.name}" has a structural default. Author the migration manually with exact defaults in both schema witnesses.`,
+          );
+      }
+    }
+  }
   const lines: string[] = [];
 
   for (const tableName of migratableTables) {

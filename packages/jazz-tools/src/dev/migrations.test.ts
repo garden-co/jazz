@@ -234,14 +234,44 @@ describe("migration stub generation", () => {
     ).toThrow("unchanged column shapes");
   });
 
+  it("rejects generated reference witnesses that would lose structural defaults", () => {
+    const users = s.table({ name: s.string() }, {});
+    const before = {
+      users,
+      records: s.table({ ownerId: s.uuid(), title: s.string().default("before") }, {}),
+    };
+    for (const title of ["before", "after"]) {
+      const after = {
+        users,
+        records: s.table(
+          { ownerId: s.uuid(), title: s.string().default(title) },
+          { owner: s.rel("users", "ownerId") },
+        ),
+      };
+      expect(() =>
+        renderMigrationStub({
+          fromHash: "aaaaaaaaaaaa",
+          toHash: "bbbbbbbbbbbb",
+          fromSchema: s.defineApp(before).wasmSchema,
+          toSchema: s.defineApp(after).wasmSchema,
+        }),
+      ).toThrow('schema witness "records.title" has a structural default');
+    }
+  });
+
   it("loads and pushes the generated relation migration through the project API", async () => {
     const { computeSchemaHash } = await import("./catalogue.js");
     const { pushMigration } = await import("./catalogue-project.js");
-    const users = s.table({ name: s.string() }, {});
+    const users = s
+      .table({ name: s.string(), peerId: s.uuid() }, { peer: s.rel("peers", "peerId") })
+      .indexOnly(["name"])
+      .branchBy("name");
+    const peers = s.table({ userId: s.uuid() }, { user: s.rel("users", "userId") });
     const columns = { ownerId: s.uuid(), memberIds: s.array(s.uuid()).optional() };
-    const fromSchema = s.defineApp({ users, records: s.table(columns, {}) }).wasmSchema;
+    const fromSchema = s.defineApp({ users, peers, records: s.table(columns, {}) }).wasmSchema;
     const toSchema = s.defineApp({
       users,
+      peers,
       records: s.table(columns, {
         owner: s.rel("users", "ownerId"),
         members: s.rel("users", "memberIds"),

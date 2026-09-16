@@ -18,7 +18,7 @@ Jazz keeps every schema version usable and translates rows between them on read 
 
 Adding `s.rel("users", "ownerId")` to an existing `s.uuid()` column changes its reference metadata without changing the stored UUID values. The same applies to optional UUID columns and UUID arrays. Generate and publish the migration through the normal workflow: Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
 
-The generated schema witnesses include the referenced tables. Existing rows become available through the relation's index when read under the new schema. Changing only a relation alias does not require a row lens. Removing or retargeting a reference, or renaming its column in the same migration, is not supported by this automatic path.
+The generated schema witnesses include the referenced tables. If those witnesses contain structural defaults, generation currently stops with an error: author the migration manually, preserving the exact defaults in both witnesses. Existing rows become available through the relation's index when read under the new schema. Changing only a relation alias does not require a row lens. Removing or retargeting a reference, or renaming its column in the same migration, is not supported by this automatic path.
 
 ## Schemas and lenses
 
