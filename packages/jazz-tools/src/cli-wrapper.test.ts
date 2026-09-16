@@ -11,7 +11,7 @@ const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const wrapper = join(packageRoot, "bin", "jazz-tools.js");
 
 async function runWrapper(
-  args: string[],
+  args: readonly string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   let resolve!: (value: { status: number | null; stdout: string; stderr: string }) => void;
@@ -44,12 +44,15 @@ async function listenForDeployRequest(): Promise<{ server: Server; url: string }
       `request=${request.url} secret=${request.headers["x-jazz-admin-secret"] ?? "<missing>"}`,
     );
   });
-  let resolve!: () => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
+  let resolveListening!: () => void;
+  let rejectListening!: (reason?: unknown) => void;
+  const listening = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolveListening = resolvePromise;
+    rejectListening = rejectPromise;
   });
+  server.once("error", rejectListening);
+  server.listen(0, "127.0.0.1", resolveListening);
+  await listening;
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("Expected deploy test server to have a TCP address.");
@@ -80,8 +83,11 @@ describe("jazz-tools wrapper", () => {
   ] as const)("loads an explicit env file and routes deploy (%s)", async (_label, args) => {
     const root = await mkdtemp(join(tmpdir(), "jazz-tools-wrapper-env-file-"));
     const { server, url } = await listenForDeployRequest();
-    const close = new Promise<void>((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
+    let resolveClose!: () => void;
+    let rejectClose!: (reason?: unknown) => void;
+    const close = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolveClose = resolvePromise;
+      rejectClose = rejectPromise;
     });
 
     try {
@@ -104,7 +110,7 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
         join(root, ".env.staging"),
         [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
       );
-      const env = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
+      const env: NodeJS.ProcessEnv = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
       delete env.JAZZ_APP_ID;
       delete env.JAZZ_SERVER_URL;
 
@@ -117,8 +123,8 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
       expect(result.stderr).not.toContain("Missing app ID");
       expect(result.stdout).not.toContain("Jazz distributed database CLI");
     } finally {
-      server.close((error) => (error ? close.reject(error) : close.resolve()));
-      await close.promise;
+      server.close((error) => (error ? rejectClose(error) : resolveClose()));
+      await close;
       await rm(root, { recursive: true, force: true });
     }
   });

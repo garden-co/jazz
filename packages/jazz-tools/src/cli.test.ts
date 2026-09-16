@@ -3488,7 +3488,7 @@ function runBin(
 }
 
 async function runCli(
-  args: string[],
+  args: readonly string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   let resolve!: (value: { status: number | null; stdout: string; stderr: string }) => void;
@@ -3521,12 +3521,15 @@ async function listenForDeployRequest(): Promise<{ server: Server; url: string }
       `request=${request.url} secret=${request.headers["x-jazz-admin-secret"] ?? "<missing>"}`,
     );
   });
-  let resolve!: () => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
+  let resolveListening!: () => void;
+  let rejectListening!: (reason?: unknown) => void;
+  const listening = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolveListening = resolvePromise;
+    rejectListening = rejectPromise;
   });
+  server.once("error", rejectListening);
+  server.listen(0, "127.0.0.1", resolveListening);
+  await listening;
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("Expected deploy test server to have a TCP address.");
@@ -3558,15 +3561,18 @@ describe("bin integration", () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
     const { server, url } = await listenForDeployRequest();
-    const close = new Promise<void>((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
+    let resolveClose!: () => void;
+    let rejectClose!: (reason?: unknown) => void;
+    const close = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolveClose = resolvePromise;
+      rejectClose = rejectPromise;
     });
 
     await writeFile(
       join(root, ".env.staging"),
       [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
     );
-    const env = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
+    const env: NodeJS.ProcessEnv = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
     for (const name of [...APP_ID_ENV_VARS, ...SERVER_URL_ENV_VARS]) {
       delete env[name];
     }
@@ -3581,8 +3587,8 @@ describe("bin integration", () => {
       expect(result.stderr).not.toContain("Missing app ID");
       expect(result.stdout).not.toContain("Usage:");
     } finally {
-      server.close((error) => (error ? close.reject(error) : close.resolve()));
-      await close.promise;
+      server.close((error) => (error ? rejectClose(error) : resolveClose()));
+      await close;
     }
   });
   it("routes validate through the TypeScript CLI for a root schema.ts project", async () => {
