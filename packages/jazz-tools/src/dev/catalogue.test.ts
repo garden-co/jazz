@@ -38,7 +38,7 @@ const schema = {
   todos: s.table({
     title: s.string(),
     ownerId: s.string(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -495,12 +495,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -688,7 +688,7 @@ export default s.defineMigration({
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {}),
   },
 });
 `,
@@ -783,12 +783,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,

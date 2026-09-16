@@ -68,7 +68,7 @@ describe("enum DSL invariants", () => {
     expect(() => col.enum({ bad: { tags: col.array(col.string()) } })).toThrow(
       "must be scalar columns",
     );
-    expect(() => col.enum({ bad: { authorId: col.uuid() } })).toThrow("cannot use references");
+    expect(() => col.enum({ linked: { authorId: col.uuid() } })).not.toThrow();
   });
 
   describe("add enum", () => {
@@ -173,7 +173,6 @@ describe("schema default DSL", () => {
         sqlType: "UUID",
         nullable: false,
         default: "00000000-0000-0000-0000-000000000001",
-        references: "users",
       },
       {
         name: "tags",
@@ -406,46 +405,6 @@ describe("column merge strategy DSL", () => {
     ).toThrow("g-set merge strategy is only supported on non-nullable ARRAY columns.");
     expect(() => col.array(col.string()).merge("g-set").optional()).toThrow(
       "g-set merge strategy is only supported on non-nullable ARRAY columns.",
-    );
-  });
-});
-
-describe("ref DSL", () => {
-  it("stores references on ref columns", () => {
-    resetCollectedState();
-    table("todos", {
-      imageId: col.uuid(),
-    });
-    const schema = getCollectedSchema();
-    expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "imageId",
-      references: "images",
-    });
-  });
-
-  it("stores references on array(ref(...)) columns", () => {
-    resetCollectedState();
-    table("bundles", {
-      itemIds: col.array(col.uuid()),
-    });
-    const schema = getCollectedSchema();
-    expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "itemIds",
-      references: "bundle_items",
-    });
-  });
-
-  it("rejects scalar reference columns not ending in Id or _id", () => {
-    resetCollectedState();
-    expect(() => table("todos", { image: col.uuid() })).toThrow(
-      "Invalid reference key 'image'. Rename it to 'image_id' or 'imageId'.",
-    );
-  });
-
-  it("rejects array(ref(...)) columns not ending in Ids or _ids", () => {
-    resetCollectedState();
-    expect(() => table("todos", { images: col.array(col.uuid()) })).toThrow(
-      "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
     );
   });
 });
