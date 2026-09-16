@@ -1,3 +1,4 @@
+import { assertRelationshipDeclaration } from "../relationships.js";
 /**
  * Analyze schema to derive forward and reverse relations.
  */
@@ -57,8 +58,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
   }
   for (const [tableName, table] of Object.entries(schema)) {
     for (const [name, declaration] of Object.entries(table.relations ?? {})) {
-      if (!declaration || !["forward", "reverse"].includes(declaration.kind))
-        throw new Error(`Invalid relationship "${tableName}.${name}".`);
+      assertRelationshipDeclaration(declaration, `${tableName}.${name}`);
       if (!Object.hasOwn(schema, declaration.table))
         throw new Error(
           `Relationship "${tableName}.${name}" references unknown table "${declaration.table}".`,

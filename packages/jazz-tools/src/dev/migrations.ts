@@ -63,7 +63,7 @@ function indentBlock(text: string, indent: number): string {
     .join("\n");
 }
 
-function baseBuilderExpression(columnType: WasmColumnType, references?: string): string {
+function baseBuilderExpression(columnType: WasmColumnType): string {
   switch (columnType.type) {
     case "Text":
       return "s.string()";
@@ -86,7 +86,7 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
     case "Uuid":
       return "s.uuid()";
     case "Array":
-      return `s.array(${baseBuilderExpression(columnType.element, references)})`;
+      return `s.array(${baseBuilderExpression(columnType.element)})`;
     case "BigInt":
       return "s.bigint()";
     case "Row":
@@ -95,7 +95,7 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
 }
 
 function builderExpressionForColumn(column: ColumnDescriptor): string {
-  const base = baseBuilderExpression(column.column_type, column.references);
+  const base = baseBuilderExpression(column.column_type);
   const withOptional = column.nullable ? `${base}.optional()` : base;
   if (column.merge_strategy === "Counter") {
     return `${withOptional}.merge("counter")`;
@@ -147,8 +147,8 @@ type TableSuggestion = {
   properties: string[];
 };
 
-function renderArrayElementExpression(columnType: WasmColumnType, references?: string): string {
-  return baseBuilderExpression(columnType, references);
+function renderArrayElementExpression(columnType: WasmColumnType): string {
+  return baseBuilderExpression(columnType);
 }
 
 function renderAddOperationExpression(column: ColumnDescriptor, defaultExpression: string): string {
@@ -181,7 +181,7 @@ function renderAddOperationExpression(column: ColumnDescriptor, defaultExpressio
       }
       return `s.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
     case "Array":
-      return `s.add.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, default: ${defaultExpression} })`;
+      return `s.add.array({ of: ${renderArrayElementExpression(column.column_type.element)}, default: ${defaultExpression} })`;
     case "BigInt":
       return `s.add.bigint({ default: ${defaultExpression} })`;
     case "Row":
@@ -222,7 +222,7 @@ function renderDropOperationExpression(
       }
       return `s.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
     case "Array":
-      return `s.drop.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.array({ of: ${renderArrayElementExpression(column.column_type.element)}, backwardsDefault: ${defaultExpression} })`;
     case "BigInt":
       return `s.drop.bigint({ backwardsDefault: ${defaultExpression} })`;
     case "Row":

@@ -1,3 +1,4 @@
+import { assertRelationshipDeclaration } from "./relationships.js";
 import type { Relationships, ForwardRelationship, ReverseRelationship } from "./relationships.js";
 import type {
   AnyTypedColumnBuilder,
@@ -156,8 +157,7 @@ export function defineTable<
       Object.hasOwn(columns, name)
     )
       throw new Error(`Relationship "${name}" collides with a column.`);
-    if (!relation || !["forward", "reverse"].includes(relation.kind))
-      throw new Error(`Invalid relationship "${name}"; use s.rel(...) or s.reverse(...).`);
+    assertRelationshipDeclaration(relation, name);
     if (relation.kind === "forward") {
       const previous = targets.get(relation.column);
       if (previous && previous !== relation.table)

@@ -1,3 +1,8 @@
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { loadCompiledSchema } from "./schema-loader.js";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "./schema-namespace.js";
 import { analyzeRelations } from "./codegen/relation-analyzer.js";
@@ -140,6 +145,54 @@ describe("explicit relationships", () => {
       posts: s.table({ owner: s.uuid() }, { writer: s.rel("users", "owner") }),
     };
     expect(s.defineMigration({ from, to: renamed }).forward).toEqual([]);
+  });
+  it("loads definition-only and Wasm-only schema exports without losing relations", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "jazz-explicit-relations-"));
+    try {
+      const source = fileURLToPath(new URL("./schema-namespace.ts", import.meta.url));
+      await writeFile(
+        join(directory, "schema.ts"),
+        `import { schema as s } from ${JSON.stringify(source)}; export const schema = s.defineSchema({ posts: s.table({ owner: s.uuid() }, { author: s.rel("users", "owner") }), users: s.table({ name: s.string() }, { authored: s.reverse("posts", "author") }) });`,
+      );
+      const loaded = await loadCompiledSchema(directory);
+      expect(loaded.wasmSchema.posts!.columns[0]!.references).toBe("users");
+      expect(
+        analyzeRelations(loaded.wasmSchema)
+          .get("users")
+          ?.map((r) => r.name),
+      ).toEqual(["authored"]);
+      expect(schemaToWasm(loaded.schema)).toEqual(loaded.wasmSchema);
+      await writeFile(
+        join(directory, "schema.ts"),
+        `export const app = { wasmSchema: ${JSON.stringify(loaded.wasmSchema)} };`,
+      );
+      const fallback = await loadCompiledSchema(directory);
+      expect(fallback.schema.tables.find((t) => t.name === "posts")?.relations).toEqual({
+        author: s.rel("users", "owner"),
+      });
+      expect(schemaToWasm(fallback.schema)).toEqual(loaded.wasmSchema);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it("rejects non-string declaration names without coercion", () => {
+    for (const value of [1, true, [], {}, null, ""]) {
+      expect(() => (s.rel as any)(value, "owner")).toThrow(/requires/);
+      expect(() => (s.rel as any)("users", value)).toThrow(/requires/);
+      expect(() => (s.reverse as any)(value, "author")).toThrow(/requires/);
+      expect(() => (s.reverse as any)("posts", value)).toThrow(/requires/);
+      expect(() =>
+        (s.table as any)(
+          { owner: s.uuid() },
+          { author: { kind: "forward", table: value, column: "owner" } },
+        ),
+      ).toThrow(/Invalid relationship/);
+      const schema = s.defineApp(definition()).wasmSchema;
+      schema.posts!.relations = {
+        author: { kind: "forward", table: value as any, column: "authorId" },
+      };
+      expect(() => analyzeRelations(schema)).toThrow(/Invalid relationship/);
+    }
   });
   it("rejects invalid local declarations", () => {
     expect(() => (s.table as any)({ value: s.string() })).toThrow(/requires a relationship map/);

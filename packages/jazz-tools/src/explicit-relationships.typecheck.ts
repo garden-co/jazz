@@ -10,10 +10,14 @@ s.table({ authorId: s.uuid() }, { author: s.rel("users", "missing") });
 s.table({ author: s.uuid() }, { author: s.rel("users", "author") });
 // @ts-expect-error Row ID is reserved.
 s.table({ authorId: s.uuid() }, { id: s.rel("users", "authorId") });
-// @ts-expect-error One reference column cannot target two tables.
 s.table(
   { authorId: s.uuid() },
-  { author: s.rel("users", "authorId"), writer: s.rel("writers", "authorId") },
+  {
+    // @ts-expect-error One reference column cannot target two tables.
+    author: s.rel("users", "authorId"),
+    // @ts-expect-error Conflicting target on the same column.
+    writer: s.rel("writers", "authorId"),
+  },
 );
 const invalidTarget = {
   posts: s.table({ authorId: s.uuid() }, { author: s.rel("missing", "authorId") }),
