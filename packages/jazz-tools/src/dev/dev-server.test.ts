@@ -8,6 +8,7 @@ import { JazzClient } from "../runtime/client.js";
 import { encodeSchema } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../runtime/testing/wasm-runtime-test-utils.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
+import { deploy } from "./catalogue.js";
 import { getAvailablePort } from "./test-helpers.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
@@ -119,6 +120,16 @@ describe("startLocalJazzServer via JazzServer", () => {
               inMemory: true,
               allowLocalFirstAuth: true,
               schema: source,
+            });
+            await deploy({
+              appId: server.appId,
+              serverUrl: server.url,
+              adminSecret: server.adminSecret,
+              schema: app,
+              permissions: s.definePermissions(app, ({ policy }) => {
+                policy.todos.allowRead.always();
+                policy.todos.allowInsert.always();
+              }),
             });
             const runtime = await createWasmRuntime(app.wasmSchema, {
               appId: server.appId,

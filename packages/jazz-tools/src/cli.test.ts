@@ -844,7 +844,7 @@ describe("cli validate", () => {
     await validate({ schemaDir: root });
   });
 
-  it("reports each fully open table when permissions.ts is missing", async () => {
+  it("reports each denied table when permissions.ts is missing", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
@@ -853,10 +853,10 @@ describe("cli validate", () => {
     const warnings = logs.filter((line) => line.includes("no policy declarations"));
     expect(warnings).toHaveLength(2);
     expect(warnings).toContain(
-      'Warning: table "projects" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.',
+      'Warning: table "projects" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.',
     );
     expect(warnings).toContain(
-      'Warning: table "todos" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.',
+      'Warning: table "todos" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.',
     );
   });
 

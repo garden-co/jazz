@@ -276,7 +276,7 @@ describe("dev catalogue push behavior", () => {
         status: "already-stored",
       },
       warnings: [
-        'Warning: table "todos" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.',
+        'Warning: table "todos" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.',
       ],
     });
     expect(events).toContainEqual({
