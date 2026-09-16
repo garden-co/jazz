@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { createServer, type Server } from "node:http";
+import { createServer, createServer as createHttpServer, type Server } from "node:http";
 import { constants } from "node:fs";
 import {
   access,
@@ -3516,6 +3516,28 @@ async function runCli(
   return promise;
 }
 
+function runBinAsync(
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, [binPath, ...args], {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+  child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+  const { promise, resolve } = Promise.withResolvers<{
+    status: number | null;
+    stdout: string;
+    stderr: string;
+  }>();
+  child.on("close", (status) => resolve({ status, stdout, stderr }));
+  return promise;
+}
+
 async function listenForDeployRequest(): Promise<{ server: Server; url: string }> {
   const server = createServer((request, response) => {
     response.statusCode = 400;
@@ -3966,6 +3988,117 @@ describe("bin integration", () => {
 
     expect(filePath).not.toBeNull();
     expect(migrationFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("pushes migrations through the bin with an env app ID and fixed hash positions", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const appId = "env-migration-app";
+    const fromHash = "a".repeat(64);
+    const toHash = "b".repeat(64);
+    const requests: Array<{
+      method: string;
+      path: string;
+      adminSecret: string | undefined;
+      body: string;
+    }> = [];
+    const server = createHttpServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", async () => {
+        const path = request.url ?? "";
+        const body = Buffer.concat(chunks).toString("utf8");
+        const adminSecret = request.headers["x-jazz-admin-secret"];
+        requests.push({
+          method: request.method ?? "",
+          path,
+          adminSecret: Array.isArray(adminSecret) ? adminSecret[0] : adminSecret,
+          body,
+        });
+        response.setHeader("content-type", "application/json");
+
+        if (request.method === "GET" && path === `/apps/${appId}/schemas`) {
+          response.statusCode = 200;
+          response.end(JSON.stringify({ hashes: [fromHash, toHash] }));
+          return;
+        }
+
+        if (
+          request.method === "GET" &&
+          (path === `/apps/${appId}/schema/${fromHash}` ||
+            path === `/apps/${appId}/schema/${toHash}`)
+        ) {
+          response.statusCode = 200;
+          response.end(await storedSchemaResponse({}).text());
+          return;
+        }
+
+        if (request.method === "POST" && path === `/apps/${appId}/admin/migrations`) {
+          response.statusCode = 201;
+          response.end(JSON.stringify({ objectId: "migration-object-id" }));
+          return;
+        }
+
+        response.statusCode = 404;
+        response.end(JSON.stringify({ error: `Unexpected request: ${request.method} ${path}` }));
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      throw new Error("HTTP mock server did not receive an address");
+    }
+
+    try {
+      const result = await runBinAsync(
+        [
+          "migrations",
+          "push",
+          fromHash,
+          toHash,
+          "--server-url",
+          `http://127.0.0.1:${address.port}`,
+          "--admin-secret",
+          "admin-secret",
+          "--migrations-dir",
+          migrationsDir,
+        ],
+        {
+          cwd: root,
+          env: {
+            ...process.env,
+            JAZZ_APP_ID: appId,
+            JAZZ_SERVER_URL: undefined,
+            JAZZ_ADMIN_SECRET: undefined,
+          },
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
+        `GET /apps/${appId}/schemas`,
+        `GET /apps/${appId}/schema/${fromHash}`,
+        `GET /apps/${appId}/schema/${toHash}`,
+        `POST /apps/${appId}/admin/migrations`,
+      ]);
+      expect(requests.every(({ adminSecret }) => adminSecret === "admin-secret")).toBe(true);
+      expect(JSON.parse(requests[3]!.body)).toMatchObject({
+        fromHash,
+        toHash,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it("verifies packed runtime bootstrap with a native-only help probe", async () => {
