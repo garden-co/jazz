@@ -1182,7 +1182,9 @@ describe("TableDataGrid", () => {
 
   it("leaves an untouched nullable Boolean without a default null when inserting", async () => {
     mockWasmSchema.todos.columns = initialMockTodoColumns.map((column) =>
-      column.name === "maybe_done" ? { ...column, default: undefined } : column,
+      column.name === "maybe_done"
+        ? { name: "maybe_done", column_type: { type: "Boolean" }, nullable: true }
+        : column,
     );
     renderGrid();
     fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
