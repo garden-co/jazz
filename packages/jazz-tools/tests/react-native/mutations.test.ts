@@ -270,7 +270,7 @@ it("settles an empty standalone update without changing the row", async () => {
 it("preserves branch head/base targets and restores only the selected head", async () => {
   const branches = schema.defineApp({
     documents: schema
-      .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() })
+      .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() }, {})
       .branchBy("branch"),
   });
   await withNativeRelayFixture(branches, async (fixture) => {
