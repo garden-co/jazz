@@ -380,22 +380,17 @@ async fn select_policies_boolean_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that the rows needed to validate a query's permissions are synced
-/// with the query result itself.
-///
-/// `protected_records` is readable when the current user has an active
-/// `access_grants` row. A fresh reader queries only `protected_records`; the
-/// query must still return the protected row without a prior explicit grant
-/// query.
+/// An ordinary reader can query protected records without first fetching the
+/// grants used by their EXISTS policy. Even readable grants are not implicitly
+/// delivered: Alice fetches hers only through an explicit remote grant query.
 #[tokio::test]
-#[ignore = "#1759: server schema conversion requires the SELECT EXISTS dependency to include an outer-row equality"]
-async fn select_policy_dependency_data_is_retrieved_as_part_of_query() {
+async fn select_exists_policy_does_not_implicitly_fetch_readable_grants() {
     tokio::task::LocalSet::new()
-        .run_until(select_policy_dependency_data_is_retrieved_as_part_of_query_inner())
+        .run_until(select_exists_policy_does_not_implicitly_fetch_readable_grants_inner())
         .await;
 }
 
-async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
+async fn select_exists_policy_does_not_implicitly_fetch_readable_grants_inner() {
     let active_grant = pe::all_of([
         pe::eq("principal_id", pe::session(vec!["claims", "sub"])),
         pe::eq("active", true),
@@ -449,10 +444,13 @@ async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
     )
     .await;
 
-    let reader =
-        jazz_testkit::connect(server.make_client_context_for_user(schema, super::ALICE_ID))
-            .await
-            .expect("connect reader");
+    let reader = jazz_testkit::TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id(super::ALICE_ID)
+        .as_user()
+        .connect()
+        .await;
 
     let protected_rows = reader
         .query(
@@ -482,13 +480,28 @@ async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
         .map(jazz::tools::test_support::ordinary_rows)
         .expect("query access grants locally");
 
+    assert!(
+        local_grant_rows.is_empty(),
+        "the protected-record query must not implicitly fetch readable grants"
+    );
+
+    let remote_grant_rows = reader
+        .query(
+            Query::from("access_grants")
+                .filter(eq(col("id"), lit(*grant_id.uuid())))
+                .select(["principal_id", "active"]),
+            jazz::tools::ReadTier::Remote,
+        )
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("explicitly query readable access grants");
     assert_eq!(
-        local_grant_rows,
+        remote_grant_rows,
         vec![(
             grant_id,
             vec![Value::Text(super::ALICE_ID.into()), Value::Boolean(true)]
         )],
-        "access grant should have been fetched with the protected record query"
+        "Alice can explicitly fetch her readable grant"
     );
 
     writer.shutdown().await.expect("shutdown writer");
