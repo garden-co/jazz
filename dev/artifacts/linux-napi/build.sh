@@ -14,7 +14,7 @@ docker build --platform "linux/$docker_arch" --tag "$image" dev/artifacts/linux-
 # This directory is deliberately distinct from every host Cargo cache. Its key
 # changes with the whole producer image recipe, including both base digests.
 cache="$root/target/linux-napi-${baseline}-${docker_arch}"
-mkdir -p "$cache/cargo" "$cache/target"
+mkdir -p "$cache/cargo" "$cache/target" "$cache/pnpm-store"
 # Worktrees require their Git metadata at the same absolute location. A normal
 # CI checkout has its Git directory inside root and needs no extra mount.
 git_common="$(git rev-parse --path-format=absolute --git-common-dir)"
@@ -23,14 +23,15 @@ if [[ "$git_common" != "$root/"* ]]; then mounts+=(--volume "$git_common:$git_co
 docker run --rm --platform "linux/$docker_arch" \
   --user "$(id -u):$(id -g)" \
   --volume "$root:$root" "${mounts[@]}" --workdir "$root" \
-  --env HOME=/tmp --env CARGO_HOME="$cache/cargo" \
+  --env CI=true --env HOME=/tmp --env CARGO_HOME="$cache/cargo" \
   --env CARGO_TARGET_DIR="$cache/target" \
+  --env JAZZ_NAPI_PNPM_STORE="$cache/pnpm-store" \
   --env JAZZ_TEST_ARTIFACT_LOCK_PATH="$cache/artifact.lock" \
   --env JAZZ_NAPI_BUILD_BASELINE="al2023-gcc11-$baseline" \
   --env JAZZ_NAPI_BUILD_IMAGE="$(docker image inspect --format '{{.Id}}' "$image")" \
   "$image" bash -c 'set -euo pipefail
     git config --global --add safe.directory "$PWD"
-    pnpm install --frozen-lockfile
+    pnpm install --frozen-lockfile --ignore-scripts --store-dir "$JAZZ_NAPI_PNPM_STORE"
     node dev/artifacts/build.mjs napi release --target "$1"
     node dev/artifacts/provenance.mjs verify napi release --target "$1"
     node dev/artifacts/stage-napi-loader.mjs "$2"

@@ -682,6 +682,22 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
     );
   }
   stageNapiManifests(root);
+  for (const [platform, target] of Object.entries(platforms)) {
+    const directory = join(root, "crates/jazz-napi/npm", platform);
+    const filename = `jazz-napi.${platform}.manifest.json`;
+    const receipt = JSON.parse(readFileSync(join(directory, filename), "utf8"));
+    assert.equal(
+      verifyPublishedNapiManifest(receipt, target, join(directory, `jazz-napi.${platform}.node`)),
+      null,
+    );
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(root, "crates/jazz-napi/provenance", filename), "utf8")),
+      receipt,
+    );
+    assert.ok(
+      JSON.parse(readFileSync(join(directory, "package.json"), "utf8")).files.includes(filename),
+    );
+  }
   const node = join(root, "crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node");
   const manifest = JSON.parse(
     readFileSync(

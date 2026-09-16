@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { verifyElf } from "./verify-elf.mjs";
+import { verifyElf } from "./linux-napi/verify-elf.mjs";
 
 test(
   "ELF gate admits a baseline object and rejects a planted newer glibc dependency",
