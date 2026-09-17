@@ -4017,6 +4017,59 @@ fn repaired_local_replay_reconnect_delivers_retained_terminal_fate() {
     );
 }
 
+#[test]
+fn incomplete_retained_root_reloads_after_storage_repair() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xdc; 16]);
+    let worker = open_db(0xdd, author, &schema);
+    let write = worker
+        .insert(
+            "todos",
+            cells("repaired retained root", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        mut versions,
+    } = worker
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .unwrap()
+    else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    versions.clear();
+    tx.n_total_writes = tx.n_total_writes.saturating_add(1);
+    let incomplete = SyncMessage::CommitUnit { tx, versions };
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_replay_route(&routes, tx_id, &queue, author, Some(incomplete));
+
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &queue,
+    ))
+    .unwrap();
+
+    assert!(
+        queue.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id
+            )
+        }),
+        "a repaired root must be reconstructed instead of replaying partial retained data"
+    );
+}
+
 fn local_replay_restore_point_reads(chain_len: usize) -> usize {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xd8; 16]);
