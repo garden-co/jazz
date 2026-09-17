@@ -471,9 +471,9 @@ describe("reserved table names", () => {
 
   it("keeps ordinary, prototype, and hyphenated table names usable", () => {
     const app = defineApp({
-      normal: defineTable({ value: col.string() }),
-      prototype: defineTable({ value: col.string() }),
-      "hyphenated-name": defineTable({ value: col.string() }),
+      normal: defineTable({ value: col.string() }, {}),
+      prototype: defineTable({ value: col.string() }, {}),
+      "hyphenated-name": defineTable({ value: col.string() }, {}),
     });
 
     expect(Object.keys(app.wasmSchema).sort()).toEqual(["hyphenated-name", "normal", "prototype"]);

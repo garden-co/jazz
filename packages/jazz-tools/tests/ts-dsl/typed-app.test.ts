@@ -79,15 +79,18 @@ const defaultedSchema = {
 type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
 const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
 const payloadEnumSchema = {
-  events: s.table({
-    event: s.enum({
-      message: {
-        requiredText: s.string(),
-        nullableText: s.string().optional(),
-        defaultedText: s.string().default("default"),
-      },
-    }),
-  }),
+  events: s.table(
+    {
+      event: s.enum({
+        message: {
+          requiredText: s.string(),
+          nullableText: s.string().optional(),
+          defaultedText: s.string().default("default"),
+        },
+      }),
+    },
+    {},
+  ),
 };
 type PayloadEnumAppSchema = s.Schema<typeof payloadEnumSchema>;
 const payloadEnumApp: s.App<PayloadEnumAppSchema> = s.defineApp(payloadEnumSchema);
