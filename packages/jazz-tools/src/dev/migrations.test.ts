@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -383,6 +383,53 @@ describe("migration stub generation", () => {
     };
     expect(s.defineMigration({ from, to }).forward).toEqual([]);
     expect(wasmSchemasEqual(s.defineApp(from).wasmSchema, s.defineApp(to).wasmSchema)).toBe(true);
+  });
+
+  it("exports snapshots and creates relation migrations with lossless bigint and bytes defaults", async () => {
+    const { exportSchema, createMigration } = await import("./catalogue-project.js");
+    const root = await mkdtemp(join(tmpdir(), "jazz-default-snapshots-"));
+    const migrationsDir = join(root, "migrations");
+    const schemaPath = join(root, "schema.ts");
+    const source = (
+      relation: boolean,
+    ) => `import { schema as s } from ${JSON.stringify(new URL("../index.ts", import.meta.url).pathname)};
+export const app = s.defineApp({
+  users: s.table({ name: s.string() }, {}),
+  records: s.table({ ownerId: s.uuid(), big: s.bigint().default(9223372036854775807n), bytes: s.bytes().default(new Uint8Array([0,128,255])), nested: s.array(s.bigint()).default([-9223372036854775808n]) }, ${relation ? '{ owner: s.rel("users", "ownerId") }' : "{}"})
+});`;
+    try {
+      await writeFile(join(root, "package.json"), '{"type":"module"}');
+      await writeFile(schemaPath, source(false));
+      const before = await exportSchema({ schemaDir: root, migrationsDir: join(root, "exports") });
+      const exported = JSON.parse(await readFile(before.snapshotPath!, "utf8"));
+      expect(wasmSchemasEqual(exported, before.schema)).toBe(true);
+      const initial = await createMigration({ schemaDir: root, migrationsDir });
+      expect(initial.status).toBe("initial-snapshot");
+      if (initial.status !== "initial-snapshot") throw new Error("Expected initial snapshot");
+      expect(
+        wasmSchemasEqual(JSON.parse(await readFile(initial.snapshotPath, "utf8")), before.schema),
+      ).toBe(true);
+      await writeFile(schemaPath, source(true));
+      const generated = await createMigration({ schemaDir: root, migrationsDir });
+      expect(generated.status).toBe("generated");
+      if (generated.status !== "generated") throw new Error("Expected migration file");
+      const code = await readFile(generated.filePath, "utf8");
+      const migration = new Function(
+        "s",
+        code
+          .replace('import { schema as s } from "jazz-tools";', "")
+          .replace("export default", "return"),
+      )(s);
+      expect(wasmSchemasEqual(s.defineApp(migration.from).wasmSchema, before.schema)).toBe(true);
+      const after = await exportSchema({ schemaDir: root, migrationsDir });
+      expect(wasmSchemasEqual(s.defineApp(migration.to).wasmSchema, after.schema)).toBe(true);
+      expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
+      expect(await createMigration({ schemaDir: root, migrationsDir })).toEqual({
+        status: "unchanged",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("loads and pushes the generated relation migration through the project API", async () => {
