@@ -311,10 +311,10 @@ pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
         added: Vec<(OutputOccurrenceId, CurrentRow)>,
         removed: Vec<OutputOccurrenceId>,
     },
-    /// Aggregate terminals retain every group, while the public facade shows
-    /// an ordered window of those groups. Re-materialize that complete facade
-    /// after each transition so displaced page members are retracted too.
-    AggregateWindow {
+    /// Ordered relation and aggregate terminals retain every member, while
+    /// the public facade shows an ordered window. Re-materialize that complete
+    /// facade after each transition so displaced page members are retracted too.
+    OrderedWindow {
         snapshot: RelationSnapshot,
         occurrence_ids: Vec<OutputOccurrenceId>,
     },
@@ -322,6 +322,15 @@ pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
     Structured {
         terminal_operations: Vec<groove::ivm::TerminalOperation>,
     },
+}
+
+impl LocalMaintainedViewSubscription {
+    fn needs_ordered_relation_snapshot(&self) -> bool {
+        (self.result_relation_projection.is_some() || self.result_relation_projections.is_some())
+            && (!self.result_query.order_by.is_empty()
+                || self.result_query.limit.is_some()
+                || self.result_query.offset != 0)
+    }
 }
 
 impl<S> NodeState<S>
@@ -1437,12 +1446,14 @@ where
             LocalMaintainedViewSubscriptionUpdate::Structured {
                 terminal_operations,
             }
-        } else if materialize_update && local.result_query.aggregate.is_some() {
+        } else if materialize_update
+            && (local.result_query.aggregate.is_some() || local.needs_ordered_relation_snapshot())
+        {
             let materialized = self
                 .materialize_local_maintained_relation_snapshot_with_occurrences(local)
                 .await?;
             local.root_occurrence_ids = materialized.root_occurrence_ids.clone();
-            LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+            LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
                 snapshot: materialized.snapshot,
                 occurrence_ids: materialized.root_occurrence_ids,
             }
