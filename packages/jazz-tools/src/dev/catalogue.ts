@@ -10,6 +10,7 @@ import type { Lens, SqlType } from "../schema.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import {
   collectMissingExplicitPolicyDiagnostics,
+  mergePermissionsIntoWasmSchema,
   validatePermissionsAgainstSchema,
 } from "../schema-permissions.js";
 import { schemaToWasm } from "../codegen/schema-reader.js";
@@ -519,7 +520,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   if ("noVerify" in options) {
     throw new Error("noVerify is no longer supported; deploy requires a complete migration path.");
   }
-  const wasmSchema = resolveSchemaSource(options.schema);
+  const wasmSchema = mergePermissionsIntoWasmSchema(resolveSchemaSource(options.schema), {});
   validatePermissionsAgainstSchema(Object.keys(wasmSchema), options.permissions);
   const warnings: string[] = [];
   for (const diagnostic of collectMissingExplicitPolicyDiagnostics(

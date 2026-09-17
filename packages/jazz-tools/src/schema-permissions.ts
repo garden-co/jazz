@@ -12,7 +12,6 @@ import type {
   PolicyExpr,
   PolicyLiteralValue,
   PolicyValue,
-  Schema,
   TablePolicies,
 } from "./schema.js";
 
@@ -575,30 +574,7 @@ export function normalizePermissionsForWasm(
   return normalized;
 }
 
-export function mergePermissionsIntoSchema(
-  schema: Schema,
-  compiledPermissions: CompiledPermissionsMap,
-): Schema {
-  validatePermissionTables(
-    schema.tables.map((table) => table.name),
-    compiledPermissions,
-  );
-
-  return {
-    tables: schema.tables.map((table) => {
-      const external = compiledPermissions[table.name];
-      if (!external) {
-        return table;
-      }
-
-      return {
-        ...table,
-        policies: external,
-      };
-    }),
-  };
-}
-
+/** Internal native representation. The explicit bundle replaces all embedded policies. */
 export function mergePermissionsIntoWasmSchema(
   schema: WasmSchema,
   compiledPermissions: CompiledPermissionsMap,
@@ -610,7 +586,7 @@ export function mergePermissionsIntoWasmSchema(
   for (const [tableName, table] of Object.entries(schema)) {
     merged[tableName] = {
       ...table,
-      policies: normalizedPermissions[tableName] ?? table.policies,
+      policies: normalizedPermissions[tableName],
     };
   }
   return merged;

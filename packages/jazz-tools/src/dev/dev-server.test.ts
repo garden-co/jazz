@@ -5,10 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "undici";
 import { schema as s } from "../index.js";
 import { JazzClient } from "../runtime/client.js";
-import { encodeSchema } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../runtime/testing/wasm-runtime-test-utils.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
-import { deploy } from "./catalogue.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { getAvailablePort } from "./test-helpers.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
@@ -96,17 +95,24 @@ describe("startLocalJazzServer via JazzServer", () => {
   }, 30_000);
 
   maybeIt(
-    "boots a client with app, query, raw, and encoded schema sources",
+    "boots a client with app, query, and raw schema sources",
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
       const app = s.defineApp({
         todos: s.table({ title: s.string(), done: s.boolean() }, {}),
       });
+      const permissions = s.definePermissions(app, ({ policy }) => {
+        policy.todos.allowRead.always();
+        policy.todos.allowInsert.always();
+      });
+      const embeddedDenial = s.definePermissions(app, ({ policy }) => {
+        policy.todos.allowRead.never();
+        policy.todos.allowInsert.never();
+      });
       const sources = [
         app,
         app.todos.where({ done: { eq: false } }),
-        app.wasmSchema,
-        encodeSchema(app.wasmSchema),
+        mergePermissionsIntoWasmSchema(app.wasmSchema, embeddedDenial),
       ] as const;
 
       try {
@@ -120,16 +126,7 @@ describe("startLocalJazzServer via JazzServer", () => {
               inMemory: true,
               allowLocalFirstAuth: true,
               schema: source,
-            });
-            await deploy({
-              appId: server.appId,
-              serverUrl: server.url,
-              adminSecret: server.adminSecret,
-              schema: app,
-              permissions: s.definePermissions(app, ({ policy }) => {
-                policy.todos.allowRead.always();
-                policy.todos.allowInsert.always();
-              }),
+              permissions,
             });
             const runtime = await createWasmRuntime(app.wasmSchema, {
               appId: server.appId,

@@ -1,4 +1,4 @@
-import { allowAll, grants } from "../testing/allow-all.js";
+import { allowAll } from "../testing/allow-all.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,7 +10,6 @@ import { fetchSchemaHashes, fetchStoredWasmSchema } from "../schema-fetch.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
-import { encodeSchema } from "./native-runtime-adapter.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
 const previousWebSocket = globalThis.WebSocket;
@@ -23,7 +22,6 @@ const schema: WasmSchema = {
     ],
   },
 };
-const allowedSchema = allowAll(schema);
 
 function normalizeTestDelta(delta: RuntimeSubscriptionDelta, _testSchema: WasmSchema) {
   return [
@@ -57,11 +55,11 @@ function resultId(sourceId: string, occurrenceKey: Uint8Array): string {
   return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-const arraySchema = allowAll({
+const arraySchema: WasmSchema = {
   arrays: {
     columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
   },
-});
+};
 
 describe("NativeRuntimeAdapter server convergence", () => {
   let server: LocalJazzServerHandle | null = null;
@@ -86,7 +84,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
       appId,
       inMemory: true,
       adminSecret: "native-runtime-convergence-admin",
-      schema: encodeSchema(allowedSchema),
+      schema,
+      permissions: allowAll(schema),
     });
 
     const clientA = await createClient({ appId, serverUrl: server.url, peer: "alice" });
@@ -151,7 +150,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
         appId,
         dataDir,
         adminSecret,
-        schema: encodeSchema(allowedSchema),
+        schema,
+        permissions: allowAll(schema),
       });
       const published = await publishSchema(server);
 
@@ -280,7 +280,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
       appId,
       inMemory: true,
       adminSecret: "native-runtime-bytea-convergence-admin",
-      schema: encodeSchema(arraySchema),
+      schema: arraySchema,
+      permissions: allowAll(arraySchema),
     });
 
     const writer = await createClient({
@@ -342,7 +343,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
         appId,
         inMemory: true,
         adminSecret: "native-runtime-restore-convergence-admin",
-        schema: encodeSchema(allowedSchema),
+        schema,
+        permissions: allowAll(schema),
       });
 
       const writer = await createClient({
@@ -438,8 +440,8 @@ async function publishSchema(server: LocalJazzServerHandle): Promise<{ hash: str
     appId: server.appId,
     serverUrl: server.url,
     adminSecret: server.adminSecret,
-    schema: allowedSchema,
-    permissions: { todos: grants },
+    schema,
+    permissions: allowAll(schema),
   });
 
   return { hash: result.schema.hash };

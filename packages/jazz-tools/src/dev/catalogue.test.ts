@@ -121,7 +121,7 @@ describe("dev catalogue runtime schema identity", () => {
         .indexOnly(["fileId", "status"]),
     };
     const app = s.defineApp(schema);
-    await createNapiNativeRuntimeAdapter(app.wasmSchema);
+    await createNapiNativeRuntimeAdapter(app.wasmSchema, {});
 
     expect(serializeRuntimeSchema(app.wasmSchema)).toContain("__jazzRuntimeSchema");
   });
