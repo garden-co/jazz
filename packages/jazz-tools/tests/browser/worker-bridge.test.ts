@@ -67,7 +67,7 @@ import {
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
-import { deploy } from "../../src/dev/catalogue.js";
+import { computeSchemaHash, deploy } from "../../src/dev/catalogue.js";
 import {
   BrowserWorkerUnresponsiveError,
   serializeBrowserRelayError,
@@ -4699,16 +4699,9 @@ async function publishCatalogueSchemaFamily(scope: string): Promise<JazzServerIn
     permissions: cataloguePermissionsV1,
   });
 
-  const v2 = await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: catalogueAppV2.wasmSchema,
-  });
-
   const migration = s.defineMigration({
     fromHash: v1.schema.hash,
-    toHash: v2.schema.hash,
+    toHash: await computeSchemaHash(catalogueAppV2.wasmSchema),
     from: catalogueSchemaV1,
     to: catalogueSchemaV2,
     migrate: {
