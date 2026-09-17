@@ -247,11 +247,10 @@ fn validate_query_canonical_parts(
                     "relation query output table does not match its Query envelope".to_owned(),
                 ));
             }
-            // `relation_query_to_query` retains the relation tree so the
-            // terminal can publish its aliases, and also carries the
-            // relation-owned filters/order/window into ordinary query fields.
-            // Those generated fields are authoritative; only the outer
-            // select and array-subquery shape may add presentation.
+            // A relation facade may arrive already normalized with its
+            // relation-owned filters, joins, ordering, and window clauses in
+            // the ordinary Query envelope. Reject only clauses that do not
+            // match the relation's canonical lowering.
             if query.filters != resolved.filters
                 || query.joins != resolved.joins
                 || query.flat_join != resolved.flat_join
@@ -272,10 +271,6 @@ fn validate_query_canonical_parts(
             resolved.relation = None;
             resolved.select = query.select.clone();
             let (mut normalized, params, _) = validate_query_canonical_parts(&resolved, schema)?;
-            // Keep the relation tree in the validated shape so its explicit
-            // output aliases reach row-set normalization and terminal
-            // descriptors. Source filters/order/joins remain canonical Query
-            // clauses above; aliases are not overloaded into Query::select.
             normalized.relation = Some(relation.clone());
             let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
             return Ok((normalized, params, canonical));

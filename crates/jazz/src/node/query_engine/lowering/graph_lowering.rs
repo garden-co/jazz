@@ -15,7 +15,20 @@ pub(super) fn lower_plan_steps(
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     match plan {
         AnalyzedQueryPlan::Linear(linear) => {
-            lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)
+            let retain_final_project_input_fields =
+                request.output.app_rows.as_ref().is_some_and(|output| {
+                    matches!(output.projection, PayloadProjection::Relation(_))
+                });
+            lower_linear_plan_steps_cached(
+                graph,
+                linear,
+                root_source,
+                resolved_sources,
+                request,
+                None,
+                None,
+                retain_final_project_input_fields,
+            )
         }
         AnalyzedQueryPlan::Union(union) => {
             lower_union_plan(union, Some(graph), root_source, resolved_sources, request)
@@ -3356,15 +3369,9 @@ fn lower_order_key(
     request: &QueryProgramRequest,
 ) -> Result<TopByOrder, UnsupportedReason> {
     let lowered = lower_field_ref(&key.value, plan, source, request, "order key")?;
-    let field = match &key.value {
-        NormalizedValueRef::SourceField { .. } => FieldRef::resolved(
-            resolved_source_descriptor_index(source, &lowered).ok_or_else(|| {
-                UnsupportedReason::Operator(format!(
-                    "resolved order key field {lowered:?} is missing from the source descriptor"
-                ))
-            })?,
-        ),
-        _ => FieldRef::name(lowered),
+    let field = match collect_window_source_field(source, &key.value) {
+        Some(field) => FieldRef::stored_name(field.name.clone().expect("window fields are named")),
+        None => FieldRef::name(lowered),
     };
     Ok(TopByOrder {
         field,
