@@ -1242,9 +1242,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       txId = ownerClient.commitTransaction(openTransactionId).txId;
     }
     this.committing = true;
-    txId = txId.finally(() => {
+    const finishCommit = () => {
       this.committing = false;
-    });
+    };
+    // Observe completion without delaying application waits on the transaction ID.
+    void txId.then(finishCommit, finishCommit);
     if (this.kind === "exclusive") {
       return new ExclusiveWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
     }
