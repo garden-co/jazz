@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
@@ -5,6 +8,11 @@ import { localAccountConfig } from "./testing/account-fixtures.js";
 import { type Db } from "./db.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
+
+import { computeSchemaHash, pushPermissions, pushSchema } from "../dev/catalogue.js";
+import { pushMigration } from "../dev/catalogue-project.js";
+import { renderMigrationStub } from "../dev/migrations.js";
+import { fetchSchemaConnectivity, fetchStoredWasmSchema } from "./schema-fetch.js";
 
 const oldSchema = {
   todos: s.table(
@@ -234,5 +242,144 @@ it("publishes UUID reference identity lenses and relates rows written before pub
     await newDb?.shutdown();
     await oldDb?.shutdown();
     await server.stop();
+  }
+}, 60_000);
+
+it("publishes generated default-bearing relation migrations and preserves them across restart", async () => {
+  const users = s.table({ name: s.string().default("Unnamed") }, {});
+  const columns = {
+    ownerId: s.uuid(),
+    status: s.string().default("draft"),
+    enabled: s.boolean().default(false),
+    tags: s.array(s.string()).default(["initial"]),
+  };
+  const before = { users, records: s.table(columns, {}) };
+  const after = {
+    users,
+    records: s.table(columns, { owner: s.rel("users", "ownerId") }),
+  };
+  const beforeApp = s.defineApp(before),
+    afterApp = s.defineApp(after);
+  const permissionsBefore = s.definePermissions(beforeApp, ({ policy }) => [
+    policy.users.allowRead.always(),
+    policy.users.allowInsert.always(),
+    policy.records.allowRead.always(),
+    policy.records.allowInsert.always(),
+  ]);
+  const permissionsAfter = s.definePermissions(afterApp, ({ policy }) => [
+    policy.users.allowRead.always(),
+    policy.users.allowInsert.always(),
+    policy.records.allowRead.always(),
+    policy.records.allowInsert.always(),
+  ]);
+  const root = await mkdtemp(join(tmpdir(), "jazz-default-relation-e2e-"));
+  let server: LocalJazzServerHandle | undefined;
+  let oldDb: Db | undefined, newDb: Db | undefined;
+  try {
+    server = await startLocalJazzServer({
+      allowLocalFirstAuth: true,
+      dataDir: join(root, "data"),
+    });
+    const { appId, adminSecret, backendSecret } = server;
+    const catalogue = { appId, adminSecret, serverUrl: server.url };
+    await deploy({ ...catalogue, schema: beforeApp, permissions: permissionsBefore });
+    oldDb = await createDb(await localAccountConfig(appId, server.url));
+    const owner = await oldDb
+      .insert(beforeApp.users, { name: "Existing owner" })
+      .wait({ tier: "edge" });
+    const existing = await oldDb
+      .insert(beforeApp.records, {
+        ownerId: owner.id,
+        status: "published",
+        enabled: true,
+        tags: ["retained"],
+      })
+      .wait({ tier: "edge" });
+    const fromHash = await computeSchemaHash(beforeApp.wasmSchema);
+    const { hash: toHash } = await pushSchema({ ...catalogue, schema: afterApp });
+    expect(toHash).not.toBe(fromHash);
+    const source = renderMigrationStub({
+      fromHash,
+      toHash,
+      fromSchema: beforeApp.wasmSchema,
+      toSchema: afterApp.wasmSchema,
+    }).replace('"jazz-tools"', JSON.stringify(new URL("../index.ts", import.meta.url).pathname));
+    const migrationFile = join(
+      root,
+      `references-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`,
+    );
+    await writeFile(join(root, "package.json"), '{"type":"module"}');
+    const options = { ...catalogue, fromHash, toHash, migrationsDir: root };
+    expect(source).toContain('.default("draft")');
+    for (const invalid of [
+      source.replaceAll('.default("draft")', ""),
+      source.replaceAll('.default("draft")', '.default("tampered")'),
+    ]) {
+      await writeFile(migrationFile, invalid);
+      await expect(pushMigration(options)).rejects.toThrow();
+      expect(await fetchSchemaConnectivity(server.url, options)).toEqual({ connected: false });
+    }
+    await writeFile(migrationFile, source);
+    expect(await pushMigration(options)).toMatchObject({ status: "published", fromHash, toHash });
+    expect(await fetchSchemaConnectivity(server.url, options)).toEqual({ connected: true });
+    await pushPermissions({ ...catalogue, schemaHash: toHash, permissions: permissionsAfter });
+
+    await oldDb.shutdown();
+    oldDb = undefined;
+    await server.stop();
+    server = await startLocalJazzServer({
+      appId,
+      adminSecret,
+      backendSecret,
+      allowLocalFirstAuth: true,
+      dataDir: join(root, "data"),
+    });
+    for (const [schemaHash, expected] of [
+      [fromHash, beforeApp.wasmSchema],
+      [toHash, afterApp.wasmSchema],
+    ] as const) {
+      const stored = await fetchStoredWasmSchema(server.url, { appId, adminSecret, schemaHash });
+      expect(stored.schema).toEqual(expected);
+    }
+    newDb = await createDb(await localAccountConfig(appId, server.url));
+    const rows = await waitForRows(
+      newDb,
+      afterApp.records.where({ id: existing.id }).include({ owner: true }),
+      (rows) => rows.length === 1 && rows[0]?.owner?.name === "Existing owner",
+    );
+    expect(rows).toEqual([
+      {
+        id: existing.id,
+        ownerId: owner.id,
+        status: "published",
+        enabled: true,
+        tags: ["retained"],
+        owner: { id: owner.id, name: "Existing owner" },
+      },
+    ]);
+    const defaultOwner = await newDb.insert(afterApp.users, {}).wait({ tier: "edge" });
+    const created = await newDb
+      .insert(afterApp.records, { ownerId: defaultOwner.id })
+      .wait({ tier: "edge" });
+    const defaultRows = await waitForRows(
+      newDb,
+      afterApp.records.where({ id: created.id }).include({ owner: true }),
+      (rows) => rows.length === 1 && rows[0]?.owner?.name === "Unnamed",
+    );
+    expect(defaultRows).toEqual([
+      {
+        id: created.id,
+        ownerId: defaultOwner.id,
+        status: "draft",
+        enabled: false,
+        tags: ["initial"],
+        owner: { id: defaultOwner.id, name: "Unnamed" },
+      },
+    ]);
+  } finally {
+    await newDb?.shutdown();
+    await oldDb?.shutdown();
+    await server?.stop();
+    await rm(root, { recursive: true, force: true });
   }
 }, 60_000);
