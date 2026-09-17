@@ -99,7 +99,7 @@ import { schema as s } from ${JSON.stringify(schemaImportPath)};
 const schema = {
   todos: s.table({
     title: s.string(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;

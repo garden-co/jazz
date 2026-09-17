@@ -885,3 +885,17 @@ SYSTEM identity, delegated scope, or local-receiver role. No sender emits false.
 snapshot, nor is it a request to wait until that snapshot becomes complete
 relative to an unavailable upstream. Convergence is asserted separately, after
 `reconnect`.
+
+### Explicit TypeScript relationships
+
+`s.table(columns, relationships)` requires both arguments; tables with no relationships use `{}`.
+Columns hold raw UUID or UUID[] values. A named `s.rel(targetTable, column)` declares a forward
+relationship and derives its cardinality and optionality from that column. A named
+`s.reverse(sourceTable, forwardRelationshipName)` declares a reverse relationship through that
+exact forward name and always returns a collection. There are no suffix rules, inferred aliases,
+or automatic inverses. Relationship names must not collide with columns, including implicit `id`.
+Local column/type checks and whole-schema target/reverse checks run eagerly at runtime and in the
+TypeScript API, including sliceable apps. Reverse relationships must point back to their declaring
+table; conflicting targets for one reference column are rejected. Explicit forward declarations
+preserve the core reference and index metadata. Alias-only changes do not change core schema identity.
+Relationships neither grant permissions nor require the target row to exist or be readable.

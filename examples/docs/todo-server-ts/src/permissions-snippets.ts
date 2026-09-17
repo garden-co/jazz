@@ -2,22 +2,36 @@ import { schema as s } from "jazz-tools";
 
 // #region permissions-schema-ts
 const schema = {
-  projects: s.table({
-    name: s.string(),
-    owner_id: s.uuid(),
-  }),
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    parentId: s.ref("todos").optional(),
-    projectId: s.ref("projects").optional(),
-    owner_id: s.uuid(),
-  }),
-  todoShares: s.table({
-    todoId: s.ref("todos"),
-    user_id: s.uuid(),
-    can_read: s.boolean(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+      owner_id: s.uuid(),
+    },
+    { todos: s.reverse("todos", "project") },
+  ),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.uuid().optional(),
+      projectId: s.uuid().optional(),
+      owner_id: s.uuid(),
+    },
+    {
+      parent: s.rel("todos", "parentId"),
+      children: s.reverse("todos", "parent"),
+      project: s.rel("projects", "projectId"),
+      shares: s.reverse("todoShares", "todo"),
+    },
+  ),
+  todoShares: s.table(
+    {
+      todoId: s.uuid(),
+      user_id: s.uuid(),
+      can_read: s.boolean(),
+    },
+    { todo: s.rel("todos", "todoId") },
+  ),
 };
 // #endregion permissions-schema-ts
 

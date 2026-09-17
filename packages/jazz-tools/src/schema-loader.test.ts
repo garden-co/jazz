@@ -104,7 +104,7 @@ const FIXTURES_DIR = fileURLToPath(new URL("../tests/ts-dsl/fixtures", import.me
 const fixtureDir = (name: string) => `${FIXTURES_DIR}/${name}`;
 
 describe("bundled DSL schema loading", () => {
-  it("loads and validates separately authored schema, app, and inferred relation permissions", async () => {
+  it("loads and validates separately authored schema, app, and declared relation permissions", async () => {
     const root = fixtureDir("inferred-relations");
     const { app } = await import("../tests/ts-dsl/fixtures/inferred-relations/app.js");
     const { default: permissions } =

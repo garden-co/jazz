@@ -1,7 +1,9 @@
+import { structuralBigInt } from "../runtime/structural-values.js";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
   WasmSchema,
+  Value,
 } from "../drivers/types.js";
 import { columnTypeSignature, shortSchemaHash, tableSchemasEqual } from "./schema-utils.js";
 
@@ -47,7 +49,15 @@ function detectPossibleTableRenames(
 }
 
 function pickWitnessSchema(schema: WasmSchema, tableNames: readonly string[]): WasmSchema {
-  const uniqueTableNames = [...new Set(tableNames)];
+  const visited = new Set(tableNames);
+  for (const tableName of visited) {
+    const table = schema[tableName];
+    for (const column of table?.columns ?? []) {
+      if (column.references) visited.add(column.references);
+    }
+    for (const relation of Object.values(table?.relations ?? {})) visited.add(relation.table);
+  }
+  const uniqueTableNames = [...visited];
   return Object.fromEntries(
     uniqueTableNames
       .filter((tableName) => schema[tableName])
@@ -63,7 +73,12 @@ function indentBlock(text: string, indent: number): string {
     .join("\n");
 }
 
-function baseBuilderExpression(columnType: WasmColumnType, references?: string): string {
+// JSON.parse preserves own "__proto__" keys that object-literal syntax reinterprets.
+function jsonSchemaExpression(schema: unknown): string {
+  return `JSON.parse(${JSON.stringify(JSON.stringify(schema))})`;
+}
+
+function baseBuilderExpression(columnType: WasmColumnType): string {
   switch (columnType.type) {
     case "Text":
       return "s.string()";
@@ -78,15 +93,15 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
     case "Bytea":
       return "s.bytes()";
     case "Json":
-      return columnType.schema ? `s.json(${JSON.stringify(columnType.schema)})` : "s.json()";
+      return columnType.schema ? `s.json(${jsonSchemaExpression(columnType.schema)})` : "s.json()";
     case "Enum":
       return `s.enum(${columnType.variants.map((variant) => JSON.stringify(variant)).join(", ")})`;
     case "EnumPayload":
       throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
-      return references ? `s.ref(${JSON.stringify(references)})` : "s.uuid()";
+      return "s.uuid()";
     case "Array":
-      return `s.array(${baseBuilderExpression(columnType.element, references)})`;
+      return `s.array(${baseBuilderExpression(columnType.element)})`;
     case "BigInt":
       return "s.bigint()";
     case "Row":
@@ -94,9 +109,47 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
   }
 }
 
+// Render stored values directly: JSON is already serialized text, timestamps are
+// milliseconds, and bigint/bytes need JavaScript constructors rather than JSON.
+function defaultExpression(value: Value): string {
+  switch (value.type) {
+    case "Null":
+      return "null";
+    case "Text":
+    case "Uuid":
+      return JSON.stringify(value.value);
+    case "Boolean":
+      return value.value ? "true" : "false";
+    case "BigInt":
+      return `${structuralBigInt(value.value)}n`;
+    case "Integer":
+    case "Double":
+      return Object.is(value.value, -0) ? "-0" : String(Number(value.value));
+    case "Timestamp": {
+      const milliseconds = Number(value.value);
+      if (!Object.is(new Date(milliseconds).getTime(), milliseconds)) {
+        throw new Error(
+          "Cannot render migration timestamp default exactly as a Date; use whole milliseconds within the JavaScript Date range.",
+        );
+      }
+      return `new Date(${milliseconds})`;
+    }
+    case "Bytea":
+      return `new Uint8Array([${Array.from(new Uint8Array(value.value)).join(", ")}])`;
+    case "Array":
+      return `[${value.value.map(defaultExpression).join(", ")}]`;
+    default:
+      throw new Error(`Migration stub generation does not yet support ${value.type} defaults.`);
+  }
+}
+
 function builderExpressionForColumn(column: ColumnDescriptor): string {
-  const base = baseBuilderExpression(column.column_type, column.references);
-  const withOptional = column.nullable ? `${base}.optional()` : base;
+  const base = baseBuilderExpression(column.column_type);
+  const optional = column.nullable ? `${base}.optional()` : base;
+  const withOptional =
+    column.default === undefined
+      ? optional
+      : `${optional}.default(${defaultExpression(column.default)})`;
   if (column.merge_strategy === "Counter") {
     return `${withOptional}.merge("counter")`;
   }
@@ -113,7 +166,33 @@ function renderSchemaWitness(schema: WasmSchema): string {
       const columnLines = tableSchema.columns.map(
         (column) => `${JSON.stringify(column.name)}: ${builderExpressionForColumn(column)},`,
       );
-      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n})`;
+      const relations = { ...tableSchema.relations };
+      for (const column of tableSchema.columns) {
+        if (
+          !column.references ||
+          Object.values(relations).some((r) => r.kind === "forward" && r.column === column.name)
+        )
+          continue;
+        const alias = `${column.name}Relation`;
+        if (Object.hasOwn(relations, alias) || tableSchema.columns.some((c) => c.name === alias))
+          throw new Error(
+            `Cannot render migration witness: relationship "${tableName}.${alias}" collides with an existing name.`,
+          );
+        relations[alias] = { kind: "forward", table: column.references, column: column.name };
+      }
+      const relationLines = Object.entries(relations).map(
+        ([name, relation]) =>
+          `${JSON.stringify(name)}: s.${relation.kind === "forward" ? "rel" : "reverse"}(${JSON.stringify(relation.table)}, ${JSON.stringify(relation.kind === "forward" ? relation.column : relation.relation)}),`,
+      );
+      const index =
+        tableSchema.indexed_columns === undefined
+          ? ""
+          : `.indexOnly(${JSON.stringify(tableSchema.indexed_columns)})`;
+      const branch =
+        tableSchema.branchBy === undefined
+          ? ""
+          : `.branchBy(${JSON.stringify(tableSchema.branchBy)})`;
+      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${branch}`;
     });
 
   if (tableEntries.length === 0) {
@@ -129,8 +208,8 @@ type TableSuggestion = {
   properties: string[];
 };
 
-function renderArrayElementExpression(columnType: WasmColumnType, references?: string): string {
-  return baseBuilderExpression(columnType, references);
+function renderArrayElementExpression(columnType: WasmColumnType): string {
+  return baseBuilderExpression(columnType);
 }
 
 function renderAddOperationExpression(column: ColumnDescriptor, defaultExpression: string): string {
@@ -149,7 +228,7 @@ function renderAddOperationExpression(column: ColumnDescriptor, defaultExpressio
       return `s.add.bytes({ default: ${defaultExpression} })`;
     case "Json":
       return column.column_type.schema
-        ? `s.add.json({ default: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
+        ? `s.add.json({ default: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
         : `s.add.json({ default: ${defaultExpression} })`;
     case "Enum":
       return `s.add.enum(${column.column_type.variants
@@ -163,7 +242,7 @@ function renderAddOperationExpression(column: ColumnDescriptor, defaultExpressio
       }
       return `s.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
     case "Array":
-      return `s.add.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, default: ${defaultExpression} })`;
+      return `s.add.array({ of: ${renderArrayElementExpression(column.column_type.element)}, default: ${defaultExpression} })`;
     case "BigInt":
       return `s.add.bigint({ default: ${defaultExpression} })`;
     case "Row":
@@ -190,7 +269,7 @@ function renderDropOperationExpression(
       return `s.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
     case "Json":
       return column.column_type.schema
-        ? `s.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
+        ? `s.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
         : `s.drop.json({ backwardsDefault: ${defaultExpression} })`;
     case "Enum":
       return `s.drop.enum(${column.column_type.variants
@@ -204,7 +283,7 @@ function renderDropOperationExpression(
       }
       return `s.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
     case "Array":
-      return `s.drop.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.array({ of: ${renderArrayElementExpression(column.column_type.element)}, backwardsDefault: ${defaultExpression} })`;
     case "BigInt":
       return `s.drop.bigint({ backwardsDefault: ${defaultExpression} })`;
     case "Row":
@@ -306,8 +385,22 @@ function renderMigrationBody(
     witnessFromTables.push(renameSuggestion.oldTableName);
     witnessToTables.push(renameSuggestion.newTableName);
   }
-  const witnessFrom = pickWitnessSchema(fromSchema, witnessFromTables);
-  const witnessTo = pickWitnessSchema(toSchema, witnessToTables);
+  // Include dependencies on both sides so unchanged referenced tables are not
+  // mistaken for newly created or removed tables by the public migration DSL.
+  const dependencies = new Set([
+    ...Object.keys(pickWitnessSchema(fromSchema, witnessFromTables)),
+    ...Object.keys(pickWitnessSchema(toSchema, witnessToTables)),
+  ]);
+  let count: number;
+  do {
+    count = dependencies.size;
+    for (const name of Object.keys(pickWitnessSchema(fromSchema, [...dependencies])))
+      dependencies.add(name);
+    for (const name of Object.keys(pickWitnessSchema(toSchema, [...dependencies])))
+      dependencies.add(name);
+  } while (dependencies.size !== count);
+  const witnessFrom = pickWitnessSchema(fromSchema, [...dependencies]);
+  const witnessTo = pickWitnessSchema(toSchema, [...dependencies]);
   const lines: string[] = [];
 
   for (const tableName of migratableTables) {
@@ -323,7 +416,34 @@ function renderMigrationBody(
       lines.push(`  ${property}`);
     }
     if (suggestion.comments.length === 0 && suggestion.properties.length === 0) {
-      lines.push("  // TODO: No safe migration steps were inferred automatically.");
+      const referenceAddition = toTable.columns.some(
+        (column) =>
+          column.references &&
+          fromTable.columns.some(
+            (source) =>
+              source.name === column.name &&
+              !source.references &&
+              source.nullable === column.nullable &&
+              source.merge_strategy === column.merge_strategy &&
+              columnTypeSignature(source.column_type) === columnTypeSignature(column.column_type),
+          ),
+      );
+      lines.push(
+        referenceAddition &&
+          fromTable.columns.length === toTable.columns.length &&
+          fromTable.columns.every((source) =>
+            toTable.columns.some(
+              (column) =>
+                column.name === source.name &&
+                (!source.references || source.references === column.references) &&
+                source.nullable === column.nullable &&
+                source.merge_strategy === column.merge_strategy &&
+                columnTypeSignature(source.column_type) === columnTypeSignature(column.column_type),
+            ),
+          )
+          ? "  // Add reference metadata with an identity lens; existing UUID values are preserved."
+          : "  // TODO: No safe migration steps were inferred automatically.",
+      );
     }
     lines.push("},");
     lines.push("");

@@ -11,13 +11,16 @@ import { uniqueDbName } from "./factories";
 type Priority = "low" | "medium" | "high";
 
 const prioritySchema = {
-  priorities: s.table({
-    label: s.string(),
-    score: s.int().transform<Priority>({
-      from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
-      to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
-    }),
-  }),
+  priorities: s.table(
+    {
+      label: s.string(),
+      score: s.int().transform<Priority>({
+        from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
+        to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
+      }),
+    },
+    {},
+  ),
 };
 
 type PriorityAppSchema = s.Schema<typeof prioritySchema>;
@@ -45,26 +48,32 @@ function applyPermissions(permissions: CompiledPermissions): s.App<PriorityAppSc
   } as s.App<PriorityAppSchema>;
 }
 const relatedSchema = {
-  parents: s.table({
-    item: s
-      .ref("items")
-      .optional()
-      .transform<string | null>({
-        from: (value) => (value === null ? null : `item:${value}`),
-        to: (value) => (value === null ? null : value.replace(/^item:/, "")),
+  parents: s.table(
+    {
+      item: s
+        .uuid()
+        .optional()
+        .transform<string | null>({
+          from: (value) => (value === null ? null : `item:${value}`),
+          to: (value) => (value === null ? null : value.replace(/^item:/, "")),
+        }),
+      itemIds: s.array(s.uuid()),
+    },
+    { itemRelation: s.rel("items", "item"), items: s.rel("items", "itemIds") },
+  ),
+  items: s.table(
+    {
+      score: s.int().transform<number>({
+        from: (value) => value * 10,
+        to: (value) => value / 10,
       }),
-    itemIds: s.array(s.ref("items")),
-  }),
-  items: s.table({
-    score: s.int().transform<number>({
-      from: (value) => value * 10,
-      to: (value) => value / 10,
-    }),
-    label: s.string().transform<string>({
-      from: (value) => `label:${value}`,
-      to: (value) => value.replace(/^label:/, ""),
-    }),
-  }),
+      label: s.string().transform<string>({
+        from: (value) => `label:${value}`,
+        to: (value) => value.replace(/^label:/, ""),
+      }),
+    },
+    { parentsViaItems: s.reverse("parents", "items") },
+  ),
 };
 
 type RelatedAppSchema = s.Schema<typeof relatedSchema>;
@@ -183,9 +192,9 @@ describe("TS transformed columns", () => {
     const emptyIncluded = await activeDb.one(
       relatedAppWithPermissions.parents
         .where({ id: { eq: emptyParent.id } })
-        .include({ item: true, items: true }),
+        .include({ itemRelation: true, items: true }),
     );
-    expect(emptyIncluded?.item).toBeNull();
+    expect(emptyIncluded?.itemRelation).toBeNull();
     expect(emptyIncluded?.items).toEqual([]);
 
     const firstExpected = {
@@ -201,14 +210,16 @@ describe("TS transformed columns", () => {
     const included = await activeDb.one(
       relatedAppWithPermissions.parents
         .where({ id: { eq: populatedParent.id } })
-        .include({ item: true, items: true }),
+        .include({ itemRelation: true, items: true }),
     );
-    expect(included?.item).toEqual(firstExpected);
+    expect(included?.itemRelation).toEqual(firstExpected);
     expect(included?.items).toHaveLength(2);
     expect(included?.items).toEqual(expect.arrayContaining([firstExpected, secondExpected]));
 
     const hopped = await activeDb.one(
-      relatedAppWithPermissions.parents.where({ id: { eq: populatedParent.id } }).hopTo("item"),
+      relatedAppWithPermissions.parents
+        .where({ id: { eq: populatedParent.id } })
+        .hopTo("itemRelation"),
     );
     expect(hopped).toEqual(firstExpected);
   });

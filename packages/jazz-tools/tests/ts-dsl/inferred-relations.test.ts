@@ -18,7 +18,7 @@ const scalars = app.records.include({
   person: true,
   team: true,
   teams: true,
-  address: true,
+  addressRelation: true,
 });
 const required = scalars.requireIncludes();
 const reverse = app.categories.include({ recordsViaCategories: true, teamsViaCategory: true });
@@ -27,7 +27,7 @@ type Label = { id: string; label: string };
 type Person = { id: string; name: string };
 type Team = { id: string; category_id: string };
 
-describe("directly inferred public relation APIs", () => {
+describe("explicit public relation APIs", () => {
   it("preserves array results, scalar nullability, and required-include refinement", () => {
     expectTypeOf<s.RowOf<typeof arrays>["categories"]>().toEqualTypeOf<Label[]>();
     expectTypeOf<s.RowOf<typeof arrays>["people"]>().toEqualTypeOf<Person[]>();
@@ -43,7 +43,7 @@ describe("directly inferred public relation APIs", () => {
     expectTypeOf<s.RowOf<typeof required>["team"]>().toEqualTypeOf<Team>();
     expectTypeOf<s.RowOf<typeof required>["teams"]>().toEqualTypeOf<Team[]>();
     // A nullable FK remains nullable even when matching includes are required.
-    expectTypeOf<s.RowOf<typeof required>["address"]>().toEqualTypeOf<Person | null>();
+    expectTypeOf<s.RowOf<typeof required>["addressRelation"]>().toEqualTypeOf<Person | null>();
     expectTypeOf<s.RowOf<typeof required>["personId"]>().toEqualTypeOf<string>();
     expectTypeOf<s.RowOf<typeof arrays>["person_ids"]>().toEqualTypeOf<string[]>();
     expect(JSON.parse(arrays._build())).toMatchObject({
@@ -57,7 +57,7 @@ describe("directly inferred public relation APIs", () => {
       { column_name: "team", outer_column: "records.team_id", inner_column: "id" },
       { column_name: "teams", outer_column: "records.teamIds", inner_column: "id" },
       {
-        column_name: "__jazz_include_address",
+        column_name: "addressRelation",
         outer_column: "records.address",
         inner_column: "id",
       },
@@ -87,12 +87,12 @@ describe("directly inferred public relation APIs", () => {
         ],
         app.wasmSchema,
         "records",
-        { address: true },
+        { addressRelation: true },
         ["address"],
       ),
     ).toEqual([
-      { id: "record-1", address: { id: "person-1", name: "Pat" } },
-      { id: "record-2", address: null },
+      { id: "record-1", address: "person-1", addressRelation: { id: "person-1", name: "Pat" } },
+      { id: "record-2", address: null, addressRelation: null },
     ]);
   });
 
@@ -144,11 +144,11 @@ describe("directly inferred public relation APIs", () => {
 });
 
 if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
-  // @ts-expect-error unsuffixed address stays address, not the old inflector's addresses
+  // @ts-expect-error only the declared addressRelation alias is available
   app.records.include({ addresses: true });
-  // @ts-expect-error reverse aliases use the same unsuffixed convention
+  // @ts-expect-error only the declared reverse alias is available
   app.people.include({ recordsViaAddresses: true });
-  // @ts-expect-error an irregular array reference uses people, not persons
+  // @ts-expect-error only the explicitly declared people alias is available
   checkedApp.records.include({ persons: true });
   // @ts-expect-error slices exclude reverse references from unselected source tables
   slice.categories.include({ teamsViaCategory: true });

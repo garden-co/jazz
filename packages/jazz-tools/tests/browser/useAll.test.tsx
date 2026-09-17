@@ -15,9 +15,16 @@ import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "
 
 const schema: WasmSchema = {
   orgs: {
+    relations: { teamsViaOrg: { kind: "reverse" as const, table: "teams", relation: "org" } },
     columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
   },
   teams: {
+    relations: {
+      org: { kind: "forward" as const, table: "orgs", column: "org_id" },
+      parent: { kind: "forward" as const, table: "teams", column: "parent_id" },
+      teamsViaParent: { kind: "reverse" as const, table: "teams", relation: "parent" },
+      usersViaTeam: { kind: "reverse" as const, table: "users", relation: "team" },
+    },
     columns: [
       { name: "name", column_type: { type: "Text" }, nullable: false },
       { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
@@ -30,12 +37,17 @@ const schema: WasmSchema = {
     ],
   },
   users: {
+    relations: {
+      team: { kind: "forward" as const, table: "teams", column: "team_id" },
+      todosViaOwner: { kind: "reverse" as const, table: "todos", relation: "owner" },
+    },
     columns: [
       { name: "name", column_type: { type: "Text" }, nullable: false },
       { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
     ],
   },
   todos: {
+    relations: { owner: { kind: "forward" as const, table: "users", column: "owner_id" } },
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
       { name: "done", column_type: { type: "Boolean" }, nullable: false },

@@ -152,15 +152,21 @@ async function terminateWorker(port: MessagePort): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const schema = {
-  projects: s.table({
-    name: s.string(),
-  }),
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    projectId: s.ref("projects").optional(),
-    tags: s.array(s.string()).optional(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todosViaProject: s.reverse("todos", "project") },
+  ),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      projectId: s.uuid().optional(),
+      tags: s.array(s.string()).optional(),
+    },
+    { project: s.rel("projects", "projectId") },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -172,14 +178,20 @@ type Todo = s.RowOf<typeof todos>;
 // worker-bridge schema: this test must exercise the same two-equality indexed
 // source shape as the native receipt, without changing unrelated test schemas.
 const maintainedIndexedSchema = {
-  projects: s.table({
-    name: s.string(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    {},
+  ),
   todos: s
-    .table({
-      title: s.string(),
-      done: s.boolean(),
-    })
+    .table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+      },
+      {},
+    )
     .indexOnly(["title", "done"]),
 };
 type MaintainedIndexedSchema = s.Schema<typeof maintainedIndexedSchema>;
@@ -188,16 +200,22 @@ const { todos: maintainedIndexedTodos } = maintainedIndexedApp;
 type MaintainedIndexedTodo = s.RowOf<typeof maintainedIndexedTodos>;
 
 const transactionIdentitySchema = {
-  projects: s.table({
-    name: s.string(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { documentsViaProject: s.reverse("documents", "project") },
+  ),
   documents: s
-    .table({
-      branch: s.string(),
-      title: s.string(),
-      projectId: s.ref("projects"),
-      body: s.string(),
-    })
+    .table(
+      {
+        branch: s.string(),
+        title: s.string(),
+        projectId: s.uuid(),
+        body: s.string(),
+      },
+      { project: s.rel("projects", "projectId") },
+    )
     .branchBy("branch"),
 };
 const transactionIdentityApp = s.defineApp(transactionIdentitySchema);
@@ -261,11 +279,14 @@ const noDeletePermissions = s.definePermissions(app, ({ policy }) => [
 ]);
 
 const nullableSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    description: s.string().optional(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+    },
+    {},
+  ),
 };
 
 type NullableSchema = s.Schema<typeof nullableSchema>;
@@ -284,18 +305,24 @@ const allTodos: QueryBuilder<Todo> = app.todos;
 // rehydrates catalogue state, including its migration lens, before a current
 // client issues its first query after reopening.
 const catalogueSchemaV1 = {
-  todos: s.table({
-    title: s.string(),
-    completed: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      completed: s.boolean(),
+    },
+    {},
+  ),
 };
 
 const catalogueSchemaV2 = {
-  todos: s.table({
-    title: s.string(),
-    completed: s.boolean(),
-    description: s.string().optional(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      completed: s.boolean(),
+      description: s.string().optional(),
+    },
+    {},
+  ),
 };
 
 const catalogueAppV1 = s.defineApp(catalogueSchemaV1);

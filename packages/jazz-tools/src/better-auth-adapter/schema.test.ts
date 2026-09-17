@@ -202,19 +202,24 @@ describe("better-auth schema helpers", () => {
         '    "email-address": s.string(),',
         '    role: s.enum("user", "admin"),',
         "    metadata: s.json().optional(),",
-        '    deviceIds: s.array(s.ref("devices")).optional(),',
+        "    deviceIds: s.array(s.uuid()).optional(),",
+        "  }, {",
+        '    deviceIdsRelation: s.rel("devices", "deviceIds"),',
         "  }),",
         "",
         "  devices: s.table({",
         "    name: s.string(),",
         "    tags: s.array(s.string()),",
         "    loginCount: s.int(),",
+        "  }, {",
         "  }),",
         "",
         "  sessions: s.table({",
         "    createdAt: s.allowExternalProvenanceName(s.timestamp()),",
         "    retryCounts: s.array(s.int()).optional(),",
-        '    userId: s.ref("accountHolders").optional(),',
+        "    userId: s.uuid().optional(),",
+        "  }, {",
+        '    userIdRelation: s.rel("accountHolders", "userId"),',
         "  }),",
         "};",
         "",
@@ -365,6 +370,7 @@ describe("better-auth schema helpers", () => {
 
   it("throws when schema.ts generation encounters non-id references", () => {
     const tables = {
+      user: { modelName: "user", fields: { email: { type: "string", required: true } } },
       session: {
         modelName: "session",
         fields: {
@@ -385,8 +391,9 @@ describe("better-auth schema helpers", () => {
     );
   });
 
-  it("throws when schema.ts generation encounters invalid scalar ref keys", () => {
+  it("declares a distinct relationship for an unsuffixed scalar UUID", () => {
     const tables = {
+      user: { modelName: "user", fields: { email: { type: "string", required: true } } },
       session: {
         modelName: "session",
         fields: {
@@ -402,13 +409,14 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(() => buildJazzSchemaSourceTextFromTables({ tables })).toThrow(
-      /reference keys must end with "Id" or "_id"/i,
+    expect(buildJazzSchemaSourceTextFromTables({ tables })).toContain(
+      'ownerRelation: s.rel("user", "owner")',
     );
   });
 
-  it("throws when schema.ts generation encounters invalid array ref keys", () => {
+  it("declares a distinct relationship for an unsuffixed UUID array", () => {
     const tables = {
+      user: { modelName: "user", fields: { email: { type: "string", required: true } } },
       session: {
         modelName: "session",
         fields: {
@@ -424,8 +432,8 @@ describe("better-auth schema helpers", () => {
       },
     } as BetterAuthDBSchema;
 
-    expect(() => buildJazzSchemaSourceTextFromTables({ tables })).toThrow(
-      /array reference keys must end with "Ids" or "_ids"/i,
+    expect(buildJazzSchemaSourceTextFromTables({ tables })).toContain(
+      'ownersRelation: s.rel("user", "owners")',
     );
   });
 });

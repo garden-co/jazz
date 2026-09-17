@@ -6,10 +6,13 @@ import type { Db } from "../../src/runtime/db.js";
 
 const schema = {
   documents: s
-    .table({
-      branch: s.string(),
-      title: s.string(),
-    })
+    .table(
+      {
+        branch: s.string(),
+        title: s.string(),
+      },
+      {},
+    )
     .branchBy("branch"),
 };
 
@@ -17,15 +20,25 @@ type AppSchema = s.Schema<typeof schema>;
 const app: s.App<AppSchema> = s.defineApp(schema);
 
 const referenceSchema = {
-  scenarios: s.table({
-    name: s.string(),
-    base_scenario_id: s.ref("scenarios").optional(),
-  }),
+  scenarios: s.table(
+    {
+      name: s.string(),
+      base_scenario_id: s.uuid().optional(),
+    },
+    {
+      base_scenario: s.rel("scenarios", "base_scenario_id"),
+      scenariosViaBase_scenario: s.reverse("scenarios", "base_scenario"),
+      tasksViaScenario: s.reverse("tasks", "scenario"),
+    },
+  ),
   tasks: s
-    .table({
-      scenario_id: s.ref("scenarios"),
-      title: s.string(),
-    })
+    .table(
+      {
+        scenario_id: s.uuid(),
+        title: s.string(),
+      },
+      { scenario: s.rel("scenarios", "scenario_id") },
+    )
     .branchBy("scenario_id"),
 };
 

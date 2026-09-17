@@ -92,7 +92,7 @@ describe("jazz-tools/shared", () => {
 
     // Schema + query via the real builder API (no JSON-shaped literals).
     const app = s.defineApp({
-      todos: s.table({ title: s.string(), done: s.boolean() }),
+      todos: s.table({ title: s.string(), done: s.boolean() }, {}),
     });
     const query = app.todos.where({ done: { eq: false } });
 

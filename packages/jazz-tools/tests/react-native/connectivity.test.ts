@@ -7,7 +7,7 @@ const { encodeNativeForegroundCommand, decodeNativeForegroundResponse } =
   nativeCommands as unknown as NativeForegroundModule;
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({ notes: schema.table({ title: schema.string() }) });
+const app = schema.defineApp({ notes: schema.table({ title: schema.string() }, {}) });
 
 it("rejects disconnect without a native upstream and leaves local reads usable", async () => {
   await withNativeRelayFixture(app, async (fixture) => {

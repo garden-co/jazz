@@ -1,3 +1,4 @@
+import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 /**
  * Contains utilities for deploying schemas, permissions, and migrations to a Jazz server.
  *
@@ -456,7 +457,7 @@ class MigrationStorage {
     await assertNoSymlinkComponents(this.snapshotsDir);
     const filePath = join(this.snapshotsDir, fileName);
     await assertNoSymlinkComponents(filePath, true);
-    const contents = `${JSON.stringify(schema, null, 2)}\n`;
+    const contents = `${JSON.stringify(schema, runtimeSchemaJsonReplacer, 2)}\n`;
     try {
       await syncFile(filePath, contents);
     } catch (error) {
@@ -1057,7 +1058,7 @@ async function committedSnapshotPublication(
   }
   return {
     finalPath: join(storage.snapshotsDir, snapshotFilename(schema.hash, timestamp)),
-    contents: `${JSON.stringify(schema.schema, null, 2)}\n`,
+    contents: `${JSON.stringify(schema.schema, runtimeSchemaJsonReplacer, 2)}\n`,
   };
 }
 
