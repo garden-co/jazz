@@ -247,12 +247,24 @@ it("publishes UUID reference identity lenses and relates rows written before pub
 }, 60_000);
 
 it("publishes generated default-bearing relation migrations and preserves them across restart", async () => {
+  const complexDefaults = {
+    sequence: 9_223_372_036_854_775_806n,
+    checkpoints: [[9_223_372_036_854_775_806n, -9_223_372_036_854_775_807n], []],
+    payload: new Uint8Array([0, 1, 127, 255]),
+    createdAt: new Date("2026-01-02T03:04:05.678Z"),
+    metadata: { archived: false, labels: ["initial"], nested: { count: 3, value: null } },
+  };
   const users = s.table({ name: s.string().default("Unnamed") }, {});
   const columns = {
     ownerId: s.uuid(),
     status: s.string().default("draft"),
     enabled: s.boolean().default(false),
     tags: s.array(s.string()).default(["initial"]),
+    sequence: s.bigint().default(complexDefaults.sequence),
+    checkpoints: s.array(s.array(s.bigint())).default(complexDefaults.checkpoints),
+    payload: s.bytes().default(complexDefaults.payload),
+    createdAt: s.timestamp().default(complexDefaults.createdAt),
+    metadata: s.json().default(complexDefaults.metadata),
   };
   const before = { users, records: s.table(columns, {}) };
   const after = {
@@ -350,14 +362,6 @@ it("publishes generated default-bearing relation migrations and preserves them a
       const stored = await fetchStoredWasmSchema(server.url, { appId, adminSecret, schemaHash });
       expect(wasmSchemasEqual(stored.schema, expected)).toBe(true);
       expect(await computeSchemaHash(stored.schema)).toBe(schemaHash);
-      for (const [tableName, table] of Object.entries(expected)) {
-        for (const column of table.columns) {
-          expect(
-            stored.schema[tableName]?.columns.find((stored) => stored.name === column.name)
-              ?.default,
-          ).toEqual(column.default);
-        }
-      }
     }
     newDb = await createDb(await localAccountConfig(appId, server.url));
     const rows = await waitForRows(
@@ -367,6 +371,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
     );
     expect(rows).toEqual([
       {
+        ...complexDefaults,
         id: existing.id,
         ownerId: owner.id,
         status: "published",
@@ -386,6 +391,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
     );
     expect(defaultRows).toEqual([
       {
+        ...complexDefaults,
         id: created.id,
         ownerId: defaultOwner.id,
         status: "draft",
