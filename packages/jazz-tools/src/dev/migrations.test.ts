@@ -219,7 +219,7 @@ describe("migration stub generation", () => {
           ),
         },
       }),
-    ).toThrow("same structural default");
+    ).toThrow("unchanged column shapes");
     expect(() =>
       define({
         from: before,
@@ -340,19 +340,27 @@ describe("migration stub generation", () => {
     }
   });
 
-  it("rejects changed, added, or removed defaults without reference additions or operations", () => {
+  it("preserves default-only schema changes without transforming existing rows", () => {
     const definitions = [s.string(), s.string().default("before"), s.string().default("after")];
     for (const before of definitions)
       for (const after of definitions) {
         const from = { records: s.table({ title: before }, {}) };
         const to = { records: s.table({ title: after }, {}) };
-        if (before === after) expect(s.defineMigration({ from, to }).forward).toEqual([]);
-        else {
-          expect(() => s.defineMigration({ from, to })).toThrow("same structural default");
-          expect(() => s.defineMigration({ from, to, migrate: { records: {} } })).toThrow(
-            "same structural default",
+        const migration = s.defineMigration({ from, to });
+        expect(migration.forward).toEqual([]);
+        expect(s.defineMigration({ from, to, migrate: {} }).forward).toEqual([]);
+        expect(() =>
+          assertMigrationMatchesCanonicalBundle(migration, {
+            fromHash: "aaaaaaaaaaaa",
+            toHash: "bbbbbbbbbbbb",
+            fromSchema: s.defineApp(from).wasmSchema,
+            toSchema: s.defineApp(to).wasmSchema,
+          }),
+        ).not.toThrow();
+        if (before !== after)
+          expect(wasmSchemasEqual(s.defineApp(from).wasmSchema, s.defineApp(to).wasmSchema)).toBe(
+            false,
           );
-        }
       }
   });
 

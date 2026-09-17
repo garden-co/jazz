@@ -850,11 +850,6 @@ function buildForwardLenses<
       if (!sourceBuilder) continue;
       const source = sourceBuilder._build(sourceColumn);
       const target = targetBuilder._build(columnName);
-      if (!columnDefaultsEqual(sourceBuilder, targetBuilder)) {
-        throw new Error(
-          `Column "${targetName}.${columnName}" must keep the same structural default in a migration.`,
-        );
-      }
       if (source.references === target.references) continue;
       if (
         !source.references &&
