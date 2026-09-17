@@ -6,6 +6,7 @@
 //! in their neighboring stages.
 
 use super::*;
+use crate::node::query_engine::RequestedSourceExpr;
 
 #[cfg(test)]
 pub(super) struct ScopedPolicyGraphReplacementPause;
@@ -504,6 +505,46 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
     fields
 }
 
+const COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES: usize = 32;
+
+fn query_program_source_cache_safe(source: &RequestedSourceExpr) -> bool {
+    match source {
+        SourceExpr::VisibleCurrent {
+            data: DataSource::Current,
+            ..
+        } => true,
+        SourceExpr::WithOverlays { input, overlays } if overlays.entries.is_empty() => {
+            query_program_source_cache_safe(input)
+        }
+        SourceExpr::LensProject { input, .. } => query_program_source_cache_safe(input),
+        SourceExpr::Merge { inputs, .. } => inputs.iter().all(query_program_source_cache_safe),
+        _ => false,
+    }
+}
+
+fn query_program_cache_safe(request: &QueryProgramRequest) -> bool {
+    request.authorization_mode == QueryAuthorizationMode::TrustedServing
+        && request
+            .reads
+            .primary
+            .sources
+            .values()
+            .all(query_program_source_cache_safe)
+        && request
+            .reads
+            .fact_reads
+            .values()
+            .flat_map(|read| read.sources.values())
+            .all(query_program_source_cache_safe)
+}
+
+fn query_program_cache_key(
+    request: &QueryProgramRequest,
+    access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+) -> String {
+    format!("request={request:?};access_paths={access_paths:?}")
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -521,12 +562,41 @@ where
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
-        self.compile_query_program_request_with_inline_sources_and_access_paths(
-            request,
-            BTreeMap::new(),
-            access_paths,
-        )
-        .await
+        if !query_program_cache_safe(&request) {
+            return self
+                .compile_query_program_request_with_inline_sources_and_access_paths(
+                    request,
+                    BTreeMap::new(),
+                    access_paths,
+                )
+                .await;
+        }
+
+        let cache_key = query_program_cache_key(&request, &access_paths);
+        if let Some(program) = self.query.compiled_query_program_cache.get(&cache_key) {
+            return Ok((**program).clone());
+        }
+        let program = self
+            .compile_query_program_request_with_inline_sources_and_access_paths(
+                request,
+                BTreeMap::new(),
+                access_paths,
+            )
+            .await?;
+        if self.query.compiled_query_program_cache.len() >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
+            && let Some(oldest) = self
+                .query
+                .compiled_query_program_cache
+                .keys()
+                .next()
+                .cloned()
+        {
+            self.query.compiled_query_program_cache.remove(&oldest);
+        }
+        self.query
+            .compiled_query_program_cache
+            .insert(cache_key, Arc::new(program.clone()));
+        Ok(program)
     }
 
     pub(super) async fn compile_query_program_request_with_inline_sources_and_access_paths(

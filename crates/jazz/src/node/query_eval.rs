@@ -1094,6 +1094,7 @@ where
     #[cfg(test)]
     pub(crate) fn clear_prepared_query_plan_cache_for_test(&mut self) {
         self.query.query_shape_cache.clear();
+        self.query.compiled_query_program_cache.clear();
     }
 
     #[cfg(test)]
