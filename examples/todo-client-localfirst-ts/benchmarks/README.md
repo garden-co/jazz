@@ -51,3 +51,28 @@ one tenth of it. Sequential updates honor `JAZZ_BATCH_UPDATE_PERCENT` (default
 be compared to clean Divan latencies. Both timed sequential cases do 1,350
 transactions, but inserts grow the scope whereas updates keep 1,500 rows
 throughout; their timings are not a pure insert-vs-update primitive comparison.
+
+## Hot-row history diagnostic (#2981)
+
+`todo-history-depth` keeps the same todo schema, RocksDB WAL worker, memory
+foreground and complete wire roundtrip. It compares `spread` (round-robin
+updates) with `hot` (one repeatedly edited row). Both explicitly name the last
+authored version of the target row as parent. Optional `stale-parent` instead
+names the seed every time: this intentionally creates concurrent siblings and
+must not be confused with sequential history depth. Every edit changes the
+title and toggles `done`; exact IDs and values are checked after each reporting
+window and after reopening the worker and rehydrating a fresh foreground.
+
+```sh
+cargo build -p jazz-example-todo-benchmark --bin todo-history-depth --profile perf
+JAZZ_HISTORY_ROWS=1500 JAZZ_HISTORY_UPDATES=2000 JAZZ_HISTORY_WINDOW=500 \
+  JAZZ_HISTORY_ARMS=spread,hot target/perf/todo-history-depth
+```
+
+JSONL windows report phase medians and average logical storage/history reads
+per update, plus source and process provenance. Authoring and author persistence
+are memory-backed; worker ingest/publication is RocksDB-backed. `upload` and
+`publish` include their wire encode/decode. `roundtrip` includes all phases and
+measurement bookkeeping, not window validation/printing or fixture setup.
+These are diagnostic timings, not CodSpeed cases or browser throughput claims.
+The existing four walltime cases and their assertions are unchanged.
