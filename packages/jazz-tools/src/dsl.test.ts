@@ -482,3 +482,15 @@ describe("reserved table names", () => {
     expect(JSON.parse(app["hyphenated-name"]._build()).table).toBe("hyphenated-name");
   });
 });
+
+describe("schema table-name uniqueness", () => {
+  it("rejects duplicate legacy table declarations during schema lowering", () => {
+    resetCollectedState();
+    table("tasks", { title: col.string() });
+    table("tasks", { completed: col.boolean() });
+
+    expect(() => schemaToWasm(getCollectedSchema())).toThrow(
+      'Duplicate table name "tasks" in schema.',
+    );
+  });
+});

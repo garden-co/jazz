@@ -258,9 +258,16 @@ function clonePolicies(policies: DslTablePolicies): TablePolicies {
  */
 export function schemaToWasm(schema: Schema): WasmSchema {
   const tables: Record<string, TableSchema> = {};
+  const tableNames = new Set<string>();
 
   for (const table of schema.tables) {
     assertSchemaNameAllowed(table.name);
+    if (tableNames.has(table.name)) {
+      throw new Error(
+        `Duplicate table name "${table.name}" in schema. Table names must be unique.`,
+      );
+    }
+    tableNames.add(table.name);
     const columns: ColumnDescriptor[] = table.columns.map((col) => {
       const columnType = sqlTypeToWasm(col.sqlType);
       if (
