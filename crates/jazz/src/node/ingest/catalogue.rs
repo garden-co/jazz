@@ -454,6 +454,7 @@ where
             // identity. Invalidate maintained handles when that same-version
             // payload changes so live subscriptions rebuild their authorization
             // graph without reopening storage through the old catalogue row.
+            self.query.compiled_query_program_cache.clear();
             self.groove_runtime_token = next_groove_runtime_token();
         }
         let mut outcome = self.drain_parked_commit_units().await?;
