@@ -164,7 +164,7 @@ cacheable outputs.
   inventory and all TypeScript quarantine markers directly from source. Every
   ignore annotation must state `#NNNN: reason`; there is no separate burndown
   manifest.
-- `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+- `JAZZ_SEED_COUNT=300 dev/t --exact node::tests::harness::m3_maintained_one_shot_differential_oracle -- --ignored`
   for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 - `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
   enforces `INV-INC-1` for relation/include delivery.
@@ -210,7 +210,7 @@ core API evolution; and adding `SyncMessage::SubscribeRejected` broke jazz-sim
 bench compilation two steps before the bench gate caught it.
 
 Wide maintained-vs-one-shot soaks use
-`JAZZ_SEED_COUNT=2000 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+`JAZZ_SEED_COUNT=2000 dev/t --exact node::tests::harness::m3_maintained_one_shot_differential_oracle -- --ignored`
 alongside the existing m3 soak conventions.
 
 **Continuous simulation soak.** `.github/workflows/continuous-simulation-soak.yml`

@@ -80,12 +80,15 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   todos: s
-    .table({
-      title: s.string(),
-      done: s.boolean(),
-      description: s.string().optional(),
-      activityLog: s.string().optional(),
-    })
+    .table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        description: s.string().optional(),
+        activityLog: s.string().optional(),
+      },
+      {},
+    )
     .indexOnly(["title", "done"]),
 };
 ```
@@ -144,11 +147,14 @@ Use `.merge("counter")` on an integer or bigint column to keep deltas additive i
 import { schema as s } from "jazz-tools";
 
 const schema = {
-  votes: s.table({
-    proposal: s.string(),
-    voteCount: s.int().merge("counter"),
-    totalVotingPower: s.bigint().merge("counter"),
-  }),
+  votes: s.table(
+    {
+      proposal: s.string(),
+      voteCount: s.int().merge("counter"),
+      totalVotingPower: s.bigint().merge("counter"),
+    },
+    {},
+  ),
 };
 ```
 
@@ -182,10 +188,13 @@ to the union of every replica's elements:
 import { schema as s } from "jazz-tools";
 
 const schema = {
-  documents: s.table({
-    title: s.string(),
-    tags: s.array(s.string()).merge("g-set"),
-  }),
+  documents: s.table(
+    {
+      title: s.string(),
+      tags: s.array(s.string()).merge("g-set"),
+    },
+    {},
+  ),
 };
 ```
 

@@ -6,7 +6,7 @@ import { waitForPublication } from "./publication-wait";
 import { requireCoreRecoveryMarker } from "./recovery-marker.ts";
 
 const app = s.defineApp({
-  todos: s.table({ title: s.string() }),
+  todos: s.table({ title: s.string() }, {}),
 });
 
 /** Public foregrounds borrow the fixture lease using the genuine account. */

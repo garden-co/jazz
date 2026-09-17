@@ -32,7 +32,7 @@ it("opens a borrowed local-first account foreground and subscribes without brows
     });
     const account = accounts.createLocalFirst();
     const config = { appId: "rn-local-first-borrowed", account };
-    const app = schema.defineApp({ todos: schema.table({ title: schema.string() }) });
+    const app = schema.defineApp({ todos: schema.table({ title: schema.string() }, {}) });
     lease = await createNativeAccountTestSession(config, serializeSchemaSource(app.wasmSchema));
     client = await createJazzClient({ ...config, nativeRelay: { capability: lease.capability } });
     expect(client.session).toMatchObject({

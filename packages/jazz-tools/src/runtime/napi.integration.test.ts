@@ -126,10 +126,13 @@ const TEST_SCHEMA: WasmSchema = {
 };
 
 const publicUnionApp = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 });
 
 const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) => {
@@ -140,10 +143,13 @@ const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) 
 });
 
 const publicUnionBigIntApp = s.defineApp({
-  metrics: s.table({
-    label: s.string(),
-    value: s.bigint(),
-  }),
+  metrics: s.table(
+    {
+      label: s.string(),
+      value: s.bigint(),
+    },
+    {},
+  ),
 });
 
 const TIMESTAMP_SCHEMA: WasmSchema = {
@@ -1562,25 +1568,25 @@ describe("NAPI integration", () => {
           const schema = {
             team: s.table({
               identity_key: s.string(),
-            }),
+            }, { "team_entryViaTeam": s.reverse("team_entry", "team"), "team_entryViaTarget": s.reverse("team_entry", "target"), "dropdowns_access_edgesViaTeam": s.reverse("dropdowns_access_edges", "team") }),
             team_entry: s.table({
-              team_id: s.ref("team"),
-              target_id: s.ref("team"),
+              team_id: s.uuid(),
+              target_id: s.uuid(),
               administrator: s.boolean(),
-            }),
+            }, { "team": s.rel("team", "team_id"), "target": s.rel("team", "target_id") }),
             dropdowns: s.table({
               name: s.string(),
-            }),
+            }, { "dropdowns_access_edgesViaResource": s.reverse("dropdowns_access_edges", "resource"), "dropdown_entryViaDropdowns": s.reverse("dropdown_entry", "dropdowns") }),
             dropdowns_access_edges: s.table({
-              resource_id: s.ref("dropdowns"),
-              team_id: s.ref("team"),
+              resource_id: s.uuid(),
+              team_id: s.uuid(),
               grant_role: s.string(),
               administrator: s.boolean(),
-            }),
+            }, { "resource": s.rel("dropdowns", "resource_id"), "team": s.rel("team", "team_id") }),
             dropdown_entry: s.table({
-              dropdowns_id: s.ref("dropdowns"),
+              dropdowns_id: s.uuid(),
               label: s.string(),
-            }),
+            }, { "dropdowns": s.rel("dropdowns", "dropdowns_id") }),
           };
 
           type AppSchema = s.Schema<typeof schema>;

@@ -153,7 +153,8 @@ const assertIntegrationCheckIsGating = (typescriptJob) => {
 const trustedCachePullRequest =
   'github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association)';
 const trustedCacheCondition =
-  "github.event_name == 'push' && github.ref == 'refs/heads/main' || " + trustedCachePullRequest;
+  "github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') || " +
+  trustedCachePullRequest;
 const untrustedCacheCondition = "github.event_name != 'push' && !(" + trustedCachePullRequest + ")";
 const sccacheWriter =
   "inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''";
@@ -210,12 +211,19 @@ const cacheAccessFor = ({ eventName, ref, sameRepository = false, authorAssociat
     eventName === "pull_request" &&
     sameRepository &&
     ["OWNER", "MEMBER", "COLLABORATOR"].includes(authorAssociation);
-  const trusted = (eventName === "push" && ref === "refs/heads/main") || trustedPullRequest;
+  const trusted =
+    (eventName === "push" && ["refs/heads/main", "refs/heads/release"].includes(ref)) ||
+    trustedPullRequest;
+  const credentialedCache = trusted && (eventName !== "push" || ref === "refs/heads/main");
   return {
     invocation: trusted ? "trusted" : "untrusted",
     idToken: trusted ? "write" : "none",
-    sccache: trusted ? (eventName === "push" ? "writer" : "reader") : "none",
-    turbo: trusted,
+    sccache: credentialedCache
+      ? eventName === "push" && ref === "refs/heads/main"
+        ? "writer"
+        : "reader"
+      : "none",
+    turbo: credentialedCache,
   };
 };
 const workflowDocumentFor = (source) => {
@@ -260,8 +268,8 @@ const assertEntryCacheTrustBoundary = (source) => {
   });
   assert.equal(trusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(trusted.with, {
-    "sccache-write": "${{ github.event_name == 'push' }}",
-    "trusted-cache": true,
+    "sccache-write": "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+    "trusted-cache": "${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}",
   });
   assert.equal(trusted.secrets, "inherit");
 
@@ -278,7 +286,7 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.deepEqual(aggregate.permissions, { contents: "read" });
   assert.equal(document.on.pull_request_target, undefined);
   assert.equal(document.on.pull_request, null, "stacked PR bases must not be branch-filtered");
-  assert.deepEqual(document.on.push, { branches: ["main"] });
+  assert.deepEqual(document.on.push, { branches: ["main", "release"] });
 };
 const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
   assert.doesNotMatch(
@@ -1200,12 +1208,17 @@ test("shared Rust cache writes are main-only while trusted PRs receive read acce
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
 });
 
-test("entry workflow grants credentialed cross-ref caches to main and trusted stacked PRs", () => {
+test("entry workflow grants credentialed cross-ref caches only to main and trusted stacked PRs", () => {
   const cases = [
     [
       "main push",
       { eventName: "push", ref: "refs/heads/main" },
       { invocation: "trusted", idToken: "write", sccache: "writer", turbo: true },
+    ],
+    [
+      "release push",
+      { eventName: "push", ref: "refs/heads/release" },
+      { invocation: "trusted", idToken: "write", sccache: "none", turbo: false },
     ],
     [
       "feature push",
@@ -1484,7 +1497,7 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
   assert.deepEqual(document.on.pull_request, {
     types: ["opened", "reopened", "synchronize", "labeled", "unlabeled"],
   });
-  assert.deepEqual(document.on.push.branches, ["main"]);
+  assert.deepEqual(document.on.push.branches, ["main", "release"]);
   assertRnNativeArtifactPushPaths(document.on.push.paths);
   assert.throws(
     () =>
@@ -1633,7 +1646,7 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
 test("realistic benchmark compilation has an explicit guarded trigger matrix", () => {
   const document = parse(realisticWorkflow);
   assert.deepEqual(document.on.pull_request, {
-    branches: ["main"],
+    branches: ["main", "release"],
     types: ["opened", "reopened", "synchronize", "labeled"],
   });
   assert.deepEqual(document.on.push, { branches: ["main"] });
@@ -1819,9 +1832,25 @@ test("pkg.pr.new previews omit Windows while release package builds retain it", 
   assert.match(packageBuild, /default: .*win32-x64-msvc/);
   assert.match(packageBuild, /include: \$\{\{ fromJSON\(inputs\.napi_matrix\) \}\}/);
   assert.match(packageBuild, /Remove Windows package omitted by this build/);
-  assert.match(packageBuild, /stage-napi-manifests\.mjs linux-x64-gnu darwin-x64 darwin-arm64/);
+  const stagedPreviewPlatforms =
+    /stage-napi-manifests\.mjs linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64/;
+  const previewPlatforms =
+    /napi_matrix: .*linux-x64-gnu.*linux-arm64-gnu.*darwin-x64.*darwin-arm64/;
+  assert.match(packageBuild, stagedPreviewPlatforms);
   assert.doesNotMatch(previewBuild, /win32-x64-msvc/);
-  assert.match(previewBuild, /napi_matrix: .*linux-x64-gnu.*darwin-x64.*darwin-arm64/);
+  assert.match(previewBuild, previewPlatforms);
+  // Both Linux bindings must be built and admitted into the staged preview.
+  for (const platform of ["linux-x64-gnu", "linux-arm64-gnu"]) {
+    assert.throws(
+      () =>
+        assert.match(packageBuild.replaceAll(platform, "omitted-platform"), stagedPreviewPlatforms),
+      { code: "ERR_ASSERTION" },
+    );
+    assert.throws(
+      () => assert.match(previewBuild.replaceAll(platform, "omitted-platform"), previewPlatforms),
+      { code: "ERR_ASSERTION" },
+    );
+  }
 });
 
 test("TypeScript CI overlaps independent Node and browser suites after one artifact build", () => {

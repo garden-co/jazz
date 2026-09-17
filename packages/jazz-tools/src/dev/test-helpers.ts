@@ -49,7 +49,7 @@ const schema = {
   todos: s.table({
     title: s.string(),
     done: s.boolean(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;

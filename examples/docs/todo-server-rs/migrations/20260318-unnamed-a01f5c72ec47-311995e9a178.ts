@@ -11,21 +11,35 @@ export default s.defineMigration({
   fromHash: "a01f5c72ec47",
   toHash: "311995e9a178",
   from: {
-    todos: s.table({
-      title: s.string(),
-      done: s.boolean(),
-      parent: s.ref("todos").optional(),
-      project: s.ref("projects").optional(),
-    }),
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        parent: s.uuid().optional(),
+        project: s.uuid().optional(),
+      },
+      {
+        parentRelation: s.rel("todos", "parent"),
+        children: s.reverse("todos", "parentRelation"),
+        projectRelation: s.rel("projects", "project"),
+      },
+    ),
   },
   to: {
-    todos: s.table({
-      title: s.string(),
-      done: s.boolean(),
-      priority: s.int().optional(),
-      description: s.string().optional(),
-      parent: s.ref("todos").optional(),
-      project: s.ref("projects").optional(),
-    }),
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        priority: s.int().optional(),
+        description: s.string().optional(),
+        parent: s.uuid().optional(),
+        project: s.uuid().optional(),
+      },
+      {
+        parentRelation: s.rel("todos", "parent"),
+        children: s.reverse("todos", "parentRelation"),
+        projectRelation: s.rel("projects", "project"),
+      },
+    ),
   },
 });

@@ -60,7 +60,7 @@ fn validate_binding_values(
             });
         }
     }
-    let canonical = canonical_binding_bytes(&values);
+    let canonical = canonical_binding_bytes(&values)?;
     Ok(Binding { values, canonical })
 }
 
@@ -88,11 +88,13 @@ impl Binding {
     }
 }
 
-pub(crate) fn binding_id_for_values(values: &BTreeMap<String, Value>) -> BindingId {
-    BindingId(uuid::Uuid::new_v5(
+pub(crate) fn binding_id_for_values(
+    values: &BTreeMap<String, Value>,
+) -> Result<BindingId, QueryError> {
+    Ok(BindingId(uuid::Uuid::new_v5(
         &QUERY_NAMESPACE,
-        &canonical_binding_bytes(values),
-    ))
+        &canonical_binding_bytes(values)?,
+    )))
 }
 
 /// Query validation error.
@@ -771,6 +773,42 @@ fn validate_join(
             }
         }
     }
+    // Explicit non-reference column equalities are ordinary existence joins.
+    // Keep the declared-reference checks below for UUID/array reference traversal.
+    if join.target == JoinTarget::Column
+        && join.source_lookup.is_none()
+        && let Some(source_column) = &join.source_column
+        && !root.references.contains_key(source_column)
+        && !join_table.references.contains_key(&join.on_column)
+    {
+        let source_type = planner_column_type(root, source_column)?;
+        let target_type = planner_column_type(&join_table, &join.on_column)?;
+        if !matches!(
+            non_null_column_type(source_type),
+            ColumnType::Uuid | ColumnType::Array(_)
+        ) && !matches!(
+            non_null_column_type(target_type),
+            ColumnType::Uuid | ColumnType::Array(_)
+        ) {
+            if !column_types_comparable(source_type, target_type) {
+                return Err(QueryError::OperandTypeMismatch);
+            }
+            for correlation in &join.correlated_filters {
+                if planner_column_type(root, &correlation.source_column)?
+                    != planner_column_type(&join_table, &correlation.join_column)?
+                {
+                    return Err(QueryError::OperandTypeMismatch);
+                }
+            }
+            for predicate in &mut join.filters {
+                validate_predicate(&join_table, predicate, params)?;
+            }
+            for nested in &mut join.nested_joins {
+                validate_join(schema, &join_table, &join.table, nested, params)?;
+            }
+            return Ok(());
+        }
+    }
     let target_table = if let Some(lookup) = &join.source_lookup {
         planner_column_type(root, &lookup.row_id_source_column)?;
         let lookup_table = schema_table(schema, &lookup.table)?;
@@ -1234,6 +1272,10 @@ fn validate_predicate(
         }
         Predicate::In(left, values) => {
             let left_type = operand_type(table, left, params)?;
+            if values.is_empty() {
+                *predicate = Predicate::Any(Vec::new());
+                return Ok(());
+            }
             for value in values {
                 let mut value_type = operand_type(table, value, params)?;
                 if let (Some(left_type), Some(candidate_type)) = (&left_type, &value_type)
@@ -1320,6 +1362,9 @@ fn validate_predicate(
             );
             validate_predicate(&payload_table, payload, params)
         }
+        // Claims are dynamically typed and become literals when binding the session.
+        // Either can be checked for nullness without a statically nullable column.
+        Predicate::IsNull(Operand::Claim(_) | Operand::Literal(_)) => Ok(()),
         Predicate::IsNull(operand) => match operand_type(table, operand, params)? {
             Some(ColumnType::Nullable(_)) => Ok(()),
             Some(_) => Err(QueryError::OperandTypeMismatch),
@@ -1541,7 +1586,7 @@ fn operand_type(
 ) -> Result<Option<ColumnType>, QueryError> {
     match operand {
         Operand::Column(column) => Ok(Some(planner_column_type(table, column)?.clone())),
-        Operand::Literal(value) => Ok(Some(value_type(value))),
+        Operand::Literal(value) => value_type(value).map(Some),
         Operand::Param(name) => Ok(params.get(name).cloned()),
         Operand::Claim(name) => claim_type(name),
     }

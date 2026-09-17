@@ -120,9 +120,10 @@ async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_wr
             Query::from("notes")
                 .filter(eq(col("id"), lit(*note_id.uuid())))
                 .select(["content"]),
-            None,
+            jazz::tools::ReadTier::LocalFirst,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query inserted note");
     assert_eq!(
         rows,
@@ -231,9 +232,10 @@ async fn rebac_two_clients_different_sessions_inner() {
     let alice_visible_docs: HashSet<_> = alice
         .query(
             Query::from("documents").select(["title"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents as alice")
         .into_iter()
         .map(|(id, _)| id)
@@ -250,9 +252,10 @@ async fn rebac_two_clients_different_sessions_inner() {
     let bob_visible_docs: HashSet<_> = bob
         .query(
             Query::from("documents").select(["title"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents as bob")
         .into_iter()
         .map(|(id, _)| id)

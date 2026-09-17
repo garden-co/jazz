@@ -1,3 +1,4 @@
+import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
 import {
   compactVerify,
@@ -135,32 +136,34 @@ async function fetchRemoteJwks(jwksUrl: string): Promise<LocalJwksDocument> {
     throw new Error("Global fetch is required for jwksUrl verification");
   }
 
-  let response: Response;
-  try {
-    response = await fetchFn(parseJwksUrl(jwksUrl), { redirect: "error" });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Unable to fetch JWKS: ${message}`);
-  }
+  return withAuthRequestDeadline(async (signal) => {
+    let response: Response;
+    try {
+      response = await fetchFn(parseJwksUrl(jwksUrl), { redirect: "error", signal });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Unable to fetch JWKS: ${message}`);
+    }
 
-  if (!response.ok) {
-    throw new Error(`Unable to fetch JWKS: HTTP ${response.status}`);
-  }
+    if (!response.ok) {
+      throw new Error(`Unable to fetch JWKS: HTTP ${response.status}`);
+    }
 
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new Error("Unable to parse JWKS response");
-  }
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new Error("Unable to parse JWKS response");
+    }
 
-  if (!isRecord(body) || !Array.isArray(body.keys) || body.keys.length === 0) {
-    throw new Error("Invalid JWKS response");
-  }
+    if (!isRecord(body) || !Array.isArray(body.keys) || body.keys.length === 0) {
+      throw new Error("Invalid JWKS response");
+    }
 
-  return {
-    keys: body.keys.filter((key): key is Record<string, unknown> => isRecord(key)),
-  };
+    return {
+      keys: body.keys.filter((key): key is Record<string, unknown> => isRecord(key)),
+    };
+  }, new Error("Unable to fetch JWKS: request timed out"));
 }
 
 async function getRemoteJwksDocument(

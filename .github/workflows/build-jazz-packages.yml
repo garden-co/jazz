@@ -12,7 +12,7 @@ on:
         description: JSON matrix for NAPI platform packages. Release callers use every platform; preview callers may omit expensive optional platforms.
         required: false
         type: string
-        default: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":true},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-2vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
+        default: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":false},{"os":"blacksmith-4vcpu-ubuntu-2404-arm","target":"aarch64-unknown-linux-gnu","platform":"linux-arm64-gnu","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-2vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
       include_rn:
         description: Build and stage jazz-rn's Android and iOS relay artifacts. Keep false for ordinary package previews; releases opt in explicitly.
         required: false
@@ -178,10 +178,24 @@ jobs:
           ref: ${{ inputs.ref }}
 
       - uses: ./.github/actions/setup-build
+        if: ${{ !startsWith(matrix.platform, 'linux-') }}
         with:
           rust-targets: ${{ matrix.target }}
           sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
           sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
+
+      - name: Cache baseline-specific Linux Cargo products
+        if: startsWith(matrix.platform, 'linux-')
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: target/linux-napi-*
+          key: linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Build Linux NAPI on pinned AL2023 userspace
+        if: startsWith(matrix.platform, 'linux-')
+        run: dev/artifacts/linux-napi/build.sh ${{ matrix.platform }}
 
       # The Windows runner image supplies the MSVC toolchain but not libclang.
       # RocksDB's zstd-sys build uses bindgen, which must be pointed at the DLL
@@ -199,6 +213,7 @@ jobs:
           $libclangPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build jazz-napi binding
+        if: ${{ !startsWith(matrix.platform, 'linux-') }}
         run: |
           node dev/artifacts/build.mjs napi release --target ${{ matrix.target }}
           node dev/artifacts/provenance.mjs verify napi release --target ${{ matrix.target }}
@@ -350,6 +365,7 @@ jobs:
       - name: Verify staged jazz-napi platform artifacts
         run: |
           test -f crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node
+          test -f crates/jazz-napi/npm/linux-arm64-gnu/jazz-napi.linux-arm64-gnu.node
           test -f crates/jazz-napi/npm/darwin-x64/jazz-napi.darwin-x64.node
           test -f crates/jazz-napi/npm/darwin-arm64/jazz-napi.darwin-arm64.node
           if [[ '${{ inputs.napi_matrix }}' == *'win32-x64-msvc'* ]]; then
@@ -367,7 +383,7 @@ jobs:
           if [[ '${{ inputs.napi_matrix }}' == *'win32-x64-msvc'* ]]; then
             node dev/artifacts/stage-napi-manifests.mjs
           else
-            node dev/artifacts/stage-napi-manifests.mjs linux-x64-gnu darwin-x64 darwin-arm64
+            node dev/artifacts/stage-napi-manifests.mjs linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64
           fi
 
       - name: Derive Jazz artifact expectations from sealed manifests
@@ -375,6 +391,18 @@ jobs:
 
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build
+
+      - name: Build and seal standalone Inspector from verified SDK artifacts
+        run: |
+          pnpm --filter inspector run build:web
+          node dev/scripts/inspector-prebuilt.mjs seal packages/inspector/dist target/inspector-prebuilt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: inspector-prebuilt
+          path: target/inspector-prebuilt
+          include-hidden-files: true
+          if-no-files-found: error
 
       - name: Build create-jazz TypeScript package
         run: pnpm --filter create-jazz build
@@ -444,6 +472,40 @@ jobs:
             !packages/create-jazz/node_modules
           include-hidden-files: true
           if-no-files-found: error
+
+  verify-linux-napi-consumer:
+    name: Verify packed Linux NAPI (${{ matrix.platform }})
+    needs: assemble-packages
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: blacksmith-4vcpu-ubuntu-2404
+            platform: linux-x64-gnu
+          - os: blacksmith-4vcpu-ubuntu-2404-arm
+            platform: linux-arm64-gnu
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+      - name: Execute packed memory and persistence receipts on AL2023
+        run: dev/artifacts/linux-napi/run-packed-smoke.sh ${{ matrix.platform }} "${RUNNER_TEMP}/packed-linux-napi"
 
   assemble-jazz-rn:
     name: Assemble jazz-rn npm package

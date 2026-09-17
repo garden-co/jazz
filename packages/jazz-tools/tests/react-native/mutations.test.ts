@@ -3,7 +3,7 @@ import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({
-  documents: schema.table({ title: schema.string(), done: schema.boolean() }),
+  documents: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
 });
 
 describe("React Native public mutations through the real foreground C ABI", () => {
@@ -179,12 +179,15 @@ it("aborts a failed stream without publishing partial rows and allows the next u
 
 it("applies typed text, bytes, and JSON diffs atomically with replacement cells", async () => {
   const rich = schema.defineApp({
-    documents: schema.table({
-      body: schema.string(),
-      payload: schema.bytes(),
-      metadata: schema.json(),
-      done: schema.boolean(),
-    }),
+    documents: schema.table(
+      {
+        body: schema.string(),
+        payload: schema.bytes(),
+        metadata: schema.json(),
+        done: schema.boolean(),
+      },
+      {},
+    ),
   });
   await withNativeRelayFixture(rich, async (fixture) => {
     const db = await fixture.createDb();
@@ -267,7 +270,7 @@ it("settles an empty standalone update without changing the row", async () => {
 it("preserves branch head/base targets and restores only the selected head", async () => {
   const branches = schema.defineApp({
     documents: schema
-      .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() })
+      .table({ branch: schema.string(), title: schema.string(), done: schema.boolean() }, {})
       .branchBy("branch"),
   });
   await withNativeRelayFixture(branches, async (fixture) => {

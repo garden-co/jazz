@@ -56,6 +56,7 @@ test("release workflow does not carry a local NAPI generation pointer into packa
 
 const napiPlatformTargets = {
   "linux-x64-gnu": "x86_64-unknown-linux-gnu",
+  "linux-arm64-gnu": "aarch64-unknown-linux-gnu",
   "darwin-x64": "x86_64-apple-darwin",
   "darwin-arm64": "aarch64-apple-darwin",
 };
@@ -642,7 +643,7 @@ test("release publishing rebuilds when workflow changes invalidate preview artif
 
   assert.match(
     workflow,
-    /if \(!treeReuseSafe\) \{\s+reason = `main tree \$\{currentTree\} differs from release PR head tree \$\{previewTree\}`;/,
+    /if \(!treeReuseSafe\) \{\s+reason = `release tree \$\{currentTree\} differs from release PR head tree \$\{previewTree\}`;/,
   );
   assert.doesNotMatch(workflow, /workflow-only drift|nonWorkflowFiles/);
 });
@@ -686,10 +687,9 @@ function packedNapiFixture(mutate = () => {}) {
   const manifest = JSON.parse(readFileSync(join(sourceDir, "package.json"), "utf8"));
   manifest.scripts = {};
   manifest.optionalDependencies = Object.fromEntries(
-    ["linux-x64-gnu", "darwin-x64", "darwin-arm64", "win32-x64-msvc"].map((target) => [
-      `@garden-co/jazz-napi-${target}`,
-      manifest.version,
-    ]),
+    ["linux-x64-gnu", "linux-arm64-gnu", "darwin-x64", "darwin-arm64", "win32-x64-msvc"].map(
+      (target) => [`@garden-co/jazz-napi-${target}`, manifest.version],
+    ),
   );
   for (const name of [
     "index.cjs",

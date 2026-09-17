@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const platformTargets = {
   "linux-x64-gnu": "x86_64-unknown-linux-gnu",
+  "linux-arm64-gnu": "aarch64-unknown-linux-gnu",
   "darwin-x64": "x86_64-apple-darwin",
   "darwin-arm64": "aarch64-apple-darwin",
   "win32-x64-msvc": "x86_64-pc-windows-msvc",
@@ -21,6 +22,8 @@ const platformTargets = {
 function hostNapiTarget() {
   const target = `${process.platform}-${process.arch}`;
   switch (target) {
+    case "linux-arm64":
+      return "linux-arm64-gnu";
     case "linux-x64":
       return "linux-x64-gnu";
     case "darwin-x64":
@@ -41,6 +44,7 @@ function hostNapiTarget() {
 const stagedRootNapiArtifact = /^jazz-napi\.[^/]+\.(?:node|manifest\.json)$/;
 const napiPlatformTargets = {
   "linux-x64-gnu": "x86_64-unknown-linux-gnu",
+  "linux-arm64-gnu": "aarch64-unknown-linux-gnu",
   "darwin-x64": "x86_64-apple-darwin",
   "darwin-arm64": "aarch64-apple-darwin",
   "win32-x64-msvc": "x86_64-pc-windows-msvc",

@@ -144,9 +144,12 @@ describe("InspectorApp", () => {
     createAttachmentClientMock.mockReset();
     const schema = (largeCount: bigint): WasmSchema =>
       s.defineApp({
-        metrics: s.table({
-          largeCount: s.bigint().default(largeCount),
-        }),
+        metrics: s.table(
+          {
+            largeCount: s.bigint().default(largeCount),
+          },
+          {},
+        ),
       }).wasmSchema;
     const initialContext = context("metrics", localFirstPhysicalDbName);
     initialContext.schema = schema(9007199254740993n);

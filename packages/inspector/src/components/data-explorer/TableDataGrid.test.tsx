@@ -115,9 +115,12 @@ const mockWasmSchema: WasmSchema = {
 };
 
 const bigintArrayApp = s.defineApp({
-  todos: s.table({
-    ranks: s.array(s.bigint()),
-  }),
+  todos: s.table(
+    {
+      ranks: s.array(s.bigint()),
+    },
+    {},
+  ),
 });
 let currentWasmSchema: WasmSchema = mockWasmSchema;
 const initialMockTodoColumns = [...mockWasmSchema.todos.columns];
