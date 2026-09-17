@@ -2908,13 +2908,13 @@ describe("cli deploy", () => {
     expect(schemaPublishBody.schema.tables.todos.indexed_columns).toEqual(["ownerId"]);
   });
 
-  it("fails when retargeting permissions to a schema with no local migration path from the previous head", async () => {
+  it("suggests a working migration command when the target schema has not been published", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
 
     const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const nextSchemaHash = await computeTestSchemaHash(storedRootSchema());
     const currentHead = {
       schemaHash: previousSchemaHash,
       version: 4,
@@ -2924,7 +2924,7 @@ describe("cli deploy", () => {
 
     const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
       if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
+        return new Response(JSON.stringify({ hashes: [previousSchemaHash] }), {
           status: 200,
         });
       }
@@ -2938,10 +2938,6 @@ describe("cli deploy", () => {
             ],
           },
         });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
-        return storedSchemaResponse(storedRootSchema());
       }
 
       if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
@@ -2968,8 +2964,17 @@ describe("cli deploy", () => {
         migrationsDir: join(root, "migrations"),
       }),
     ).rejects.toThrow(
-      "The new schema bbbbbbbbbbbb is not connected to the previous schema aaaaaaaaaaaa on the server. Run `jazz-tools migrations create test-app --fromHash aaaaaaaaaaaa --toHash bbbbbbbbbbbb` to create a migration and then re-run this command.",
+      `The new schema ${nextSchemaHash.slice(0, 12)} is not connected to the previous schema aaaaaaaaaaaa on the server. Run \`jazz-tools migrations create test-app --fromHash aaaaaaaaaaaa\` to create a migration and then re-run this command.`,
     );
+    const filePath = await createMigration({
+      appId: APP_ID,
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+      migrationsDir: join(root, "migrations"),
+      fromHash: previousSchemaHash.slice(0, 12),
+    });
+    expect(filePath).toContain(`-aaaaaaaaaaaa-${nextSchemaHash.slice(0, 12)}.ts`);
   });
 
   it("pushes a local migration before publishing permissions when the server reports disconnected schemas", async () => {

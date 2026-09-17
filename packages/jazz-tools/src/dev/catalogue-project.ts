@@ -1593,7 +1593,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
 function disconnectedSchemaMessage(appId: string, fromHash: string, toHash: string): string {
   const fromShortHash = shortSchemaHash(fromHash);
   const toShortHash = shortSchemaHash(toHash);
-  return `The new schema ${toShortHash} is not connected to the previous schema ${fromShortHash} on the server. Run \`jazz-tools migrations create ${appId} --fromHash ${fromShortHash} --toHash ${toShortHash}\` to create a migration and then re-run this command.`;
+  return `The new schema ${toShortHash} is not connected to the previous schema ${fromShortHash} on the server. Run \`jazz-tools migrations create ${appId} --fromHash ${fromShortHash}\` to create a migration and then re-run this command.`;
 }
 
 function noMigrationFileMessage(
