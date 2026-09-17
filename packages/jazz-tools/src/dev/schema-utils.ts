@@ -1,3 +1,4 @@
+import { canonicalJsonSchema, columnTypeSignature } from "../runtime/schema-metadata.js";
 import { structuralValuesEqual } from "../runtime/structural-values.js";
 import type {
   ColumnDescriptor,
@@ -49,9 +50,7 @@ export function structuralSchemaHash(schema: WasmSchema): string {
   return bytesToHex(blake3(writer.bytes()));
 }
 
-export function columnTypeSignature(columnType: WasmColumnType): string {
-  return JSON.stringify(columnType);
-}
+export { columnTypeSignature };
 
 class StructuralHashWriter {
   private chunks: number[] = [];
@@ -195,31 +194,6 @@ function hashValue(writer: StructuralHashWriter, value: Value): void {
   }
   const exhaustive: never = value;
   throw new Error(`Unhandled schema default: ${String(exhaustive)}`);
-}
-
-// Rust's UTF-8 string order follows Unicode scalar order, unlike UTF-16 sort.
-function compareUnicodeScalars(left: string, right: string): number {
-  const leftPoints = Array.from(left, (character) => character.codePointAt(0)!);
-  const rightPoints = Array.from(right, (character) => character.codePointAt(0)!);
-  for (let index = 0; index < Math.min(leftPoints.length, rightPoints.length); index++) {
-    const difference = leftPoints[index]! - rightPoints[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftPoints.length - rightPoints.length;
-}
-
-// Rust's serde_json::Value uses sorted object keys for JSON-schema metadata.
-// This does not normalize stored JSON default text, whose bytes are identity.
-function canonicalJsonSchema(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJsonSchema).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const object = value as Record<string, unknown>;
-    return `{${Object.keys(object)
-      .sort(compareUnicodeScalars)
-      .map((key) => `${JSON.stringify(key)}:${canonicalJsonSchema(object[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType): void {

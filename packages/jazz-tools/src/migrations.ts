@@ -1,3 +1,4 @@
+import { columnTypeSignature } from "./runtime/schema-metadata.js";
 import { structuralValuesEqual } from "./runtime/structural-values.js";
 import { sqlTypeToWasm } from "./codegen/schema-reader.js";
 import { toValue } from "./runtime/value-converter.js";
@@ -682,7 +683,7 @@ function buildRemovedTableSet(
 function columnShapeSignature(builder: AnyTypedColumnBuilder, omitReference = false): string {
   const column = builder._build("__migration_shape__");
   return JSON.stringify({
-    sqlType: column.sqlType,
+    sqlType: columnTypeSignature(sqlTypeToWasm(column.sqlType)),
     nullable: column.nullable,
     references: omitReference ? null : (column.references ?? null),
   });

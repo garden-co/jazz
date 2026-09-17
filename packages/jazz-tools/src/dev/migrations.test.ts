@@ -1,3 +1,4 @@
+import { assertMigrationMatchesCanonicalBundle } from "./catalogue.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
@@ -383,6 +384,62 @@ describe("migration stub generation", () => {
     };
     expect(s.defineMigration({ from, to }).forward).toEqual([]);
     expect(wasmSchemasEqual(s.defineApp(from).wasmSchema, s.defineApp(to).wasmSchema)).toBe(true);
+  });
+
+  it("accepts server JSON metadata object ordering but preserves array and default-text identity", () => {
+    const users = s.table({ name: s.string() }, {});
+    const columns = (serverOrder: boolean) => ({
+      ownerId: s.uuid(),
+      data: s
+        .json(
+          serverOrder
+            ? {
+                additionalProperties: false,
+                properties: { a: { type: "number" }, z: { type: "string" } },
+                type: "object",
+              }
+            : {
+                type: "object",
+                properties: { z: { type: "string" }, a: { type: "number" } },
+                additionalProperties: false,
+              },
+        )
+        .default({ z: "value", a: 1 }),
+      nested: s
+        .array(
+          s.json(
+            serverOrder
+              ? { additionalProperties: false, type: "object" }
+              : { type: "object", additionalProperties: false },
+          ),
+        )
+        .default([{}]),
+    });
+    const from = { users, records: s.table(columns(false), {}) };
+    const to = { users, records: s.table(columns(true), { owner: s.rel("users", "ownerId") }) };
+    const migration = s.defineMigration({ from, to });
+    const canonicalFrom = s.defineApp({ users, records: s.table(columns(true), {}) }).wasmSchema;
+    const canonicalTo = s.defineApp(to).wasmSchema;
+    expect(() =>
+      assertMigrationMatchesCanonicalBundle(migration, {
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        fromSchema: canonicalFrom,
+        toSchema: canonicalTo,
+      }),
+    ).not.toThrow();
+    expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
+    const first = s.defineApp({
+      records: s.table({ data: s.json({ enum: ["a", "b"] }).default('"a"') }, {}),
+    }).wasmSchema;
+    const reordered = s.defineApp({
+      records: s.table({ data: s.json({ enum: ["b", "a"] }).default('"a"') }, {}),
+    }).wasmSchema;
+    expect(wasmSchemasEqual(first, reordered)).toBe(false);
+    const changedText = s.defineApp({
+      records: s.table({ data: s.json({ enum: ["a", "b"] }).default(' "a" ') }, {}),
+    }).wasmSchema;
+    expect(wasmSchemasEqual(first, changedText)).toBe(false);
   });
 
   it("exports snapshots and creates relation migrations with lossless bigint and bytes defaults", async () => {
