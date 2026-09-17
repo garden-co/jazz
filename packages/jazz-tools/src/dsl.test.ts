@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
 import { col, getCollectedSchema, resetCollectedState, table } from "./dsl.js";
-import { schema } from "./index.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
 import { defineApp, defineSchema, defineTable } from "./typed-app.js";
@@ -410,55 +409,6 @@ describe("column merge strategy DSL", () => {
   });
 });
 
-describe("ref DSL", () => {
-  it("stores references on ref columns", () => {
-    resetCollectedState();
-    table("todos", {
-      imageId: col.ref("images"),
-    });
-    const schema = getCollectedSchema();
-    expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "imageId",
-      references: "images",
-    });
-  });
-
-  it("stores references on array(ref(...)) columns", () => {
-    resetCollectedState();
-    table("bundles", {
-      itemIds: col.array(col.ref("bundle_items")),
-    });
-    const schema = getCollectedSchema();
-    expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "itemIds",
-      references: "bundle_items",
-    });
-  });
-
-  it("rejects nested reference arrays during construction in both public namespaces", () => {
-    expect(() => col.array(col.array(col.ref("bundle_items")))).toThrow(/reference/i);
-    expect(() => schema.array(schema.array(schema.ref("bundle_items")))).toThrow(/reference/i);
-
-    expect(() => col.array(col.ref("bundle_items"))).not.toThrow();
-    expect(() => schema.array(schema.ref("bundle_items"))).not.toThrow();
-    expect(() => col.array(col.array(col.string()))).not.toThrow();
-    expect(() => schema.array(schema.array(schema.string()))).not.toThrow();
-  });
-
-  it("rejects scalar reference columns not ending in Id or _id", () => {
-    resetCollectedState();
-    expect(() => table("todos", { image: col.ref("images") })).toThrow(
-      "Invalid reference key 'image'. Rename it to 'image_id' or 'imageId'.",
-    );
-  });
-
-  it("rejects array(ref(...)) columns not ending in Ids or _ids", () => {
-    resetCollectedState();
-    expect(() => table("todos", { images: col.array(col.ref("images")) })).toThrow(
-      "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
-    );
-  });
-});
 describe("reserved magic-column namespace", () => {
   it("rejects schema columns starting with $", () => {
     resetCollectedState();

@@ -53,6 +53,18 @@ describe("explicit relationships", () => {
       ["reviewerIds", "users"],
     ]);
   });
+  it("rejects nested reference arrays used as relations", () => {
+    const defineTableUnchecked = s.table as unknown as (
+      columns: unknown,
+      relations: unknown,
+    ) => unknown;
+    expect(() =>
+      defineTableUnchecked(
+        { itemIds: s.array(s.array(s.uuid())) },
+        { items: s.rel("bundle_items", "itemIds") },
+      ),
+    ).toThrow(/nested reference array/i);
+  });
   it("preserves reference storage identity and excludes aliases from the hash", async () => {
     const app = s.defineApp(definition());
     const legacy = schemaToWasm({
