@@ -1008,45 +1008,12 @@ impl TickEvaluator<'_> {
         Ok(false)
     }
 
-    fn node_depends_on_aggregate(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
-        if let Some(value) = self
-            .node_meta
-            .get(&node)
-            .and_then(|meta| meta.has_hydration_state_ancestor)
-        {
-            return Ok(value);
-        }
-        // Node descriptors and input edges are immutable while installed. The
-        // metadata is retired with the node; consumer attachment and runtime
-        // state cleanup do not change this ancestor classification.
-        let mut ancestors = HashSet::new();
-        self.graph.mark_ancestors(node, &mut ancestors);
-        #[cfg(test)]
-        {
-            self.metrics.aggregate_dependency_walk_nodes += ancestors.len();
-        }
-        let mut depends = false;
-        for ancestor in ancestors {
-            let graph_node = self
-                .graph
-                .node(ancestor)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
-            if matches!(
-                graph_node.descriptor.operator,
-                OpType::Aggregate(_)
-                    | OpType::ArgMinBy(_)
-                    | OpType::ArgMaxBy(_)
-                    | OpType::Arrange(_)
-            ) {
-                depends = true;
-                break;
-            }
-        }
-        self.node_meta
-            .entry(node)
-            .or_default()
-            .has_hydration_state_ancestor = Some(depends);
-        Ok(depends)
+    fn node_depends_on_aggregate(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        Ok(self
+            .graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?
+            .depends_on_aggregate())
     }
 
     fn aggregate_arrangements_are_current(

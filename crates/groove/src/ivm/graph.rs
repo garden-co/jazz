@@ -1518,13 +1518,18 @@ impl IvmGraph {
             );
             return id;
         }
+        let depends_on_aggregate = matches!(descriptor.operator, OpType::Aggregate(_))
+            || descriptor.inputs.iter().any(|input| {
+                self.nodes
+                    .get(input)
+                    .is_some_and(GraphNode::depends_on_aggregate)
+            });
 
         for input in &descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(input) {
                 input_node.children.insert(id);
             }
         }
-
         match &descriptor.operator {
             OpType::TableSource(source) => {
                 self.table_sources
@@ -1552,9 +1557,10 @@ impl IvmGraph {
             }
             _ => {}
         }
-
-        self.nodes
-            .insert(id, GraphNode::new(descriptor, durability));
+        self.nodes.insert(
+            id,
+            GraphNode::new(descriptor, durability, depends_on_aggregate),
+        );
         id
     }
 
@@ -1686,18 +1692,32 @@ pub struct GraphNode {
     /// Durable nodes are retained even without subscriptions because they
     /// maintain storage-backed indices.
     pub durability: NodeDurability,
-    /// Reverse edges make eager GC cheap when subscriptions go away.
+    /// Reverse edges make eager GC cheap when graph subscriptions go away.
     pub children: HashSet<NodeId>,
+    /// Whether this node or one of its transitive inputs is an aggregate.
+    ///
+    /// Graph nodes are immutable after insertion and their inputs are
+    /// dependency-ordered, so this structural fact is computed once.
+    depends_on_aggregate: bool,
 }
 
 impl GraphNode {
-    fn new(descriptor: NodeDescriptor, durability: NodeDurability) -> Self {
+    fn new(
+        descriptor: NodeDescriptor,
+        durability: NodeDurability,
+        depends_on_aggregate: bool,
+    ) -> Self {
         Self {
             id: descriptor.node_id(),
             descriptor,
             durability,
             children: HashSet::default(),
+            depends_on_aggregate,
         }
+    }
+
+    pub(crate) fn depends_on_aggregate(&self) -> bool {
+        self.depends_on_aggregate
     }
 
     pub fn is_durable(&self) -> bool {
@@ -2534,7 +2554,7 @@ mod tests {
         );
         graph.nodes.insert(
             descriptor.node_id(),
-            GraphNode::new(colliding_descriptor, NodeDurability::Ephemeral),
+            GraphNode::new(colliding_descriptor, NodeDurability::Ephemeral, false),
         );
 
         graph.dedup_node(descriptor, NodeDurability::Ephemeral);
