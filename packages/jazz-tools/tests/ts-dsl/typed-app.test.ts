@@ -206,7 +206,7 @@ describe("typed app prototype", () => {
     (tableName) => {
       expect(() =>
         s.defineApp({
-          [tableName]: s.table({ value: s.string() }),
+          [tableName]: s.table({ value: s.string() }, {}),
         } as never),
       ).toThrow(/reserved/i);
     },
@@ -215,7 +215,7 @@ describe("typed app prototype", () => {
   it("rejects a table named exists instead of masking the policy control", () => {
     expect(() => {
       const reservedApp = s.defineApp({
-        exists: s.table({ value: s.string() }),
+        exists: s.table({ value: s.string() }, {}),
       } as never);
       s.definePermissions(reservedApp, ({ policy }) => {
         const existsPolicy = policy.exists as unknown as {
