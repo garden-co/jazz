@@ -341,7 +341,15 @@ it("publishes generated default-bearing relation migrations and preserves them a
       [toHash, afterApp.wasmSchema],
     ] as const) {
       const stored = await fetchStoredWasmSchema(server.url, { appId, adminSecret, schemaHash });
-      expect(stored.schema).toEqual(expected);
+      expect(await computeSchemaHash(stored.schema)).toBe(schemaHash);
+      for (const [tableName, table] of Object.entries(expected)) {
+        for (const column of table.columns) {
+          expect(
+            stored.schema[tableName]?.columns.find((stored) => stored.name === column.name)
+              ?.default,
+          ).toEqual(column.default);
+        }
+      }
     }
     newDb = await createDb(await localAccountConfig(appId, server.url));
     const rows = await waitForRows(
