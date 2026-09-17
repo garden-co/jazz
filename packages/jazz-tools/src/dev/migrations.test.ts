@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -235,7 +237,7 @@ describe("migration stub generation", () => {
     ).toThrow("unchanged column shapes");
   });
 
-  it("roundtrips every supported structural default in generated reference witnesses", () => {
+  it("roundtrips every supported structural default in generated reference witnesses", async () => {
     const id = "11111111-1111-4111-8111-111111111111";
     const columns = {
       ownerId: s.uuid().default(id),
@@ -247,6 +249,7 @@ describe("migration stub generation", () => {
       time: s.timestamp().default(new Date("2026-01-01T00:00:00Z")),
       bytes: s.bytes().default(new Uint8Array([0, 128, 255])),
       nested: s.array(s.array(s.bigint())).default([[1n, -2n], []]),
+      times: s.array(s.array(s.timestamp())).default([[new Date(1234)]]),
       json: s.json().default('{ "__proto__": {"safe":true}, "quote": "x" }'),
       status: s.enum("draft", "done").default("draft"),
       missing: s.string().optional().default(null),
@@ -279,6 +282,52 @@ describe("migration stub generation", () => {
       expect(actual).toEqual(expected);
     }
     expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
+    const root = await mkdtemp(join(tmpdir(), "jazz-default-witness-types-"));
+    try {
+      await writeFile(join(root, "package.json"), '{"type":"module"}');
+      await writeFile(join(root, "migration.ts"), source);
+      await writeFile(
+        join(root, "tsconfig.json"),
+        JSON.stringify({
+          extends: new URL("../../tsconfig.tests.json", import.meta.url).pathname,
+          compilerOptions: {
+            rootDir: "/",
+            typeRoots: [new URL("../../node_modules/@types", import.meta.url).pathname],
+          },
+          include: [join(root, "migration.ts")],
+          exclude: [],
+        }),
+      );
+      await promisify(execFile)(process.execPath, [
+        new URL("../../node_modules/typescript/bin/tsc", import.meta.url).pathname,
+        "--project",
+        join(root, "tsconfig.json"),
+      ]).catch((error: { stdout?: string; stderr?: string }) => {
+        throw new Error(
+          `Generated witness typecheck failed:\n${error.stdout ?? ""}${error.stderr ?? ""}`,
+        );
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  it("rejects timestamp defaults that Date cannot represent exactly", () => {
+    for (const value of [0.5, 8640000000000001]) {
+      const fromSchema = s.defineApp({ users: s.table({ name: s.string() }, {}) }).wasmSchema;
+      const toSchema = s.defineApp({
+        users: s.table({ name: s.string() }, {}),
+        records: s.table({ time: s.timestamp().default(value) }, {}),
+      }).wasmSchema;
+      expect(() =>
+        renderMigrationStub({
+          fromHash: "aaaaaaaaaaaa",
+          toHash: "bbbbbbbbbbbb",
+          fromSchema,
+          toSchema,
+        }),
+      ).toThrow("Cannot render migration timestamp default exactly");
+    }
   });
 
   it("rejects changed, added, or removed defaults without reference additions or operations", () => {
@@ -297,6 +346,36 @@ describe("migration stub generation", () => {
       }
   });
 
+  it("compares canonical defaults across equivalent builder input representations", () => {
+    const from = {
+      records: s.table(
+        {
+          time: s.timestamp().default(new Date(1234)),
+          big: s.bigint().default(42n),
+          bytes: s.bytes().default(new Uint8Array([1, 2])),
+          json: s.json().default({ key: "value" }),
+          nested: s.array(s.timestamp()).default([new Date(1234)]),
+        },
+        {},
+      ),
+    };
+    const to = {
+      records: s.table(
+        {
+          time: s.timestamp().default(1234),
+          // Exercise JS inputs accepted by the shared runtime converters.
+          big: s.bigint().default(42 as unknown as bigint),
+          bytes: s.bytes().default([1, 2] as unknown as Uint8Array),
+          json: s.json().default('{"key":"value"}'),
+          nested: s.array(s.timestamp()).default([1234 as unknown as Date]),
+        },
+        {},
+      ),
+    };
+    expect(s.defineMigration({ from, to }).forward).toEqual([]);
+    expect(wasmSchemasEqual(s.defineApp(from).wasmSchema, s.defineApp(to).wasmSchema)).toBe(true);
+  });
+
   it("loads and pushes the generated relation migration through the project API", async () => {
     const { computeSchemaHash } = await import("./catalogue.js");
     const { pushMigration } = await import("./catalogue-project.js");
@@ -305,7 +384,13 @@ describe("migration stub generation", () => {
       .indexOnly(["name"])
       .branchBy("name");
     const peers = s.table({ userId: s.uuid() }, { user: s.rel("users", "userId") });
-    const columns = { ownerId: s.uuid(), memberIds: s.array(s.uuid()).optional() };
+    const columns = {
+      ownerId: s.uuid(),
+      memberIds: s.array(s.uuid()).optional(),
+      title: s.string().default("draft"),
+      large: s.bigint().default(9007199254740993n),
+      nested: s.array(s.bigint()).default([9223372036854775807n]),
+    };
     const fromSchema = s.defineApp({ users, peers, records: s.table(columns, {}) }).wasmSchema;
     const toSchema = s.defineApp({
       users,
@@ -334,9 +419,17 @@ describe("migration stub generation", () => {
         vi.fn(async (input: string, init?: RequestInit) => {
           if (input.endsWith("/schemas")) return Response.json({ hashes: [fromHash, toHash] });
           if (input.endsWith(`/schema/${fromHash}`))
-            return Response.json({ schema: { tables: fromSchema }, publishedAt: 0 });
+            return new Response(
+              JSON.stringify({ schema: { tables: fromSchema }, publishedAt: 0 }, (_, value) =>
+                typeof value === "bigint" ? value.toString() : value,
+              ),
+            );
           if (input.endsWith(`/schema/${toHash}`))
-            return Response.json({ schema: { tables: toSchema }, publishedAt: 0 });
+            return new Response(
+              JSON.stringify({ schema: { tables: toSchema }, publishedAt: 0 }, (_, value) =>
+                typeof value === "bigint" ? value.toString() : value,
+              ),
+            );
           if (input.endsWith("/admin/migrations")) {
             body = JSON.parse(String(init?.body));
             return Response.json(
@@ -346,6 +439,36 @@ describe("migration stub generation", () => {
           }
           throw new Error(`Unexpected fetch: ${input}`);
         }),
+      );
+      const path = join(root, `references-${fromHash.slice(0, 12)}-${toHash.slice(0, 12)}.ts`);
+      for (const replacement of ["", '.default("altered")']) {
+        await writeFile(
+          path,
+          source
+            .replaceAll('.default("draft")', replacement)
+            .replace(
+              '"jazz-tools"',
+              JSON.stringify(new URL("../index.ts", import.meta.url).pathname),
+            ),
+        );
+        await expect(
+          pushMigration({
+            appId: "test-app",
+            serverUrl: "http://localhost:1625",
+            adminSecret: "test-secret",
+            migrationsDir: root,
+            fromHash,
+            toHash,
+          }),
+        ).rejects.toThrow("does not match");
+        expect(body).toBeUndefined();
+      }
+      await writeFile(
+        path,
+        source.replace(
+          '"jazz-tools"',
+          JSON.stringify(new URL("../index.ts", import.meta.url).pathname),
+        ),
       );
       const result = await pushMigration({
         appId: "test-app",

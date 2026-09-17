@@ -8,12 +8,13 @@ export function structuralValuesEqual(left: Value | undefined, right: Value | un
     case "Null":
       return true;
     case "Integer":
-    case "BigInt":
     case "Double":
     case "Timestamp":
     case "Boolean":
     case "Text":
       return Object.is(left.value, (right as typeof left).value);
+    case "BigInt":
+      return structuralBigInt(left.value) === structuralBigInt((right as typeof left).value);
     case "Uuid":
       return (
         left.value.replace(/-/g, "").toLowerCase() ===
@@ -44,4 +45,20 @@ function valuesEqual(left: Value[], right: Value[]): boolean {
     left.length === right.length &&
     left.every((value, index) => structuralValuesEqual(value, right[index]))
   );
+}
+
+/** Human JSON schemas carry i64 values as decimal strings; legacy safe numbers also occur. */
+export function structuralBigInt(value: unknown): bigint {
+  if (
+    (typeof value !== "bigint" && typeof value !== "number" && typeof value !== "string") ||
+    (typeof value === "number" && !Number.isSafeInteger(value)) ||
+    (typeof value === "string" && !/^-?[0-9]+$/.test(value))
+  ) {
+    throw new Error("Invalid structural BigInt default: expected a signed 64-bit integer.");
+  }
+  const result = BigInt(value);
+  if (result < -(1n << 63n) || result > (1n << 63n) - 1n) {
+    throw new Error("Invalid structural BigInt default: expected a signed 64-bit integer.");
+  }
+  return result;
 }

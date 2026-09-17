@@ -1,3 +1,4 @@
+import { structuralBigInt } from "../runtime/structural-values.js";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
@@ -115,11 +116,19 @@ function defaultExpression(value: Value): string {
     case "Boolean":
       return value.value ? "true" : "false";
     case "BigInt":
-      return `${BigInt(value.value)}n`;
+      return `${structuralBigInt(value.value)}n`;
     case "Integer":
-    case "Timestamp":
     case "Double":
       return Object.is(value.value, -0) ? "-0" : String(Number(value.value));
+    case "Timestamp": {
+      const milliseconds = Number(value.value);
+      if (!Object.is(new Date(milliseconds).getTime(), milliseconds)) {
+        throw new Error(
+          "Cannot render migration timestamp default exactly as a Date; use whole milliseconds within the JavaScript Date range.",
+        );
+      }
+      return `new Date(${milliseconds})`;
+    }
     case "Bytea":
       return `new Uint8Array([${Array.from(new Uint8Array(value.value)).join(", ")}])`;
     case "Array":
