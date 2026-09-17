@@ -3309,12 +3309,17 @@ where
         }
         // Relation output aliases are a terminal presentation concern. Keep
         // source-bound ordering and pagination above this projection so their
-        // keys still resolve against the source descriptor.
-        if query
+        // keys still resolve against the source descriptor. A supported
+        // recursive gather has no explicit relation projection and must retain
+        // the ordinary source-table output instead.
+        let has_relation_output_projection = query
             .relation
             .as_ref()
-            .is_some_and(|relation| crate::query::relation_union_parts(&relation.rel).is_none())
-        {
+            .map(crate::query::relation_output_projection_if_present)
+            .transpose()?
+            .flatten()
+            .is_some();
+        if has_relation_output_projection {
             let project_node = RowSetNodeId("relation:output".to_owned());
             nodes.insert(
                 project_node.clone(),
