@@ -1,9 +1,10 @@
-//! Baseline receipts for complementary one-shot query shapes.
+//! Receipts for overlapping one-shot query shapes across realistic row widths.
 //!
-//! This benchmark intentionally measures the current implementation only. It
-//! does not claim that logical storage reads are physical I/O, unique rows, or
-//! source decode counts. A future source-reuse implementation can compare its
-//! receipts with these independent fixture lifecycles.
+//! The benchmark varies seeded row cardinality and title payload width through
+//! environment variables, then measures cold Q3 and Q1/Q2-to-Q3 reuse levels.
+//! It asserts row membership before emitting timings. Logical storage reads
+//! remain visible: reuse avoids decode/materialization work, not Groove scans or
+//! physical I/O.
 
 mod schema_fixture;
 mod support;
@@ -23,13 +24,15 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 const TABLE: &str = "todos";
 const DEFAULT_ROWS: usize = 1_000;
+const DEFAULT_TITLE_PAYLOAD_BYTES: usize = 32;
 
 type DirectDb = Db<MemoryStorage>;
 
 struct PreparedQueries {
     all: PreparedQuery,
-    done_true: PreparedQuery,
-    done_false: PreparedQuery,
+    status_done: PreparedQuery,
+    status_not_done: PreparedQuery,
+    status_blocked: PreparedQuery,
 }
 
 struct ReadSample {
@@ -43,21 +46,28 @@ fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
 
     let row_count = support::env_usize("JAZZ_QUERY_SOURCE_ROWS", DEFAULT_ROWS);
+    let title_payload_bytes =
+        support::env_usize("JAZZ_QUERY_SOURCE_TITLE_BYTES", DEFAULT_TITLE_PAYLOAD_BYTES);
     assert!(
         row_count > 0,
         "JAZZ_QUERY_SOURCE_ROWS must be greater than zero"
     );
+    assert!(
+        title_payload_bytes > 0,
+        "JAZZ_QUERY_SOURCE_TITLE_BYTES must be greater than zero"
+    );
 
-    run_first_read(row_count);
-    run_repeated_read(row_count);
-    run_complementary_sequence(row_count);
+    run_first_read(row_count, title_payload_bytes);
+    run_one_partition_sequence(row_count, title_payload_bytes);
+    run_two_partition_sequence(row_count, title_payload_bytes);
+    run_all_partition_sequence(row_count, title_payload_bytes);
 }
 
 fn schema() -> JazzSchema {
     schema_fixture::compile(
         SchemaBuilder::new().table(
             TableSchemaBuilder::new(TABLE)
-                .column("done", ColumnType::Boolean)
+                .column("status", ColumnType::Text)
                 .column("title", ColumnType::Text),
         ),
     )
@@ -87,13 +97,19 @@ fn open_db(seed: u64) -> DirectDb {
     .expect("open query-source measurement db")
 }
 
-fn seed_todos(db: &DirectDb, row_count: usize) {
+fn seed_todos(db: &DirectDb, row_count: usize, title_payload_bytes: usize) {
     for index in 0..row_count {
+        let status = match index % 3 {
+            0 => "done",
+            1 => "not_done",
+            _ => "blocked",
+        };
+        let title = format!("Todo {index} {}", "x".repeat(title_payload_bytes));
         let write = jazz::block_on(db.insert(
             TABLE,
             BTreeMap::from([
-                ("done".to_owned(), Value::Bool(index.is_multiple_of(2))),
-                ("title".to_owned(), Value::String(format!("Todo {index}"))),
+                ("status".to_owned(), Value::String(status.to_owned())),
+                ("title".to_owned(), Value::String(title)),
             ]),
             Default::default(),
         ))
@@ -108,62 +124,146 @@ fn prepare_queries(db: &DirectDb) -> PreparedQueries {
         all: db
             .prepare_query(&Query::from(TABLE))
             .expect("prepare all-todos query"),
-        done_true: db
-            .prepare_query(&Query::from(TABLE).filter(eq(col("done"), lit(true))))
-            .expect("prepare done-true query"),
-        done_false: db
-            .prepare_query(&Query::from(TABLE).filter(eq(col("done"), lit(false))))
-            .expect("prepare done-false query"),
+        status_done: db
+            .prepare_query(&Query::from(TABLE).filter(eq(col("status"), lit("done"))))
+            .expect("prepare done-status query"),
+        status_not_done: db
+            .prepare_query(&Query::from(TABLE).filter(eq(col("status"), lit("not_done"))))
+            .expect("prepare not-done-status query"),
+        status_blocked: db
+            .prepare_query(&Query::from(TABLE).filter(eq(col("status"), lit("blocked"))))
+            .expect("prepare blocked-status query"),
     }
 }
 
-fn setup(seed: u64, row_count: usize) -> (DirectDb, PreparedQueries) {
+fn setup(seed: u64, row_count: usize, title_payload_bytes: usize) -> (DirectDb, PreparedQueries) {
     let db = open_db(seed);
-    seed_todos(&db, row_count);
+    seed_todos(&db, row_count, title_payload_bytes);
     let queries = prepare_queries(&db);
     (db, queries)
 }
 
-fn run_first_read(row_count: usize) {
-    let (db, queries) = setup(0x30, row_count);
+fn run_first_read(row_count: usize, title_payload_bytes: usize) {
+    let (db, queries) = setup(0x30, row_count, title_payload_bytes);
     let sample = read(&db, &queries.all);
     assert_row_count("first_read_q3", &sample.rows, row_count);
-    emit("first_read_q3", row_count, &sample);
+    emit("first_read_q3", row_count, title_payload_bytes, 0, &sample);
 }
 
-fn run_repeated_read(row_count: usize) {
-    let (db, queries) = setup(0x31, row_count);
-    let warmup = read(&db, &queries.all);
-    assert_row_count("warmup_q3", &warmup.rows, row_count);
-
-    let sample = read(&db, &queries.all);
-    assert_row_count("repeated_read_q3", &sample.rows, row_count);
-    emit("repeated_read_q3", row_count, &sample);
-}
-
-fn run_complementary_sequence(row_count: usize) {
-    let (db, queries) = setup(0x32, row_count);
-    let done_true = read(&db, &queries.done_true);
-    let done_false = read(&db, &queries.done_false);
+fn run_one_partition_sequence(row_count: usize, title_payload_bytes: usize) {
+    let (db, queries) = setup(0x31, row_count, title_payload_bytes);
+    let done = read(&db, &queries.status_done);
     let all = read(&db, &queries.all);
 
-    let expected_true = row_count.div_ceil(2);
-    let expected_false = row_count / 2;
-    assert_row_count("sequence_q1_done_true", &done_true.rows, expected_true);
-    assert_row_count("sequence_q2_done_false", &done_false.rows, expected_false);
-    assert_row_count("sequence_q3_all", &all.rows, row_count);
+    assert_row_count("sequence_33_q1_done", &done.rows, (row_count + 2) / 3);
+    assert_row_count("sequence_33_q3_all", &all.rows, row_count);
+    assert_subset("sequence_33_done_subset", &done.rows, &all.rows);
 
-    let mut partition = row_ids(&done_true.rows);
-    partition.extend(row_ids(&done_false.rows));
-    assert_eq!(
-        partition,
-        row_ids(&all.rows),
-        "done=true and done=false must partition the seeded non-nullable table"
+    emit(
+        "sequence_33_q1_done",
+        row_count,
+        title_payload_bytes,
+        0,
+        &done,
+    );
+    emit(
+        "sequence_33_q3_all",
+        row_count,
+        title_payload_bytes,
+        done.rows.len(),
+        &all,
+    );
+}
+
+fn run_two_partition_sequence(row_count: usize, title_payload_bytes: usize) {
+    let (db, queries) = setup(0x32, row_count, title_payload_bytes);
+    let done = read(&db, &queries.status_done);
+    let not_done = read(&db, &queries.status_not_done);
+    let all = read(&db, &queries.all);
+
+    assert_row_count("sequence_67_q1_done", &done.rows, (row_count + 2) / 3);
+    assert_row_count(
+        "sequence_67_q2_not_done",
+        &not_done.rows,
+        (row_count + 1) / 3,
+    );
+    assert_row_count("sequence_67_q3_all", &all.rows, row_count);
+    assert_disjoint("sequence_67_status_disjoint", &done.rows, &not_done.rows);
+    assert_subset("sequence_67_done_subset", &done.rows, &all.rows);
+    assert_subset("sequence_67_not_done_subset", &not_done.rows, &all.rows);
+
+    emit(
+        "sequence_67_q1_done",
+        row_count,
+        title_payload_bytes,
+        0,
+        &done,
+    );
+    emit(
+        "sequence_67_q2_not_done",
+        row_count,
+        title_payload_bytes,
+        0,
+        &not_done,
+    );
+    emit(
+        "sequence_67_q3_all",
+        row_count,
+        title_payload_bytes,
+        done.rows.len() + not_done.rows.len(),
+        &all,
+    );
+}
+
+fn run_all_partition_sequence(row_count: usize, title_payload_bytes: usize) {
+    let (db, queries) = setup(0x33, row_count, title_payload_bytes);
+    let done = read(&db, &queries.status_done);
+    let not_done = read(&db, &queries.status_not_done);
+    let blocked = read(&db, &queries.status_blocked);
+    let all = read(&db, &queries.all);
+
+    assert_row_count("sequence_100_q1_done", &done.rows, (row_count + 2) / 3);
+    assert_row_count(
+        "sequence_100_q2_not_done",
+        &not_done.rows,
+        (row_count + 1) / 3,
+    );
+    assert_row_count("sequence_100_q3_blocked", &blocked.rows, row_count / 3);
+    assert_row_count("sequence_100_q4_all", &all.rows, row_count);
+    assert_partition(
+        "sequence_100_status_partition",
+        &[&done.rows, &not_done.rows, &blocked.rows],
+        &all.rows,
     );
 
-    emit("sequence_q1_done_true", row_count, &done_true);
-    emit("sequence_q2_done_false", row_count, &done_false);
-    emit("sequence_q3_all", row_count, &all);
+    emit(
+        "sequence_100_q1_done",
+        row_count,
+        title_payload_bytes,
+        0,
+        &done,
+    );
+    emit(
+        "sequence_100_q2_not_done",
+        row_count,
+        title_payload_bytes,
+        0,
+        &not_done,
+    );
+    emit(
+        "sequence_100_q3_blocked",
+        row_count,
+        title_payload_bytes,
+        0,
+        &blocked,
+    );
+    emit(
+        "sequence_100_q4_all",
+        row_count,
+        title_payload_bytes,
+        done.rows.len() + not_done.rows.len() + blocked.rows.len(),
+        &all,
+    );
 }
 
 fn read(db: &DirectDb, query: &PreparedQuery) -> ReadSample {
@@ -194,8 +294,35 @@ fn assert_row_count(case: &str, rows: &[CurrentRow], expected: usize) {
 fn row_ids(rows: &[CurrentRow]) -> BTreeSet<RowUuid> {
     rows.iter().map(CurrentRow::row_uuid).collect()
 }
+fn assert_subset(case: &str, subset: &[CurrentRow], all: &[CurrentRow]) {
+    assert!(
+        row_ids(subset).is_subset(&row_ids(all)),
+        "{case} contains a row outside the all-rows result"
+    );
+}
 
-fn emit(case: &str, table_rows: usize, sample: &ReadSample) {
+fn assert_disjoint(case: &str, left: &[CurrentRow], right: &[CurrentRow]) {
+    assert!(
+        row_ids(left).is_disjoint(&row_ids(right)),
+        "{case} contains an overlapping row"
+    );
+}
+
+fn assert_partition(case: &str, parts: &[&[CurrentRow]], all: &[CurrentRow]) {
+    let mut partition = BTreeSet::new();
+    for part in parts {
+        partition.extend(row_ids(part));
+    }
+    assert_eq!(partition, row_ids(all), "{case} does not cover all rows");
+}
+
+fn emit(
+    case: &str,
+    table_rows: usize,
+    title_payload_bytes: usize,
+    expected_reusable_rows: usize,
+    sample: &ReadSample,
+) {
     let mut fields = BTreeMap::new();
     fields.insert(
         "measurement".to_owned(),
@@ -204,8 +331,20 @@ fn emit(case: &str, table_rows: usize, sample: &ReadSample) {
     fields.insert("case".to_owned(), serde_json::json!(case));
     fields.insert("table_rows".to_owned(), serde_json::json!(table_rows));
     fields.insert(
+        "title_payload_bytes".to_owned(),
+        serde_json::json!(title_payload_bytes),
+    );
+    fields.insert(
         "result_rows".to_owned(),
         serde_json::json!(sample.rows.len()),
+    );
+    fields.insert(
+        "expected_reusable_rows".to_owned(),
+        serde_json::json!(expected_reusable_rows),
+    );
+    fields.insert(
+        "expected_reuse_per_mille".to_owned(),
+        serde_json::json!(expected_reusable_rows.saturating_mul(1_000) / table_rows),
     );
     fields.insert(
         "wall_us".to_owned(),
