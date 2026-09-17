@@ -9,7 +9,7 @@ import { type Db } from "./db.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
 
-import { pushPermissions, pushSchema } from "../dev/catalogue.js";
+import { computeSchemaHash, pushPermissions, pushSchema } from "../dev/catalogue.js";
 import { pushMigration } from "../dev/catalogue-project.js";
 import { renderMigrationStub } from "../dev/migrations.js";
 import { wasmSchemasEqual } from "../dev/schema-utils.js";
@@ -303,6 +303,8 @@ it("publishes generated default-bearing relation migrations and preserves them a
     const fromHash = deployed.schema.hash;
     const { hash: toHash } = await pushSchema({ ...catalogue, schema: afterApp });
     expect(toHash).not.toBe(fromHash);
+    expect(await computeSchemaHash(beforeApp.wasmSchema)).toBe(fromHash);
+    expect(await computeSchemaHash(afterApp.wasmSchema)).toBe(toHash);
     const source = renderMigrationStub({
       fromHash,
       toHash,
@@ -347,6 +349,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
     ] as const) {
       const stored = await fetchStoredWasmSchema(server.url, { appId, adminSecret, schemaHash });
       expect(wasmSchemasEqual(stored.schema, expected)).toBe(true);
+      expect(await computeSchemaHash(stored.schema)).toBe(schemaHash);
       for (const [tableName, table] of Object.entries(expected)) {
         for (const column of table.columns) {
           expect(
