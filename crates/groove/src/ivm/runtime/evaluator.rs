@@ -1021,6 +1021,10 @@ impl TickEvaluator<'_> {
         // state cleanup do not change this ancestor classification.
         let mut ancestors = HashSet::new();
         self.graph.mark_ancestors(node, &mut ancestors);
+        #[cfg(test)]
+        {
+            self.metrics.aggregate_dependency_walk_nodes += ancestors.len();
+        }
         let mut depends = false;
         for ancestor in ancestors {
             let graph_node = self

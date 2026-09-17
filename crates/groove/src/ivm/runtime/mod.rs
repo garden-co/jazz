@@ -211,6 +211,8 @@ pub struct IvmRuntime {
     eval_memo_bytes: usize,
     hydration_memo_hits: u64,
     hydration_memo_computes: u64,
+    #[cfg(test)]
+    aggregate_dependency_walk_nodes: usize,
     hydration_memo_computed_nodes: HashSet<NodeId>,
     /// Retainers and GC age live outside operator state so stateless leaf nodes
     /// can be retained without allocating fake operator state.
@@ -276,6 +278,8 @@ impl IvmRuntime {
             eval_memo_bytes: 0,
             hydration_memo_hits: 0,
             hydration_memo_computes: 0,
+            #[cfg(test)]
+            aggregate_dependency_walk_nodes: 0,
             hydration_memo_computed_nodes: HashSet::default(),
             node_meta: HashMap::default(),
             current_tick: 0,
