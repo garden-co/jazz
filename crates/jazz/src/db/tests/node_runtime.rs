@@ -3965,6 +3965,58 @@ fn local_replay_routes_keep_independent_live_receivers() {
     }
 }
 
+#[test]
+fn repaired_local_replay_reconnect_delivers_retained_terminal_fate() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xda; 16]);
+    let worker = open_db(0xdb, author, &schema);
+    let write = worker
+        .insert(
+            "todos",
+            cells("reconnectable replay", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_replay_route(&routes, tx_id, &old_queue, author, None);
+    drop(old_queue);
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(3)),
+        durability: Some(DurabilityTier::Global),
+    };
+    route_local_fate(&routes, tx_id, &fate);
+
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &replacement_queue,
+    ))
+    .unwrap();
+
+    assert!(
+        replacement_queue.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::FateUpdate {
+                    tx_id: received,
+                    fate: Fate::Accepted,
+                    durability: Some(DurabilityTier::Global),
+                    ..
+                } if *received == tx_id
+            )
+        }),
+        "a repaired replacement must receive the retained terminal fate"
+    );
+}
+
 fn local_replay_restore_point_reads(chain_len: usize) -> usize {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xd8; 16]);
