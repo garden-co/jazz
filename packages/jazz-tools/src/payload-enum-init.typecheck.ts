@@ -18,8 +18,8 @@ const nullable: s.InsertOf<typeof app.events> = {
 };
 // @ts-expect-error Required payload fields cannot be omitted.
 const missing: s.InsertOf<typeof app.events> = { event: { type: "message" } };
-// @ts-expect-error Defaulted non-nullable fields cannot be null.
 const invalid: s.InsertOf<typeof app.events> = {
+  // @ts-expect-error Defaulted non-nullable fields cannot be null.
   event: { type: "message", requiredText: "x", defaultedText: null },
 };
 declare const row: s.RowOf<typeof app.events>;
