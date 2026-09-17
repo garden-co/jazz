@@ -3786,6 +3786,114 @@ fn reopened_local_subscriber_replays_deep_causal_chain_without_stack_overflow() 
 }
 
 #[test]
+fn reopened_local_subscriber_replays_after_complete_parent_repair() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xcb; 16]);
+    let worker = open_db(0xcb, author, &schema);
+    let core = open_core(0xcc, AuthorSubject::SYSTEM, &schema);
+
+    let (worker_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, author);
+
+    let parent = worker
+        .insert(
+            "todos",
+            cells("repairable parent", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let parent_tx = parent.mergeable_tx_id();
+    worker.tick().unwrap();
+    core.tick().unwrap();
+    worker.tick().unwrap();
+    assert_eq!(
+        worker.write_state(parent_tx).unwrap().durability,
+        DurabilityTier::Global
+    );
+
+    let child = worker
+        .update(
+            "todos",
+            parent.row_uuid(),
+            cells("repairable child", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let child_tx = child.mergeable_tx_id();
+    assert_eq!(worker.write_state(child_tx).unwrap().fate, Fate::Pending);
+    let eviction = block_on(
+        worker
+            .node
+            .node
+            .borrow_mut()
+            .evict_cold(&crate::peer::PeerEvictionPins::default()),
+    )
+    .unwrap();
+    assert!(eviction.row_versions_evictable > 0);
+
+    let foreground = open_db(0xcd, author, &schema);
+    foreground.set_non_durable_client();
+    let (foreground_transport, worker_foreground_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
+    for _ in 0..16 {
+        worker.tick().unwrap();
+        core.tick().unwrap();
+        worker.tick().unwrap();
+        if worker.write_state(child_tx).unwrap().durability == DurabilityTier::Global {
+            break;
+        }
+    }
+    assert_eq!(
+        worker.write_state(child_tx).unwrap().durability,
+        DurabilityTier::Global,
+        "the authority fate must arrive before the missing parent is repaired"
+    );
+
+    let query = foreground.table("todos");
+    let mut subscription =
+        prepared_subscribe(&foreground, &query, global_subscribe_opts()).unwrap();
+
+    let mut repaired = false;
+    for _ in 0..64 {
+        foreground.tick().unwrap();
+        worker.tick().unwrap();
+        core.tick().unwrap();
+        worker.tick().unwrap();
+        foreground.tick().unwrap();
+        if prepared_read(&foreground, &query).iter().any(|row| {
+            row.cell(&schema.tables()[0], "title")
+                == Some(Value::String("repairable child".to_owned()))
+        }) {
+            repaired = true;
+            break;
+        }
+        while subscription.try_next_event().is_some() {}
+    }
+    assert!(
+        repaired,
+        "a complete parent repair must release the child replay"
+    );
+    assert!(matches!(
+        worker.write_state(child_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
+    assert!(matches!(
+        foreground.write_state(child_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn local_acknowledgements_do_not_reprobe_retained_history() {
     // Internal topology is necessary to count storage probes at the local
     // acknowledgement boundary independently of unrelated query/persistence
