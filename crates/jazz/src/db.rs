@@ -2127,10 +2127,17 @@ fn route_edge_admission_fate(routes: &EdgeFateRoutes, tx_id: TxId, fate: &SyncMe
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+
 enum LocalReplayStatus {
     Visiting,
     Complete,
     Blocked,
+}
+fn local_replay_unit_is_complete(unit: &SyncMessage) -> bool {
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        return false;
+    };
+    usize::try_from(tx.n_total_writes).ok() == Some(versions.len())
 }
 
 enum LocalReplayFrame {
@@ -2263,7 +2270,9 @@ where
             let mut has_matching_route = false;
             for route in matching {
                 has_matching_route = true;
-                if let Some(unit) = &route.replay_unit {
+                if let Some(unit) = &route.replay_unit
+                    && local_replay_unit_is_complete(unit)
+                {
                     units.entry(*tx_id).or_insert_with(|| unit.clone());
                 }
             }
