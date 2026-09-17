@@ -1725,6 +1725,7 @@ fn relation_query_subscription_hop_preserves_projected_self_reference_cells() {
     .unwrap();
 
     let query = users_to_teams_relation_query();
+
     let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
     assert_eq!(row_ids(&snapshot.rows), vec![team]);
     assert_eq!(
@@ -1735,9 +1736,15 @@ fn relation_query_subscription_hop_preserves_projected_self_reference_cells() {
         snapshot.rows[0].cell(&schema.tables[1], "parent_id"),
         Some(Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))))
     );
-
     let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
-    let opened = opened_rows(stream.try_next_event().expect("opened event"));
+    let opened = (0..32).find_map(|_| {
+        let event = stream.try_next_event();
+        if event.is_none() {
+            db.tick().unwrap();
+        }
+        event
+    });
+    let opened = opened_rows(opened.expect("opened event"));
     let opened_team = opened
         .iter()
         .find(|row| row.row_uuid() == team)

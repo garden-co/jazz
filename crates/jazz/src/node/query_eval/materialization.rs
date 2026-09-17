@@ -1347,15 +1347,14 @@ where
             if index < snapshot.root_count
                 && row.table() == query.table
                 && let Some(columns) = relation_projection.as_deref()
+                && columns
+                    .iter()
+                    .all(|column| row.raw_field(&column.alias).is_some())
             {
-                if !columns.iter().all(|column| {
-                    matches!(
-                        row.raw_field(&column.alias),
-                        Some(value) if !matches!(value, Value::Nullable(None))
-                    )
-                }) {
-                    return Ok(false);
-                }
+                // A projected nullable value is materialized when its field is
+                // present, including an explicit `Nullable(None)` value.
+                // Supporting rows from joined sources do not carry the
+                // relation aliases and are checked against their own schema.
                 continue;
             }
             let table = self.table_in_schema_ref(row.table(), shape.schema_version())?;
