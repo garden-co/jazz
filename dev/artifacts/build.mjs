@@ -47,12 +47,14 @@ const commands = {
 };
 const napiBindingForTarget = {
   "x86_64-unknown-linux-gnu": "jazz-napi.linux-x64-gnu.node",
+  "aarch64-unknown-linux-gnu": "jazz-napi.linux-arm64-gnu.node",
   "x86_64-pc-windows-msvc": "jazz-napi.win32-x64-msvc.node",
   "x86_64-apple-darwin": "jazz-napi.darwin-x64.node",
   "aarch64-apple-darwin": "jazz-napi.darwin-arm64.node",
 };
 const hostTarget = {
   "linux-x64": "x86_64-unknown-linux-gnu",
+  "linux-arm64": "aarch64-unknown-linux-gnu",
   "win32-x64": "x86_64-pc-windows-msvc",
   "darwin-x64": "x86_64-apple-darwin",
   "darwin-arm64": "aarch64-apple-darwin",
