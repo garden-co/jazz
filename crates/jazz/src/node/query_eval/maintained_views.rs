@@ -431,9 +431,9 @@ where
                 .query()
                 .relation
                 .as_ref()
-                .map(crate::query::relation_output_projection)
+                .map(crate::query::relation_output_projection_if_present)
                 .transpose()?
-                .map(|(_, columns)| columns),
+                .flatten(),
             result_relation_projections: shape
                 .query()
                 .relation

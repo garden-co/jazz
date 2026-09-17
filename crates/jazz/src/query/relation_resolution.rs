@@ -153,6 +153,19 @@ pub(crate) fn relation_output_projection(
     })?;
     Ok((scope, columns))
 }
+/// Return explicit output aliases when the relation expression has them.
+///
+/// A supported `Gather` is normalized into the ordinary recursive query shape
+/// and therefore keeps the source table's normal materialization contract.
+pub(crate) fn relation_output_projection_if_present(
+    relation: &RelationQuery,
+) -> Result<Option<Vec<RelationProjectColumn>>, QueryError> {
+    let (base, _, _, _, _) = peel_relation_output_steps(&relation.rel)?;
+    if matches!(base, RelationExpr::Gather { .. }) {
+        return Ok(None);
+    }
+    relation_output_projection(relation).map(|(_, columns)| Some(columns))
+}
 /// Return the projection for every leaf of a retained relation UNION.
 ///
 /// Labels use the same length-prefixed path encoding as executable UNION

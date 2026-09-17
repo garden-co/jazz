@@ -1339,10 +1339,9 @@ where
         let relation_projection = query
             .relation
             .as_ref()
-            .map(crate::query::relation_output_projection)
-            .transpose()
-            .map_err(|error| Error::QueryCapability(error.to_string()))?
-            .map(|(_, columns)| columns);
+            .map(crate::query::relation_output_projection_if_present)
+            .transpose()?
+            .flatten();
         for (index, row) in snapshot.rows.iter().enumerate() {
             if index < snapshot.root_count
                 && row.table() == query.table
