@@ -81,6 +81,8 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
     let schema = RuntimeSchema {
         tables: tables.to_vec(),
     };
+    validate_converted_references(tables)?;
+
     let mut branch_column_types = BTreeMap::<String, GrooveColumnType>::new();
     for table in tables {
         let mut bound = std::collections::BTreeSet::new();
@@ -156,6 +158,48 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
         }
     }
     Ok(())
+}
+
+fn validate_converted_references(tables: &[CoreTableSchema]) -> Result<(), SchemaConversionError> {
+    let table_names = tables
+        .iter()
+        .map(|table| table.name.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for table in tables {
+        for (column_name, target_table) in &table.references {
+            let path = format!("$.{}.{}", table.name, column_name);
+            if !table_names.contains(target_table.as_str()) {
+                return Err(err(
+                    path,
+                    format!("reference target table '{target_table}' does not exist"),
+                ));
+            }
+
+            let column_type = table
+                .columns
+                .iter()
+                .find(|column| column.name == *column_name)
+                .map(|column| &column.column_type)
+                .ok_or_else(|| err(path.clone(), "reference source column is not declared"))?;
+            if !is_uuid_reference_type(column_type) {
+                return Err(err(
+                    path,
+                    "reference source column must use UUID or UUID[] type",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_uuid_reference_type(column_type: &GrooveColumnType) -> bool {
+    match column_type {
+        GrooveColumnType::Nullable(inner) => is_uuid_reference_type(inner),
+        GrooveColumnType::Uuid => true,
+        GrooveColumnType::Array(inner) => matches!(inner.as_ref(), GrooveColumnType::Uuid),
+        _ => false,
+    }
 }
 
 #[derive(Clone)]

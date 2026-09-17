@@ -70,6 +70,97 @@ fn team_project_schema(index_only_name: bool) -> Schema {
         .build()
 }
 
+/// A scalar UUID reference may point at a row that does not exist yet:
+/// alice's write settles at the real server, the referring `roots` row is
+/// visible, and querying `targets` remains empty.
+///
+/// ```text
+/// alice ──insert roots(target_id=absent UUID)──► JazzServer
+/// alice ◄────────── accepted Edge settlement ───┘
+/// alice ──query roots──► referring row visible
+/// alice ──query targets──► empty
+/// ```
+#[tokio::test]
+async fn public_schema_allows_uuid_reference_without_target_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(public_schema_allows_uuid_reference_without_target_rows_inner())
+        .await;
+}
+
+async fn public_schema_allows_uuid_reference_without_target_rows_inner() {
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("roots")
+                .fk_column("target_id", "targets")
+                .policies(permissions(|p| {
+                    p.allow_read().always();
+                    p.allow_insert().always();
+                    p.allow_update().always();
+                    p.allow_delete().always();
+                })),
+        )
+        .table(TableSchema::builder("targets").policies(permissions(|p| {
+            p.allow_read().always();
+            p.allow_insert().always();
+            p.allow_update().always();
+            p.allow_delete().always();
+        })))
+        .build();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        &test_user_id("dangling-reference-alice"),
+        "roots",
+        READY_TIMEOUT,
+    )
+    .await;
+
+    let absent_target =
+        ObjectId::from_uuid(Uuid::from_u128(0xaaaaaaaa_aaaa_4aaa_aaaa_aaaaaaaaaaa1));
+    let (root_id, _, transaction_id) = alice
+        .insert("roots", row_input!("target_id" => absent_target))
+        .expect("alice inserts a root pointing at an absent target");
+    wait_for_edge_txs(
+        &alice,
+        &[transaction_id.expect("ordinary mutation commits immediately")],
+    )
+    .await;
+
+    let roots = wait_for_query(
+        &alice,
+        jazz::query::Query::from("roots"),
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "alice sees the settled referring root",
+        |rows| has_row(&rows, root_id, &[Value::Uuid(absent_target)]).then_some(rows),
+    )
+    .await;
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].1, vec![Value::Uuid(absent_target)]);
+
+    let targets = wait_for_query(
+        &alice,
+        jazz::query::Query::from("targets"),
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "alice confirms the referenced target is absent",
+        |rows| rows.is_empty().then_some(rows),
+    )
+    .await;
+    assert!(
+        targets.is_empty(),
+        "the UUID reference must not create a target row: {targets:?}"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    server.shutdown().await;
+}
+
 async fn create_project(admin: &JazzClient, title: &str) -> ObjectId {
     let (id, _, transaction_id) = admin
         .insert("projects", row_input!("title" => title))
