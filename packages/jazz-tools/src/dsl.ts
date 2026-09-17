@@ -126,12 +126,14 @@ export type TypedColumnBuilder<
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
   Value = TSTypeFromSqlType<Sql>,
+  Init = TSInitFromSqlType<Sql>,
 > = Omit<ColumnBuilder, "optional" | "default" | "merge" | "transform"> & {
   readonly __jazzSqlType: Sql;
   readonly __jazzOptional: Optional;
   readonly __jazzReferences: Ref;
   readonly __jazzHasDefault: HasDefault;
   readonly __jazzValue: Value;
+  readonly __jazzInitValue: Init;
   /**
    * Set the default value for the column.
    *
@@ -140,13 +142,13 @@ export type TypedColumnBuilder<
    */
   default(
     value: MaybeOptional<ColumnDefaultValue<Sql>, Optional>,
-  ): ColumnAlias<Sql, Optional, Ref, true, Value>;
+  ): ColumnAlias<Sql, Optional, Ref, true, Value, Init>;
   /**
    * Set the merge strategy for the column (defaults to LWW)
    */
   merge(
     strategy: AllowedColumnMergeStrategy<Sql, Optional>,
-  ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value>;
+  ): ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Init>;
   /**
    * Transform stored column values at the TypeScript boundary.
    *
@@ -155,11 +157,11 @@ export type TypedColumnBuilder<
   transform<TransformedValue>(transform: {
     from(value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>): TransformedValue;
     to(value: TransformedValue): MaybeOptional<TSTypeFromSqlType<Sql>, Optional>;
-  }): ColumnAlias<Sql, Optional, Ref, HasDefault, TransformedValue>;
+  }): ColumnAlias<Sql, Optional, Ref, HasDefault, TransformedValue, TransformedValue>;
   /**
    * Make the column nullable
    */
-  optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value>;
+  optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value, Init>;
 };
 
 // This is a constraint for builder input positions, not a public builder
@@ -174,6 +176,7 @@ export type AnyTypedColumnBuilder = Omit<
   readonly __jazzReferences: string | undefined;
   readonly __jazzHasDefault: boolean;
   readonly __jazzValue: unknown;
+  readonly __jazzInitValue: unknown;
 };
 
 /**
@@ -201,14 +204,9 @@ export type ColumnBuilderHasDefault<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzHasDefault"];
 export type ColumnBuilderValue<TBuilder extends AnyTypedColumnBuilder> = TBuilder["__jazzValue"];
 
-/** Preserve transformed application values while expanding ordinary SQL write inputs. */
-export type ColumnBuilderInitValue<TBuilder extends AnyTypedColumnBuilder> = [
-  ColumnBuilderValue<TBuilder>,
-] extends [TSTypeFromSqlType<ColumnBuilderSqlType<TBuilder>>]
-  ? [TSTypeFromSqlType<ColumnBuilderSqlType<TBuilder>>] extends [ColumnBuilderValue<TBuilder>]
-    ? TSInitFromSqlType<ColumnBuilderSqlType<TBuilder>>
-    : ColumnBuilderValue<TBuilder>
-  : ColumnBuilderValue<TBuilder>;
+/** Input values are explicit so even same-shape transforms retain their contract. */
+export type ColumnBuilderInitValue<TBuilder extends AnyTypedColumnBuilder> =
+  TBuilder["__jazzInitValue"];
 
 export interface ColumnTransform<Stored = unknown, View = unknown> {
   from(value: Stored): View;
@@ -219,54 +217,64 @@ export type StringColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = string,
-> = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault, Value, Init>;
 /** UUID value without an application-table foreign key, e.g. an account ID. */
 export type UuidColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = string,
-> = TypedColumnBuilder<"UUID", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"UUID", Optional, undefined, HasDefault, Value, Init>;
 export type BooleanColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = boolean,
-> = TypedColumnBuilder<"BOOLEAN", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"BOOLEAN", Optional, undefined, HasDefault, Value, Init>;
 export type IntColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = number,
-> = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault, Value, Init>;
 export type BigIntColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = bigint,
-> = TypedColumnBuilder<"BIGINT", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"BIGINT", Optional, undefined, HasDefault, Value, Init>;
 export type TimestampColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Date,
-> = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault, Value, Init>;
 export type FloatColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = number,
-> = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault, Value, Init>;
 export type BytesColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Uint8Array,
-> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value, Init>;
 export type JsonColumn<
   Output = JsonValue,
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Output,
-> = TypedColumnBuilder<JsonSqlType<Output>, Optional, undefined, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<JsonSqlType<Output>, Optional, undefined, HasDefault, Value, Init>;
 export type EnumColumn<
   Variants extends readonly string[] = readonly string[],
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = Variants[number],
+  Init = Value,
 > = TypedColumnBuilder<
   {
     kind: "ENUM";
@@ -275,26 +283,37 @@ export type EnumColumn<
   Optional,
   undefined,
   HasDefault,
-  Value
+  Value,
+  Init
 >;
 export type EnumCasesColumn<
   Cases extends readonly EnumCaseSqlType[] = readonly EnumCaseSqlType[],
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = TSTypeFromSqlType<{ kind: "ENUM"; cases: Cases }>,
-> = TypedColumnBuilder<{ kind: "ENUM"; cases: Cases }, Optional, undefined, HasDefault, Value>;
+  Init = TSInitFromSqlType<{ kind: "ENUM"; cases: Cases }>,
+> = TypedColumnBuilder<
+  { kind: "ENUM"; cases: Cases },
+  Optional,
+  undefined,
+  HasDefault,
+  Value,
+  Init
+>;
 export type RefColumn<
   TargetTable extends string,
   Optional extends boolean = false,
   HasDefault extends boolean = false,
   Value = string,
-> = TypedColumnBuilder<"UUID", Optional, TargetTable, HasDefault, Value>;
+  Init = Value,
+> = TypedColumnBuilder<"UUID", Optional, TargetTable, HasDefault, Value, Init>;
 export type ArrayColumn<
   ElementSql extends SqlType = SqlType,
   Optional extends boolean = false,
   Ref extends string | undefined = undefined,
   HasDefault extends boolean = false,
   Value = TSTypeFromSqlType<{ kind: "ARRAY"; element: ElementSql }>,
+  Init = TSInitFromSqlType<{ kind: "ARRAY"; element: ElementSql }>,
 > = TypedColumnBuilder<
   {
     kind: "ARRAY";
@@ -303,7 +322,8 @@ export type ArrayColumn<
   Optional,
   Ref,
   HasDefault,
-  Value
+  Value,
+  Init
 >;
 export type ColumnAlias<
   Sql extends SqlType = SqlType,
@@ -311,40 +331,41 @@ export type ColumnAlias<
   Ref extends string | undefined = string | undefined,
   HasDefault extends boolean = boolean,
   Value = TSTypeFromSqlType<Sql>,
+  Init = TSInitFromSqlType<Sql>,
 > = Sql extends {
   kind: "ARRAY";
   element: infer ElementSql extends SqlType;
 }
-  ? ArrayColumn<ElementSql, Optional, Ref, HasDefault, Value>
+  ? ArrayColumn<ElementSql, Optional, Ref, HasDefault, Value, Init>
   : Ref extends string
-    ? RefColumn<Ref, Optional, HasDefault, Value>
+    ? RefColumn<Ref, Optional, HasDefault, Value, Init>
     : Sql extends "TEXT"
-      ? StringColumn<Optional, HasDefault, Value>
+      ? StringColumn<Optional, HasDefault, Value, Init>
       : Sql extends "BOOLEAN"
-        ? BooleanColumn<Optional, HasDefault, Value>
+        ? BooleanColumn<Optional, HasDefault, Value, Init>
         : Sql extends "INTEGER"
-          ? IntColumn<Optional, HasDefault, Value>
+          ? IntColumn<Optional, HasDefault, Value, Init>
           : Sql extends "BIGINT"
-            ? BigIntColumn<Optional, HasDefault, Value>
+            ? BigIntColumn<Optional, HasDefault, Value, Init>
             : Sql extends "TIMESTAMP"
-              ? TimestampColumn<Optional, HasDefault, Value>
+              ? TimestampColumn<Optional, HasDefault, Value, Init>
               : Sql extends "REAL"
-                ? FloatColumn<Optional, HasDefault, Value>
+                ? FloatColumn<Optional, HasDefault, Value, Init>
                 : Sql extends "BYTEA"
-                  ? BytesColumn<Optional, HasDefault, Value>
+                  ? BytesColumn<Optional, HasDefault, Value, Init>
                   : Sql extends JsonSqlType<infer Output>
-                    ? JsonColumn<Output, Optional, HasDefault, Value>
+                    ? JsonColumn<Output, Optional, HasDefault, Value, Init>
                     : Sql extends {
                           kind: "ENUM";
                           variants: infer Variants extends readonly string[];
                         }
-                      ? EnumColumn<Variants, Optional, HasDefault, Value>
+                      ? EnumColumn<Variants, Optional, HasDefault, Value, Init>
                       : Sql extends {
                             kind: "ENUM";
                             cases: infer Cases extends readonly EnumCaseSqlType[];
                           }
-                        ? EnumCasesColumn<Cases, Optional, HasDefault, Value>
-                        : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
+                        ? EnumCasesColumn<Cases, Optional, HasDefault, Value, Init>
+                        : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value, Init>;
 
 function normalizeColumnMergeStrategy(
   strategy: ColumnMergeStrategyName,

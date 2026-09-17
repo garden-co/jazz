@@ -71,3 +71,31 @@ const transformed = s.defineApp({
 });
 const transformedInit: s.InsertOf<typeof transformed.events> = { event: "message" };
 void [omitted, nullable, missing, invalid, nested, transformedInit];
+
+const sameShape = s.enum({ message: { text: s.string().default("default") } }).transform({
+  from: (value) => value,
+  to: (value) => ({ ...value, text: value.text.toUpperCase() }),
+});
+const sameShapeApp = s.defineApp({
+  events: s.table(
+    {
+      event: sameShape,
+      modified: sameShape.optional().default({ type: "message" }).merge("lww"),
+    },
+    {},
+  ),
+});
+const completeTransformInput: s.InsertOf<typeof sameShapeApp.events> = {
+  event: { type: "message", text: "present" },
+  modified: { type: "message", text: "present" },
+};
+const missingTransformInput: s.InsertOf<typeof sameShapeApp.events> = {
+  // @ts-expect-error Same-shape transform callbacks require their complete input.
+  event: { type: "message" },
+};
+const missingModifiedTransformInput: s.InsertOf<typeof sameShapeApp.events> = {
+  event: { type: "message", text: "present" },
+  // @ts-expect-error Modifiers must preserve the explicit transform input contract.
+  modified: { type: "message" },
+};
+void [completeTransformInput, missingTransformInput, missingModifiedTransformInput];
