@@ -4581,16 +4581,24 @@ mod dynamic_schema_view_tests {
         ))
         .unwrap();
         let query = postcard::to_allocvec(&view.table("items")).unwrap();
-        let result = block_on(WasmDbInner::Memory(Rc::clone(&view)).all_serialized_query(
-            query,
-            ReadOpts::default(),
-            Some(batch),
-            None,
-            None,
-            false,
-            f64::INFINITY,
-        ))
-        .unwrap();
+        let inner = WasmDbInner::Memory(Rc::clone(&view));
+        let (result, tick) = block_on(async {
+            // This native fixture has no browser scheduler to drive the owner's queue.
+            futures_util::join!(
+                inner.all_serialized_query(
+                    query,
+                    ReadOpts::default(),
+                    Some(batch),
+                    None,
+                    None,
+                    false,
+                    f64::INFINITY,
+                ),
+                owner.tick(),
+            )
+        });
+        tick.unwrap();
+        let result = result.unwrap();
         let SerializedReadResult::Rows(rows) = result else {
             panic!("plain transaction query must return rows")
         };
