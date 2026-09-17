@@ -144,6 +144,45 @@ fn maintained_rows_by_uuid_for_identity(
 }
 
 #[test]
+fn identical_current_subscription_compilation_reuses_program() {
+    let schema = access_path_schema();
+    let (_dir, mut core) = open_node_with_schema(node(0xc4), schema);
+    let shape = Query::from("docs").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    core.reset_query_program_compilations_for_test();
+    let (first_receiver, ..) = core
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Global,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+    core.unsubscribe_groove_subscription(first_receiver.id());
+    let after_first = core.query_program_compilations_for_test();
+    assert!(after_first > 0, "the first subscription must compile its program");
+
+    let (second_receiver, ..) = core
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Global,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+    core.unsubscribe_groove_subscription(second_receiver.id());
+
+    assert_eq!(
+        core.query_program_compilations_for_test(),
+        after_first,
+        "an identical storage-backed subscription should reuse its compiled program"
+    );
+}
+
+#[test]
 fn history_complete_query_derives_membership_from_canonical_rows() {
     let schema = access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());

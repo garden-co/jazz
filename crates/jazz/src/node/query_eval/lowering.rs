@@ -598,6 +598,10 @@ where
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
     ) -> Result<QueryProgram, Error> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.query_program_compilations += 1;
+        }
         // Preflight-only compilation also owns its temporary Edge inputs.
         // Actual maintained views hold a second owner across their lifetime.
         let _edge_availability_owner = if request.authorization_mode

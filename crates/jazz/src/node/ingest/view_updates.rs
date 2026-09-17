@@ -809,6 +809,10 @@ where
             if !seen.insert(tx_id) {
                 continue;
             }
+            #[cfg(any(test, feature = "testing"))]
+            {
+                self.merge_head_reachability_nodes += 1;
+            }
             // Reachability is row-local. Preserve the transaction-presence and
             // resident-cache semantics without materializing its sibling rows.
             let Some(tx) = self.query_transaction(tx_id).await? else {

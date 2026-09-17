@@ -896,6 +896,53 @@ fn ancestry_lookup_avoids_transaction_wide_reads_resident_and_cold() {
     }
 }
 
+#[test]
+fn repeated_row_reachability_checks_reuse_complete_ancestry() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xe4), schema);
+    let row_uuid = row(0xe5);
+    let mut parent = None;
+    let chain_len = 96;
+    for index in 0..chain_len {
+        let mut commit = MergeableCommit::new("todos", row_uuid, 10 + index as u64)
+            .cells(BTreeMap::from([("title".to_owned(), "revision".to_owned())]));
+        if let Some(parent) = parent {
+            commit = commit.parents(vec![parent]);
+        }
+        parent = Some(writer.commit_mergeable_unit_settled(commit).unwrap().0);
+    }
+    let head = parent.expect("history chain has a head");
+    let table_id = writer
+        .physical_table_id_for_schema(writer.catalogue.current_write_schema.schema, "todos")
+        .unwrap();
+    let missing = TxId::new(TxTime::from(1), node(0xe6));
+
+    writer.reset_merge_head_reachability_walks_for_test();
+    assert!(!writer
+        .content_version_reaches_tx(
+            table_id,
+            &BranchKey::default(),
+            row_uuid,
+            head,
+            missing,
+        )
+        .unwrap());
+    assert!(!writer
+        .content_version_reaches_tx(
+            table_id,
+            &BranchKey::default(),
+            row_uuid,
+            head,
+            missing,
+        )
+        .unwrap());
+
+    assert!(
+        writer.merge_head_reachability_nodes_for_test() <= chain_len,
+        "repeated membership checks must not rescan the complete row ancestry"
+    );
+}
+
 // Internal work-count receipt: transaction fate handling may read the full
 // unit once; exact row matching must not add another transaction-wide read.
 #[test]

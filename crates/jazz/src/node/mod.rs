@@ -578,6 +578,12 @@ pub struct NodeState<S> {
     /// node-scoped so unrelated parallel test nodes cannot contaminate it.
     #[cfg(any(test, feature = "testing"))]
     merge_head_reachability_walks: usize,
+    /// Test-only count of transaction nodes visited by merge-head walks.
+    #[cfg(any(test, feature = "testing"))]
+    merge_head_reachability_nodes: usize,
+    /// Test-only count of query programs actually lowered, excluding cache hits.
+    #[cfg(any(test, feature = "testing"))]
+    query_program_compilations: usize,
     /// Process-local claims attached to authenticated subscriber sessions.
     session_claims: BTreeMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.
@@ -753,10 +759,23 @@ where
 {
     pub(super) fn reset_merge_head_reachability_walks_for_test(&mut self) {
         self.merge_head_reachability_walks = 0;
+        self.merge_head_reachability_nodes = 0;
     }
 
     pub(super) fn merge_head_reachability_walks_for_test(&self) -> usize {
         self.merge_head_reachability_walks
+    }
+
+    pub(super) fn merge_head_reachability_nodes_for_test(&self) -> usize {
+        self.merge_head_reachability_nodes
+    }
+
+    pub(super) fn reset_query_program_compilations_for_test(&mut self) {
+        self.query_program_compilations = 0;
+    }
+
+    pub(super) fn query_program_compilations_for_test(&self) -> usize {
+        self.query_program_compilations
     }
 
     fn allocate_global_time_for_test(&mut self) -> GlobalTime {

@@ -778,6 +778,10 @@ where
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
             #[cfg(any(test, feature = "testing"))]
             merge_head_reachability_walks: 0,
+            #[cfg(any(test, feature = "testing"))]
+            merge_head_reachability_nodes: 0,
+            #[cfg(any(test, feature = "testing"))]
+            query_program_compilations: 0,
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
             active_session_claims: None,
