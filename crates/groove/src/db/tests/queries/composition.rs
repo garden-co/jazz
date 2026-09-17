@@ -2,6 +2,102 @@
 
 use super::*;
 
+/// Alice and Bob share an extrema query. Attaching Bob and issuing one-shot
+/// reads must not double-count Alice's retained inputs. Identical rows from
+/// two sources contribute twice, but the winner is always emitted once.
+/// seed -> attach twice -> retract duplicates -> empty -> attach -> refill.
+#[futures_test::test]
+async fn arg_by_shared_hydration_preserves_multiplicity_and_empty_refill() {
+    for maximum in [false, true] {
+        let storage = MemoryStorage::new(&["history", "history_shadow"]).unwrap();
+        let mut database = Database::new(two_history_tables_schema(), storage)
+            .await
+            .unwrap();
+        let input = GraphBuilder::union([
+            GraphBuilder::table("history"),
+            GraphBuilder::table("history_shadow"),
+        ]);
+        let graph = if maximum {
+            GraphBuilder::arg_max_by(input, ["row"], ["stamp", "node"])
+        } else {
+            GraphBuilder::arg_min_by(input, ["row"], ["stamp", "node"])
+        };
+        let older = history_values(1, 10, 1, "older");
+        let newer = history_values(1, 20, 1, "newer");
+        let initial = if maximum {
+            newer.clone()
+        } else {
+            older.clone()
+        };
+        let mut batch = database.open_batch();
+        batch.insert("history", older.clone());
+        batch.insert("history", newer.clone());
+        batch.insert("history_shadow", newer);
+        database.commit_batch(batch).await.unwrap();
+        let alice = database.subscribe_one_sink(graph.clone()).await.unwrap();
+        assert_eq!(
+            alice.recv().unwrap().to_values().unwrap(),
+            [(initial.clone(), 1)]
+        );
+        let bob = database.subscribe_one_sink(graph.clone()).await.unwrap();
+        assert_eq!(
+            bob.recv().unwrap().to_values().unwrap(),
+            [(initial.clone(), 1)]
+        );
+        assert_eq!(
+            database
+                .query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(initial.clone(), 1)]
+        );
+
+        let mut batch = database.open_batch();
+        batch.delete("history", history_key(1, 20, 1));
+        database.commit_batch(batch).await.unwrap();
+        for sub in [&alice, &bob] {
+            assert!(matches!(sub.try_recv(), Err(TryRecvError::Empty)));
+        }
+        let mut batch = database.open_batch();
+        batch.delete("history_shadow", history_key(1, 20, 1));
+        database.commit_batch(batch).await.unwrap();
+        for sub in [&alice, &bob] {
+            if maximum {
+                assert_eq!(
+                    sub.recv().unwrap().to_values().unwrap(),
+                    [(initial.clone(), -1), (older.clone(), 1)]
+                );
+            } else {
+                assert!(matches!(sub.try_recv(), Err(TryRecvError::Empty)));
+            }
+        }
+        let mut batch = database.open_batch();
+        batch.delete("history", history_key(1, 10, 1));
+        database.commit_batch(batch).await.unwrap();
+        for sub in [&alice, &bob] {
+            assert_eq!(
+                sub.recv().unwrap().to_values().unwrap(),
+                [(older.clone(), -1)]
+            );
+        }
+        let carol = database.subscribe_one_sink(graph.clone()).await.unwrap();
+        assert!(carol.recv().unwrap().is_empty());
+        assert!(database.query_graph(graph).await.unwrap().is_empty());
+        let refill = history_values(1, 30, 1, "refill");
+        let mut batch = database.open_batch();
+        batch.insert("history", refill.clone());
+        database.commit_batch(batch).await.unwrap();
+        for sub in [&alice, &bob, &carol] {
+            assert_eq!(
+                sub.recv().unwrap().to_values().unwrap(),
+                [(refill.clone(), 1)]
+            );
+        }
+    }
+}
+
 #[futures_test::test]
 async fn arg_max_by_feeds_join_and_anti_join() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"])

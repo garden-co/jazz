@@ -2,7 +2,6 @@
 
 use super::*;
 
-type SourceRecord = (Vec<u8>, Bytes);
 pub(super) type WindowedRecord = (Bytes, i64);
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -65,52 +64,40 @@ pub(super) fn arg_by_candidate_replaces(
 }
 
 pub(super) struct ArgBySpec<'a> {
-    pub(super) group_fields: &'a [String],
     pub(super) group_field_indices: &'a [usize],
     pub(super) comparison_field_indices: &'a [usize],
     pub(super) direction: ArgByDirection,
 }
 
-pub(super) fn arg_by_winner_from_records(
+pub(super) fn arg_by_order_key(
     descriptor: RecordDescriptor,
-    comparison_field_indices: &[usize],
-    records: Vec<(Bytes, i64)>,
-    direction: ArgByDirection,
-) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    // Match TopBy's total-order convention: declared fields decide the rank
-    // under the operator direction, while encoded record bytes break exact
-    // comparison-key ties ascending for both ArgMinBy and ArgMaxBy.
-    let mut winner = None;
-    for (record, weight) in records {
-        if weight <= 0 {
-            continue;
-        }
-        let key = encoded_record_key_part(descriptor, &record, comparison_field_indices)?;
-        let replaces = winner
-            .as_ref()
-            .is_none_or(|(winner_key, winner_record): &SourceRecord| {
-                arg_by_candidate_replaces(&key, &record, winner_key, winner_record, direction)
-            });
-        if replaces {
-            winner = Some((key, record));
-        }
-    }
-    Ok(winner)
+    delta: &RecordDelta,
+    spec: &ArgBySpec<'_>,
+) -> Result<CollectByOrderKey, IvmRuntimeError> {
+    // Reuse the sparse ordered group without changing ArgBy's existing encoded
+    // comparison semantics. Only the declared key reverses for Max; the full
+    // record tie-breaker remains ascending for both directions.
+    Ok((
+        vec![TopBySortPart {
+            key: TopBySortKey::Bytes(encoded_record_key_part(
+                descriptor,
+                delta.raw(),
+                spec.comparison_field_indices,
+            )?),
+            direction: match spec.direction {
+                ArgByDirection::Min => TopByDirection::Asc,
+                ArgByDirection::Max => TopByDirection::Desc,
+            },
+        }],
+        delta.record.clone(),
+    ))
 }
 
-pub(super) fn arg_by_winner_before_from_deltas(
-    descriptor: RecordDescriptor,
-    comparison_field_indices: &[usize],
-    after_records: Vec<(Bytes, i64)>,
-    deltas: Vec<RecordDelta>,
-    direction: ArgByDirection,
-) -> Result<Option<SourceRecord>, IvmRuntimeError> {
-    arg_by_winner_from_records(
-        descriptor,
-        comparison_field_indices,
-        records_before_deltas(after_records, &deltas),
-        direction,
-    )
+pub(super) fn arg_by_ordered_winner(group: &CollectByGroup) -> Option<Bytes> {
+    group
+        .iter()
+        .find(|(_, weight)| **weight > 0)
+        .map(|(key, _)| key.1.clone())
 }
 
 #[cfg(test)]
