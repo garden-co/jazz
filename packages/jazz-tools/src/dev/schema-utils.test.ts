@@ -100,6 +100,19 @@ describe("structuralSchemaHash", () => {
         },
       };
       expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
+      expect(wasmSchemasEqual(schema, structuredClone(schema)), entry.name).toBe(true);
+      if (entry.default !== undefined) {
+        const missing = structuredClone(schema);
+        delete missing.values.columns[0]!.default;
+        expect(wasmSchemasEqual(schema, missing), entry.name).toBe(false);
+      }
+      if (entry.default?.type === "Row") {
+        const altered = structuredClone(schema);
+        const value = altered.values.columns[0]!.default!;
+        if (value.type !== "Row") throw new Error("Expected row corpus default");
+        value.value.values.reverse();
+        expect(wasmSchemasEqual(schema, altered), "row default value order").toBe(false);
+      }
     }
   });
 
