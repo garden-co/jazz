@@ -25,9 +25,9 @@ describe("dev-server re-export compatibility", () => {
     const dev = await import("./index.js");
     expect(typeof dev.startLocalJazzServer).toBe("function");
     expect(typeof dev.watchSchema).toBe("function");
-    expect(typeof dev.pushSchema).toBe("function");
-    expect(typeof dev.pushPermissions).toBe("function");
-    expect(typeof dev.pushMigration).toBe("function");
+    expect(dev).not.toHaveProperty("pushSchema");
+    expect(dev).not.toHaveProperty("pushPermissions");
+    expect(dev).not.toHaveProperty("pushMigration");
     expect(typeof dev.deploy).toBe("function");
   });
 

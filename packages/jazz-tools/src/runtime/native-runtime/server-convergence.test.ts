@@ -1,4 +1,4 @@
-import { allowAll } from "../testing/allow-all.js";
+import { allowAll, grants } from "../testing/allow-all.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -439,6 +439,7 @@ async function publishSchema(server: LocalJazzServerHandle): Promise<{ hash: str
     serverUrl: server.url,
     adminSecret: server.adminSecret,
     schema: allowedSchema,
+    permissions: { todos: grants },
   });
 
   return { hash: result.schema.hash };

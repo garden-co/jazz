@@ -749,7 +749,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        permissions: todoServerProject.permissions!,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -1686,7 +1686,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        permissions: todoServerProject.permissions!,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -1775,6 +1775,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         schema: TEST_SCHEMA,
+        permissions: {},
       });
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");

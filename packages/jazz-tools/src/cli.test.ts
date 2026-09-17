@@ -18,7 +18,10 @@ import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
-import { createMigration as createCatalogueMigration } from "./dev/catalogue-project.js";
+import {
+  createMigration as createCatalogueMigration,
+  pushMigration as rawPushMigration,
+} from "./dev/catalogue-project.js";
 import {
   APP_ID_ENV_VARS,
   SERVER_URL_ENV_VARS,
@@ -29,7 +32,6 @@ import {
   loadEnvFile,
   readEnvFiles,
   permissionsStatus as rawPermissionsStatus,
-  pushMigration as rawPushMigration,
   resolveEnvVar,
   schemaHash as rawSchemaHash,
   validate,
@@ -2620,7 +2622,7 @@ describe("cli permissions", () => {
     );
     expect(logs).toContain(`Server permissions head is v3 on ${schemaHash.slice(0, 12)}.`);
     expect(logs).toContain(
-      "Next push will require parent bundle 22222222-2222-2222-2222-222222222222.",
+      "Next deploy will require parent bundle 22222222-2222-2222-2222-222222222222.",
     );
   });
 
@@ -2701,51 +2703,20 @@ describe("cli permissions", () => {
 });
 
 describe("cli deploy", () => {
-  it("publishes only the structural schema when there's no permissions.ts file", async () => {
+  it("rejects missing permissions before publication", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-
-    const schemaHash = "1234123412341234123412341234123412341234123412341234123412341234";
-    let schemaPublishBody: any;
-
-    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
-        schemaPublishBody = JSON.parse(String(init?.body));
-        return new Response(
-          JSON.stringify({
-            objectId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            hash: schemaHash,
-          }),
-          { status: 201 },
-        );
-      }
-
-      if (input.includes(`/admin/permissions`)) {
-        throw new Error("deploy() should skip permissions when no permissions.ts is present.");
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-
-    const { logs } = await captureConsoleLogs(() =>
+    await expect(
       deploy({
-        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         schemaDir: root,
         migrationsDir: join(root, "migrations"),
       }),
-    );
-
-    expect(schemaPublishBody.schema.tables.projects.columns[0].name).toBe("name");
-    expect(logs).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
-    expect(logs).toContain(`Published the current schema as ${schemaHash.slice(0, 12)}.`);
-    expect(logs).toContain("No permissions.ts found; skipping permissions publish.");
+    ).rejects.toThrow("Create a permissions.ts file");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("publishes the structural schema and permissions when the server has neither", async () => {
@@ -2997,7 +2968,7 @@ describe("cli deploy", () => {
         migrationsDir: join(root, "migrations"),
       }),
     ).rejects.toThrow(
-      "The new permissions schema bbbbbbbbbbbb is not connected to the previous permissions schema aaaaaaaaaaaa on the server. Reads and writes may fail until you push a migration. Run `jazz-tools migrations create test-app --fromHash aaaaaaaaaaaa --toHash bbbbbbbbbbbb` to create a migration and then re-run this command.",
+      "The new schema bbbbbbbbbbbb is not connected to the previous schema aaaaaaaaaaaa on the server. Run `jazz-tools migrations create test-app --fromHash aaaaaaaaaaaa --toHash bbbbbbbbbbbb` to create a migration and then re-run this command.",
     );
   });
 
@@ -3350,81 +3321,20 @@ export default s.defineMigration({
     expect(pushedMigrations).toHaveLength(2);
   });
 
-  it("warns instead of failing with --no-verify when a migration is missing", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-
-    const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const currentHead = {
-      schemaHash: previousSchemaHash,
-      version: 4,
-      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
-      bundleObjectId: "22222222-2222-2222-2222-222222222222",
-    };
-
-    const fetchMock = vi.fn(async (input: string, _init?: RequestInit) => {
-      if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-        return new Response(JSON.stringify({ hashes: [previousSchemaHash, nextSchemaHash] }), {
-          status: 200,
-        });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${previousSchemaHash}`)) {
-        return storedSchemaResponse({
-          todos: {
-            columns: [
-              { name: "title", column_type: { type: "Text" }, nullable: false },
-              { name: "ownerId", column_type: { type: "Text" }, nullable: false },
-            ],
-          },
-        });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
-        return storedSchemaResponse(storedRootSchema());
-      }
-
-      if (input.includes(`/apps/${APP_ID}/admin/schema-connectivity?`)) {
-        return new Response(JSON.stringify({ connected: false }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
-        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
-      }
-
-      if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
-        return new Response(
-          JSON.stringify({
-            head: {
-              schemaHash: nextSchemaHash,
-              version: 5,
-              parentBundleObjectId: currentHead.bundleObjectId,
-              bundleObjectId: "33333333-3333-3333-3333-333333333333",
-            },
-          }),
-          { status: 201 },
-        );
-      }
-
-      throw new Error(`Unexpected fetch: ${input}`);
-    });
+  it("rejects the removed noVerify bypass before publication", async () => {
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-
-    const { logs } = await captureConsoleLogs(() =>
+    await expect(
       deploy({
-        appId: APP_ID,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
-        schemaDir: root,
-        migrationsDir: join(root, "migrations"),
+        schemaDir: "/unused",
+        migrationsDir: "/unused",
+        // @ts-expect-error Old JavaScript callers must not silently bypass migration checks.
         noVerify: true,
       }),
-    );
-
-    expect(logs.some((line) => line.includes("Warning: The new permissions schema"))).toBe(true);
-    expect(logs.some((line) => line.includes("Published permissions"))).toBe(true);
+    ).rejects.toThrow("noVerify is no longer supported");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("warns about tables with no explicit permission policy", async () => {
@@ -3556,12 +3466,22 @@ function hostNativeBinaryName(): string | null {
 
 describe("bin integration", () => {
   it.each([
+    ["migrations", "push", "app", "old", "new"],
+    ["deploy", "app", "--no-verify"],
+  ])("rejects removed publication command or bypass: %j", (...args) => {
+    const result = runBin(args);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("deploy");
+  });
+
+  it.each([
     ["before command", ["--env-file", ".env.staging", "deploy", "explicit-cli-app"]],
     ["after command", ["deploy", "--env-file", ".env.staging", "explicit-cli-app"]],
     ["equals before command", ["--env-file=.env.staging", "deploy", "explicit-cli-app"]],
   ] as const)("loads an explicit env file and dispatches deploy (%s)", async (_label, args) => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     const { server, url } = await listenForDeployRequest();
     let resolveClose!: () => void;
     let rejectClose!: (reason?: unknown) => void;
@@ -4010,7 +3930,8 @@ exit 0
     expect(result.stdout).toContain("validate");
     expect(result.stdout).toContain("schema export");
     expect(result.stdout).toContain("deploy");
-    expect(result.stdout).toContain("migrations push");
+    expect(result.stdout).not.toContain("migrations push");
+    expect(result.stdout).toContain("deploy");
     expect(result.stdout).toContain("server");
     expect(result.stdout).toContain("create");
   });
