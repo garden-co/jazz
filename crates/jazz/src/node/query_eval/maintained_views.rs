@@ -326,10 +326,17 @@ pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
 
 impl LocalMaintainedViewSubscription {
     fn needs_ordered_relation_snapshot(&self) -> bool {
+        let query_has_window = !self.result_query.order_by.is_empty()
+            || self.result_query.limit.is_some()
+            || self.result_query.offset != 0;
+        let relation_has_union_window =
+            self.result_query.relation.as_ref().is_some_and(|relation| {
+                crate::query::relation_union_presentation_order(relation).is_some()
+                    || crate::query::relation_union_parts(&relation.rel)
+                        .is_some_and(|parts| parts.limit.is_some() || parts.offset.is_some())
+            });
         (self.result_relation_projection.is_some() || self.result_relation_projections.is_some())
-            && (!self.result_query.order_by.is_empty()
-                || self.result_query.limit.is_some()
-                || self.result_query.offset != 0)
+            && (query_has_window || relation_has_union_window)
     }
 }
 
