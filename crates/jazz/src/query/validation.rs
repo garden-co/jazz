@@ -247,22 +247,33 @@ fn validate_query_canonical_parts(
                     "relation query output table does not match its Query envelope".to_owned(),
                 ));
             }
-            // A relation facade may arrive already normalized with its
-            // relation-owned filters, joins, ordering, and window clauses in
-            // the ordinary Query envelope. Reject only clauses that do not
-            // match the relation's canonical lowering.
-            if query.filters != resolved.filters
-                || query.joins != resolved.joins
-                || query.flat_join != resolved.flat_join
-                || query.policy_branches != resolved.policy_branches
-                || query.reachable != resolved.reachable
-                || query.inherits != resolved.inherits
-                || query.includes != resolved.includes
-                || query.order_by != resolved.order_by
-                || query.aggregate != resolved.aggregate
-                || query.limit != resolved.limit
-                || query.offset != resolved.offset
-            {
+            // A relation facade sent over the public wire carries no ordinary
+            // clauses; an internal caller may already have materialized the
+            // exact clauses generated from the relation. Reject only ordinary
+            // clauses that are neither absent nor canonical.
+            let matches_generated = query.filters == resolved.filters
+                && query.joins == resolved.joins
+                && query.flat_join == resolved.flat_join
+                && query.policy_branches == resolved.policy_branches
+                && query.reachable == resolved.reachable
+                && query.inherits == resolved.inherits
+                && query.includes == resolved.includes
+                && query.order_by == resolved.order_by
+                && query.aggregate == resolved.aggregate
+                && query.limit == resolved.limit
+                && query.offset == resolved.offset;
+            let has_ordinary_clauses = !query.filters.is_empty()
+                || !query.joins.is_empty()
+                || query.flat_join.is_some()
+                || !query.policy_branches.is_empty()
+                || !query.reachable.is_empty()
+                || !query.inherits.is_empty()
+                || !query.includes.is_empty()
+                || !query.order_by.is_empty()
+                || query.aggregate.is_some()
+                || query.limit.is_some()
+                || query.offset != 0;
+            if has_ordinary_clauses && !matches_generated {
                 return Err(QueryError::UnsupportedRelationQuery(
                     "relation query cannot be combined with ordinary query clauses".to_owned(),
                 ));

@@ -3369,9 +3369,26 @@ fn lower_order_key(
     request: &QueryProgramRequest,
 ) -> Result<TopByOrder, UnsupportedReason> {
     let lowered = lower_field_ref(&key.value, plan, source, request, "order key")?;
-    let field = match collect_window_source_field(source, &key.value) {
-        Some(field) => FieldRef::stored_name(field.name.clone().expect("window fields are named")),
-        None => FieldRef::name(lowered),
+    let relation_output = request
+        .output
+        .app_rows
+        .as_ref()
+        .is_some_and(|output| matches!(output.projection, PayloadProjection::Relation(_)));
+    let field = match (
+        relation_output,
+        collect_window_source_field(source, &key.value),
+    ) {
+        (true, Some(_)) => FieldRef::resolved(
+            resolved_source_descriptor_index(source, &lowered).ok_or_else(|| {
+                UnsupportedReason::Operator(format!(
+                    "resolved order key field {lowered:?} is missing from the source descriptor"
+                ))
+            })?,
+        ),
+        (false, Some(field)) => {
+            FieldRef::stored_name(field.name.clone().expect("window fields are named"))
+        }
+        (_, None) => FieldRef::name(lowered),
     };
     Ok(TopByOrder {
         field,
