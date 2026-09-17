@@ -3655,6 +3655,137 @@ fn cold_browser_relay_restore_yields_to_storage() {
 }
 
 #[test]
+fn reopened_local_subscriber_does_not_poison_on_evicted_causal_parent() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xcf; 16]);
+    let worker = open_db(0xcf, author, &schema);
+    let core = open_core(0xd0, AuthorSubject::SYSTEM, &schema);
+
+    let (worker_transport, core_transport) = duplex();
+    let worker_upstream = block_on(worker.connect_upstream(worker_transport));
+    let core_subscriber = core.accept_subscriber(core_transport, author);
+
+    let parent = worker
+        .insert(
+            "todos",
+            cells("accepted parent", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let parent_tx = parent.mergeable_tx_id();
+    worker.tick().unwrap();
+    core.tick().unwrap();
+    worker.tick().unwrap();
+    assert!(matches!(
+        worker.write_state(parent_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
+
+    let child = worker
+        .update(
+            "todos",
+            parent.row_uuid(),
+            cells("pending child", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let child_tx = child.mergeable_tx_id();
+    assert!(matches!(
+        worker.write_state(child_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            ..
+        }
+    ));
+
+    assert!(worker.detach_connection(&worker_upstream));
+    assert!(core.server.detach_connection(&core_subscriber));
+    let eviction = block_on(
+        worker
+            .node
+            .node
+            .borrow_mut()
+            .evict_cold(&crate::peer::PeerEvictionPins::default()),
+    )
+    .unwrap();
+    assert!(
+        eviction.row_versions_evictable > 0,
+        "the accepted parent must be evictable while the pending child remains pinned"
+    );
+
+    let foreground = open_db(0xd1, author, &schema);
+    foreground.set_non_durable_client();
+    let (foreground_transport, worker_foreground_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
+
+    for _ in 0..8 {
+        worker
+            .tick()
+            .expect("worker admission must survive incomplete replay ancestry");
+        foreground
+            .tick()
+            .expect("foreground must not receive an unappliable replay frame");
+    }
+}
+
+#[test]
+fn reopened_local_subscriber_replays_deep_causal_chain_without_stack_overflow() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc9; 16]);
+    let worker = open_db(0xc9, author, &schema);
+
+    let first = worker
+        .insert(
+            "todos",
+            cells("causal root", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let row_id = first.row_uuid();
+    let mut latest_tx = first.mergeable_tx_id();
+    for index in 0..256 {
+        let write = worker
+            .update(
+                "todos",
+                row_id,
+                cells(&format!("causal step {index}"), false, author),
+                Default::default(),
+            )
+            .unwrap();
+        latest_tx = write.mergeable_tx_id();
+    }
+
+    let foreground = open_db(0xca, author, &schema);
+    foreground.set_non_durable_client();
+    let (foreground_transport, worker_foreground_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
+
+    for _ in 0..8 {
+        worker
+            .tick()
+            .expect("deep replay must not overflow the owner stack");
+        foreground
+            .tick()
+            .expect("foreground must not receive a malformed replay frame");
+    }
+    assert!(matches!(
+        worker.write_state(latest_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn local_acknowledgements_do_not_reprobe_retained_history() {
     // Internal topology is necessary to count storage probes at the local
     // acknowledgement boundary independently of unrelated query/persistence
