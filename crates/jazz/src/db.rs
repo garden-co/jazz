@@ -2308,6 +2308,9 @@ where
         .iter()
         .filter(|tx_id| matches!(statuses.get(tx_id), Some(LocalReplayStatus::Complete)));
     for tx_id in ready_roots {
+        // Re-admit through the blocked state first so a replacement queue can
+        // reclaim a dead same-author route and its held terminal fate.
+        register_local_replay_route(routes, *tx_id, downstream_fates, author, None);
         register_local_fate_route(routes, *tx_id, downstream_fates);
     }
     for tx_id in roots {
