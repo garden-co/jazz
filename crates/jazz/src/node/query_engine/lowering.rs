@@ -683,6 +683,14 @@ fn parameter_domain_for_request(
     request: &QueryProgramRequest,
 ) -> Result<ParameterDomain, UnsupportedReason> {
     let mut domain = parameter_domain(&request.input.shape);
+    // The binding-source identity describes the validated parameter contract,
+    // not whichever physical sources survive access-path selection. In
+    // particular, enum columns acquire registry identities in storage; using
+    // those column types for a binding would give a retained plan a different
+    // descriptor from a selective hydration of the same validated query.
+    for (name, ty) in &request.input.binding.param_types {
+        domain.user_params.insert(name.clone(), ty.clone());
+    }
     for (name, ty) in &request.input.binding.extra_user_params {
         if let Some(existing) = domain.user_params.get(name)
             && existing != ty
