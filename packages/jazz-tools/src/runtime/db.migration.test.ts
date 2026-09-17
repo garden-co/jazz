@@ -316,7 +316,9 @@ it("publishes generated default-bearing relation migrations and preserves them a
       source.replaceAll('.default("draft")', '.default("tampered")'),
     ]) {
       await writeFile(migrationFile, invalid);
-      await expect(pushMigration(options)).rejects.toThrow();
+      await expect(pushMigration(options)).rejects.toThrow(
+        /schema witness for table records does not match canonical schema/,
+      );
       expect(await fetchSchemaConnectivity(server.url, options)).toEqual({ connected: false });
     }
     await writeFile(migrationFile, source);
