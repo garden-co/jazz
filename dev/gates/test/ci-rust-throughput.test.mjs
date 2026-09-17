@@ -1832,9 +1832,25 @@ test("pkg.pr.new previews omit Windows while release package builds retain it", 
   assert.match(packageBuild, /default: .*win32-x64-msvc/);
   assert.match(packageBuild, /include: \$\{\{ fromJSON\(inputs\.napi_matrix\) \}\}/);
   assert.match(packageBuild, /Remove Windows package omitted by this build/);
-  assert.match(packageBuild, /stage-napi-manifests\.mjs linux-x64-gnu darwin-x64 darwin-arm64/);
+  const stagedPreviewPlatforms =
+    /stage-napi-manifests\.mjs linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64/;
+  const previewPlatforms =
+    /napi_matrix: .*linux-x64-gnu.*linux-arm64-gnu.*darwin-x64.*darwin-arm64/;
+  assert.match(packageBuild, stagedPreviewPlatforms);
   assert.doesNotMatch(previewBuild, /win32-x64-msvc/);
-  assert.match(previewBuild, /napi_matrix: .*linux-x64-gnu.*darwin-x64.*darwin-arm64/);
+  assert.match(previewBuild, previewPlatforms);
+  // Both Linux bindings must be built and admitted into the staged preview.
+  for (const platform of ["linux-x64-gnu", "linux-arm64-gnu"]) {
+    assert.throws(
+      () =>
+        assert.match(packageBuild.replaceAll(platform, "omitted-platform"), stagedPreviewPlatforms),
+      { code: "ERR_ASSERTION" },
+    );
+    assert.throws(
+      () => assert.match(previewBuild.replaceAll(platform, "omitted-platform"), previewPlatforms),
+      { code: "ERR_ASSERTION" },
+    );
+  }
 });
 
 test("TypeScript CI overlaps independent Node and browser suites after one artifact build", () => {

@@ -3,7 +3,7 @@ import { schema as s, generateAuthSecret } from "../../src/index.js";
 import { createBrowserTestDb as createDb } from "./support.js";
 
 const app = s.defineApp({
-  tasks: s.table({ title: s.string(), done: s.boolean() }),
+  tasks: s.table({ title: s.string(), done: s.boolean() }, {}),
 });
 
 it("settles an empty local read and retains acknowledged writes across repeated reopen", async () => {

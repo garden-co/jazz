@@ -1,3 +1,4 @@
+import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 import type {
   ColumnType,
   TablePolicies,
@@ -163,7 +164,7 @@ export async function publishStoredSchema(
       "Content-Type": "application/json",
       "X-Jazz-Admin-Secret": options.adminSecret,
     },
-    body: JSON.stringify({ schema: { tables: options.schema } }),
+    body: JSON.stringify({ schema: { tables: options.schema } }, runtimeSchemaJsonReplacer),
   });
 
   if (!response.ok) {

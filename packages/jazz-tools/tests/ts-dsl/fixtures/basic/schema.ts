@@ -17,41 +17,66 @@ const jsonSchemaWithConstraints = z.object({
 });
 
 export const schema = {
-  users: s.table({
-    name: s.string(),
-    friendsIds: s.array(s.ref("users")),
-  }),
-  projects: s.table({
-    name: s.string(),
-  }),
+  users: s.table(
+    {
+      name: s.string(),
+      friendsIds: s.array(s.uuid()),
+    },
+    {
+      friends: s.rel("users", "friendsIds"),
+      usersViaFriends: s.reverse("users", "friends"),
+      todosViaOwner: s.reverse("todos", "owner"),
+      todosViaAssignees: s.reverse("todos", "assignees"),
+    },
+  ),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todosViaProject: s.reverse("todos", "project") },
+  ),
   todos: s
-    .table({
-      title: s.string(),
-      done: s.boolean().default(false),
-      tags: s.array(s.string()).default([]),
-      projectId: s.ref("projects"),
-      ownerId: s.ref("users").optional(),
-      assigneesIds: s.array(s.ref("users")).default([]),
-    })
+    .table(
+      {
+        title: s.string(),
+        done: s.boolean().default(false),
+        tags: s.array(s.string()).default([]),
+        projectId: s.uuid(),
+        ownerId: s.uuid().optional(),
+        assigneesIds: s.array(s.uuid()).default([]),
+      },
+      {
+        project: s.rel("projects", "projectId"),
+        owner: s.rel("users", "ownerId"),
+        assignees: s.rel("users", "assigneesIds"),
+        table_with_defaultsViaRef: s.reverse("table_with_defaults", "ref"),
+      },
+    )
     .indexOnly(["done"]),
-  table_with_defaults: s.table({
-    integer: s.int().default(1),
-    float: s.float().default(1),
-    bytes: s.bytes().default(new Uint8Array([0, 1, 255])),
-    enum: s.enum("a", "b", "c").default("a"),
-    json: s.json(jsonSchema).default({ name: "default name" }),
-    timestampDate: s.timestamp().default(new Date("2026-01-01")),
-    timestampNumber: s.timestamp().default(0),
-    string: s.string().default("default value"),
-    array: s.array(s.string()).default(["a", "b", "c"]),
-    boolean: s.boolean().default(true),
-    nullable: s.string().optional().default(null),
-    nullableInteger: s.int().optional().default(null),
-    refId: s.ref("todos").optional().default("00000000-0000-0000-0000-000000000000"),
-  }),
-  table_with_constraints: s.table({
-    data: s.json(jsonSchemaWithConstraints),
-  }),
+  table_with_defaults: s.table(
+    {
+      integer: s.int().default(1),
+      float: s.float().default(1),
+      bytes: s.bytes().default(new Uint8Array([0, 1, 255])),
+      enum: s.enum("a", "b", "c").default("a"),
+      json: s.json(jsonSchema).default({ name: "default name" }),
+      timestampDate: s.timestamp().default(new Date("2026-01-01")),
+      timestampNumber: s.timestamp().default(0),
+      string: s.string().default("default value"),
+      array: s.array(s.string()).default(["a", "b", "c"]),
+      boolean: s.boolean().default(true),
+      nullable: s.string().optional().default(null),
+      nullableInteger: s.int().optional().default(null),
+      refId: s.uuid().optional().default("00000000-0000-0000-0000-000000000000"),
+    },
+    { ref: s.rel("todos", "refId") },
+  ),
+  table_with_constraints: s.table(
+    {
+      data: s.json(jsonSchemaWithConstraints),
+    },
+    {},
+  ),
 };
 
 export type AppSchema = s.Schema<typeof schema>;

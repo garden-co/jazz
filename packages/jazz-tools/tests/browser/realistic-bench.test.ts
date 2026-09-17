@@ -261,43 +261,90 @@ const DEFAULT_CI_BROWSER_LIMITS = {
 type BrowserLimitOverrides = Partial<Record<keyof typeof DEFAULT_CI_BROWSER_LIMITS, number>>;
 
 const projectBoardSchema = {
-  users: s.table({ display_name: s.string(), email: s.string() }),
-  organizations: s.table({ name: s.string(), created_at: s.timestamp() }),
-  memberships: s.table({
-    organization_id: s.ref("organizations"),
-    user_id: s.ref("users"),
-    role: s.string(),
-  }),
-  projects: s.table({
-    organization_id: s.ref("organizations"),
-    name: s.string(),
-    archived: s.boolean(),
-    updated_at: s.timestamp(),
-  }),
-  tasks: s.table({
-    project_id: s.ref("projects"),
-    title: s.string(),
-    status: s.string(),
-    priority: s.int(),
-    assignee_id: s.ref("users"),
-    updated_at: s.timestamp(),
-    due_at: s.timestamp().optional(),
-  }),
-  task_comments: s.table({
-    task_id: s.ref("tasks"),
-    author_id: s.ref("users"),
-    body: s.string(),
-    created_at: s.timestamp(),
-  }),
-  task_watchers: s.table({ task_id: s.ref("tasks"), user_id: s.ref("users") }),
-  activity_events: s.table({
-    project_id: s.ref("projects"),
-    task_id: s.ref("tasks").optional(),
-    actor_id: s.ref("users"),
-    kind: s.string(),
-    created_at: s.timestamp(),
-    payload: s.string(),
-  }),
+  users: s.table(
+    { display_name: s.string(), email: s.string() },
+    {
+      membershipsViaUser: s.reverse("memberships", "user"),
+      tasksViaAssignee: s.reverse("tasks", "assignee"),
+      task_commentsViaAuthor: s.reverse("task_comments", "author"),
+      task_watchersViaUser: s.reverse("task_watchers", "user"),
+      activity_eventsViaActor: s.reverse("activity_events", "actor"),
+    },
+  ),
+  organizations: s.table(
+    { name: s.string(), created_at: s.timestamp() },
+    {
+      membershipsViaOrganization: s.reverse("memberships", "organization"),
+      projectsViaOrganization: s.reverse("projects", "organization"),
+    },
+  ),
+  memberships: s.table(
+    {
+      organization_id: s.uuid(),
+      user_id: s.uuid(),
+      role: s.string(),
+    },
+    { organization: s.rel("organizations", "organization_id"), user: s.rel("users", "user_id") },
+  ),
+  projects: s.table(
+    {
+      organization_id: s.uuid(),
+      name: s.string(),
+      archived: s.boolean(),
+      updated_at: s.timestamp(),
+    },
+    {
+      organization: s.rel("organizations", "organization_id"),
+      tasksViaProject: s.reverse("tasks", "project"),
+      activity_eventsViaProject: s.reverse("activity_events", "project"),
+    },
+  ),
+  tasks: s.table(
+    {
+      project_id: s.uuid(),
+      title: s.string(),
+      status: s.string(),
+      priority: s.int(),
+      assignee_id: s.uuid(),
+      updated_at: s.timestamp(),
+      due_at: s.timestamp().optional(),
+    },
+    {
+      project: s.rel("projects", "project_id"),
+      assignee: s.rel("users", "assignee_id"),
+      task_commentsViaTask: s.reverse("task_comments", "task"),
+      task_watchersViaTask: s.reverse("task_watchers", "task"),
+      activity_eventsViaTask: s.reverse("activity_events", "task"),
+    },
+  ),
+  task_comments: s.table(
+    {
+      task_id: s.uuid(),
+      author_id: s.uuid(),
+      body: s.string(),
+      created_at: s.timestamp(),
+    },
+    { task: s.rel("tasks", "task_id"), author: s.rel("users", "author_id") },
+  ),
+  task_watchers: s.table(
+    { task_id: s.uuid(), user_id: s.uuid() },
+    { task: s.rel("tasks", "task_id"), user: s.rel("users", "user_id") },
+  ),
+  activity_events: s.table(
+    {
+      project_id: s.uuid(),
+      task_id: s.uuid().optional(),
+      actor_id: s.uuid(),
+      kind: s.string(),
+      created_at: s.timestamp(),
+      payload: s.string(),
+    },
+    {
+      project: s.rel("projects", "project_id"),
+      task: s.rel("tasks", "task_id"),
+      actor: s.rel("users", "actor_id"),
+    },
+  ),
 };
 const projectBoardApp = s.defineApp(projectBoardSchema);
 
@@ -1566,6 +1613,11 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
 
   return {
     folders: {
+      relations: {
+        parent: { kind: "forward" as const, table: "folders", column: "parent_id" },
+        foldersViaParent: { kind: "reverse" as const, table: "folders", relation: "parent" },
+        documentsViaFolder: { kind: "reverse" as const, table: "documents", relation: "folder" },
+      },
       columns: [
         {
           name: "parent_id",
@@ -1597,6 +1649,7 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
       },
     },
     documents: {
+      relations: { folder: { kind: "forward" as const, table: "folders", column: "folder_id" } },
       columns: [
         {
           name: "folder_id",

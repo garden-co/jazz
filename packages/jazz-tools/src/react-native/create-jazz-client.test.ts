@@ -49,7 +49,7 @@ import {
 } from "./index.js";
 
 const app = s.defineApp({
-  notes: s.table({ title: s.string() }),
+  notes: s.table({ title: s.string() }, {}),
 });
 
 const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);

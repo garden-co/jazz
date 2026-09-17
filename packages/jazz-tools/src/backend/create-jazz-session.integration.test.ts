@@ -7,8 +7,8 @@ import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runt
 import { createJazzSession } from "./index.js";
 
 const app = s.defineApp({
-  notes: s.table({ text: s.string() }),
-  posts: s.table({ text: s.string() }),
+  notes: s.table({ text: s.string() }, {}),
+  posts: s.table({ text: s.string() }, {}),
 });
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.posts.allowRead.always();

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const nativePackages = [
   "@garden-co/jazz-napi-linux-x64-gnu",
+  "@garden-co/jazz-napi-linux-arm64-gnu",
   "@garden-co/jazz-napi-darwin-x64",
   "@garden-co/jazz-napi-darwin-arm64",
   "@garden-co/jazz-napi-win32-x64-msvc",

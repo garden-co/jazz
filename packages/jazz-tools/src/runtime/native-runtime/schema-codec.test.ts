@@ -19,12 +19,15 @@ describe("branch-aware schema codec", () => {
 
   it("exposes branchBy through the typed schema DSL", () => {
     const app = s.defineApp({
-      branches: s.table({ name: s.string() }),
+      branches: s.table({ name: s.string() }, { todosViaBranch: s.reverse("todos", "branch") }),
       todos: s
-        .table({
-          branch_id: s.ref("branches"),
-          title: s.string(),
-        })
+        .table(
+          {
+            branch_id: s.uuid(),
+            title: s.string(),
+          },
+          { branch: s.rel("branches", "branch_id") },
+        )
         .branchBy(["branch_id"]),
     });
 

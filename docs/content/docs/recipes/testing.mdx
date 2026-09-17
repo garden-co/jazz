@@ -283,18 +283,24 @@ import { deploy, startLocalJazzServer } from "jazz-tools/testing";
 import { describe, expect, it, vi } from "vitest";
 
 const oldSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 
 const newSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    tags: s.array(s.string()).default([]),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      tags: s.array(s.string()).default([]),
+    },
+    {},
+  ),
 };
 
 const oldApp = s.defineApp(oldSchema);

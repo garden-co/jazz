@@ -3,9 +3,18 @@ import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({
-  groups: schema.table({ name: schema.string() }),
-  tasks: schema.table({ title: schema.string(), group_id: schema.ref("groups") }),
-  notes: schema.table({ body: schema.string(), task_id: schema.ref("tasks") }),
+  groups: schema.table(
+    { name: schema.string() },
+    { tasksViaGroup: schema.reverse("tasks", "group") },
+  ),
+  tasks: schema.table(
+    { title: schema.string(), group_id: schema.uuid() },
+    { group: schema.rel("groups", "group_id"), notesViaTask: schema.reverse("notes", "task") },
+  ),
+  notes: schema.table(
+    { body: schema.string(), task_id: schema.uuid() },
+    { task: schema.rel("tasks", "task_id") },
+  ),
 });
 const query = app.groups
   .include({

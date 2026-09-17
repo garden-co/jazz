@@ -1,3 +1,4 @@
+import { rel, reverse } from "./relationships.js";
 // DSL for defining schemas and migrations
 
 import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
@@ -335,36 +336,6 @@ export type ColumnAlias<
                         ? EnumCasesColumn<Cases, Optional, HasDefault, Value>
                         : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
 
-type RefColumnKey = `${string}Id` | `${string}_id`;
-type RefArrayColumnKey = `${string}Ids` | `${string}_ids`;
-
-function isValidRefColumnKey(name: string): name is RefColumnKey {
-  return name.endsWith("Id") || name.endsWith("_id");
-}
-
-function isValidRefArrayColumnKey(name: string): name is RefArrayColumnKey {
-  return name.endsWith("Ids") || name.endsWith("_ids");
-}
-
-function validateReferenceColumnName(name: string, builder: ColumnBuilder): void {
-  if (!builder._references) {
-    return;
-  }
-
-  if (builder instanceof ArrayBuilder) {
-    if (!isValidRefArrayColumnKey(name)) {
-      throw new Error(
-        `Invalid array reference key '${name}'. Rename it to '${name}_ids' or '${name}Ids'.`,
-      );
-    }
-    return;
-  }
-
-  if (!isValidRefColumnKey(name)) {
-    throw new Error(`Invalid reference key '${name}'. Rename it to '${name}_id' or '${name}Id'.`);
-  }
-}
-
 function normalizeColumnMergeStrategy(
   strategy: ColumnMergeStrategyName,
   sqlType: SqlType,
@@ -579,63 +550,6 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
 
   get _references(): string | undefined {
     return undefined;
-  }
-}
-
-// ============================================================================
-// Ref Builder (for foreign key references in schema context)
-// ============================================================================
-
-class RefBuilder implements ColumnBuilder {
-  private _nullable = false;
-  private _default: unknown = undefined;
-  private _mergeStrategy: ColumnMergeStrategy | undefined;
-  _transform?: ColumnTransform<unknown, unknown>;
-
-  constructor(private _targetTable: string) {}
-
-  optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error(
-        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
-      );
-    }
-    this._nullable = true;
-    return this;
-  }
-
-  default(value: unknown): this {
-    this._default = value;
-    return this;
-  }
-
-  merge(strategy: ColumnMergeStrategyName): this {
-    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
-    return this;
-  }
-
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
-    return this;
-  }
-
-  _build(name: string): Column {
-    return {
-      name,
-      sqlType: this._sqlType,
-      nullable: this._nullable,
-      ...(this._default === undefined ? {} : { default: this._default }),
-      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
-      references: this._references,
-    };
-  }
-
-  get _sqlType(): SqlType {
-    return "UUID";
-  }
-
-  get _references(): string | undefined {
-    return this._targetTable;
   }
 }
 
@@ -953,8 +867,8 @@ export const col = {
       }[keyof Cases & string][]
     >;
   },
-  ref: <const TargetTable extends string>(targetTable: TargetTable) =>
-    new RefBuilder(targetTable) as unknown as RefColumn<TargetTable>,
+  rel,
+  reverse,
   array: <Builder extends AnyTypedColumnBuilder>(element: Builder) =>
     new ArrayBuilder(element as unknown as ColumnBuilder) as unknown as ArrayColumn<
       ColumnBuilderSqlType<Builder>,
@@ -987,27 +901,9 @@ export const col = {
 
 let collectedTables: Table[] = [];
 
-type ScalarIdColumnError<K extends string> =
-  `Invalid reference key '${K}'. Rename it to '${K}_id' or '${K}Id'`;
-
-type ArrayIdColumnError<K extends string> =
-  `Invalid array reference key '${K}'. Rename it to '${K}_ids' or '${K}Ids'`;
-
-type EnforceReferenceColumnNames<T extends Record<string, ColumnBuilder>> = {
-  [K in keyof T & string]: T[K] extends RefBuilder
-    ? K extends RefColumnKey
-      ? T[K]
-      : ScalarIdColumnError<K>
-    : T[K] extends ArrayBuilder<RefBuilder>
-      ? K extends RefArrayColumnKey
-        ? T[K]
-        : ArrayIdColumnError<K>
-      : T[K];
-};
-
 export function table<const T extends Record<string, ColumnBuilder>>(
   name: string,
-  columns: EnforceReferenceColumnNames<T> & NoExplicitIdColumn,
+  columns: T & NoExplicitIdColumn,
 ): void {
   if (arguments.length > 2) {
     throw new Error(
@@ -1018,7 +914,6 @@ export function table<const T extends Record<string, ColumnBuilder>>(
 
   const cols: Column[] = [];
   for (const [colName, builder] of Object.entries(columns as Record<string, ColumnBuilder>)) {
-    validateReferenceColumnName(colName, builder);
     assertUserTableColumnNameAllowed(colName);
     const column = builder._build(colName);
     if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;

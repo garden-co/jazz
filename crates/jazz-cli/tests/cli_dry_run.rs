@@ -189,7 +189,10 @@ fn parse_bound_port_record(contents: &str) -> Option<u16> {
 
 #[cfg(unix)]
 fn publish_empty_schema_and_wait_for_live_core(port: u16, data_dir: &Path) {
-    let body = r#"{"schema":{"tables":{}}}"#;
+    let body = serde_json::to_string(&json!({
+        "schema": empty_schema().public_schema(),
+    }))
+    .expect("serialize empty schema");
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect admin schema API");
     write!(
         stream,
@@ -1207,8 +1210,7 @@ fn server_command_reports_wired_loopback_shape() {
 }
 
 #[cfg(unix)]
-#[test]
-fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
+fn run_signal_lifecycle(signal: libc::c_int, signal_name: &str) {
     let temp_dir = tempfile::tempdir().expect("create server temp dir");
     let data_dir = temp_dir.path().join("data");
     let first_port_file = temp_dir.path().join("first-port");
@@ -1216,8 +1218,8 @@ fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
     publish_empty_schema_and_wait_for_live_core(first_port, &data_dir);
 
     // SAFETY: `first.id()` names the live child process spawned above.
-    let result = unsafe { libc::kill(first.id() as libc::pid_t, libc::SIGTERM) };
-    assert_eq!(result, 0, "send SIGTERM to jazz-tools server");
+    let result = unsafe { libc::kill(first.id() as libc::pid_t, signal) };
+    assert_eq!(result, 0, "send {signal_name} to jazz-tools server");
     wait_for_successful_exit(&mut first, Duration::from_secs(10));
 
     // Reopening the same RocksDB directory proves controlled shutdown released
@@ -1226,9 +1228,32 @@ fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
     let (mut second, _second_port) = start_jazz_tools_server(&data_dir, &second_port_file);
     assert!(data_dir.join("server-shell.rocksdb").is_dir());
     // SAFETY: `second.id()` names the live child process spawned above.
-    let result = unsafe { libc::kill(second.id() as libc::pid_t, libc::SIGTERM) };
-    assert_eq!(result, 0, "send SIGTERM to restarted jazz-tools server");
+    let result = unsafe { libc::kill(second.id() as libc::pid_t, signal) };
+    assert_eq!(
+        result, 0,
+        "send {signal_name} to restarted jazz-tools server"
+    );
     wait_for_successful_exit(&mut second, Duration::from_secs(10));
+}
+
+#[cfg(unix)]
+#[test]
+fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
+    run_signal_lifecycle(libc::SIGTERM, "SIGTERM");
+}
+
+/// Alice starts a persistent jazz-tools server, establishes its public HTTP
+/// storage path, and sends SIGINT only to the child PID. The child must finish
+/// controlled shutdown successfully and release the storage directory.
+///
+/// ```text
+/// alice ──HTTP schema publish──► jazz-tools child
+/// alice ──SIGINT(child PID)────► jazz-tools child ──controlled exit──► success
+/// ```
+#[cfg(unix)]
+#[test]
+fn jazz_tools_server_sigint_exits_cleanly_and_releases_storage() {
+    run_signal_lifecycle(libc::SIGINT, "SIGINT");
 }
 
 /// Bound-port readiness accepts only one complete newline-terminated numeric record.

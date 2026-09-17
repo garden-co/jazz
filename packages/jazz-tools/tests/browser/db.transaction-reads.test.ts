@@ -5,10 +5,13 @@ import { deploy } from "../../src/dev/catalogue.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
 const app = schema.defineApp({
-  todos: schema.table({
-    title: schema.string(),
-    done: schema.boolean(),
-  }),
+  todos: schema.table(
+    {
+      title: schema.string(),
+      done: schema.boolean(),
+    },
+    {},
+  ),
 });
 
 type Todo = RowOf<typeof app.todos>;

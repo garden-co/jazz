@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
+import { validate } from "./cli.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { loadCompiledSchema, schemaLoaderTestHooks } from "./schema-loader.js";
 
@@ -103,6 +104,37 @@ const FIXTURES_DIR = fileURLToPath(new URL("../tests/ts-dsl/fixtures", import.me
 const fixtureDir = (name: string) => `${FIXTURES_DIR}/${name}`;
 
 describe("bundled DSL schema loading", () => {
+  it("loads and validates separately authored schema, app, and declared relation permissions", async () => {
+    const root = fixtureDir("inferred-relations");
+    const { app } = await import("../tests/ts-dsl/fixtures/inferred-relations/app.js");
+    const { default: permissions } =
+      await import("../tests/ts-dsl/fixtures/inferred-relations/permissions.js");
+    const loaded = await loadCompiledSchema(root);
+    expect(loaded.wasmSchema).toEqual(app.wasmSchema);
+    expect(loaded.permissions).toEqual(permissions);
+    expect(loaded.permissionsFile).toBe(`${root}/permissions.ts`);
+    expect(loaded.permissions?.records?.select?.using).toMatchObject({
+      type: "ExistsRel",
+      rel: {
+        Project: {
+          input: {
+            Join: {
+              on: [{ left: { scope: "records", column: "person_ids" }, right: { column: "id" } }],
+            },
+          },
+        },
+      },
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await validate({ schemaDir: root });
+      expect(log).toHaveBeenCalledWith(`Loaded current permissions from ${root}/permissions.ts.`);
+      expect(log).toHaveBeenCalledWith("Validated 6 tables in schema.ts.");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("collects tables from a public bare jazz-tools side-effect import", async () => {
     const loaded = await loadCompiledSchema(fixtureDir("side-effect-only"));
 

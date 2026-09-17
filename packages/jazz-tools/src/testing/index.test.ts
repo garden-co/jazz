@@ -16,11 +16,14 @@ import { settlePolicySeed, settlePolicySeedForSessionReads } from "./policy-test
 const tempRoots: string[] = [];
 const localServers = new Set<LocalJazzServerHandle>();
 const testSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    ownerId: s.uuid().optional(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      ownerId: s.uuid().optional(),
+    },
+    {},
+  ),
 };
 type TestSchema = s.Schema<typeof testSchema>;
 const testApp: s.App<TestSchema> = s.defineApp(testSchema);

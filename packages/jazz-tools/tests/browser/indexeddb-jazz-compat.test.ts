@@ -42,16 +42,22 @@ import {
 } from "./support.js";
 
 const app = s.defineApp({
-  projects: s.table({
-    name: s.string(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { documentsViaProject: s.reverse("documents", "project") },
+  ),
   documents: s
-    .table({
-      branch: s.string(),
-      title: s.string(),
-      projectId: s.ref("projects"),
-      body: s.string(),
-    })
+    .table(
+      {
+        branch: s.string(),
+        title: s.string(),
+        projectId: s.uuid(),
+        body: s.string(),
+      },
+      { project: s.rel("projects", "projectId") },
+    )
     .branchBy("branch"),
 });
 
@@ -70,10 +76,13 @@ const permissions = s.definePermissions(app, ({ policy }) => [
 // exercises branches and large values; this isolates storage admission from
 // any schema-level query work that cannot run after an invalid epoch anyway.
 const corruptionApp = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 });
 
 describe("browser Jazz storage compatibility corpus", () => {
@@ -143,7 +152,7 @@ describe("browser Jazz storage compatibility corpus", () => {
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
     expect(digest).toBe("e1aa237f375db4d060c2a3fe13fa443659fba55c8695f99993e17e200c897b00");
-    const publishedApp = s.defineApp({ notes: s.table({ body: s.string() }) });
+    const publishedApp = s.defineApp({ notes: s.table({ body: s.string() }, {}) });
     const appId = "00000000-0000-4000-8000-000000000054";
     const accounts = await createAccountManager({ appId, serverUrl: "http://127.0.0.1:1" });
     const dbName = uniqueDbName("published-alpha54-compat");

@@ -3,23 +3,51 @@ import { schema as s } from "../../src/index.js";
 import type { Query, Table } from "../../src/typed-app.js";
 
 const schema = {
-  employees: s.table({
-    name: s.string(),
-    manager: s.ref("employees").optional(),
-    mentors: s.array(s.ref("employees")),
-    homeTeam: s.ref("teams").optional(),
-  }),
-  teams: s.table({
-    name: s.string(),
-    lead: s.ref("employees"),
-    parentTeam: s.ref("teams").optional(),
-    flagshipProject: s.ref("projects").optional(),
-  }),
-  projects: s.table({
-    name: s.string(),
-    team: s.ref("teams"),
-    approver: s.ref("employees").optional(),
-  }),
+  employees: s.table(
+    {
+      name: s.string(),
+      manager: s.uuid().optional(),
+      mentors: s.array(s.uuid()),
+      homeTeam: s.uuid().optional(),
+    },
+    {
+      managerRelation: s.rel("employees", "manager"),
+      employeesViaManager: s.reverse("employees", "managerRelation"),
+      mentorsRelation: s.rel("employees", "mentors"),
+      employeesViaMentors: s.reverse("employees", "mentorsRelation"),
+      homeTeamRelation: s.rel("teams", "homeTeam"),
+      teamsViaLead: s.reverse("teams", "leadRelation"),
+      projectsViaApprover: s.reverse("projects", "approverRelation"),
+    },
+  ),
+  teams: s.table(
+    {
+      name: s.string(),
+      lead: s.uuid(),
+      parentTeam: s.uuid().optional(),
+      flagshipProject: s.uuid().optional(),
+    },
+    {
+      employeesViaHomeTeam: s.reverse("employees", "homeTeamRelation"),
+      leadRelation: s.rel("employees", "lead"),
+      parentTeamRelation: s.rel("teams", "parentTeam"),
+      teamsViaParentTeam: s.reverse("teams", "parentTeamRelation"),
+      flagshipProjectRelation: s.rel("projects", "flagshipProject"),
+      projectsViaTeam: s.reverse("projects", "teamRelation"),
+    },
+  ),
+  projects: s.table(
+    {
+      name: s.string(),
+      team: s.uuid(),
+      approver: s.uuid().optional(),
+    },
+    {
+      teamsViaFlagshipProject: s.reverse("teams", "flagshipProjectRelation"),
+      teamRelation: s.rel("teams", "team"),
+      approverRelation: s.rel("employees", "approver"),
+    },
+  ),
 };
 
 type CircularAppSchema = s.Schema<typeof schema>;
@@ -31,18 +59,18 @@ describe("typed app circular schemas", () => {
       JSON.parse(
         app.employees
           .include({
-            manager: {
-              manager: true,
+            managerRelation: {
+              managerRelation: true,
             },
-            mentors: app.employees.select("name"),
+            mentorsRelation: app.employees.select("name"),
             employeesViaManager: app.employees.select("name"),
             employeesViaMentors: app.employees.select("name"),
-            homeTeam: {
-              lead: {
-                manager: true,
+            homeTeamRelation: {
+              leadRelation: {
+                managerRelation: true,
               },
-              parentTeam: {
-                lead: true,
+              parentTeamRelation: {
+                leadRelation: true,
               },
               projectsViaTeam: app.projects.select("name"),
             },
@@ -53,10 +81,10 @@ describe("typed app circular schemas", () => {
       table: "employees",
       conditions: [],
       includes: {
-        manager: {
-          manager: true,
+        managerRelation: {
+          managerRelation: true,
         },
-        mentors: {
+        mentorsRelation: {
           table: "employees",
           conditions: [],
           includes: {},
@@ -80,12 +108,12 @@ describe("typed app circular schemas", () => {
           orderBy: [],
           hops: [],
         },
-        homeTeam: {
-          lead: {
-            manager: true,
+        homeTeamRelation: {
+          leadRelation: {
+            managerRelation: true,
           },
-          parentTeam: {
-            lead: true,
+          parentTeamRelation: {
+            leadRelation: true,
           },
           projectsViaTeam: {
             table: "projects",
@@ -104,20 +132,20 @@ describe("typed app circular schemas", () => {
 
   it("infers self-references and cyclic reverse relations without collapsing", () => {
     const employeeGraphQuery = app.employees.include({
-      manager: {
-        homeTeam: {
-          lead: true,
+      managerRelation: {
+        homeTeamRelation: {
+          leadRelation: true,
         },
       },
-      mentors: app.employees.select("name"),
+      mentorsRelation: app.employees.select("name"),
       employeesViaManager: app.employees.select("name"),
       employeesViaMentors: app.employees.select("name"),
-      homeTeam: {
-        lead: {
-          manager: true,
+      homeTeamRelation: {
+        leadRelation: {
+          managerRelation: true,
         },
-        parentTeam: {
-          lead: true,
+        parentTeamRelation: {
+          leadRelation: true,
         },
         projectsViaTeam: app.projects.select("name"),
         teamsViaParentTeam: app.teams.select("name"),
@@ -129,19 +157,25 @@ describe("typed app circular schemas", () => {
 
     expectTypeOf(employeeGraph.id).toEqualTypeOf<string>();
     expectTypeOf(employeeGraph.name).toEqualTypeOf<string>();
-    expectTypeOf(employeeGraph.manager?.homeTeam?.lead?.name).toEqualTypeOf<string | undefined>();
-    expectTypeOf(employeeGraph.homeTeam?.lead?.manager?.id).toEqualTypeOf<string | undefined>();
-    expectTypeOf(employeeGraph.homeTeam?.parentTeam?.lead?.name).toEqualTypeOf<
+    expectTypeOf(employeeGraph.managerRelation?.homeTeamRelation?.leadRelation?.name).toEqualTypeOf<
       string | undefined
     >();
-    expectTypeOf(employeeGraph.mentors).toEqualTypeOf<Array<{ id: string; name: string }>>();
+    expectTypeOf(employeeGraph.homeTeamRelation?.leadRelation?.managerRelation?.id).toEqualTypeOf<
+      string | undefined
+    >();
+    expectTypeOf(
+      employeeGraph.homeTeamRelation?.parentTeamRelation?.leadRelation?.name,
+    ).toEqualTypeOf<string | undefined>();
+    expectTypeOf(employeeGraph.mentorsRelation).toEqualTypeOf<
+      Array<{ id: string; name: string }>
+    >();
     expectTypeOf(employeeGraph.employeesViaMentors).toEqualTypeOf<
       Array<{ id: string; name: string }>
     >();
-    expectTypeOf(employeeGraph.homeTeam?.projectsViaTeam).toEqualTypeOf<
+    expectTypeOf(employeeGraph.homeTeamRelation?.projectsViaTeam).toEqualTypeOf<
       Array<{ id: string; name: string }> | undefined
     >();
-    expectTypeOf(employeeGraph.homeTeam?.teamsViaParentTeam).toEqualTypeOf<
+    expectTypeOf(employeeGraph.homeTeamRelation?.teamsViaParentTeam).toEqualTypeOf<
       Array<{ id: string; name: string }> | undefined
     >();
     expectTypeOf(employeeGraph.employeesViaManager).toEqualTypeOf<
@@ -152,13 +186,13 @@ describe("typed app circular schemas", () => {
     const employeeQueryContract: Query<
       "employees",
       {
-        manager: { homeTeam: { lead: true } };
-        mentors: ReturnType<typeof app.employees.select<"name">>;
+        managerRelation: { homeTeamRelation: { leadRelation: true } };
+        mentorsRelation: ReturnType<typeof app.employees.select<"name">>;
         employeesViaManager: ReturnType<typeof app.employees.select<"name">>;
         employeesViaMentors: ReturnType<typeof app.employees.select<"name">>;
-        homeTeam: {
-          lead: { manager: true };
-          parentTeam: { lead: true };
+        homeTeamRelation: {
+          leadRelation: { managerRelation: true };
+          parentTeamRelation: { leadRelation: true };
           projectsViaTeam: ReturnType<typeof app.projects.select<"name">>;
           teamsViaParentTeam: ReturnType<typeof app.teams.select<"name">>;
         };

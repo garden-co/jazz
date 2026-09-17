@@ -1,40 +1,69 @@
 import { schema as s } from "jazz-tools";
 
 const schema = {
-  profiles: s.table({
-    userId: s.uuid(),
-    name: s.string(),
-    avatar: s.string().optional(),
-  }),
-  chats: s.table({
-    name: s.string().optional(),
-    isPublic: s.boolean(),
-    joinCode: s.string().optional(),
-  }),
-  chatMembers: s.table({
-    chatId: s.ref("chats"),
-    userId: s.uuid(),
-    joinCode: s.string().optional(),
-  }),
-  messages: s.table({
-    chatId: s.ref("chats"),
-    text: s.string(),
-    senderId: s.ref("profiles"),
-  }),
-  reactions: s.table({
-    messageId: s.ref("messages"),
-    userId: s.uuid(),
-    emoji: s.string(),
-  }),
-  canvases: s.table({
-    chatId: s.ref("chats"),
-  }),
-  strokes: s.table({
-    canvasId: s.ref("canvases"),
-    color: s.string(),
-    width: s.int(),
-    pointsJson: s.string(),
-  }),
+  profiles: s.table(
+    {
+      userId: s.uuid(),
+      name: s.string(),
+      avatar: s.string().optional(),
+    },
+    { messagesViaSender: s.reverse("messages", "sender") },
+  ),
+  chats: s.table(
+    {
+      name: s.string().optional(),
+      isPublic: s.boolean(),
+      joinCode: s.string().optional(),
+    },
+    {
+      chatMembersViaChat: s.reverse("chatMembers", "chat"),
+      messagesViaChat: s.reverse("messages", "chat"),
+      canvasesViaChat: s.reverse("canvases", "chat"),
+    },
+  ),
+  chatMembers: s.table(
+    {
+      chatId: s.uuid(),
+      userId: s.uuid(),
+      joinCode: s.string().optional(),
+    },
+    { chat: s.rel("chats", "chatId") },
+  ),
+  messages: s.table(
+    {
+      chatId: s.uuid(),
+      text: s.string(),
+      senderId: s.uuid(),
+    },
+    {
+      chat: s.rel("chats", "chatId"),
+      sender: s.rel("profiles", "senderId"),
+      reactionsViaMessage: s.reverse("reactions", "message"),
+    },
+  ),
+  reactions: s.table(
+    {
+      messageId: s.uuid(),
+      userId: s.uuid(),
+      emoji: s.string(),
+    },
+    { message: s.rel("messages", "messageId") },
+  ),
+  canvases: s.table(
+    {
+      chatId: s.uuid(),
+    },
+    { chat: s.rel("chats", "chatId"), strokesViaCanvas: s.reverse("strokes", "canvas") },
+  ),
+  strokes: s.table(
+    {
+      canvasId: s.uuid(),
+      color: s.string(),
+      width: s.int(),
+      pointsJson: s.string(),
+    },
+    { canvas: s.rel("canvases", "canvasId") },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
