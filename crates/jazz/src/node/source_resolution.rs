@@ -28,7 +28,7 @@ where
         let Some(base) = base else {
             return Ok(None);
         };
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let schema = self
             .catalogue
             .catalogue_schemas
@@ -311,7 +311,7 @@ where
         base: Option<&BranchViewBase>,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let schema = self
             .catalogue
             .catalogue_schemas
@@ -613,7 +613,7 @@ where
         read_schema_version: SchemaVersionId,
         tier: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if read_schema_version == self.catalogue.current_schema_version_id {
+        if read_schema_version == self.catalogue.local_schema_version_id {
             return self.current_rows(table, tier).await;
         }
         let read_table = self.table_in_schema(table, read_schema_version)?;

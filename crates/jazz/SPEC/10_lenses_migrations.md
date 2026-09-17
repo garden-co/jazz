@@ -673,6 +673,33 @@ as `now()` require a deterministic authority/origin rule before they can be
 accepted. Merge-strategy-only changes still change schema identity because they
 change future merge behavior.
 
+### Active schema and local schema
+
+The authority's **active schema** selects one structural schema and one explicit
+permission bundle at a single monotone revision. Policy-only updates advance
+that revision without changing structural schema identity or creating migration
+lenses. Admitting structural schemas or lenses does not activate them. Activation
+requires an admitted migration path; an explicit empty permission bundle is a
+valid deny-all selection. The node's local API schema remains independent, so
+older clients retain their schema view across authority activations.
+
+The server catalogue retains the existing permissions-bundle/head encodings and
+HTTP endpoints as compatibility boundaries. Internally they describe the active
+schema. Runtime activation persists its selection and authorization source in
+one batch before installing the new authorization view. Structural catalogue
+entries do not need to be rewritten with permissions on policy updates.
+
+Opening a legacy store without an active-schema record recovers its selected
+schema and grants from the old write pointer and schema payload, then persists
+an active-schema record at revision zero. The old independent write counter is
+not an authority revision. Server startup installs the durable administrative
+selection before serving traffic. Reopening the upgraded store preserves its
+active revision; snapshots have no legacy revision exception. Standalone schema
+publications cannot replace grants, and standalone write pointers cannot change
+the active selection. Interoperation with old running nodes is not supported.
+The existing snapshot wire layout is retained: the active authorization source
+is projected into its schema payload at serialization and extracted on receipt.
+
 ## Open Questions
 
 - 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Lens/catalogue lifecycle, validation, administration, and schema projection.

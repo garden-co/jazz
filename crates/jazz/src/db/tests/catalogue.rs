@@ -321,7 +321,7 @@ fn assert_offline_replica_schema_bootstrap(backend: bool) {
         )
         .unwrap();
     bob.publish_schema_with_lens(1, publication).unwrap();
-    bob.set_current_write_schema(CurrentWriteSchema {
+    bob.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: target.version_id(),
     })
@@ -549,7 +549,7 @@ fn assert_snapshot_preserves_offline_enum_rows(descendant: bool) {
             .unwrap();
         authority.publish_schema_with_lens(1, publication).unwrap();
         authority
-            .set_current_write_schema(CurrentWriteSchema {
+            .activate_catalogue_schema_for_test(CurrentWriteSchema {
                 revision: 1,
                 schema: evolved.id,
             })
@@ -708,12 +708,9 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: schema_version.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: schema_version.id,
         })
         .unwrap();
 
@@ -836,12 +833,9 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: middle.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: middle.id,
         })
         .unwrap();
     assert_eq!(
@@ -883,12 +877,9 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 2,
-                schema: latest.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 2,
+            schema: latest.id,
         })
         .unwrap();
     db.refresh_subscriptions().unwrap();
@@ -974,7 +965,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         )
         .unwrap();
     db.publish_schema_with_lens(1, owner_publication).unwrap();
-    db.set_current_write_schema(CurrentWriteSchema {
+    db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: owner_payload.id,
     })
@@ -1008,7 +999,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         vec![first]
     );
 
-    db.publish_schema(SchemaVersion::new(editor_head)).unwrap();
+    db.activate_schema_for_test(2, editor_head).unwrap();
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
         row(0xb2),
@@ -1085,11 +1076,11 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
         revision: 2,
         schema: schema_version.id,
     };
-    let pointer_ack = core.set_current_write_schema(pointer).unwrap();
-    assert!(matches!(
-        pointer_ack.as_slice(),
-        [SyncMessage::CatalogueAck(ack)] if ack.revision == Some(2) && ack.schema == Some(schema_version.id) && ack.applied
-    ));
+    core.activate_catalogue_schema_for_test(pointer).unwrap();
+    assert_eq!(
+        core.server.node().borrow().current_write_schema().unwrap(),
+        pointer
+    );
 
     let row = seed(&core, "todos", cells("under evolved schema", false, owner));
     let rows = core.read(&Query::from("todos")).unwrap();

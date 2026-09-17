@@ -69,7 +69,7 @@ where
 
     let mut actual_global = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
     let physical_table = node
-        .physical_table_id_for_schema(node.catalogue.current_schema_version_id, table)
+        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, table)
         .unwrap();
     for (storage_table, layer) in [
         (
@@ -203,7 +203,7 @@ where
     S: OrderedKvStorage,
 {
     let physical_table = node
-        .physical_table_id_for_schema(node.catalogue.current_schema_version_id, table)
+        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, table)
         .unwrap();
     node.database
         .primary_key_scan_raw(&physical_ahead_current_table_name(physical_table), &[])
@@ -383,12 +383,9 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
         )
         .unwrap();
     }
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 4,
-            schema: schemas[3].version_id(),
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 4,
+        schema: schemas[3].version_id(),
     })
     .unwrap();
 

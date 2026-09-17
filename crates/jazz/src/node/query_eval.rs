@@ -825,7 +825,7 @@ where
         schema_version: SchemaVersionId,
         table: &str,
     ) -> bool {
-        if schema_version != self.catalogue.current_schema_version_id {
+        if schema_version != self.catalogue.local_schema_version_id {
             return false;
         }
         let Some(table_id) = self
@@ -873,7 +873,7 @@ where
         let (shape, binding) = if strips_policy_branches
             && !shape.query().policy_branches.is_empty()
         {
-            let schema = if shape.schema_version() == self.catalogue.current_schema_version_id {
+            let schema = if shape.schema_version() == self.catalogue.local_schema_version_id {
                 &self.catalogue.schema
             } else {
                 &self
@@ -993,17 +993,20 @@ where
                 shape.query().includes.len(),
             );
         }
-        let query_schema = self
-            .catalogue
-            .catalogue_schemas
-            .get(&shape.schema_version())
-            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
-        let root_has_read_policy = query_schema
-            .schema
-            .tables
-            .iter()
-            .find(|table| table.name == shape.query().table)
-            .is_some_and(|table| table.read_policy.is_some());
+        let query_schema = if shape.schema_version() == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&shape.schema_version())
+                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+                .schema
+        };
+        let root_has_read_policy = self
+            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
+            .read_policy
+            .is_some();
         let storage_backed_result_materialization = matches!(output, CurrentQueryProgramOutput::MaintainedView)
                 // A strict receiver obtains its result only by replacing its
                 // descriptor-bound CoveredInput sources from this exact
@@ -1066,7 +1069,7 @@ where
                 read_view,
                 settled_binding_view,
                 None,
-                &query_schema.schema,
+                query_schema,
             )?,
             policy,
             input,
@@ -1919,7 +1922,7 @@ where
     }
 
     fn can_use_prepared_current_query_plan(&self, shape: &ValidatedQuery) -> bool {
-        shape.schema_version() == self.catalogue.current_schema_version_id
+        shape.schema_version() == self.catalogue.local_schema_version_id
             && !self.required_include_membership_is_identity_sensitive(shape)
     }
 
@@ -2198,7 +2201,7 @@ where
         position: GlobalTime,
     ) -> Result<Vec<groove::db::EncodedKeyValue<'_>>, Error> {
         let table_id =
-            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
         if position.0 == u64::MAX {
             Ok(self
                 .database
@@ -2973,7 +2976,7 @@ where
     }
 
     pub(crate) fn uses_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
-        shape.schema_version() != self.catalogue.current_schema_version_id
+        shape.schema_version() != self.catalogue.local_schema_version_id
     }
 
     pub(crate) fn apply_query_order_with_occurrences(
@@ -2996,7 +2999,7 @@ where
             } else {
                 Some(self.table_in_schema(
                     &presentation_query.table,
-                    self.catalogue.current_write_schema.schema,
+                    self.catalogue.active_schema.schema,
                 )?)
             };
         Self::sort_query_rows_with_occurrences(
@@ -3012,7 +3015,7 @@ where
         query: &crate::query::Query,
         rows: &mut [CurrentRow],
     ) -> Result<(), Error> {
-        self.apply_projection_in_schema(query, self.catalogue.current_write_schema.schema, rows)
+        self.apply_projection_in_schema(query, self.catalogue.active_schema.schema, rows)
     }
 
     /// Evaluate a validated query inside an open exclusive transaction.

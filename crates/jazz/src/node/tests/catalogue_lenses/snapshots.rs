@@ -115,12 +115,9 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .unwrap();
     let (_, authored) = authority
@@ -286,18 +283,15 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .unwrap();
 
     let (_receiver_dir, mut receiver) =
         open_node_with_schema(node(0x61), evolved.schema.clone());
-    let local_alias = receiver.catalogue.current_schema_version_alias.unwrap();
+    let local_alias = receiver.catalogue.local_schema_version_alias.unwrap();
     let local_mapping = receiver.catalogue.physical_mappings[&evolved.id].clone();
     let authority_identities = authority.catalogue.physical_mappings[&evolved.id]
         .identities
@@ -352,7 +346,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     );
 
     assert_eq!(
-        receiver.catalogue.current_schema_version_alias,
+        receiver.catalogue.local_schema_version_alias,
         Some(local_alias)
     );
     let received_mapping = &receiver.catalogue.physical_mappings[&evolved.id];
@@ -368,6 +362,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     // read schema even though it does not change that schema version's hash.
     // A trusted same-version semantic change must retire live runtime handles.
     let mut active_policy_change = authority.catalogue_snapshot().unwrap();
+    active_policy_change.current_write_schema.revision += 1;
     active_policy_change
         .schemas
         .iter_mut()
@@ -465,12 +460,9 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .unwrap();
 
@@ -566,12 +558,9 @@ fn authored_columns_follow_a_renamed_column_through_wire_and_reopen() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: renamed.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
         })
         .unwrap();
     let (new_tx, new_unit) = authority
@@ -644,12 +633,9 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .unwrap();
 
@@ -921,6 +907,7 @@ fn test_catalogue_kind(kind: &[u8]) -> crate::node::codec::CatalogueRecordKind {
         b"schema_lineage_active" => CatalogueRecordKind::SchemaLineageActive,
         b"write_pointer_pending" => CatalogueRecordKind::WritePointerPending,
         b"bootstrap_ready" => CatalogueRecordKind::BootstrapReady,
+        b"active_schema" => CatalogueRecordKind::ActiveSchema,
         _ => panic!("unknown test catalogue kind: {kind:?}"),
     }
 }
@@ -976,13 +963,14 @@ fn catalogue_kernel_kind_fixture_is_exact_and_closed() {
         (CatalogueRecordKind::SchemaLineageActive, 5),
         (CatalogueRecordKind::WritePointerPending, 6),
         (CatalogueRecordKind::BootstrapReady, 7),
+        (CatalogueRecordKind::ActiveSchema, 8),
     ];
 
     for (kind, bytes) in fixture {
         assert_eq!(kind.key(), bytes, "epoch-pinned kind fixture changed");
         assert_eq!(CatalogueRecordKind::from_key(bytes).unwrap(), kind);
     }
-    assert!(CatalogueRecordKind::from_key(8).is_err());
+    assert!(CatalogueRecordKind::from_key(9).is_err());
     assert!(CatalogueRecordKind::from_key(u64::MAX).is_err());
 }
 
@@ -1648,7 +1636,7 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
     edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .expect("install exact trusted core catalogue");
     assert_eq!(edge.catalogue_bootstrap_state(), CatalogueBootstrapState::Ready);
-    assert_eq!(edge.catalogue.current_schema_version_id, authority_genesis);
+    assert_eq!(edge.catalogue.local_schema_version_id, authority_genesis);
     assert_eq!(edge.catalogue.schema, schema());
     assert_eq!(edge.current_write_schema().unwrap(), snapshot.current_write_schema);
     assert_eq!(edge.active_catalogue_seq(), 1);
@@ -1661,7 +1649,7 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
         .expect("fresh process discovers durable authority genesis");
     assert_eq!(reopened.catalogue_bootstrap_state(), CatalogueBootstrapState::Ready);
     assert_eq!(
-        reopened.catalogue.current_schema_version_id,
+        reopened.catalogue.local_schema_version_id,
         authority_genesis,
         "reopen must use the authority genesis, never the empty temporary schema"
     );
@@ -1778,7 +1766,7 @@ fn dynamic_edge_reopen_rejects_catalogue_stripped_history() {
         MergeableCommit::new("todos", row(0x9f), 10).cells(title_cells("durable history")),
     )
     .unwrap();
-    let alias = durable_node.catalogue.current_schema_version_alias.unwrap();
+    let alias = durable_node.catalogue.local_schema_version_alias.unwrap();
     delete_catalogue_record(&mut durable_node, b"genesis", base.version_id().0);
     delete_catalogue_record(&mut durable_node, b"schema", base.version_id().0);
     delete_schema_mapping_record(&mut durable_node, alias);
@@ -2210,12 +2198,9 @@ fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reop
     assert_eq!(core.catalogue_schemas().len(), 1);
     assert_eq!(core.current_write_schema().unwrap().revision, 0);
     assert!(matches!(
-        core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: base.version_id(),
-            },
+        core.activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: base.version_id(),
         }),
         Err(Error::CatalogueActivationFailed)
     ));
@@ -2339,4 +2324,61 @@ fn lineage_equality_preserves_content_and_declaration_multiplicity() {
             assert_ne!(original.content_id(), changed.content_id());
         }
     }
+}
+
+/// Opening an old edge upgrades storage before any snapshot is received.
+/// Internal because creating an old durable layout requires writing catalogue records.
+#[test]
+fn legacy_edge_upgrades_active_schema_during_open() {
+    let base = schema();
+    let (_authority_dir, authority) = open_node_with_schema(node(0xc8), base.clone());
+    let mut current = authority.catalogue_snapshot().unwrap();
+    current.current_write_schema.revision = 2;
+    let mut legacy = current.clone();
+    legacy.current_write_schema.revision = 7;
+    let dir = tempfile::tempdir().unwrap();
+    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(legacy)
+        .unwrap();
+    // Old edges stored the selected permissions in the schema payload and had no active-schema record.
+    delete_catalogue_record(&mut edge, b"active_schema", uuid::Uuid::nil());
+    write_catalogue_record(
+        &mut edge,
+        b"schema",
+        base.version_id().0,
+        codec::encode_catalogue_schema(&SchemaVersion::new(base)).unwrap(),
+    );
+    drop(edge);
+
+    let edge = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
+    assert_eq!(edge.current_write_schema().unwrap().revision, 0);
+    assert_eq!(edge.catalogue_snapshot().unwrap().schemas, current.schemas);
+    drop(edge);
+    // The conversion is durable even if no server has connected yet.
+    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
+    assert_eq!(edge.current_write_schema().unwrap().revision, 0);
+    edge.apply_trusted_catalogue_snapshot_settled(current.clone())
+        .unwrap();
+    assert_eq!(edge.current_write_schema().unwrap().revision, 2);
+    let mut conflicting = current.clone();
+    conflicting.schemas[0] =
+        SchemaVersion::new(conflicting.schemas[0].schema.without_permissions());
+    assert!(
+        edge.apply_trusted_catalogue_snapshot_settled(conflicting)
+            .is_err()
+    );
+    let mut stale = current;
+    stale.current_write_schema.revision = 1;
+    assert!(
+        edge.apply_trusted_catalogue_snapshot_settled(stale.clone())
+            .is_err()
+    );
+    drop(edge);
+    let mut reopened = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
+    assert_eq!(reopened.current_write_schema().unwrap().revision, 2);
+    assert!(
+        reopened
+            .apply_trusted_catalogue_snapshot_settled(stale)
+            .is_err()
+    );
 }

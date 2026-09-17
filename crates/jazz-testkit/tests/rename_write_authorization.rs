@@ -9,9 +9,7 @@ use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
-use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens,
-};
+use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens};
 use jazz::row_input;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::SchemaHash;
@@ -235,19 +233,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
         authority.persist_and_settle_outcome(outcome).await
     })
     .expect("publish v2 rename lineage");
-    block_on(async {
-        let outcome = authority
-            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-                author: AuthorSubject::SYSTEM,
-                pointer: CurrentWriteSchema {
-                    revision: 1,
-                    schema: v2.id,
-                },
-            })
-            .await?;
-        authority.persist_and_settle_outcome(outcome).await
-    })
-    .expect("select v2 write schema");
+    block_on(authority.activate_schema_for_test(1, v2.schema.clone())).expect("activate v2 schema");
 
     let mallory = author(0xa2);
     let mut non_owner_writer_v2 = open_node(node(0x11), v2.schema.clone());

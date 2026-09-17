@@ -1003,20 +1003,21 @@ impl ServerRuntimeHandle {
         result
     }
 
-    /// Compile and publish the permissions source selected by the catalogue
-    /// shell.
-    pub async fn publish_permissions_source(
+    /// Install the catalogue's active schema and permissions at one authority revision.
+    pub async fn activate_schema(
         &self,
-        schema: crate::tools::Schema,
-        lineage_source: SchemaVersionId,
+        revision: u64,
+        schema: JazzSchema,
+        permissions: std::collections::HashMap<
+            crate::tools::public_schema::TableName,
+            crate::tools::public_schema::TablePolicies,
+        >,
     ) -> Result<SchemaVersionId, String> {
         let activity_tx = self.inner.activity_tx.clone();
         let result = self
             .run(move |shell| {
-                let schema =
-                    crate::schema::JazzSchema::new(&schema).map_err(|error| error.to_string())?;
                 shell
-                    .publish_permissions_schema(schema, lineage_source)
+                    .activate_schema(revision, schema, permissions)
                     .map_err(|error| error.to_string())
             })
             .await;

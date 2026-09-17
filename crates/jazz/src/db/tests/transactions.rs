@@ -537,7 +537,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         .unwrap();
     owner.publish_schema_with_lens(2, publication).unwrap();
     owner
-        .set_current_write_schema(CurrentWriteSchema {
+        .activate_catalogue_schema_for_test(CurrentWriteSchema {
             revision: 2,
             schema: renamed.id,
         })

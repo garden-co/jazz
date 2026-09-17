@@ -35,6 +35,11 @@ where
         table: &str,
         schema_version: SchemaVersionId,
     ) -> Result<&TableSchema, Error> {
+        if schema_version == self.catalogue.active_schema.schema {
+            return self.catalogue.active_schema.compiled.tables.iter()
+                .find(|candidate| candidate.name == table)
+                .ok_or_else(|| Error::TableNotFound(table.to_owned()));
+        }
         self.catalogue
             .catalogue_schemas
             .get(&schema_version)
@@ -46,7 +51,7 @@ where
                     .find(|candidate| candidate.name == table)
             })
             .or_else(|| {
-                (schema_version == self.catalogue.current_schema_version_id)
+                (schema_version == self.catalogue.local_schema_version_id)
                     .then(|| self.table(table).ok())
                     .flatten()
             })
@@ -295,7 +300,7 @@ where
                 "repair coordinate has no unique current lineage",
             ));
         };
-        let name = self.catalogue.physical_mappings[&self.catalogue.current_schema_version_id]
+        let name = self.catalogue.physical_mappings[&self.catalogue.local_schema_version_id]
             .tables
             .iter()
             .find_map(|(name, mapping)| (mapping.table_id == table).then_some(name.clone()))
@@ -391,8 +396,8 @@ where
                     ));
                 };
                 let request_schema = [
-                    self.catalogue.current_write_schema.schema,
-                    self.catalogue.current_schema_version_id,
+                    self.catalogue.active_schema.schema,
+                    self.catalogue.local_schema_version_id,
                 ]
                 .into_iter()
                 .find(|schema_version| {

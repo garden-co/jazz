@@ -2185,17 +2185,6 @@ impl CoreDb {
         })
     }
 
-    pub(super) fn publish_schema(&self, schema: SchemaVersion) -> Result<Vec<SyncMessage>, Error> {
-        let node = self.server.node();
-        let outcome = block_on(node.borrow_mut().apply_trusted_catalogue_message(
-            SyncMessage::PublishSchema {
-                author: self.author,
-                schema: Box::new(schema),
-            },
-        ))?;
-        block_on(node.borrow_mut().persist_and_settle_outcome(outcome)).map_err(Into::into)
-    }
-
     pub(super) fn publish_schema_with_lens(
         &self,
         catalogue_seq: u64,
@@ -2212,18 +2201,28 @@ impl CoreDb {
         block_on(node.borrow_mut().persist_and_settle_outcome(outcome)).map_err(Into::into)
     }
 
-    pub(super) fn set_current_write_schema(
+    pub(super) fn activate_schema_for_test(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+    ) -> Result<(), Error> {
+        block_on(
+            self.server
+                .node()
+                .borrow_mut()
+                .activate_schema(revision, schema),
+        )
+        .map_err(Into::into)
+    }
+
+    pub(super) fn activate_catalogue_schema_for_test(
         &self,
         pointer: CurrentWriteSchema,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<(), Error> {
         let node = self.server.node();
-        let outcome = block_on(node.borrow_mut().apply_trusted_catalogue_message(
-            SyncMessage::SetCurrentWriteSchema {
-                author: self.author,
-                pointer,
-            },
-        ))?;
-        block_on(node.borrow_mut().persist_and_settle_outcome(outcome)).map_err(Into::into)
+        node.borrow_mut()
+            .activate_catalogue_schema_settled(pointer)
+            .map_err(Into::into)
     }
 }
 

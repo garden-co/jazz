@@ -11,9 +11,7 @@ use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
-use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens,
-};
+use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::public_schema::{
@@ -141,17 +139,7 @@ fn publish_chain(
         .unwrap();
         settle_outcome(core, outcome).unwrap();
     }
-    let outcome = jazz::db::block_on(core.apply_trusted_catalogue_message(
-        SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 4,
-                schema: schemas[3].version_id(),
-            },
-        },
-    ))
-    .unwrap();
-    settle_outcome(core, outcome).unwrap();
+    jazz::db::block_on(core.activate_schema_for_test(4, schemas[3].clone())).unwrap();
 }
 
 fn rows_for_schema(

@@ -2829,7 +2829,9 @@ where
         shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> Result<NormalizedRowSetShape, Error> {
-        let schema = if shape.schema_version() == self.catalogue.current_schema_version_id {
+        let schema = if shape.schema_version() == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if shape.schema_version() == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self

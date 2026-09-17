@@ -646,9 +646,9 @@ struct LargeValueIngressState {
 #[derive(Clone, Debug)]
 struct SchemaCatalogue {
     /// Schema version used for the node's base/local API schema.
-    current_schema_version_id: SchemaVersionId,
-    /// Compact alias for `current_schema_version_id` once recovered or allocated.
-    current_schema_version_alias: Option<SchemaVersionAlias>,
+    local_schema_version_id: SchemaVersionId,
+    /// Compact alias for `local_schema_version_id` once recovered or allocated.
+    local_schema_version_alias: Option<SchemaVersionAlias>,
     /// Base schema supplied when the node was opened.
     schema: JazzSchema,
     /// Mapping from schema version IDs to compact on-disk aliases.
@@ -667,8 +667,6 @@ struct SchemaCatalogue {
     active_lineages_by_target: BTreeMap<SchemaVersionId, StagedSchemaLineage>,
     /// Highest contiguously activated schema catalogue position.
     active_catalogue_seq: u64,
-    /// Durable write-pointer updates waiting for their schema to become Active.
-    pending_write_pointers: BTreeMap<u64, CurrentWriteSchema>,
     /// Next database-local physical table id.
     next_physical_table_id: u64,
     /// Next database-local physical column id.
@@ -686,7 +684,52 @@ struct SchemaCatalogue {
         >,
     >,
     /// Schema version currently used for newly authored writes.
-    current_write_schema: CurrentWriteSchema,
+    active_schema: ActiveSchema,
+}
+
+/// One authority selection: structural schema, permissions, and revision.
+/// `compiled` is a derived authorization view, never a catalogue schema entry.
+/// The legacy wire pointer is retained only at protocol compatibility boundaries.
+#[derive(Clone, Debug, PartialEq)]
+struct ActiveSchema {
+    schema: SchemaVersionId,
+    revision: u64,
+    compiled: JazzSchema,
+}
+
+impl ActiveSchema {
+    /// Project the unified selection into the unchanged legacy wire envelope.
+    fn wire_pointer(&self) -> CurrentWriteSchema {
+        CurrentWriteSchema {
+            revision: self.revision,
+            schema: self.schema,
+        }
+    }
+
+    fn same_permissions(&self, other: &Self) -> bool {
+        self.compiled
+            .tables
+            .iter()
+            .map(|table| (&table.name, &table.read_policy, &table.write_policies))
+            .eq(other
+                .compiled
+                .tables
+                .iter()
+                .map(|table| (&table.name, &table.read_policy, &table.write_policies)))
+    }
+
+    fn new(pointer: CurrentWriteSchema, compiled: JazzSchema) -> Result<Self, Error> {
+        if compiled.version_id() != pointer.schema {
+            return Err(Error::InvalidCatalogueUpdate(
+                "active schema permissions target mismatch",
+            ));
+        }
+        Ok(Self {
+            schema: pointer.schema,
+            revision: pointer.revision,
+            compiled,
+        })
+    }
 }
 
 /// Readiness of a dynamically catalogued node.
@@ -2764,11 +2807,11 @@ struct CatalogueOpenState {
     pending_lineages: BTreeMap<u64, PendingSchemaLineage>,
     active_lineages_by_target: BTreeMap<SchemaVersionId, StagedSchemaLineage>,
     active_catalogue_seq: u64,
-    pending_write_pointers: BTreeMap<u64, CurrentWriteSchema>,
     next_physical_table_id: u64,
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
     catalogue_bootstrap_marker: bool,
+    recovered_active_schema: Option<ActiveSchema>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

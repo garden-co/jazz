@@ -422,7 +422,7 @@ where
         &mut self,
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
-        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let write_schema_version = self.catalogue.active_schema.schema;
         let (commit, permission_subject) = self.durable_author_policy_preview(commit)?;
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
@@ -435,11 +435,8 @@ where
         &mut self,
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
-        self.dry_run_mergeable_write_allows_in_schema(
-            self.catalogue.current_write_schema.schema,
-            commit,
-        )
-        .await
+        self.dry_run_mergeable_write_allows_in_schema(self.catalogue.active_schema.schema, commit)
+            .await
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -488,7 +485,7 @@ where
         self.dry_run_read_current_allows_in_schema(
             table_name,
             row_uuid,
-            self.catalogue.current_schema_version_id,
+            self.catalogue.local_schema_version_id,
             identity,
             false,
         )
@@ -506,7 +503,9 @@ where
         identity: AuthorSubject,
         include_deleted: bool,
     ) -> Result<bool, Error> {
-        let schema = if schema_version == self.catalogue.current_schema_version_id {
+        let schema = if schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -700,11 +699,11 @@ where
     }
 
     pub(super) fn policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
-        let write_schema = self.catalogue.current_write_schema.schema;
+        let write_schema = self.catalogue.active_schema.schema;
         if self.table_in_schema(table, write_schema).is_ok() {
             write_schema
         } else {
-            self.catalogue.current_schema_version_id
+            self.catalogue.local_schema_version_id
         }
     }
 
@@ -714,8 +713,8 @@ where
         query_schema: SchemaVersionId,
         shape: &NormalizedRowSetShape,
     ) -> SchemaVersionId {
-        let write_schema = self.catalogue.current_write_schema.schema;
-        let current_schema = self.catalogue.current_schema_version_id;
+        let write_schema = self.catalogue.active_schema.schema;
+        let current_schema = self.catalogue.local_schema_version_id;
         if self.table_in_schema(table, write_schema).is_ok()
             && self.policy_schema_resolves_query_sources(write_schema, shape)
         {
@@ -750,18 +749,18 @@ where
         source: SchemaVersionId,
         table: &str,
     ) -> Result<SchemaVersionId, Error> {
-        let write_schema = self.catalogue.current_write_schema.schema;
+        let write_schema = self.catalogue.active_schema.schema;
         if self.source_reaches_write_policy_table(source, write_schema, table)? {
             Ok(write_schema)
         } else if self.source_reaches_write_policy_table(
             source,
-            self.catalogue.current_schema_version_id,
+            self.catalogue.local_schema_version_id,
             table,
         )? || self
-            .table_in_schema(table, self.catalogue.current_schema_version_id)
+            .table_in_schema(table, self.catalogue.local_schema_version_id)
             .is_ok()
         {
-            Ok(self.catalogue.current_schema_version_id)
+            Ok(self.catalogue.local_schema_version_id)
         } else {
             Ok(source)
         }
@@ -849,7 +848,7 @@ where
         candidate_tx_id: Option<TxId>,
     ) -> Result<Option<CurrentRow>, Error> {
         let subject_table = if self
-            .table_in_schema(version.table(), self.catalogue.current_write_schema.schema)
+            .table_in_schema(version.table(), self.catalogue.active_schema.schema)
             .is_ok()
         {
             version.table()

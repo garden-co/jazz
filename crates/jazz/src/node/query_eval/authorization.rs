@@ -196,7 +196,9 @@ where
         row_uuid: RowUuid,
         identity: AuthorSubject,
     ) -> Result<bool, Error> {
-        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -520,12 +522,21 @@ where
     ) -> Result<bool, Error> {
         let policy_schema_version = if self
             .catalogue
+            .active_schema
+            .compiled
+            .tables
+            .iter()
+            .any(|known| known == table)
+        {
+            self.catalogue.active_schema.schema
+        } else if self
+            .catalogue
             .schema
             .tables
             .iter()
             .any(|known| known == table)
         {
-            self.catalogue.current_schema_version_id
+            self.catalogue.local_schema_version_id
         } else {
             self.catalogue
                 .catalogue_schemas
@@ -538,7 +549,7 @@ where
                         .any(|known| known == table)
                         .then_some(*schema_version)
                 })
-                .unwrap_or(self.catalogue.current_schema_version_id)
+                .unwrap_or(self.catalogue.local_schema_version_id)
         };
         self.write_policy_query_allows_candidate_for_schema(
             policy_schema_version,
@@ -662,7 +673,9 @@ where
                 }
             }
         }
-        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -998,7 +1011,9 @@ where
         binding_user_params: BTreeMap<String, ColumnType>,
         binding_claim_params: BTreeMap<String, ProgramClaimParam>,
     ) -> Result<QueryProgramRequest, Error> {
-        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -1156,7 +1171,9 @@ where
         {
             return Ok(request.clone());
         }
-        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -1302,7 +1319,7 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
-        let schema_version = self.catalogue.current_schema_version_id;
+        let schema_version = self.catalogue.local_schema_version_id;
         self.maintained_view_content_current_with_version_in_schema(table, tier, schema_version)
     }
 
@@ -1397,12 +1414,12 @@ where
         table: &str,
         _operation: AuthorizationScopeOperation,
     ) -> SchemaVersionId {
-        let write_schema = self.catalogue.current_write_schema.schema;
+        let write_schema = self.catalogue.active_schema.schema;
         let has_policy_table = self.table_in_schema(table, write_schema).is_ok();
         if has_policy_table {
             write_schema
         } else {
-            self.catalogue.current_schema_version_id
+            self.catalogue.local_schema_version_id
         }
     }
 
@@ -1439,13 +1456,18 @@ where
         // support-query schema from that policy view.
         let policy_schema_version =
             self.authorization_scope_policy_schema_for_action(table_name, operation);
-        let policy_schema = self
-            .catalogue
-            .catalogue_schemas
-            .get(&policy_schema_version)
-            .ok_or(Error::InvalidStoredValue(
-                "authorization policy schema is unknown",
-            ))?;
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue(
+                    "authorization policy schema is unknown",
+                ))?
+                .schema
+        };
         let policies = authorization_policy_queries(
             &self.table_in_schema(table_name, policy_schema_version)?,
             operation,
@@ -1461,7 +1483,7 @@ where
                     policy.clone(),
                     claims,
                     &claim_values,
-                    &policy_schema.schema,
+                    policy_schema,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1833,12 +1855,9 @@ mod authorization_scope_compiler_tests {
             ),
         })
         .unwrap();
-        node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved_id,
-            },
+        node.activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_id,
         })
         .unwrap();
 
@@ -1953,12 +1972,9 @@ mod authorization_scope_compiler_tests {
             ),
         })
         .unwrap();
-        node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved_id,
-            },
+        node.activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_id,
         })
         .unwrap();
 
@@ -2022,7 +2038,7 @@ mod authorization_scope_compiler_tests {
         );
         let request = node
             .table_read_policy_authorization_request(
-                node.catalogue.current_schema_version_id,
+                node.catalogue.local_schema_version_id,
                 "resources",
                 author,
                 ParamBindingMode::InlineAllReachableSeeds,
