@@ -281,8 +281,12 @@ fn validate_query_canonical_parts(
             resolved.array_subqueries = query.array_subqueries.clone();
             resolved.relation = None;
             resolved.select = query.select.clone();
+            let retain_relation = crate::query::relation_output_projection_if_present(relation)?
+                .is_some();
             let (mut normalized, params, _) = validate_query_canonical_parts(&resolved, schema)?;
-            normalized.relation = Some(relation.clone());
+            if retain_relation {
+                normalized.relation = Some(relation.clone());
+            }
             let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
             return Ok((normalized, params, canonical));
         }
