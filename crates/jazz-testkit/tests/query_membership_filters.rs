@@ -96,7 +96,11 @@ async fn in_filters_match_integer_float_boolean_and_reference_columns() {
                 ))
                 .select(["title"]);
 
-            let mut rows = client.query(query, None).await.expect("query items");
+            let mut rows = client
+                .query(query, jazz::tools::ReadTier::LocalFirst)
+                .await
+                .map(jazz::tools::test_support::ordinary_rows)
+                .expect("query items");
             rows.sort_by_key(|(id, _)| *id);
 
             assert_eq!(
@@ -157,9 +161,10 @@ async fn contains_filters_match_non_text_array_elements_and_text_substrings() {
                     jazz::query::Query::from("items")
                         .filter(contains(col("counts"), lit(3)))
                         .select(["title"]),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query integer array contains");
             assert_eq!(
                 count_rows,
@@ -171,9 +176,10 @@ async fn contains_filters_match_non_text_array_elements_and_text_substrings() {
                     jazz::query::Query::from("items")
                         .filter(contains(col("flags"), lit(true)))
                         .select(["title"]),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query boolean array contains");
             assert_eq!(flag_rows, count_rows);
 
@@ -182,9 +188,10 @@ async fn contains_filters_match_non_text_array_elements_and_text_substrings() {
                     jazz::query::Query::from("items")
                         .filter(contains(col("watcher_ids"), lit(*owner_a.uuid())))
                         .select(["title"]),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query uuid array contains");
             assert_eq!(ref_rows, count_rows);
 
@@ -193,9 +200,10 @@ async fn contains_filters_match_non_text_array_elements_and_text_substrings() {
                     jazz::query::Query::from("items")
                         .filter(contains(col("title"), lit("needle")))
                         .select(["title"]),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query text substring contains");
             assert_eq!(text_rows, count_rows);
         })
@@ -211,9 +219,10 @@ async fn invalid_membership_filters_return_type_errors() {
             let scalar_contains = client
                 .query(
                     jazz::query::Query::from("items").filter(contains(col("count"), lit(1))),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect_err("contains on scalar integer column should fail");
             assert!(
                 scalar_contains
@@ -226,9 +235,10 @@ async fn invalid_membership_filters_return_type_errors() {
                 .query(
                     jazz::query::Query::from("items")
                         .filter(in_list(col("count"), [lit("not an integer")])),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect_err("in with mismatched candidate type should fail");
             // #1182 replaced the bare "operand type mismatch" with a message
             // naming the column and both types. Assert on those parts rather
@@ -270,9 +280,10 @@ async fn in_filter_rejects_scalar_candidate_for_array_column() {
                 .query(
                     jazz::query::Query::from("items")
                         .filter(in_list(col("counts"), [lit(3)])),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect_err(
                     "a scalar in candidate for an array column must fail validation, not return no rows",
                 );

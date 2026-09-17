@@ -11,7 +11,7 @@ import {
 
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({ documents: schema.table({ title: schema.string() }) });
+const app = schema.defineApp({ documents: schema.table({ title: schema.string() }, {}) });
 
 // writeState is the existing low-level NativeDb contract; public WriteHandle
 // exposes waits, so this receipt intentionally uses the real binding adapter.

@@ -13,7 +13,7 @@ const target = "linux-x64-gnu";
 const rustTarget = "x86_64-unknown-linux-gnu";
 const fingerprint = "a".repeat(64);
 
-function fixture({ profile = "release" } = {}) {
+function fixture({ profile = "release", platform = target, rust = rustTarget } = {}) {
   const root = mkdtempSync(join(tmpdir(), "jazz-napi-package-"));
   const packageDir = join(root, "crates", "jazz-napi");
   const generation = join(packageDir, ".native-artifacts", "generation-release");
@@ -32,18 +32,18 @@ function fixture({ profile = "release" } = {}) {
     `const nativeBinding = require("./.native-artifacts/generation-release/index.js");\nmodule.exports = { nativeBinding, expectedNativeArtifactFingerprint: "${fingerprint}" };\n`,
   );
   const nativeBytes = "fixture native bytes\n";
-  writeFileSync(join(generation, `jazz-napi.${target}.node`), nativeBytes);
+  writeFileSync(join(generation, `jazz-napi.${platform}.node`), nativeBytes);
   writeFileSync(join(generation, "index.js"), "module.exports = {};\n");
   writeFileSync(
     join(generation, ".jazz-artifact-manifest.json"),
     JSON.stringify({
       kind: "napi",
       profile,
-      target: rustTarget,
+      target: rust,
       nativeArtifactFingerprint: fingerprint,
       artifacts: [
         {
-          file: `jazz-napi.${target}.node`,
+          file: `jazz-napi.${platform}.node`,
           sha256: createHash("sha256").update(nativeBytes).digest("hex"),
         },
       ],
@@ -196,5 +196,33 @@ test("NAPI prepack publishes the validated generation bytes despite source inter
     );
   } finally {
     rmSync(fixtureRoot.root, { recursive: true, force: true });
+  }
+});
+
+test("ARM64 staging publishes the selected sealed binding and fingerprint", () => {
+  const platform = "linux-arm64-gnu";
+  const f = fixture({ platform, rust: "aarch64-unknown-linux-gnu" });
+  try {
+    stageNapiLoader(f.root, platform);
+    assert.equal(
+      readFileSync(join(f.packageDir, `jazz-napi.${platform}.node`), "utf8"),
+      "fixture native bytes\n",
+    );
+    const manifest = JSON.parse(
+      readFileSync(join(f.packageDir, `jazz-napi.${platform}.manifest.json`), "utf8"),
+    );
+    assert.equal(manifest.target, "aarch64-unknown-linux-gnu");
+    assert.equal(manifest.nativeArtifactFingerprint, fingerprint);
+    assert.match(
+      readFileSync(join(f.packageDir, "native-artifact-fingerprint.cjs"), "utf8"),
+      new RegExp(fingerprint),
+    );
+    assert.equal(
+      readFileSync(join(f.packageDir, "native-loader.cjs"), "utf8"),
+      "module.exports = {};\n",
+    );
+    assert.ok(packageSource.napi.targets.includes("aarch64-unknown-linux-gnu"));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
   }
 });

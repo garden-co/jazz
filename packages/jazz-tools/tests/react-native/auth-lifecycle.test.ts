@@ -4,7 +4,7 @@ import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({ notes: schema.table({ title: schema.string() }) });
+const app = schema.defineApp({ notes: schema.table({ title: schema.string() }, {}) });
 
 it("rejects caller credentials and requires an enrolled account handle", async () => {
   await withNativeRelayFixture(app, async (fixture) => {
@@ -151,7 +151,7 @@ it("caller config mutation cannot replace the handle behind an existing context"
 
 it("retains external provider claims when borrowing an admitted native account", async () => {
   const scopedApp = schema.defineApp({
-    notes: schema.table({ title: schema.string(), role: schema.string() }),
+    notes: schema.table({ title: schema.string(), role: schema.string() }, {}),
   });
   const permissions = schema.definePermissions(scopedApp, ({ policy, session }) => {
     policy.notes.allowRead.where({ role: session.claims["role"] });

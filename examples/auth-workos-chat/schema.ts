@@ -1,12 +1,15 @@
 import { schema as s } from "jazz-tools";
 
 const schema = {
-  messages: s.table({
-    author_name: s.string(),
-    chat_id: s.string(),
-    text: s.string(),
-    sent_at: s.timestamp(),
-  }),
+  messages: s.table(
+    {
+      author_name: s.string(),
+      chat_id: s.string(),
+      text: s.string(),
+      sent_at: s.timestamp(),
+    },
+    {},
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;

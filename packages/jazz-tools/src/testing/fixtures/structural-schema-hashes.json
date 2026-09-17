@@ -184,5 +184,352 @@
       "nullable": false,
       "hash": "dd622416483432dbc37d09a7894d1af286b3c7a404bd337dc358343f3be4a630"
     }
+  ],
+  "defaultCases": [
+    {
+      "columnType": {
+        "type": "Integer"
+      },
+      "default": {
+        "type": "Integer",
+        "value": -2147483648
+      },
+      "hash": "0fde6940c734b2ed2c808bfd4da4d77906a9fcb26a0fcc58a8a74b3bf55b75a5",
+      "name": "integer-min",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Integer"
+      },
+      "default": {
+        "type": "Integer",
+        "value": 2147483647
+      },
+      "hash": "404f8bf78329021a9f43698493336813c06fad1511fdae31b0eac74d43de8dd0",
+      "name": "integer-max",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "BigInt"
+      },
+      "default": {
+        "type": "BigInt",
+        "value": "-9223372036854775808"
+      },
+      "hash": "ded06ed8399ab046d6d48893fbe37a66dfc3a7728b6a85d76a99a6a889271d05",
+      "name": "bigint-min",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "BigInt"
+      },
+      "default": {
+        "type": "BigInt",
+        "value": "9223372036854775807"
+      },
+      "hash": "44c9702474bd52304d56b26761b22d224c88645c389bc46516a5014173a17607",
+      "name": "bigint-max",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Double"
+      },
+      "default": {
+        "type": "Double",
+        "value": -12.5
+      },
+      "hash": "7ba4bc040c4a0d5a0a7af33e379cbd8d55cb52be96078130b57238f62121c349",
+      "name": "double",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Boolean"
+      },
+      "default": {
+        "type": "Boolean",
+        "value": false
+      },
+      "hash": "2ff50c48f8ef554900d301801bbc89aec9518cfed5746e432ce339ffd9183cf9",
+      "name": "boolean-false",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Text"
+      },
+      "default": {
+        "type": "Text",
+        "value": "café 🌿"
+      },
+      "hash": "0ff880fdb8e60e9e53d9095dd534c72db18805fd88e80b72d13f8c70fd92061a",
+      "name": "text-unicode",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Json"
+      },
+      "default": {
+        "type": "Text",
+        "value": "{\"count\":2}"
+      },
+      "hash": "0ccd01838c979d4c88cc11aaa66eae6211990a797c72676e5e4807d1389a0568",
+      "name": "json",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "a": {
+              "type": "string"
+            },
+            "z": {
+              "minimum": 1.25,
+              "type": "number"
+            },
+            "": {
+              "type": "string"
+            },
+            "𐀀": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "type": "Json"
+      },
+      "default": {
+        "type": "Text",
+        "value": "{\"z\":2,\"a\":\"ok\"}"
+      },
+      "hash": "c0c194fab3b85da53ddeb41481bf1b2ac6d8b43e566c68de03e3746c1cc0e33b",
+      "name": "json-schema",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Timestamp"
+      },
+      "default": {
+        "type": "Timestamp",
+        "value": 1700000000123
+      },
+      "hash": "d5588ff7bc5263ca2a7d24130fe99187ec086cd963191e5e6b2dbc55d23ec579",
+      "name": "timestamp",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Uuid"
+      },
+      "default": {
+        "type": "Uuid",
+        "value": "00112233-4455-6677-8899-aabbccddeeff"
+      },
+      "hash": "420b60f8799c62cfb834bd51d6c9f483a1c27181bf73864363b98696a106b6e1",
+      "name": "uuid",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Bytea"
+      },
+      "default": {
+        "type": "Bytea",
+        "value": [0, 1, 127, 128, 255]
+      },
+      "hash": "7a22b7ab67255133078cb8e922b77f5708c631feaed6a3ce6df5d0c9230e352f",
+      "name": "bytea",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "element": {
+          "type": "Integer"
+        },
+        "type": "Array"
+      },
+      "default": {
+        "type": "Array",
+        "value": [
+          {
+            "type": "Integer",
+            "value": -1
+          },
+          {
+            "type": "Integer",
+            "value": 2
+          }
+        ]
+      },
+      "hash": "9c1dc0e93ba33f1878a1a430b392857dc399acc8760cd1f7e748cac53479bd82",
+      "name": "array",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "element": {
+          "type": "Integer"
+        },
+        "type": "Array"
+      },
+      "default": {
+        "type": "Array",
+        "value": []
+      },
+      "hash": "63d2c62c08637cb6ed612d426da79a5372361ba09082d627752af5b9707285fc",
+      "name": "empty-array",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "columns": [
+          {
+            "column_type": {
+              "type": "Integer"
+            },
+            "name": "count",
+            "nullable": false
+          },
+          {
+            "column_type": {
+              "type": "Text"
+            },
+            "name": "note",
+            "nullable": true
+          }
+        ],
+        "type": "Row"
+      },
+      "default": {
+        "type": "Row",
+        "value": {
+          "values": [
+            {
+              "type": "Integer",
+              "value": 3
+            },
+            {
+              "type": "Null"
+            }
+          ]
+        }
+      },
+      "hash": "13937b9d93f5d7d84e59c6346ec4b292497607baf8da12226129b69eedaf3039",
+      "name": "row",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Enum",
+        "variants": ["draft", "active"]
+      },
+      "default": {
+        "type": "Text",
+        "value": "active"
+      },
+      "hash": "a8be5a0af1b19cf44f82c51b21787708a5b845eb4e892962b474be8c51656c8c",
+      "name": "enum",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "cases": [
+          {
+            "fields": [
+              {
+                "column_type": {
+                  "type": "Text"
+                },
+                "name": "title",
+                "nullable": false
+              }
+            ],
+            "name": "created"
+          },
+          {
+            "fields": [],
+            "name": "deleted"
+          }
+        ],
+        "type": "EnumPayload"
+      },
+      "default": {
+        "type": "Enum",
+        "value": {
+          "case": "created",
+          "values": [
+            {
+              "type": "Text",
+              "value": "hello"
+            }
+          ]
+        }
+      },
+      "hash": "99401b36c24acb71f7705439dcf8cf08a40b968d550c2561bf8a81007a33534f",
+      "name": "enum-payload",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Text"
+      },
+      "default": {
+        "type": "Null"
+      },
+      "hash": "e599d2ed34fc3d58ee4e5388a29c6e14879ba2e82dd8d5b877474467a87c2683",
+      "name": "null",
+      "nullable": true
+    },
+    {
+      "columnType": {
+        "type": "Text"
+      },
+      "hash": "b538ab7ca774cdf97c4bccce8270bda486e9d0f8ab6d04cea86200fc12bdd0bf",
+      "name": "absent",
+      "nullable": true
+    },
+    {
+      "branchBy": ["value"],
+      "columnType": {
+        "type": "Text"
+      },
+      "default": {
+        "type": "Text",
+        "value": "main"
+      },
+      "hash": "52c30e9358eeaec995682401f585b0a2db6688afa8c89753ef01e74673895bfc",
+      "name": "branch-by",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Integer"
+      },
+      "hash": "d145712b9d53865821167aa1a539ba25317cfac7cf3eeca4682fb6aae65fb34a",
+      "mergeStrategy": "Counter",
+      "name": "merge-only",
+      "nullable": false
+    },
+    {
+      "columnType": {
+        "type": "Integer"
+      },
+      "default": {
+        "type": "Integer",
+        "value": 5
+      },
+      "hash": "b43e7fdc87fd439971910e9795fd0dc24ca696f4da7e05cafbbcd198991cec2a",
+      "mergeStrategy": "Counter",
+      "name": "default-and-merge",
+      "nullable": false
+    }
   ]
 }

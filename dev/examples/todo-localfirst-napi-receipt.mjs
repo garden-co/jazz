@@ -12,17 +12,27 @@ const adminSecret = process.env.JAZZ_TODO_ADMIN_SECRET ?? "todo-localfirst-admin
 const backendSecret = process.env.JAZZ_TODO_BACKEND_SECRET ?? adminSecret;
 
 const app = s.defineApp({
-  projects: s.table({
-    name: s.string(),
-  }),
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    description: s.string().optional(),
-    owner_id: s.uuid(),
-    parentId: s.ref("todos").optional(),
-    projectId: s.ref("projects").optional(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todosViaProject: s.reverse("todos", "project") },
+  ),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      owner_id: s.uuid(),
+      parentId: s.uuid().optional(),
+      projectId: s.uuid().optional(),
+    },
+    {
+      parent: s.rel("todos", "parentId"),
+      todosViaParent: s.reverse("todos", "parent"),
+      project: s.rel("projects", "projectId"),
+    },
+  ),
 });
 
 const permissions = s.definePermissions(app, ({ policy, session }) => {

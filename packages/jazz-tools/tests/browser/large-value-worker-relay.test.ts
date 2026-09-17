@@ -21,12 +21,15 @@ import {
 import { getJazzServerInfo } from "./testing-server.js";
 
 const app = s.defineApp({
-  values: s.table({
-    name: s.string(),
-    text: s.string().optional(),
-    bytes: s.bytes().optional(),
-    control: s.boolean(),
-  }),
+  values: s.table(
+    {
+      name: s.string(),
+      text: s.string().optional(),
+      bytes: s.bytes().optional(),
+      control: s.boolean(),
+    },
+    {},
+  ),
 });
 
 const permissions = s.definePermissions(app, ({ policy }) => [
@@ -41,16 +44,22 @@ const permissions = s.definePermissions(app, ({ policy }) => [
 // authors a referenced project. It is distinct from the streaming receipts
 // below, which each create one row in their own transaction.
 const transactionApp = s.defineApp({
-  projects: s.table({
-    name: s.string(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { documentsViaProject: s.reverse("documents", "project") },
+  ),
   documents: s
-    .table({
-      branch: s.string(),
-      title: s.string(),
-      projectId: s.ref("projects"),
-      body: s.string(),
-    })
+    .table(
+      {
+        branch: s.string(),
+        title: s.string(),
+        projectId: s.uuid(),
+        body: s.string(),
+      },
+      { project: s.rel("projects", "projectId") },
+    )
     .branchBy("branch"),
 });
 

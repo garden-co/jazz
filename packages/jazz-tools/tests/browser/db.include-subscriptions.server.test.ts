@@ -17,22 +17,45 @@ import {
 import { getJazzServerInfo } from "./testing-server.js";
 
 const app = schema.defineApp({
-  orgs: schema.table({
-    name: schema.string(),
-  }),
-  todos: schema.table({
-    title: schema.string(),
-    org_id: schema.ref("orgs"),
-  }),
-  user_checks: schema.table({
-    org_id: schema.ref("orgs"),
-    todo_id: schema.ref("todos"),
-  }),
-  check_notes: schema.table({
-    body: schema.string(),
-    org_id: schema.ref("orgs"),
-    user_check_id: schema.ref("user_checks"),
-  }),
+  orgs: schema.table(
+    {
+      name: schema.string(),
+    },
+    {
+      todosViaOrg: schema.reverse("todos", "org"),
+      user_checksViaOrg: schema.reverse("user_checks", "org"),
+      check_notesViaOrg: schema.reverse("check_notes", "org"),
+    },
+  ),
+  todos: schema.table(
+    {
+      title: schema.string(),
+      org_id: schema.uuid(),
+    },
+    {
+      org: schema.rel("orgs", "org_id"),
+      user_checksViaTodo: schema.reverse("user_checks", "todo"),
+    },
+  ),
+  user_checks: schema.table(
+    {
+      org_id: schema.uuid(),
+      todo_id: schema.uuid(),
+    },
+    {
+      org: schema.rel("orgs", "org_id"),
+      todo: schema.rel("todos", "todo_id"),
+      check_notesViaUser_check: schema.reverse("check_notes", "user_check"),
+    },
+  ),
+  check_notes: schema.table(
+    {
+      body: schema.string(),
+      org_id: schema.uuid(),
+      user_check_id: schema.uuid(),
+    },
+    { org: schema.rel("orgs", "org_id"), user_check: schema.rel("user_checks", "user_check_id") },
+  ),
 });
 
 const permissions = schema.definePermissions(app, ({ policy }) => [

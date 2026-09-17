@@ -5,18 +5,24 @@ import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
 const app = s.defineApp({
-  items: s.table({
-    title: s.string(),
-    note: s.string().default("default note"),
-    tags: s.array(s.string()).default([]),
-  }),
+  items: s.table(
+    {
+      title: s.string(),
+      note: s.string().default("default note"),
+      tags: s.array(s.string()).default([]),
+    },
+    {},
+  ),
 });
 
 const requiredArrayApp = s.defineApp({
-  items: s.table({
-    title: s.string(),
-    tags: s.array(s.string()),
-  }),
+  items: s.table(
+    {
+      title: s.string(),
+      tags: s.array(s.string()),
+    },
+    {},
+  ),
 });
 
 let db: Db | undefined;

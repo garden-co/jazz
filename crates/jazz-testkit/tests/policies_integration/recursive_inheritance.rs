@@ -27,8 +27,9 @@ fn insert_folder(
 
 async fn query_folder_ids(client: &JazzClient) -> HashSet<ObjectId> {
     client
-        .query(Query::from("folders"), Some(DurabilityTier::EdgeServer))
+        .query(Query::from("folders"), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query folders")
         .into_iter()
         .map(|(id, _)| id)
@@ -41,9 +42,10 @@ async fn query_folder_name_as(client: &JazzClient, folder_id: ObjectId) -> Optio
             Query::from("folders")
                 .filter(eq(col("id"), lit(*folder_id.uuid())))
                 .select(["name"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query folders")
         .first()
         .map(|(_, values)| {
@@ -173,13 +175,29 @@ async fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     let _bob_visible = query_folder_ids(&bob).await;
 
     let result = alice.update(
+        "folders",
         grand,
         vec![("name".to_string(), Value::Text("Renamed by Alice".into()))],
     );
-    let result_is_err = result.is_err();
-    if let Ok(Some(transaction_id)) = result {
-        wait_for_edge_txs(&alice, &[transaction_id]).await;
-    }
+    let result_is_err = match result {
+        Err(_) => true,
+        Ok(transaction_id) => match alice
+            .wait_for_transaction(
+                transaction_id.expect("ordinary mutation has a transaction"),
+                DurabilityTier::EdgeServer,
+            )
+            .await
+        {
+            Ok(()) => false,
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("authorization_denied"),
+                    "{error}"
+                );
+                true
+            }
+        },
+    };
 
     let name = query_folder_name_as(&bob, grand)
         .await

@@ -7,8 +7,8 @@ import { defineMigration, exportLocalFirstSecret, schema as s } from "../index.j
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createJazzSession } from "./index.js";
 
-const before = { entries: s.table({ text: s.string() }) };
-const after = { ...before, controls: s.table({ value: s.string() }) };
+const before = { entries: s.table({ text: s.string() }, {}) };
+const after = { ...before, controls: s.table({ value: s.string() }, {}) };
 const oldApp = s.defineApp(before);
 const newApp = s.defineApp(after);
 const oldPermissions = s.definePermissions(oldApp, ({ policy }) => {
@@ -102,7 +102,7 @@ describe("offline persistent schema bootstrap", () => {
           expect(await reopened.db.all(newApp.entries, { tier: "local" })).toHaveLength(1);
           await close(reopened.session);
           // An incompatible, unpublished target cannot borrow B's admission.
-          const incompatible = s.defineApp({ entries: s.table({ text: s.boolean() }) });
+          const incompatible = s.defineApp({ entries: s.table({ text: s.boolean() }, {}) });
           const rejected = await open(incompatible, "reader");
           await expect(rejected.db.all(incompatible.entries, { tier: "global" })).rejects.toThrow(
             /awaiting published catalogue admission/,

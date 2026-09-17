@@ -1,20 +1,13 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz::query::{Gather, Query, col, eq, lit};
+use jazz::query::Query;
 
 use super::support::{
     collect_stream_deltas, connect_ready_client, connect_ready_user, has_added_id, has_any_change,
     has_removed, wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
 use super::{pe, permissions};
-use jazz::tools::TableName;
-use jazz::tools::public_schema::{
-    RelColumnRef as ColumnRef, RelExpr, RelJoinCondition as JoinCondition, RelJoinKind as JoinKind,
-    RelKeyRef as KeyRef, RelPredicateCmpOp as PredicateCmpOp, RelPredicateExpr as PredicateExpr,
-    RelProjectColumn as ProjectColumn, RelProjectExpr as ProjectExpr,
-    RelRecursionBound as RecursionBound, RelValueRef as ValueRef, RowIdRef,
-};
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
     TableSchema, TableSchemaBuilder, Value,
@@ -82,112 +75,31 @@ fn make_recursive_relation_documents_schema(
         .policies(policies)
 }
 
-fn scoped_column(scope: &str, column: &str) -> ColumnRef {
-    ColumnRef {
-        scope: Some(scope.to_owned()),
-        column: column.to_owned(),
-    }
-}
-
-fn reachable_teams_relation() -> RelExpr {
-    RelExpr::Gather {
-        seed: Box::new(RelExpr::Project {
-            input: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::Join {
-                    left: Box::new(RelExpr::TableScan {
-                        table: TableName::new("teams"),
-                        alias: None,
-                    }),
-                    right: Box::new(RelExpr::TableScan {
-                        table: TableName::new("team_memberships"),
-                        alias: None,
-                    }),
-                    on: vec![JoinCondition {
-                        left: scoped_column("teams", "id"),
-                        right: scoped_column("team_memberships", "team_id"),
-                    }],
-                    join_kind: JoinKind::Inner,
-                }),
-                predicate: PredicateExpr::Cmp {
-                    left: scoped_column("team_memberships", "user_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user".to_owned()]),
-                },
-            }),
-            columns: vec![ProjectColumn {
-                alias: "id".to_string(),
-                expr: ProjectExpr::Column(scoped_column("teams", "id")),
-            }],
-        }),
-        step: Box::new(RelExpr::Project {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::Project {
-                    input: Box::new(RelExpr::Filter {
-                        input: Box::new(RelExpr::TableScan {
-                            table: TableName::new("team_edges"),
-                            alias: None,
-                        }),
-                        predicate: PredicateExpr::Cmp {
-                            left: scoped_column("team_edges", "child_team"),
-                            op: PredicateCmpOp::Eq,
-                            right: ValueRef::RowId(RowIdRef::Frontier),
-                        },
-                    }),
-                    columns: vec![ProjectColumn {
-                        alias: "parent_team".to_string(),
-                        expr: ProjectExpr::Column(scoped_column("team_edges", "parent_team")),
-                    }],
-                }),
-                right: Box::new(RelExpr::TableScan {
-                    table: TableName::new("teams"),
-                    alias: Some("__recursive_hop_0".to_owned()),
-                }),
-                on: vec![JoinCondition {
-                    left: scoped_column("team_edges", "parent_team"),
-                    right: scoped_column("__recursive_hop_0", "id"),
-                }],
-                join_kind: JoinKind::Inner,
-            }),
-            columns: vec![ProjectColumn {
-                alias: "id".to_string(),
-                expr: ProjectExpr::Column(scoped_column("__recursive_hop_0", "id")),
-            }],
-        }),
-        frontier_key: KeyRef::Column(ColumnRef::unscoped("id")),
-        bound: RecursionBound::MaxDepth(10),
-        dedupe_key: vec![KeyRef::Column(ColumnRef::unscoped("id"))],
-    }
-}
-
 fn recursive_relation_document_select_policy() -> PolicyExpr {
-    PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(reachable_teams_relation()),
-                right: Box::new(RelExpr::TableScan {
-                    table: TableName::new("resource_access_edges"),
-                    alias: None,
-                }),
-                on: vec![JoinCondition {
-                    left: ColumnRef::unscoped("id"),
-                    right: scoped_column("resource_access_edges", "team_id"),
-                }],
-                join_kind: JoinKind::Inner,
-            }),
-            predicate: PredicateExpr::And(vec![
-                PredicateExpr::Cmp {
-                    left: scoped_column("resource_access_edges", "resource_id"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::RowId(RowIdRef::Outer),
-                },
-                PredicateExpr::Cmp {
-                    left: scoped_column("resource_access_edges", "grant_role"),
-                    op: PredicateCmpOp::Eq,
-                    right: ValueRef::Literal("viewer".into()),
-                },
-            ]),
-        },
-    }
+    let seed = pe::table("team_memberships")
+        .where_(pe::rel::eq_session("user_id", "claims.sub"))
+        .join(
+            pe::table("teams").alias("seed_team"),
+            pe::rel::column("team_memberships", "team_id"),
+            pe::rel::column("seed_team", "id"),
+        )
+        .select([("id", pe::rel::column("seed_team", "id"))]);
+    let step = pe::table("team_edges")
+        .where_(pe::rel::eq_frontier("child_team"))
+        .select([("id", "parent_team")]);
+
+    pe::exists(
+        seed.gather(step, 10)
+            .join(
+                pe::table("resource_access_edges").alias("access"),
+                pe::rel::column("teams", "id"),
+                pe::rel::column("access", "team_id"),
+            )
+            .where_(pe::rel::all_of([
+                pe::rel::eq_outer(pe::rel::column("access", "resource_id"), "id"),
+                pe::rel::eq_literal(pe::rel::column("access", "grant_role"), "viewer"),
+            ])),
+    )
 }
 
 fn recursive_relation_policy_schema() -> Schema {
@@ -195,18 +107,18 @@ fn recursive_relation_policy_schema() -> Schema {
         .table(TableSchema::builder("teams").column("name", ColumnType::Text))
         .table(
             TableSchema::builder("team_edges")
-                .column("child_team", ColumnType::Uuid)
-                .column("parent_team", ColumnType::Uuid),
+                .fk_column("child_team", "teams")
+                .fk_column("parent_team", "teams"),
         )
         .table(
             TableSchema::builder("team_memberships")
                 .column("user_id", ColumnType::Text)
-                .column("team_id", ColumnType::Uuid),
+                .fk_column("team_id", "teams"),
         )
         .table(
             TableSchema::builder("resource_access_edges")
-                .column("team_id", ColumnType::Uuid)
-                .column("resource_id", ColumnType::Uuid)
+                .fk_column("team_id", "teams")
+                .fk_column("resource_id", "documents")
                 .column("grant_role", ColumnType::Text),
         )
         .table(make_recursive_relation_documents_schema(
@@ -218,32 +130,6 @@ fn recursive_relation_policy_schema() -> Schema {
                     .where_(recursive_relation_document_select_policy());
             }),
         ))
-        .build()
-}
-
-fn recursive_step_magic_column_policy_schema() -> Schema {
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("teams")
-                .column("name", ColumnType::Text)
-                .policies(permissions(|p| {
-                    p.allow_insert().always();
-                    p.allow_read().always();
-                })),
-        )
-        .table(
-            TableSchema::builder("team_edges")
-                .column("child_team", ColumnType::Uuid)
-                .column("parent_team", ColumnType::Uuid)
-                .column("owner_id", ColumnType::Text)
-                .policies(permissions(|p| {
-                    p.allow_insert().always();
-                    p.allow_read().always();
-                    p.allow_update()
-                        .where_old(pe::eq("owner_id", pe::session(vec!["claims", "sub"])))
-                        .where_new(pe::always());
-                })),
-        )
         .build()
 }
 
@@ -285,11 +171,16 @@ async fn create_recursive_folder(
 
 async fn update_recursive_folder_parent(
     client: &JazzClient,
+    table_name: &str,
     folder_id: ObjectId,
     parent_id: Option<ObjectId>,
 ) {
     client
-        .update(folder_id, vec![("parent_id".to_string(), parent_id.into())])
+        .update(
+            table_name,
+            folder_id,
+            vec![("parent_id".to_string(), parent_id.into())],
+        )
         .expect("update recursive folder parent");
 }
 
@@ -300,31 +191,28 @@ async fn create_team(client: &JazzClient, name: &str) -> ObjectId {
         .0
 }
 
-async fn create_team_edge(client: &JazzClient, child_team: ObjectId, parent_team: ObjectId) {
-    client
+async fn create_team_edge(
+    client: &JazzClient,
+    child_team: ObjectId,
+    parent_team: ObjectId,
+) -> ObjectId {
+    let (edge_id, _, transaction_id) = client
         .insert(
             "team_edges",
             jazz::row_input!("child_team" => Value::Uuid(child_team), "parent_team" => Value::Uuid(parent_team)))
 
         .expect("create team edge");
-}
-
-async fn create_owned_team_edge(
-    client: &JazzClient,
-    child_team: ObjectId,
-    parent_team: ObjectId,
-    owner_id: &str,
-) {
-    client
-        .insert(
-            "team_edges",
-            jazz::row_input!(
-                "child_team" => child_team,
-                "parent_team" => parent_team,
-                "owner_id" => owner_id,
-            ),
-        )
-        .expect("create owned team edge");
+    tokio::time::timeout(
+        QUERY_TIMEOUT,
+        client.wait_for_transaction(
+            transaction_id.expect("team edge insert must commit immediately"),
+            DurabilityTier::EdgeServer,
+        ),
+    )
+    .await
+    .expect("team edge settlement timed out")
+    .expect("team edge must reach the server");
+    edge_id
 }
 
 async fn create_team_membership(client: &JazzClient, user_id: &str, team_id: ObjectId) {
@@ -358,84 +246,6 @@ async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
 }
 
 // -- Tests --
-
-/// Verifies that magic permission columns inside a recursive step are evaluated
-/// with the reader's session.
-///
-/// Actors: admin seeds the graph, alice reads it.
-///
-/// ```text
-/// Platform --editable-by-alice--> API --editable-by-bob--> Finance
-///
-/// alice query from Platform with recursive step filter $canEdit=true
-///   -> {Platform, API}
-/// ```
-#[tokio::test]
-#[ignore = "#1761: recursive query magic-column evaluation hangs for more than 90 seconds"]
-async fn recursive_query_step_magic_columns_use_reader_session() {
-    tokio::task::LocalSet::new()
-        .run_until(recursive_query_step_magic_columns_use_reader_session_inner())
-        .await;
-}
-
-async fn recursive_query_step_magic_columns_use_reader_session_inner() {
-    let schema = recursive_step_magic_column_policy_schema();
-    let server = JazzServer::builder()
-        .with_schema(schema.clone())
-        .start()
-        .await
-        .expect("start test server");
-    let admin = connect_ready_client(&server, &schema, "admin", "teams", READY_TIMEOUT).await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "teams", READY_TIMEOUT).await;
-
-    let platform = create_team(&admin, "Platform").await;
-    let api = create_team(&admin, "API").await;
-    let finance = create_team(&admin, "Finance").await;
-    create_owned_team_edge(&admin, platform, api, super::ALICE_ID).await;
-    create_owned_team_edge(&admin, api, finance, super::BOB_ID).await;
-
-    let query = Query::from("teams")
-        .filter(eq(col("name"), lit("Platform")))
-        .gather(
-            Gather::from("team_edges")
-                .where_current("child_team")
-                .filter(eq(col("$canEdit"), lit(true)))
-                .hop_to("parent_team")
-                .max_depth(10),
-        );
-
-    let rows = wait_for_rows(
-        &alice,
-        query,
-        "alice sees only teams reached through editable recursive edges",
-        |rows| {
-            let mut names = rows
-                .iter()
-                .filter_map(|(_, values)| match values.first() {
-                    Some(Value::Text(name)) => Some(name.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            names.sort();
-            (names == vec!["API".to_string(), "Platform".to_string()]).then_some(rows)
-        },
-    )
-    .await;
-
-    let mut names = rows
-        .iter()
-        .filter_map(|(_, values)| match values.first() {
-            Some(Value::Text(name)) => Some(name.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    assert_eq!(names, vec!["API", "Platform"]);
-
-    admin.shutdown().await.expect("shutdown admin");
-    alice.shutdown().await.expect("shutdown alice");
-    server.shutdown().await;
-}
 
 /// Verifies that recursive `INHERITS` grants access through an owned ancestor
 /// and still fails closed for a session with no reachable owned folder.
@@ -506,7 +316,7 @@ async fn recursive_inherits_grants_visible_ancestor_chain_and_denies_unrelated_s
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no recursive folders without an owned ancestor",
         Some,
@@ -642,7 +452,7 @@ async fn recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch_
         Some(cycle_a),
     )
     .await;
-    update_recursive_folder_parent(&admin, cycle_a, Some(cycle_b)).await;
+    update_recursive_folder_parent(&admin, table_name, cycle_a, Some(cycle_b)).await;
 
     let query = Query::from(table_name);
     let alice_rows = wait_for_rows(
@@ -732,7 +542,7 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change_inner()
     collect_stream_deltas(&mut alice_stream, &mut alice_log, NO_DELTA_WINDOW).await;
     alice_log.clear();
 
-    update_recursive_folder_parent(&admin, child, Some(root)).await;
+    update_recursive_folder_parent(&admin, table_name, child, Some(root)).await;
     wait_for_subscription_update(
         &mut alice_stream,
         &mut alice_log,
@@ -759,7 +569,7 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change_inner()
     collect_stream_deltas(&mut alice_stream, &mut alice_log, NO_DELTA_WINDOW).await;
     alice_log.clear();
 
-    update_recursive_folder_parent(&admin, child, None).await;
+    update_recursive_folder_parent(&admin, table_name, child, None).await;
     wait_for_subscription_update(
         &mut alice_stream,
         &mut alice_log,
@@ -798,7 +608,6 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change_inner()
 /// dave query ─► {}
 /// ```
 #[tokio::test]
-#[ignore = "#1761: read-side recursive ExistsRel never grants rows in integration"]
 async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_without_path() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -852,7 +661,7 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
     let dave_rows = wait_for_query(
         &dave,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "dave sees no documents without a reachable team path",
         Some,
@@ -868,10 +677,11 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
 
 /// Verifies that a recursive gather graph with a diamond topology does not
 /// emit duplicate visibility changes when a second path reaches a team that was
-/// already granting access.
+/// already granting access. Removing one path preserves visibility; removing
+/// the last path revokes access in queries and the existing subscription.
 ///
-/// Actors: bob holds the subscription, admin grows the diamond, and the root
-/// team remains the single grant source for the document.
+/// Actors: bob holds the subscription, admin grows then removes the diamond,
+/// and the root team remains the single grant source for the document.
 ///
 /// ```text
 /// initial path: leaf ─► mid_a ─► root ─► document grant
@@ -880,7 +690,6 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
 /// bob should keep exactly one visible document, with no second add delta.
 /// ```
 #[tokio::test]
-#[ignore = "#1761: recursive ExistsRel grant path is still invisible, so diamond dedupe never settles"]
 async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_deltas() {
     tokio::task::LocalSet::new()
         .run_until(recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_deltas_inner())
@@ -901,7 +710,7 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
     let mid_a = create_team(&admin, "mid-a").await;
     let mid_b = create_team(&admin, "mid-b").await;
     let leaf = create_team(&admin, "leaf").await;
-    create_team_edge(&admin, leaf, mid_a).await;
+    let first_path_edge = create_team_edge(&admin, leaf, mid_a).await;
     create_team_edge(&admin, mid_a, root).await;
     create_team_membership(&admin, super::BOB_ID, leaf).await;
 
@@ -932,15 +741,23 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
         .await
         .expect("subscribe bob recursive relation policy");
     let mut bob_log = Vec::new();
-    collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "initial recursive grant subscription add",
+        |log| has_added_id(log, doc_id),
+    )
+    .await;
     bob_log.clear();
 
-    create_team_edge(&admin, leaf, mid_b).await;
+    let second_path_edge = create_team_edge(&admin, leaf, mid_b).await;
     create_team_edge(&admin, mid_b, root).await;
 
     let rows_after_second_path = bob
-        .query(query, Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents after second recursive path");
     assert_eq!(
         rows_after_second_path.len(),
@@ -959,6 +776,51 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
         !has_any_change(&bob_log, doc_id),
         "an already-visible recursive grant must not emit duplicate deltas: log={bob_log:?}"
     );
+
+    bob_log.clear();
+    let tx = admin
+        .delete("team_edges", first_path_edge)
+        .expect("remove first recursive path")
+        .expect("edge deletion transaction");
+    jazz_testkit::wait_for_edge_txs(&admin, &[tx]).await;
+    let remaining_rows = bob
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("query documents with one remaining path");
+    assert_eq!(
+        remaining_rows,
+        vec![(doc_id, title_document_values("Diamond Grant"))]
+    );
+    collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
+    assert!(
+        !has_any_change(&bob_log, doc_id),
+        "removing one of two paths must preserve subscription visibility: log={bob_log:?}"
+    );
+
+    bob_log.clear();
+    let tx = admin
+        .delete("team_edges", second_path_edge)
+        .expect("remove last recursive path")
+        .expect("edge deletion transaction");
+    jazz_testkit::wait_for_edge_txs(&admin, &[tx]).await;
+    wait_for_query(
+        &bob,
+        query,
+        jazz::tools::ReadTier::Remote,
+        QUERY_TIMEOUT,
+        "no recursive path must mean no visible document",
+        |rows| rows.is_empty().then_some(()),
+    )
+    .await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "last recursive path removal revokes subscription visibility",
+        |log| has_removed(log, doc_id),
+    )
+    .await;
 
     admin.shutdown().await.expect("shutdown admin");
     bob.shutdown().await.expect("shutdown bob");

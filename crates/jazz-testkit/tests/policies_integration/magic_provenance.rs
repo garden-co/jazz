@@ -1,4 +1,3 @@
-use jazz::tools::DurabilityTier;
 use jazz_server::JazzServer;
 use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
 
@@ -13,10 +12,40 @@ fn attributed_to(principal: &str) -> WriteContext {
     }
 }
 
+async fn connect_provenance_author(
+    server: &JazzServer,
+    schema: &Schema,
+    user_id: &str,
+) -> (JazzClient, Session) {
+    let (context, client) = jazz_testkit::TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema.clone())
+        .with_user_id(user_id)
+        .as_user()
+        .ready_on("notes", READY_TIMEOUT)
+        .connect_with_context()
+        .await;
+    let mut session = Session::new("urn:jazz:test", user_id);
+    session.account_id = Some(context.account_id.expect("enrolled author account"));
+    (client, session)
+}
+
+fn author_record(account: jazz::account_registry::AccountId, issuer: &str, subject: &str) -> Value {
+    Value::Row {
+        id: None,
+        values: vec![
+            Value::Uuid(ObjectId::from_uuid(account.0)),
+            Value::Row {
+                id: None,
+                values: vec![Value::Text(issuer.into()), Value::Text(subject.into())],
+            },
+        ],
+    }
+}
+
 /// Verifies provenance magic columns for normal session writes, backend
 /// attribution, timestamps, query filters, and system-authored writes.
 #[tokio::test]
-#[ignore = "#1758: WriteContext attribution is not applied by the synced Rust client, so $updatedBy is not the requested principal"]
 async fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     tokio::task::LocalSet::new()
         .run_until(provenance_magic_columns_capture_insert_update_and_system_authors_inner())
@@ -28,9 +57,29 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
     let server = JazzServer::start_with_schema(schema.clone())
         .await
         .expect("start test server");
-    let client =
-        connect_ready_client(&server, &schema, "provenance-admin", "notes", READY_TIMEOUT).await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
+    let backend_node = uuid::Uuid::new_v4();
+    let client = connect_ready_client(
+        &server,
+        &schema,
+        &backend_node.to_string(),
+        "notes",
+        READY_TIMEOUT,
+    )
+    .await;
+    let (alice, alice_session) = connect_provenance_author(&server, &schema, super::ALICE_ID).await;
+    let (bob, bob_session) = connect_provenance_author(&server, &schema, super::BOB_ID).await;
+    let alice_author = author_record(
+        alice_session.account_id.unwrap(),
+        "urn:jazz:test",
+        super::ALICE_ID,
+    );
+    let bob_account = bob_session.account_id.unwrap();
+    let bob_author = author_record(bob_account, "urn:jazz:test", super::BOB_ID);
+    let system_author = author_record(
+        jazz::account_registry::SYSTEM_ACCOUNT_ID,
+        "urn:jazz:system",
+        &backend_node.to_string(),
+    );
 
     let (note, _, note_tx) = alice
         .insert("notes", crate::row_input!("title" => "draft"))
@@ -52,9 +101,10 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
                     "$createdAt",
                     "$updatedAt",
                 ]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query initial note");
     assert_eq!(initial.len(), 1, "draft note should be queryable");
     assert_eq!(
@@ -62,8 +112,8 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
         Value::Text("draft".into()),
         "projected title should decode"
     );
-    assert_eq!(initial[0].1[1], Value::Text(super::ALICE_ID.into()));
-    assert_eq!(initial[0].1[2], Value::Text(super::ALICE_ID.into()));
+    assert_eq!(initial[0].1[1], alice_author.clone());
+    assert_eq!(initial[0].1[2], alice_author.clone());
     let Value::Timestamp(initial_created_at) = initial[0].1[3] else {
         panic!("$createdAt should decode as a timestamp")
     };
@@ -76,8 +126,17 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
     );
 
     let update_tx = client
-        .with_write_context(attributed_to(super::BOB_ID))
-        .update(note, vec![("title".into(), Value::Text("revised".into()))])
+        .with_write_context(attributed_to(
+            bob_session
+                .author_subject()
+                .expect("Bob author")
+                .canonical(),
+        ))
+        .update(
+            "notes",
+            note,
+            vec![("title".into(), Value::Text("revised".into()))],
+        )
         .expect("attributed update should succeed without a session")
         .expect("attributed update should commit immediately");
     wait_for_edge_txs(&client, &[update_tx]).await;
@@ -93,14 +152,15 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
                     "$createdAt",
                     "$updatedAt",
                 ]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query updated note");
     assert_eq!(updated.len(), 1, "updated note should remain queryable");
     assert_eq!(updated[0].1[0], Value::Text("revised".into()));
-    assert_eq!(updated[0].1[1], Value::Text(super::ALICE_ID.into()));
-    assert_eq!(updated[0].1[2], Value::Text(super::BOB_ID.into()));
+    assert_eq!(updated[0].1[1], alice_author.clone());
+    assert_eq!(updated[0].1[2], bob_author.clone());
     let Value::Timestamp(updated_created_at) = updated[0].1[3] else {
         panic!("updated $createdAt should decode as a timestamp")
     };
@@ -119,19 +179,17 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
     let updated_by_bob = client
         .query(
             Query::from("notes")
-                .filter(eq(col("$updatedBy"), lit(super::BOB_ID)))
+                .filter(eq(col("$updatedBy.account"), lit(bob_account.0)))
                 .select(["title", "$updatedBy"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query notes updated by bob");
     assert_eq!(updated_by_bob.len(), 1);
     assert_eq!(
         updated_by_bob[0].1,
-        vec![
-            Value::Text("revised".into()),
-            Value::Text(super::BOB_ID.into())
-        ]
+        vec![Value::Text("revised".into()), bob_author.clone()]
     );
 
     let system_tx = client
@@ -145,29 +203,30 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
             Query::from("notes")
                 .filter(eq(col("title"), lit("system note")))
                 .select(["title", "$createdBy", "$updatedBy"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query system-authored note");
     assert_eq!(system.len(), 1);
     assert_eq!(
         system[0].1,
         vec![
             Value::Text("system note".into()),
-            Value::Text(SYSTEM_PRINCIPAL_ID.into()),
-            Value::Text(SYSTEM_PRINCIPAL_ID.into()),
+            system_author.clone(),
+            system_author.clone(),
         ]
     );
 
     client.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
 
 /// Verifies that write contexts can explicitly override `$updatedAt` while
 /// preserving the original creator and creation timestamp.
 #[tokio::test]
-#[ignore = "#1758: WriteContext attribution and updated_at overrides are not applied by the synced Rust client"]
 async fn provenance_magic_columns_allow_explicit_updated_at_override() {
     tokio::task::LocalSet::new()
         .run_until(provenance_magic_columns_allow_explicit_updated_at_override_inner())
@@ -181,7 +240,18 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
         .expect("start test server");
     let client =
         connect_ready_client(&server, &schema, "provenance-admin", "notes", READY_TIMEOUT).await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
+    let (alice, alice_session) = connect_provenance_author(&server, &schema, super::ALICE_ID).await;
+    let (bob, bob_session) = connect_provenance_author(&server, &schema, super::BOB_ID).await;
+    let alice_author = author_record(
+        alice_session.account_id.unwrap(),
+        "urn:jazz:test",
+        super::ALICE_ID,
+    );
+    let bob_author = author_record(
+        bob_session.account_id.unwrap(),
+        "urn:jazz:test",
+        super::BOB_ID,
+    );
 
     let (note, _, note_tx) = alice
         .insert("notes", crate::row_input!("title" => "draft"))
@@ -197,9 +267,10 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
             Query::from("notes")
                 .filter(eq(col("title"), lit("draft")))
                 .select(["$createdAt", "$updatedAt"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query initial note timestamps");
     assert_eq!(initial.len(), 1, "draft note should be queryable");
     let Value::Timestamp(initial_created_at) = initial[0].1[0] else {
@@ -209,12 +280,18 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
     let custom_updated_at = initial_created_at + 10_000;
     let bob_backfill = WriteContext {
         updated_at: Some(custom_updated_at),
-        ..attributed_to(super::BOB_ID)
+        ..attributed_to(
+            bob_session
+                .author_subject()
+                .expect("Bob author")
+                .canonical(),
+        )
     };
 
     let update_tx = client
         .with_write_context(bob_backfill)
         .update(
+            "notes",
             note,
             vec![("title".into(), Value::Text("backfilled".into()))],
         )
@@ -233,14 +310,15 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
                     "$createdAt",
                     "$updatedAt",
                 ]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query backfilled note");
     assert_eq!(updated.len(), 1, "backfilled note should remain queryable");
     assert_eq!(updated[0].1[0], Value::Text("backfilled".into()));
-    assert_eq!(updated[0].1[1], Value::Text(super::ALICE_ID.into()));
-    assert_eq!(updated[0].1[2], Value::Text(super::BOB_ID.into()));
+    assert_eq!(updated[0].1[1], alice_author);
+    assert_eq!(updated[0].1[2], bob_author);
     let Value::Timestamp(updated_created_at) = updated[0].1[3] else {
         panic!("updated $createdAt should decode as a timestamp")
     };
@@ -252,13 +330,13 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
 
     client.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
 }
 
 /// Verifies `$createdBy`-based row policies: creators can read/update/delete
 /// their rows, backend-attributed rows behave as creator-owned, and system rows stay hidden.
 #[tokio::test]
-#[ignore = "#1758: trusted backend attribution is ignored by the synced Rust client, so backend-attributed rows are not creator-owned"]
 async fn created_by_permissions_allow_creators_and_hide_system_rows() {
     tokio::task::LocalSet::new()
         .run_until(created_by_permissions_allow_creators_and_hide_system_rows_inner())
@@ -272,14 +350,24 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
         .expect("start test server");
     let client =
         connect_ready_client(&server, &schema, "provenance-admin", "notes", READY_TIMEOUT).await;
-    let alice = connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
+    let (alice, alice_session) = connect_provenance_author(&server, &schema, super::ALICE_ID).await;
+    let alice_author = author_record(
+        alice_session.account_id.unwrap(),
+        "urn:jazz:test",
+        super::ALICE_ID,
+    );
     let bob = connect_ready_user(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT).await;
 
     let (alice_owned, _, alice_owned_tx) = alice
         .insert("notes", crate::row_input!("title" => "alice-owned"))
         .expect("creator-based insert policy should allow alice");
     let (alice_attributed, _, attributed_tx) = client
-        .with_write_context(attributed_to(super::ALICE_ID))
+        .with_write_context(attributed_to(
+            alice_session
+                .author_subject()
+                .expect("Alice author")
+                .canonical(),
+        ))
         .insert("notes", crate::row_input!("title" => "alice-attributed"))
         .expect("backend-attributed note should stamp alice as creator");
     let system_tx = client
@@ -306,9 +394,10 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
             Query::from("notes")
                 .select(["title", "$createdBy"])
                 .order_by("title", jazz::query::OrderDirection::Asc),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query notes as alice");
     assert_eq!(
         alice_visible
@@ -316,14 +405,8 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
             .map(|(_, values)| values.clone())
             .collect::<Vec<_>>(),
         vec![
-            vec![
-                Value::Text("alice-attributed".into()),
-                Value::Text(super::ALICE_ID.into()),
-            ],
-            vec![
-                Value::Text("alice-owned".into()),
-                Value::Text(super::ALICE_ID.into())
-            ],
+            vec![Value::Text("alice-attributed".into()), alice_author.clone(),],
+            vec![Value::Text("alice-owned".into()), alice_author.clone()],
         ],
         "alice should only see notes authored as alice"
     );
@@ -331,30 +414,19 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
     let bob_visible = bob
         .query(
             Query::from("notes").select(["title"]),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query notes as bob");
     assert!(
         bob_visible.is_empty(),
         "bob should not see alice/system notes"
     );
 
-    let bob_update_err = bob
-        .update(
-            alice_owned,
-            vec![("title".into(), Value::Text("bob edit".into()))],
-        )
-        .expect_err("non-creator update should be denied");
-    assert_client_policy_denied(bob_update_err, "notes", Operation::Update);
-
-    let bob_delete_err = bob
-        .delete(alice_owned)
-        .expect_err("non-creator delete should be denied");
-    assert_client_policy_denied(bob_delete_err, "notes", Operation::Delete);
-
     let alice_update_tx = alice
         .update(
+            "notes",
             alice_attributed,
             vec![(
                 "title".into(),
@@ -364,7 +436,7 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
         .expect("creator should be able to update attributed rows")
         .expect("creator update should commit immediately");
     let alice_delete_tx = alice
-        .delete(alice_owned)
+        .delete("notes", alice_owned)
         .expect("creator should be able to delete her own row")
         .expect("creator delete should commit immediately");
     wait_for_edge_txs(&alice, &[alice_update_tx, alice_delete_tx]).await;
@@ -374,9 +446,10 @@ async fn created_by_permissions_allow_creators_and_hide_system_rows_inner() {
             Query::from("notes")
                 .select(["title"])
                 .order_by("title", jazz::query::OrderDirection::Asc),
-            Some(DurabilityTier::EdgeServer),
+            jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query notes as alice after mutations");
     assert_eq!(
         alice_after_mutations

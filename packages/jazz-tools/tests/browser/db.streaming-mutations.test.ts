@@ -4,10 +4,13 @@ import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
 import type { Db } from "../../src/runtime/db.js";
 
 const app = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 });
 
 let db: Db | undefined;

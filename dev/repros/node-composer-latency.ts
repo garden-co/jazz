@@ -29,8 +29,8 @@ NapiDb.prototype.setTickScheduler = function (callback) {
 };
 
 const app = s.defineApp({
-  drafts: s.table({ text: s.string() }),
-  messages: s.table({ channel: s.string(), text: s.string() }),
+  drafts: s.table({ text: s.string() }, {}),
+  messages: s.table({ channel: s.string(), text: s.string() }, {}),
 });
 const permissions = s.definePermissions(app, ({ policy }) => {
   for (const table of [policy.drafts, policy.messages]) {

@@ -93,10 +93,20 @@ describe("NativeRuntimeAdapter policy source encoding", () => {
   it("encodes authored inherited permissions identically to their source form", () => {
     const baseSchema: WasmSchema = {
       resources: {
+        relations: {
+          entriesViaResource: {
+            kind: "reverse" as const,
+            table: "entries",
+            relation: "resourceRelation",
+          },
+        },
         columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
         policies: { select: { using: { type: "True" } } },
       },
       entries: {
+        relations: {
+          resourceRelation: { kind: "forward" as const, table: "resources", column: "resource" },
+        },
         columns: [
           {
             name: "resource",
