@@ -1299,7 +1299,7 @@ where
                     coerce_prepared_binding_value(value, &claim.ty),
                 );
             }
-            program_binding.id = binding_id_for_values(&values);
+            program_binding.id = binding_id_for_values(&values)?;
             program_binding.values = values;
         }
         Ok(program_binding)
