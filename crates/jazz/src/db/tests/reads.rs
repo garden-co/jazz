@@ -2,6 +2,58 @@
 
 use super::*;
 
+/// Alice detaches a query while its storage read owns the runtime. Detachment
+/// must release coverage without re-entering that owner or breaking later reads.
+/// This is internal because a server test cannot deterministically pause storage
+/// at this ownership boundary or inspect coverage attachment cleanup.
+///
+/// alice: pause read -> detach -> resume -> coverage released -> read again
+#[test]
+fn detach_query_during_suspended_read_releases_coverage_without_reentry() {
+    use futures::executor::block_on;
+    use futures::task::noop_waker;
+    use groove::storage::TestStorage;
+
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+    );
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x31; 16]),
+            author: AuthorSubject::for_test_bytes([0x41; 16]),
+        },
+    )))
+    .unwrap();
+    let prepared = block_on(db.prepare_query_async(&db.table("todos"))).unwrap();
+    let attachment =
+        block_on(db.attach_query_with_opts_async(&prepared, ReadOpts::default(), None, None))
+            .unwrap();
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    storage.evict_all();
+    control.pause();
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut read = Box::pin(db.all(&prepared, opts.clone()));
+    assert!(read.as_mut().poll(&mut cx).is_pending());
+
+    db.detach_query(attachment);
+
+    control.resume();
+    assert!(block_on(read).unwrap().is_empty());
+    block_on(db.tick()).unwrap();
+    assert_eq!(db.query_coverage_attachment_counts_for_test(), (0, 0));
+    assert!(block_on(db.all(&prepared, opts)).unwrap().is_empty());
+}
+
 fn joined_issue_query() -> Query {
     Query::from("issues").join_via("issue_tags", "issue", [eq(col("tag"), lit("prepared"))])
 }
