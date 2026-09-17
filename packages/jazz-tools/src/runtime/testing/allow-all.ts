@@ -2,7 +2,7 @@ import type { WasmSchema } from "../../drivers/types.js";
 import { schema as s } from "../../schema-namespace.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 
-const grants = s.definePermissions(s.defineApp({ fixture: s.table({}) }), ({ policy }) => {
+const grants = s.definePermissions(s.defineApp({ fixture: s.table({}, {}) }), ({ policy }) => {
   policy.fixture.allowRead.always();
   policy.fixture.allowInsert.always();
   policy.fixture.allowUpdate.always();
