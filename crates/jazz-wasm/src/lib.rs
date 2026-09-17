@@ -336,6 +336,10 @@ impl WasmPendingNativeRead {
             None => Ok(JsValue::NULL),
         }
     }
+
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+    }
 }
 
 fn pending_operation_waker(callback: js_sys::Function) -> Waker {
@@ -998,10 +1002,6 @@ impl WasmDbInner {
                 };
                 if let Some(open_tx) = open_tx {
                     let pending = $db.enqueue_transaction_read(open_tx, future);
-                    #[allow(unused_variables)]
-                    if let WasmDbInner::Memory(memory) = self {
-                        memory.drive_queued_mutation_once();
-                    }
                     pending.await.map_err(transaction_read_cancelled)?
                 } else {
                     future.await
