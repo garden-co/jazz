@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { ColumnType, WasmSchema } from "../drivers/types.js";
+import type { ColumnDescriptor, ColumnType, WasmSchema } from "../drivers/types.js";
 
 import { schema as s } from "../index.js";
 import { structuralSchemaHash, wasmSchemasEqual } from "./schema-utils.js";
@@ -15,6 +15,15 @@ function schemaWithColumnType(columnType: ColumnType, nullable = false): WasmSch
 
 type StructuralHashFixture = {
   schemaLayoutVersion: number;
+  defaultCases: Array<{
+    name: string;
+    columnType: ColumnType;
+    nullable: boolean;
+    default?: ColumnDescriptor["default"];
+    branchBy?: string[];
+    mergeStrategy?: ColumnDescriptor["merge_strategy"];
+    hash: string;
+  }>;
   columnTypeCases: Array<{
     name: string;
     columnType: ColumnType;
@@ -71,6 +80,29 @@ describe("structuralSchemaHash", () => {
     expect(new Set(hashes).size).toBe(hashes.length);
   });
 
+  it("matches Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {
+    expect(structuralHashFixture.defaultCases.length).toBeGreaterThanOrEqual(22);
+    for (const entry of structuralHashFixture.defaultCases) {
+      // This corpus intentionally consumes Rust's human-JSON carriers, including
+      // decimal-string bigint values and byte arrays, without changing their wire format.
+      const schema: WasmSchema = {
+        values: {
+          columns: [
+            {
+              name: "value",
+              column_type: entry.columnType,
+              nullable: entry.nullable,
+              ...(entry.default === undefined ? {} : { default: entry.default }),
+              ...(entry.mergeStrategy === undefined ? {} : { merge_strategy: entry.mergeStrategy }),
+            },
+          ],
+          ...(entry.branchBy === undefined ? {} : { branchBy: entry.branchBy }),
+        },
+      };
+      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
+    }
+  });
+
   it("keeps the portable type-tag list exhaustive at compile time", () => {
     const _exhaustive: PortableColumnTypeTagsAreExhaustive = true;
     expect(_exhaustive).toBe(true);
@@ -78,6 +110,29 @@ describe("structuralSchemaHash", () => {
 });
 
 describe("canonical witness default equality", () => {
+  it("normalizes exact human-JSON bigint defaults and rejects invalid carriers", () => {
+    const schema = s.defineApp({
+      records: s.table({ value: s.bigint().default(9223372036854775807n) }, {}),
+    }).wasmSchema;
+    const serialized = JSON.parse(
+      JSON.stringify(schema, (_, value) => (typeof value === "bigint" ? value.toString() : value)),
+    );
+    expect(wasmSchemasEqual(schema, serialized)).toBe(true);
+    for (const value of [
+      9007199254740992,
+      "9223372036854775808",
+      "-9223372036854775809",
+      "42n",
+      "1; throw new Error()",
+      null,
+    ]) {
+      serialized.records.columns[0].default.value = value;
+      expect(() => wasmSchemasEqual(schema, serialized)).toThrow(
+        "Invalid structural BigInt default",
+      );
+    }
+  });
+
   it("distinguishes missing and altered defaults for every supported column value", () => {
     const pairs = [
       [s.string().default("before"), s.string().default("after")],

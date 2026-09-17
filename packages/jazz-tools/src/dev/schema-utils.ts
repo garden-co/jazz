@@ -197,6 +197,17 @@ function hashValue(writer: StructuralHashWriter, value: Value): void {
   throw new Error(`Unhandled schema default: ${String(exhaustive)}`);
 }
 
+// Rust's UTF-8 string order follows Unicode scalar order, unlike UTF-16 sort.
+function compareUnicodeScalars(left: string, right: string): number {
+  const leftPoints = Array.from(left, (character) => character.codePointAt(0)!);
+  const rightPoints = Array.from(right, (character) => character.codePointAt(0)!);
+  for (let index = 0; index < Math.min(leftPoints.length, rightPoints.length); index++) {
+    const difference = leftPoints[index]! - rightPoints[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
 // Rust's serde_json::Value uses sorted object keys for JSON-schema metadata.
 // This does not normalize stored JSON default text, whose bytes are identity.
 function canonicalJsonSchema(value: unknown): string {
@@ -204,7 +215,7 @@ function canonicalJsonSchema(value: unknown): string {
   if (value !== null && typeof value === "object") {
     const object = value as Record<string, unknown>;
     return `{${Object.keys(object)
-      .sort()
+      .sort(compareUnicodeScalars)
       .map((key) => `${JSON.stringify(key)}:${canonicalJsonSchema(object[key])}`)
       .join(",")}}`;
   }

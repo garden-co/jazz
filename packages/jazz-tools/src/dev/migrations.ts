@@ -73,6 +73,11 @@ function indentBlock(text: string, indent: number): string {
     .join("\n");
 }
 
+// JSON.parse preserves own "__proto__" keys that object-literal syntax reinterprets.
+function jsonSchemaExpression(schema: unknown): string {
+  return `JSON.parse(${JSON.stringify(JSON.stringify(schema))})`;
+}
+
 function baseBuilderExpression(columnType: WasmColumnType): string {
   switch (columnType.type) {
     case "Text":
@@ -88,7 +93,7 @@ function baseBuilderExpression(columnType: WasmColumnType): string {
     case "Bytea":
       return "s.bytes()";
     case "Json":
-      return columnType.schema ? `s.json(${JSON.stringify(columnType.schema)})` : "s.json()";
+      return columnType.schema ? `s.json(${jsonSchemaExpression(columnType.schema)})` : "s.json()";
     case "Enum":
       return `s.enum(${columnType.variants.map((variant) => JSON.stringify(variant)).join(", ")})`;
     case "EnumPayload":
@@ -223,7 +228,7 @@ function renderAddOperationExpression(column: ColumnDescriptor, defaultExpressio
       return `s.add.bytes({ default: ${defaultExpression} })`;
     case "Json":
       return column.column_type.schema
-        ? `s.add.json({ default: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
+        ? `s.add.json({ default: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
         : `s.add.json({ default: ${defaultExpression} })`;
     case "Enum":
       return `s.add.enum(${column.column_type.variants
@@ -264,7 +269,7 @@ function renderDropOperationExpression(
       return `s.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
     case "Json":
       return column.column_type.schema
-        ? `s.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
+        ? `s.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
         : `s.drop.json({ backwardsDefault: ${defaultExpression} })`;
     case "Enum":
       return `s.drop.enum(${column.column_type.variants

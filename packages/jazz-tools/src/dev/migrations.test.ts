@@ -250,7 +250,16 @@ describe("migration stub generation", () => {
       bytes: s.bytes().default(new Uint8Array([0, 128, 255])),
       nested: s.array(s.array(s.bigint())).default([[1n, -2n], []]),
       times: s.array(s.array(s.timestamp())).default([[new Date(1234)]]),
-      json: s.json().default('{ "__proto__": {"safe":true}, "quote": "x" }'),
+      json: s
+        .json({
+          type: "object",
+          properties: Object.fromEntries([
+            ["__proto__", { type: "object" as const }],
+            ["\uE000", { type: "string" as const }],
+            ["\u{10000}", { type: "string" as const }],
+          ]),
+        })
+        .default('{ "__proto__": {"safe":true}, "quote": "x" }'),
       status: s.enum("draft", "done").default("draft"),
       missing: s.string().optional().default(null),
       refs: s.array(s.uuid()).default([id]),
