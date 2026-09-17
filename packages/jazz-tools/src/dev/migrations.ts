@@ -2,6 +2,7 @@ import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
   WasmSchema,
+  Value,
 } from "../drivers/types.js";
 import { columnTypeSignature, shortSchemaHash, tableSchemasEqual } from "./schema-utils.js";
 
@@ -102,9 +103,39 @@ function baseBuilderExpression(columnType: WasmColumnType): string {
   }
 }
 
+// Render stored values directly: JSON is already serialized text, timestamps are
+// milliseconds, and bigint/bytes need JavaScript constructors rather than JSON.
+function defaultExpression(value: Value): string {
+  switch (value.type) {
+    case "Null":
+      return "null";
+    case "Text":
+    case "Uuid":
+      return JSON.stringify(value.value);
+    case "Boolean":
+      return value.value ? "true" : "false";
+    case "BigInt":
+      return `${BigInt(value.value)}n`;
+    case "Integer":
+    case "Timestamp":
+    case "Double":
+      return Object.is(value.value, -0) ? "-0" : String(Number(value.value));
+    case "Bytea":
+      return `new Uint8Array([${Array.from(new Uint8Array(value.value)).join(", ")}])`;
+    case "Array":
+      return `[${value.value.map(defaultExpression).join(", ")}]`;
+    default:
+      throw new Error(`Migration stub generation does not yet support ${value.type} defaults.`);
+  }
+}
+
 function builderExpressionForColumn(column: ColumnDescriptor): string {
   const base = baseBuilderExpression(column.column_type);
-  const withOptional = column.nullable ? `${base}.optional()` : base;
+  const optional = column.nullable ? `${base}.optional()` : base;
+  const withOptional =
+    column.default === undefined
+      ? optional
+      : `${optional}.default(${defaultExpression(column.default)})`;
   if (column.merge_strategy === "Counter") {
     return `${withOptional}.merge("counter")`;
   }
@@ -356,28 +387,6 @@ function renderMigrationBody(
   } while (dependencies.size !== count);
   const witnessFrom = pickWitnessSchema(fromSchema, [...dependencies]);
   const witnessTo = pickWitnessSchema(toSchema, [...dependencies]);
-  const addsReference = migratableTables.some((tableName) =>
-    toSchema[tableName]!.columns.some(
-      (column) =>
-        column.references &&
-        fromSchema[tableName]!.columns.some(
-          (source) => source.name === column.name && !source.references,
-        ),
-    ),
-  );
-  if (addsReference) {
-    // The witness renderer does not preserve structural defaults. Do not
-    // silently turn a default-bearing transition into a safe identity lens.
-    for (const schema of [witnessFrom, witnessTo]) {
-      for (const [tableName, table] of Object.entries(schema)) {
-        const column = table.columns.find((column) => column.default !== undefined);
-        if (column)
-          throw new Error(
-            `Cannot generate reference migration: schema witness "${tableName}.${column.name}" has a structural default. Author the migration manually with exact defaults in both schema witnesses.`,
-          );
-      }
-    }
-  }
   const lines: string[] = [];
 
   for (const tableName of migratableTables) {

@@ -1,3 +1,4 @@
+import { structuralValuesEqual } from "../runtime/structural-values.js";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
@@ -275,6 +276,7 @@ function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean 
     left.nullable === right.nullable &&
     left.references === right.references &&
     left.merge_strategy === right.merge_strategy &&
+    structuralValuesEqual(left.default, right.default) &&
     columnTypeSignature(left.column_type) === columnTypeSignature(right.column_type)
   );
 }

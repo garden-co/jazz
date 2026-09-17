@@ -39,7 +39,7 @@ const map: Record<ScalarSqlType, ColumnType> = {
 /**
  * Convert a DSL SqlType to WasmColumnType format.
  */
-function sqlTypeToWasm(sqlType: SqlType): ColumnType {
+export function sqlTypeToWasm(sqlType: SqlType): ColumnType {
   if (typeof sqlType !== "string") {
     if (sqlType.kind === "ENUM") {
       if (sqlType.cases) {

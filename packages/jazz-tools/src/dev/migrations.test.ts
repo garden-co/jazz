@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
+import { wasmSchemasEqual, structuralSchemaHash } from "./schema-utils.js";
 import { renderMigrationStub } from "./migrations.js";
 
 describe("migration stub generation", () => {
@@ -215,7 +216,7 @@ describe("migration stub generation", () => {
           ),
         },
       }),
-    ).toThrow("unchanged column shapes");
+    ).toThrow("same structural default");
     expect(() =>
       define({
         from: before,
@@ -234,29 +235,66 @@ describe("migration stub generation", () => {
     ).toThrow("unchanged column shapes");
   });
 
-  it("rejects generated reference witnesses that would lose structural defaults", () => {
-    const users = s.table({ name: s.string() }, {});
-    const before = {
-      users,
-      records: s.table({ ownerId: s.uuid(), title: s.string().default("before") }, {}),
+  it("roundtrips every supported structural default in generated reference witnesses", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const columns = {
+      ownerId: s.uuid().default(id),
+      title: s.string().default('quote"\\\n${globalThis.injected = true}'),
+      enabled: s.boolean().default(false),
+      count: s.int().default(-2),
+      score: s.float().default(-0),
+      big: s.bigint().default(9223372036854775807n),
+      time: s.timestamp().default(new Date("2026-01-01T00:00:00Z")),
+      bytes: s.bytes().default(new Uint8Array([0, 128, 255])),
+      nested: s.array(s.array(s.bigint())).default([[1n, -2n], []]),
+      json: s.json().default('{ "__proto__": {"safe":true}, "quote": "x" }'),
+      status: s.enum("draft", "done").default("draft"),
+      missing: s.string().optional().default(null),
+      refs: s.array(s.uuid()).default([id]),
     };
-    for (const title of ["before", "after"]) {
-      const after = {
-        users,
-        records: s.table(
-          { ownerId: s.uuid(), title: s.string().default(title) },
-          { owner: s.rel("users", "ownerId") },
-        ),
-      };
-      expect(() =>
-        renderMigrationStub({
-          fromHash: "aaaaaaaaaaaa",
-          toHash: "bbbbbbbbbbbb",
-          fromSchema: s.defineApp(before).wasmSchema,
-          toSchema: s.defineApp(after).wasmSchema,
-        }),
-      ).toThrow('schema witness "records.title" has a structural default');
+    const users = s.table({ name: s.string().default("anonymous") }, {});
+    const from = s.defineApp({ users, records: s.table(columns, {}) }).wasmSchema;
+    const to = s.defineApp({
+      users,
+      records: s.table(columns, { owner: s.rel("users", "ownerId") }),
+    }).wasmSchema;
+    const source = renderMigrationStub({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      fromSchema: from,
+      toSchema: to,
+    });
+    const migration = new Function(
+      "s",
+      source
+        .replace('import { schema as s } from "jazz-tools";', "")
+        .replace("export default", "return"),
+    )(s);
+    for (const [actual, expected] of [
+      [s.defineApp(migration.from).wasmSchema, from],
+      [s.defineApp(migration.to).wasmSchema, to],
+    ]) {
+      expect(wasmSchemasEqual(actual!, expected!)).toBe(true);
+      expect(structuralSchemaHash(actual!)).toBe(structuralSchemaHash(expected!));
+      expect(actual).toEqual(expected);
     }
+    expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
+  });
+
+  it("rejects changed, added, or removed defaults without reference additions or operations", () => {
+    const definitions = [s.string(), s.string().default("before"), s.string().default("after")];
+    for (const before of definitions)
+      for (const after of definitions) {
+        const from = { records: s.table({ title: before }, {}) };
+        const to = { records: s.table({ title: after }, {}) };
+        if (before === after) expect(s.defineMigration({ from, to }).forward).toEqual([]);
+        else {
+          expect(() => s.defineMigration({ from, to })).toThrow("same structural default");
+          expect(() => s.defineMigration({ from, to, migrate: { records: {} } })).toThrow(
+            "same structural default",
+          );
+        }
+      }
   });
 
   it("loads and pushes the generated relation migration through the project API", async () => {

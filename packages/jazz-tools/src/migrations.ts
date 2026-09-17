@@ -1,3 +1,6 @@
+import { structuralValuesEqual } from "./runtime/structural-values.js";
+import { sqlTypeToWasm } from "./codegen/schema-reader.js";
+import { toValue } from "./runtime/value-converter.js";
 import type {
   AnyTypedColumnBuilder,
   ColumnBuilderOptional,
@@ -685,36 +688,21 @@ function columnShapeSignature(builder: AnyTypedColumnBuilder, omitReference = fa
   });
 }
 
-function migrationDefaultsEqual(left: unknown, right: unknown): boolean {
-  if (Object.is(left, right)) return true;
-  if (left instanceof Date || right instanceof Date) {
-    return left instanceof Date && right instanceof Date && left.getTime() === right.getTime();
-  }
-  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
-  if (Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) return false;
-  if (Array.isArray(left) && Array.isArray(right) && left.length !== right.length) return false;
-  const leftKeys = Object.keys(left),
-    rightKeys = Object.keys(right);
-  return (
-    leftKeys.length === rightKeys.length &&
-    leftKeys.every(
-      (key) =>
-        Object.hasOwn(right, key) &&
-        migrationDefaultsEqual(
-          (left as Record<string, unknown>)[key],
-          (right as Record<string, unknown>)[key],
-        ),
-    )
+function columnDefaultsEqual(left: AnyTypedColumnBuilder, right: AnyTypedColumnBuilder): boolean {
+  const source = left._build("__migration_shape__"),
+    target = right._build("__migration_shape__");
+  if (source.default === undefined || target.default === undefined)
+    return source.default === target.default;
+  return structuralValuesEqual(
+    toValue(source.default, sqlTypeToWasm(source.sqlType)),
+    toValue(target.default, sqlTypeToWasm(target.sqlType)),
   );
 }
 
 function columnMetadataEqual(left: AnyTypedColumnBuilder, right: AnyTypedColumnBuilder): boolean {
   const source = left._build("__migration_shape__"),
     target = right._build("__migration_shape__");
-  return (
-    source.mergeStrategy === target.mergeStrategy &&
-    migrationDefaultsEqual(source.default, target.default)
-  );
+  return source.mergeStrategy === target.mergeStrategy && columnDefaultsEqual(left, right);
 }
 
 function tableMatchesAfterApplyingColumnOperations(
@@ -861,6 +849,11 @@ function buildForwardLenses<
       if (!sourceBuilder) continue;
       const source = sourceBuilder._build(sourceColumn);
       const target = targetBuilder._build(columnName);
+      if (!columnDefaultsEqual(sourceBuilder, targetBuilder)) {
+        throw new Error(
+          `Column "${targetName}.${columnName}" must keep the same structural default in a migration.`,
+        );
+      }
       if (source.references === target.references) continue;
       if (
         !source.references &&
@@ -1073,14 +1066,14 @@ export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<a
  *     todos: s.table({
  *       title: s.string(),
  *       done: s.boolean(),
- *     }),
+ *     }, {}),
  *   },
  *   to: {
  *     todos: s.table({
  *       title: s.string(),
  *       done: s.boolean(),
  *       priority: s.enum("low", "medium", "high"),
- *     }),
+ *     }, {}),
  *   },
  * });
  * ```
