@@ -206,6 +206,10 @@ impl RelayWorker {
             }
         }
         .map_err(RelayError::Db)?;
+        #[cfg(test)]
+        {
+            client.direct_mutation_drive_calls += 1;
+        }
         client.db.drive_queued_mutation_once();
         if let Some(error) = client
             .db
