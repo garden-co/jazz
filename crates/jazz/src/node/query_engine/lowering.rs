@@ -688,8 +688,12 @@ fn parameter_domain_for_request(
     // particular, enum columns acquire registry identities in storage; using
     // those column types for a binding would give a retained plan a different
     // descriptor from a selective hydration of the same validated query.
-    for (name, ty) in &request.input.binding.param_types {
-        domain.user_params.insert(name.clone(), ty.clone());
+    // Inline-only programs consume concrete values and must not acquire a
+    // prepared-binding domain merely because the caller validated parameters.
+    if request.input.binding.source_shape.is_some() {
+        domain
+            .user_params
+            .extend(request.input.binding.param_types.clone());
     }
     for (name, ty) in &request.input.binding.extra_user_params {
         if let Some(existing) = domain.user_params.get(name)
