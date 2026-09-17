@@ -9,9 +9,10 @@ import { type Db } from "./db.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
 
-import { computeSchemaHash, pushPermissions, pushSchema } from "../dev/catalogue.js";
+import { pushPermissions, pushSchema } from "../dev/catalogue.js";
 import { pushMigration } from "../dev/catalogue-project.js";
 import { renderMigrationStub } from "../dev/migrations.js";
+import { wasmSchemasEqual } from "../dev/schema-utils.js";
 import { fetchSchemaConnectivity, fetchStoredWasmSchema } from "./schema-fetch.js";
 
 const oldSchema = {
@@ -282,7 +283,11 @@ it("publishes generated default-bearing relation migrations and preserves them a
     });
     const { appId, adminSecret, backendSecret } = server;
     const catalogue = { appId, adminSecret, serverUrl: server.url };
-    await deploy({ ...catalogue, schema: beforeApp, permissions: permissionsBefore });
+    const deployed = await deploy({
+      ...catalogue,
+      schema: beforeApp,
+      permissions: permissionsBefore,
+    });
     oldDb = await createDb(await localAccountConfig(appId, server.url));
     const owner = await oldDb
       .insert(beforeApp.users, { name: "Existing owner" })
@@ -295,7 +300,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
         tags: ["retained"],
       })
       .wait({ tier: "edge" });
-    const fromHash = await computeSchemaHash(beforeApp.wasmSchema);
+    const fromHash = deployed.schema.hash;
     const { hash: toHash } = await pushSchema({ ...catalogue, schema: afterApp });
     expect(toHash).not.toBe(fromHash);
     const source = renderMigrationStub({
@@ -341,7 +346,7 @@ it("publishes generated default-bearing relation migrations and preserves them a
       [toHash, afterApp.wasmSchema],
     ] as const) {
       const stored = await fetchStoredWasmSchema(server.url, { appId, adminSecret, schemaHash });
-      expect(await computeSchemaHash(stored.schema)).toBe(schemaHash);
+      expect(wasmSchemasEqual(stored.schema, expected)).toBe(true);
       for (const [tableName, table] of Object.entries(expected)) {
         for (const column of table.columns) {
           expect(
