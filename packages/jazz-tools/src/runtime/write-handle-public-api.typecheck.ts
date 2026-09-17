@@ -7,9 +7,9 @@ import type {
   WriteResult,
 } from "../index.js";
 // @ts-expect-error `BatchId` was removed from the runtime transaction API.
-import type { BatchId } from "./client.js";
+import type { BatchId as _RemovedBatchId } from "./client.js";
 // @ts-expect-error `OpenBatchId` was removed from the runtime transaction API.
-import type { OpenBatchId } from "./client.js";
+import type { OpenBatchId as _RemovedOpenBatchId } from "./client.js";
 
 type Todo = { id: string; title: string; done: boolean };
 type TodoInit = { title: string; done: boolean };
@@ -54,9 +54,9 @@ async function assertWriteHandleContract() {
 
   const txId: Promise<string> = inserted.txId;
   // @ts-expect-error `txId` is the single public committed-write identity.
-  inserted.batchId;
+  void inserted.batchId;
   // @ts-expect-error `transactionId` was an obsolete compatibility alias.
-  inserted.transactionId;
+  void inserted.transactionId;
 
   inserted.wait({ tier: "local" });
   // @ts-expect-error Mergeable mutations require a durability tier when waiting.
@@ -78,6 +78,9 @@ async function assertWriteHandleContract() {
 
   const mergeableCommit: WriteHandle = db.beginTransaction().commit();
   const exclusiveCommit: ExclusiveWriteHandle = db.beginExclusiveTransaction().commit();
+  exclusiveCommit.wait();
+  // @ts-expect-error Exclusive commits are confirmed by the authority without a tier.
+  exclusiveCommit.wait({ tier: "global" });
 
   void restored;
   void updated;

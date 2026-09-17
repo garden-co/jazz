@@ -83,6 +83,25 @@ describe("Db exclusive transaction initialization", () => {
 });
 
 describe("Db transactions", () => {
+  it.each(["mergeable", "exclusive"] as const)(
+    "finishes an outstanding %s read before committing its transaction",
+    async (kind) => {
+      await db.shutdown();
+      db = await createAccountDb(await localAccountConfig(`pending-read-${crypto.randomUUID()}`));
+      await allTodos();
+      const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+      const inserted = tx.insert(app.todos, { title: "read before commit", done: false });
+      const reading = tx.all(app.todos.where({ id: inserted.id }), { tier: "local" });
+      const committed = tx.commit();
+      expect(committed).not.toBeInstanceOf(Promise);
+      expect(() => tx.update(app.todos, inserted.id, { title: "too late" })).toThrow();
+      expect(() => tx.commit()).toThrow();
+      await expect(reading).resolves.toEqual([inserted]);
+      await committed.wait({ tier: "local" });
+      await expect(allTodos()).resolves.toEqual([inserted]);
+    },
+  );
+
   it("anchors an exclusive read snapshot at the public begin call", async () => {
     const { value: beforeBegin } = db.insert(app.todos, {
       title: "visible at begin",
@@ -295,21 +314,6 @@ describe("Db transactions", () => {
       await result.wait({ tier: "local" });
     } finally {
       await taggedDb.shutdown();
-    }
-  });
-
-  it("types exclusive transaction waits without durability options", async () => {
-    if (false) {
-      const result = await db.exclusiveTransaction((tx) => tx.kind);
-      void result.wait();
-      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
-      void result.wait({ tier: "global" });
-
-      const tx = db.beginExclusiveTransaction();
-      const committed = await tx.commit();
-      void committed.wait();
-      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
-      void committed.wait({ tier: "global" });
     }
   });
 
