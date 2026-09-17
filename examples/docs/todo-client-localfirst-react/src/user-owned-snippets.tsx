@@ -3,10 +3,13 @@ import { useAll, useDb, useSession } from "jazz-tools/react";
 
 // #region owned-schema
 const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -53,11 +56,14 @@ export function AddTodo() {
 
 // #region owned-schema-explicit
 const schemaExplicit = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    owner_id: s.uuid(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      owner_id: s.uuid(),
+    },
+    {},
+  ),
 };
 
 type ExplicitAppSchema = s.Schema<typeof schemaExplicit>;

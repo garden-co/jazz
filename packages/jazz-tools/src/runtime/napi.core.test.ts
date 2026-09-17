@@ -262,6 +262,10 @@ const OWNED_TODOS_SCHEMA: WasmSchema = {
 
 const CHAT_POLICY_SCHEMA: WasmSchema = {
   chats: {
+    relations: {
+      chat_membersViaChat: { kind: "reverse" as const, table: "chat_members", relation: "chat" },
+      messagesViaChat: { kind: "reverse" as const, table: "messages", relation: "chat" },
+    },
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
       { name: "visibility", column_type: { type: "Text" }, nullable: false },
@@ -308,6 +312,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
     },
   },
   chat_members: {
+    relations: { chat: { kind: "forward" as const, table: "chats", column: "chat_id" } },
     columns: [
       {
         name: "chat_id",
@@ -346,6 +351,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
     },
   },
   messages: {
+    relations: { chat: { kind: "forward" as const, table: "chats", column: "chat_id" } },
     columns: [
       {
         name: "chat_id",
@@ -473,7 +479,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       account: testAccountId(authorSeed),
       identity: { issuer: "urn:jazz:test", subject: authorSeed },
     };
-    const provenanceApp = s.defineApp({ todos: s.table({ title: s.string(), done: s.boolean() }) });
+    const provenanceApp = s.defineApp({
+      todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+    });
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,

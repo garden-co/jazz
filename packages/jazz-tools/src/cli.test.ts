@@ -226,11 +226,11 @@ import { schema as s } from ${JSON.stringify(indexImportPath)};
 const schema = {
   projects: s.table({
     name: s.string(),
-  }),
+  }, {  }),
   todos: s.table({
     title: s.string(),
     ownerId: s.string(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -246,7 +246,7 @@ const schema = {
   todos: s.table({
     title: s.string(),
     done: s.boolean(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -257,7 +257,7 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 function rootSchemaWithConventionalProvenance(indexImportPath: string = indexPath): string {
   return `
 import { schema as s } from ${JSON.stringify(indexImportPath)};
-const schema = { todos: s.table({ title: s.string(), createdAt: s.timestamp() }) };
+const schema = { todos: s.table({ title: s.string(), createdAt: s.timestamp() }, {  }) };
 type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 `;
@@ -271,7 +271,7 @@ const schema = { imports: s.table({
   createdAt: s.allowExternalProvenanceName(s.timestamp()),
   publishedAt: s.timestamp(),
   assignedBy: s.string(),
-}) };
+}, {  }) };
 type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 `;
@@ -282,7 +282,7 @@ function rawRootSchemaWithExternalProvenance(indexImportPath: string = indexPath
 import { schema as s } from ${JSON.stringify(indexImportPath)};
 export const schema = { imports: s.table({
   createdAt: s.allowExternalProvenanceName(s.timestamp()),
-}) };
+}, {  }) };
 `;
 }
 
@@ -294,7 +294,7 @@ const schema = {
   todos: s.table({
     title: s.string(),
     ownerId: s.string(),
-  }).indexOnly(["ownerId"]),
+  }, {  }).indexOnly(["ownerId"]),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -309,12 +309,12 @@ import { schema as s } from ${JSON.stringify(indexImportPath)};
 const schema = {
   projects: s.table({
     name: s.string(),
-  }),
+  }, {  }),
   todos: s.table({
     title: s.string(),
     ownerId: s.string(),
     notes: s.string().optional(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -375,7 +375,7 @@ const schema = {
   todos: s.table({
     title: s.string(),
     ownerId: s.string(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -2040,12 +2040,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -2133,12 +2133,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -2236,13 +2236,13 @@ export default s.defineMigration({
     todos: s.table({
       title: s.string(),
       done: s.boolean(),
-    }),
+    }, {  }),
   },
   to: {
     todos: s.table({
       title: s.string(),
       done: s.boolean().default(false),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -2350,6 +2350,7 @@ export default s.defineMigration({
       if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
         return storedSchemaResponse({
           memberships: {
+            relations: { owner: { kind: "forward" as const, table: "users", column: "ownerId" } },
             columns: [
               {
                 name: "ownerId",
@@ -2365,6 +2366,7 @@ export default s.defineMigration({
       if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
         return storedSchemaResponse({
           memberships: {
+            relations: { owner: { kind: "forward" as const, table: "people", column: "ownerId" } },
             columns: [
               {
                 name: "ownerId",
@@ -2425,12 +2427,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     people: s.table({
       email_address: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -2509,18 +2511,18 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
     legacy_profiles: s.table({
       bio: s.string().optional(),
-    }),
+    }, {  }),
   },
   to: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
     profiles: s.table({
       bio: s.string().optional(),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -3033,20 +3035,20 @@ export default s.defineMigration({
   from: {
     projects: s.table({
       name: s.string(),
-    }),
+    }, {  }),
     todos: s.table({
       title: s.string(),
       owner_id: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     projects: s.table({
       name: s.string(),
-    }),
+    }, {  }),
     todos: s.table({
       title: s.string(),
       ownerId: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -3147,7 +3149,7 @@ const schema = {
   todos: s.table({
     title: s.string(),
     owner: s.string(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -3224,12 +3226,12 @@ export default s.defineMigration({
   from: {
     todos: s.table({
       ${fromFields}
-    }),
+    }, {}),
   },
   to: {
     todos: s.table({
       ${toFields}
-    }),
+    }, {}),
   },
 });
 `;

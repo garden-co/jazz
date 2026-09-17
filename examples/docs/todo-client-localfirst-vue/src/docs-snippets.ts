@@ -33,17 +33,17 @@ export async function whereExamples(db: Db) {
 // #region includes-vue
 export async function includeExamples(db: Db) {
   const todos = await db.all(app.todos.include({ project: true, parent: true }));
-  const projects = await db.all(app.projects.include({ todosViaProject: true }));
+  const projects = await db.all(app.projects.include({ todos: true }));
   const nested = await db.all(
     app.todos.include({
       project: {
-        todosViaProject: true,
+        todos: true,
       },
     }),
   );
   const filtered = await db.all(
     app.todos.include({
-      todosViaParent: app.todos.where({ done: false }),
+      children: app.todos.where({ done: false }),
     }),
   );
 

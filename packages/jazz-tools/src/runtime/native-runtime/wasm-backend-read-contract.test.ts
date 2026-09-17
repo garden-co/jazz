@@ -7,8 +7,11 @@ import { openConfig, queryFromTable, queryWithPredicates } from "./native-codec.
 import { encodeSchema } from "./schema-codec.js";
 
 const app = s.defineApp({
-  folders: s.table({ title: s.string() }),
-  notes: s.table({ text: s.string(), folderId: s.ref("folders") }),
+  folders: s.table({ title: s.string() }, { notesViaFolder: s.reverse("notes", "folder") }),
+  notes: s.table(
+    { text: s.string(), folderId: s.uuid() },
+    { folder: s.rel("folders", "folderId") },
+  ),
 });
 
 describe("WASM backend read capability parity", () => {

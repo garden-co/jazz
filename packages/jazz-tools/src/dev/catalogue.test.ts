@@ -38,7 +38,7 @@ const schema = {
   todos: s.table({
     title: s.string(),
     ownerId: s.string(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -81,23 +81,43 @@ describe("dev catalogue API exports", () => {
 describe("dev catalogue runtime schema identity", () => {
   it("opens a NativeRuntimeAdapter for representative public schema shapes", async () => {
     const schema = {
-      users: s.table({
-        name: s.string(),
-      }),
-      files: s.table({
-        ownerId: s.ref("users"),
-        contents: s.bytes().default(new Uint8Array([0, 1, 127, 255])),
-        mediaType: s.enum("image/png", "text/plain").default("text/plain"),
-        tags: s.array(s.string()).default(["draft", "review"]),
-      }),
+      users: s.table(
+        {
+          name: s.string(),
+        },
+        {
+          filesViaOwner: s.reverse("files", "owner"),
+          commentsViaAuthor: s.reverse("comments", "author"),
+        },
+      ),
+      files: s.table(
+        {
+          ownerId: s.uuid(),
+          contents: s.bytes().default(new Uint8Array([0, 1, 127, 255])),
+          mediaType: s.enum("image/png", "text/plain").default("text/plain"),
+          tags: s.array(s.string()).default(["draft", "review"]),
+        },
+        {
+          owner: s.rel("users", "ownerId"),
+          commentsViaFile: s.reverse("comments", "file"),
+          commentsViaAttachments: s.reverse("comments", "attachments"),
+        },
+      ),
       comments: s
-        .table({
-          fileId: s.ref("files"),
-          authorId: s.ref("users").optional().default(null),
-          body: s.string(),
-          attachmentIds: s.array(s.ref("files")).default([]),
-          status: s.enum("open", "resolved").default("open"),
-        })
+        .table(
+          {
+            fileId: s.uuid(),
+            authorId: s.uuid().optional().default(null),
+            body: s.string(),
+            attachmentIds: s.array(s.uuid()).default([]),
+            status: s.enum("open", "resolved").default("open"),
+          },
+          {
+            file: s.rel("files", "fileId"),
+            author: s.rel("users", "authorId"),
+            attachments: s.rel("files", "attachmentIds"),
+          },
+        )
         .indexOnly(["fileId", "status"]),
     };
     const app = s.defineApp(schema);
@@ -209,10 +229,13 @@ describe("dev catalogue push behavior", () => {
 
     const storedHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     const storedSchema = s.defineApp({
-      todos: s.table({
-        title: s.string(),
-        ownerId: s.string(),
-      }),
+      todos: s.table(
+        {
+          title: s.string(),
+          ownerId: s.string(),
+        },
+        {},
+      ),
     }).wasmSchema;
 
     vi.stubGlobal(
@@ -275,10 +298,13 @@ describe("dev catalogue push behavior", () => {
     const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const storedSchema = s.defineApp({
-      todos: s.table({
-        title: s.string(),
-        ownerId: s.string(),
-      }),
+      todos: s.table(
+        {
+          title: s.string(),
+          ownerId: s.string(),
+        },
+        {},
+      ),
     }).wasmSchema;
     const previousHead = {
       schemaHash: previousSchemaHash,
@@ -363,16 +389,22 @@ describe("dev catalogue push behavior", () => {
     const toHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     const objectId = "55555555-5555-5555-5555-555555555555";
     const fromSchema = s.defineApp({
-      todos: s.table({
-        title: s.string(),
-        done: s.boolean(),
-      }),
+      todos: s.table(
+        {
+          title: s.string(),
+          done: s.boolean(),
+        },
+        {},
+      ),
     }).wasmSchema;
     const toSchema = s.defineApp({
-      todos: s.table({
-        done: s.boolean(),
-        title: s.string(),
-      }),
+      todos: s.table(
+        {
+          done: s.boolean(),
+          title: s.string(),
+        },
+        {},
+      ),
     }).wasmSchema;
 
     let migrationBody: any;
@@ -428,14 +460,20 @@ describe("dev catalogue push behavior", () => {
     await mkdir(migrationsDir, { recursive: true });
 
     const fromSchema = {
-      users: s.table({
-        email: s.string(),
-      }),
+      users: s.table(
+        {
+          email: s.string(),
+        },
+        {},
+      ),
     };
     const toSchema = {
-      users: s.table({
-        email_address: s.string(),
-      }),
+      users: s.table(
+        {
+          email_address: s.string(),
+        },
+        {},
+      ),
     };
     const { computeSchemaHash } = await import("./catalogue.js");
     const fromHash = await computeSchemaHash(s.defineApp(fromSchema).wasmSchema);
@@ -457,12 +495,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -606,14 +644,20 @@ export default s.defineMigration({
       await mkdir(migrationsDir, { recursive: true });
 
       const fromSchema = {
-        users: s.table({
-          email: s.string(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
       };
       const toSchema = {
-        users: s.table({
-          email_address: s.string(),
-        }),
+        users: s.table(
+          {
+            email_address: s.string(),
+          },
+          {},
+        ),
       };
       const { computeSchemaHash } = await import("./catalogue.js");
       const fromWasmSchema = s.defineApp(fromSchema).wasmSchema;
@@ -639,12 +683,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: ${fromColumn},
-    }),
+    }, {}),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {}),
   },
 });
 `,
@@ -703,14 +747,20 @@ export default s.defineMigration({
     await mkdir(migrationsDir, { recursive: true });
 
     const fromSchema = {
-      users: s.table({
-        email: s.string(),
-      }),
+      users: s.table(
+        {
+          email: s.string(),
+        },
+        {},
+      ),
     };
     const toSchema = {
-      users: s.table({
-        email_address: s.string(),
-      }),
+      users: s.table(
+        {
+          email_address: s.string(),
+        },
+        {},
+      ),
     };
     const { computeSchemaHash } = await import("./catalogue.js");
     const fromWasmSchema = s.defineApp(fromSchema).wasmSchema;
@@ -733,12 +783,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,

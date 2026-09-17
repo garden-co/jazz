@@ -13,11 +13,14 @@ const issuer = "https://inspector-save.test";
 const userId = "editor";
 const permittedOwner = "00000000-0000-4000-8000-000000000001";
 const inspectorSaveApp = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    owner_id: s.uuid(),
-    rank: s.bigint().optional(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      owner_id: s.uuid(),
+      rank: s.bigint().optional(),
+    },
+    {},
+  ),
 });
 const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user.account });

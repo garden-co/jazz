@@ -35,14 +35,14 @@ export async function includeExamples(db: Db) {
   // Load each todo's project and parent in one shot
   const todos = await db.all(app.todos.include({ project: true, parent: true }));
 
-  // Reverse relations: project FK on todos creates todosViaProject on projects
-  const projects = await db.all(app.projects.include({ todosViaProject: true }));
+  // Reverse relations: projects explicitly declares todos as the reverse of todos.project
+  const projects = await db.all(app.projects.include({ todos: true }));
 
   // Nested: load project, and for each project, load its todos
   const nested = await db.all(
     app.todos.include({
       project: {
-        todosViaProject: true,
+        todos: true,
       },
     }),
   );
@@ -50,7 +50,7 @@ export async function includeExamples(db: Db) {
   // Filtered: only include incomplete child todos
   const filtered = await db.all(
     app.todos.include({
-      todosViaParent: app.todos.where({ done: false }),
+      children: app.todos.where({ done: false }),
     }),
   );
 

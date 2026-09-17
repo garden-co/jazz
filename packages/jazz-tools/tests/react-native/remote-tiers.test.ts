@@ -7,7 +7,7 @@ import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }),
+  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
 });
 
 // These cases intentionally have no authority peer: an ordinary persisted

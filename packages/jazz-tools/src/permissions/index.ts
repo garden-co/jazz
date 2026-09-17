@@ -7,12 +7,7 @@ import type {
   TablePolicies,
 } from "../schema.js";
 import type { WasmSchema } from "../drivers/types.js";
-import {
-  AmbiguousRelationNameError,
-  DuplicateColumnNameError,
-  analyzeRelations,
-  type Relation,
-} from "../codegen/relation-analyzer.js";
+import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import type {
   RelColumnRef,
   RelExpr,
@@ -1048,16 +1043,7 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
   }
 
   const typedSchema = schema as WasmSchema;
-  try {
-    return analyzeRelations(typedSchema);
-  } catch (error) {
-    if (error instanceof AmbiguousRelationNameError || error instanceof DuplicateColumnNameError) {
-      throw error;
-    }
-    // Keep permissive behavior for partially-specified schemas used in tests/tooling.
-    // hopTo/gather callers still receive explicit unknown-relation errors.
-    return new Map();
-  }
+  return analyzeRelations(typedSchema);
 }
 
 function buildPolicyContext(

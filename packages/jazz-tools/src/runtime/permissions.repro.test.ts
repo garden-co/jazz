@@ -11,66 +11,115 @@ import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
 const reproApp = s.defineApp({
-  teams: s.table({
-    name: s.string(),
-    route_key: s.string(),
-    corporation_id: s.string(),
-    kind: s.string(),
-    identity_key: s.uuid().optional(),
-    system_owned: s.boolean(),
-    archived: s.boolean(),
-  }),
-  user_team_edges: s.table({
-    user_id: s.uuid(),
-    team: s.ref("teams"),
-    administrator: s.boolean(),
-  }),
-  team_team_edges: s.table({
-    child_team: s.ref("teams"),
-    parent_team: s.ref("teams"),
-    administrator: s.boolean(),
-  }),
-  team_access_edges: s.table({
-    target_team: s.ref("teams"),
-    team: s.ref("teams"),
-    grant_role: s.string(),
-    administrator: s.boolean(),
-  }),
+  teams: s.table(
+    {
+      name: s.string(),
+      route_key: s.string(),
+      corporation_id: s.string(),
+      kind: s.string(),
+      identity_key: s.uuid().optional(),
+      system_owned: s.boolean(),
+      archived: s.boolean(),
+    },
+    {
+      user_team_edgesViaTeam: s.reverse("user_team_edges", "teamRelation"),
+      team_team_edgesViaChild_team: s.reverse("team_team_edges", "child_teamRelation"),
+      team_team_edgesViaParent_team: s.reverse("team_team_edges", "parent_teamRelation"),
+      team_access_edgesViaTarget_team: s.reverse("team_access_edges", "target_teamRelation"),
+      team_access_edgesViaTeam: s.reverse("team_access_edges", "teamRelation"),
+    },
+  ),
+  user_team_edges: s.table(
+    {
+      user_id: s.uuid(),
+      team: s.uuid(),
+      administrator: s.boolean(),
+    },
+    { teamRelation: s.rel("teams", "team") },
+  ),
+  team_team_edges: s.table(
+    {
+      child_team: s.uuid(),
+      parent_team: s.uuid(),
+      administrator: s.boolean(),
+    },
+    {
+      child_teamRelation: s.rel("teams", "child_team"),
+      parent_teamRelation: s.rel("teams", "parent_team"),
+    },
+  ),
+  team_access_edges: s.table(
+    {
+      target_team: s.uuid(),
+      team: s.uuid(),
+      grant_role: s.string(),
+      administrator: s.boolean(),
+    },
+    { target_teamRelation: s.rel("teams", "target_team"), teamRelation: s.rel("teams", "team") },
+  ),
 });
 
 const doubleRefReproApp = s.defineApp({
-  teams: s.table({
-    name: s.string(),
-  }),
-  team_entry: s.table({
-    team_id: s.ref("teams"),
-    target_id: s.ref("teams"),
-    user_id: s.uuid(),
-    administrator: s.boolean(),
-  }),
-  dropdowns: s.table({
-    name: s.string(),
-  }),
-  dropdowns_access_edges: s.table({
-    resource_id: s.ref("dropdowns"),
-    team_id: s.ref("teams"),
-    grant_role: s.string(),
-    administrator: s.boolean(),
-  }),
+  teams: s.table(
+    {
+      name: s.string(),
+    },
+    {
+      team_entryViaTeam: s.reverse("team_entry", "teamRelation"),
+      team_entryViaTarget: s.reverse("team_entry", "target"),
+      dropdowns_access_edgesViaTeam: s.reverse("dropdowns_access_edges", "teamRelation"),
+    },
+  ),
+  team_entry: s.table(
+    {
+      team_id: s.uuid(),
+      target_id: s.uuid(),
+      user_id: s.uuid(),
+      administrator: s.boolean(),
+    },
+    { teamRelation: s.rel("teams", "team_id"), target: s.rel("teams", "target_id") },
+  ),
+  dropdowns: s.table(
+    {
+      name: s.string(),
+    },
+    { dropdowns_access_edgesViaResource: s.reverse("dropdowns_access_edges", "resource") },
+  ),
+  dropdowns_access_edges: s.table(
+    {
+      resource_id: s.uuid(),
+      team_id: s.uuid(),
+      grant_role: s.string(),
+      administrator: s.boolean(),
+    },
+    { resource: s.rel("dropdowns", "resource_id"), teamRelation: s.rel("teams", "team_id") },
+  ),
 });
 
 const relatedWriteApp = s.defineApp({
-  playlists: s.table({ name: s.string() }),
-  invitations: s.table({
-    playlist_id: s.ref("playlists"),
-    subject: s.uuid(),
-    role: s.enum("listener", "editor"),
-    status: s.enum("pending", "accepted", "revoked"),
-  }),
-  playlist_entries: s.table({
-    playlist_id: s.ref("playlists"),
-    position: s.int(),
-  }),
+  playlists: s.table(
+    { name: s.string() },
+    {
+      invitationsViaPlaylist: s.reverse("invitations", "playlist"),
+      playlist_entriesViaPlaylist: s.reverse("playlist_entries", "playlist"),
+    },
+  ),
+  invitations: s.table(
+    {
+      playlist_id: s.uuid(),
+      subject: s.uuid(),
+      role: s.enum("listener", "editor"),
+      status: s.enum("pending", "accepted", "revoked"),
+    },
+    { playlist: s.rel("playlists", "playlist_id") },
+  ),
+  playlist_entries: s.table(
+    {
+      playlist_id: s.uuid(),
+      position: s.int(),
+    },
+    { playlist: s.rel("playlists", "playlist_id") },
+  ),
 });
 
 const relatedWritePermissions = s.definePermissions(
@@ -457,7 +506,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
               child_team: current,
               administrator: false,
             })
-            .hopTo("parent_team"),
+            .hopTo("parent_teamRelation"),
         maxDepth: 8,
       });
 
@@ -475,9 +524,12 @@ describe("runtime permission repros for recursive gather and qualified predicate
           allOf([
             { route_key: "relation-direct" },
             policy.exists(
-              policy.user_team_edges.where({ user_id: session.user.account }).hopTo("team").where({
-                id: team.id,
-              }),
+              policy.user_team_edges
+                .where({ user_id: session.user.account })
+                .hopTo("teamRelation")
+                .where({
+                  id: team.id,
+                }),
             ),
           ]),
         ),

@@ -3,17 +3,29 @@ import type { JazzClient } from "jazz-tools/backend";
 
 // #region invite-schema
 const schema = {
-  chats: s.table({}),
-  chatMembers: s.table({
-    chatId: s.ref("chats"),
-    user_id: s.uuid(),
-    inviteId: s.string().optional(),
-  }),
-  chatInvites: s.table({
-    chatId: s.ref("chats"),
-    code: s.string(),
-    singleUse: s.boolean(),
-  }),
+  chats: s.table(
+    {},
+    {
+      members: s.reverse("chatMembers", "chat"),
+      invites: s.reverse("chatInvites", "chat"),
+    },
+  ),
+  chatMembers: s.table(
+    {
+      chatId: s.uuid(),
+      user_id: s.uuid(),
+      inviteId: s.string().optional(),
+    },
+    { chat: s.rel("chats", "chatId") },
+  ),
+  chatInvites: s.table(
+    {
+      chatId: s.uuid(),
+      code: s.string(),
+      singleUse: s.boolean(),
+    },
+    { chat: s.rel("chats", "chatId") },
+  ),
 };
 // #endregion invite-schema
 

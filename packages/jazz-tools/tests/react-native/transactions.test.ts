@@ -4,7 +4,7 @@ import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }),
+  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
 });
 
 // Browser donor: db.transaction-reads.test.ts, snapshot anchoring, staged

@@ -202,3 +202,10 @@ export {
   type AuthProviderSnapshot,
 } from "./session/auth-provider.js";
 export { connectBetterAuth, type BetterAuthClient } from "./session/better-auth.js";
+
+export type {
+  ForwardRelationship,
+  ReverseRelationship,
+  Relationship,
+  Relationships,
+} from "./relationships.js";

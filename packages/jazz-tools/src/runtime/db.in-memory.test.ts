@@ -5,10 +5,13 @@ import { type Db } from "./db.js";
 import { createDb } from "./default-create-db.js";
 
 const schema = {
-  notes: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  notes: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -16,12 +19,15 @@ const app: s.App<AppSchema> = s.defineApp(schema);
 type Note = s.RowOf<typeof app.notes>;
 
 const largeValueSchema = {
-  documents: s.table({
-    payload: s.bytes(),
-    body: s.string(),
-    metadata: s.json(),
-    done: s.boolean(),
-  }),
+  documents: s.table(
+    {
+      payload: s.bytes(),
+      body: s.string(),
+      metadata: s.json(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 type LargeValueAppSchema = s.Schema<typeof largeValueSchema>;
 const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema);
