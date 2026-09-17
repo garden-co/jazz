@@ -66,18 +66,24 @@ bound validation pass are outside the timed closure. The full JSONL read-count
 receipt, including its 1M-row diagnostic rung, remains available by setting
 `JAZZ_SELECTIVE_HYDRATION_RECEIPT=1`.
 
-`query_source_measurement` is a standalone baseline receipt for issue #3056.
-Run it with:
+`query_source_measurement` is a standalone receipt for issue #3056. Run it
+with:
 
 ```bash
+JAZZ_QUERY_SOURCE_ROWS=10000 \
+JAZZ_QUERY_SOURCE_TITLE_BYTES=512 \
 cargo bench -p jazz --bench query_source_measurement --features testing
 ```
 
-It emits JSONL for an independent first all-rows read, a repeated all-rows
-read, and a `done=true` → `done=false` → all-rows sequence over a seeded
-non-nullable boolean column. Each receipt includes the `Db::read_profiled`
-phase timings, result count, and logical storage reads/ranges. These storage
-counters do not identify physical I/O, unique rows, or source decode counts.
+The `JAZZ_QUERY_SOURCE_ROWS` and `JAZZ_QUERY_SOURCE_TITLE_BYTES` knobs vary
+cardinality and row width without changing the timed read closure. It emits
+JSONL for a cold all-rows read, then Q1/Q3 sequences with approximately 33%,
+67%, and 100% of Q3's rows preloaded by disjoint `done`, `not_done`, and
+`blocked` status queries. Each receipt includes the expected reusable-row
+count, `Db::read_profiled` phase timings, result count, and logical storage
+reads/ranges. The correctness oracle asserts exact row counts and partition
+coverage before emitting timings. Storage counters do not identify physical
+I/O, unique rows, or source decode counts.
 
 ## Intended next ports
 
