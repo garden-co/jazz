@@ -3529,11 +3529,16 @@ function runBinAsync(
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
   child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
-  const { promise, resolve } = Promise.withResolvers<{
+  let resolve!: (value: {
     status: number | null;
     stdout: string;
     stderr: string;
-  }>();
+  }) => void;
+  const promise = new Promise<{ status: number | null; stdout: string; stderr: string }>(
+    (resolvePromise) => {
+      resolve = resolvePromise;
+    },
+  );
   child.on("close", (status) => resolve({ status, stdout, stderr }));
   return promise;
 }
