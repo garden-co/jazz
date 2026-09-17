@@ -19,6 +19,7 @@ import type {
   RenameOp,
   ScalarSqlType,
   TSTypeFromSqlType,
+  TSInitFromSqlType,
 } from "./schema.js";
 import {
   assertUserColumnNameAllowed,
@@ -117,7 +118,7 @@ type AllowedColumnMergeStrategy<
         }[keyof MergeStrategyColumnType];
 type ColumnDefaultValue<Sql extends SqlType> = Sql extends "TIMESTAMP"
   ? Date | number
-  : TSTypeFromSqlType<Sql>;
+  : TSInitFromSqlType<Sql>;
 
 export type TypedColumnBuilder<
   Sql extends SqlType = SqlType,
@@ -199,6 +200,15 @@ export type ColumnBuilderReferences<TBuilder extends AnyTypedColumnBuilder> =
 export type ColumnBuilderHasDefault<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzHasDefault"];
 export type ColumnBuilderValue<TBuilder extends AnyTypedColumnBuilder> = TBuilder["__jazzValue"];
+
+/** Preserve transformed application values while expanding ordinary SQL write inputs. */
+export type ColumnBuilderInitValue<TBuilder extends AnyTypedColumnBuilder> = [
+  ColumnBuilderValue<TBuilder>,
+] extends [TSTypeFromSqlType<ColumnBuilderSqlType<TBuilder>>]
+  ? [TSTypeFromSqlType<ColumnBuilderSqlType<TBuilder>>] extends [ColumnBuilderValue<TBuilder>]
+    ? TSInitFromSqlType<ColumnBuilderSqlType<TBuilder>>
+    : ColumnBuilderValue<TBuilder>
+  : ColumnBuilderValue<TBuilder>;
 
 export interface ColumnTransform<Stored = unknown, View = unknown> {
   from(value: Stored): View;

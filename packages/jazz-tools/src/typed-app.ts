@@ -6,6 +6,7 @@ import type {
   ColumnBuilderOptional,
   ColumnBuilderSqlType,
   ColumnBuilderValue,
+  ColumnBuilderInitValue,
   ColumnTransform,
 } from "./dsl.js";
 import { blake3 } from "@noble/hashes/blake3.js";
@@ -286,8 +287,8 @@ type ReturnedColumnValue<TBuilder extends AnyTypedColumnBuilder> =
     : ColumnValue<TBuilder>;
 type InsertColumnValue<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderOptional<TBuilder> extends true
-    ? ColumnValue<TBuilder> | null
-    : ColumnValue<TBuilder>;
+    ? ColumnBuilderInitValue<TBuilder> | null
+    : ColumnBuilderInitValue<TBuilder>;
 
 type OptionalColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderOptional<
