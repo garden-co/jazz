@@ -3369,11 +3369,13 @@ fn lower_order_key(
     request: &QueryProgramRequest,
 ) -> Result<TopByOrder, UnsupportedReason> {
     let lowered = lower_field_ref(&key.value, plan, source, request, "order key")?;
-    let relation_output = request
-        .output
-        .app_rows
-        .as_ref()
-        .is_some_and(|output| matches!(output.projection, PayloadProjection::Relation(_)));
+    let relation_output = request.output.app_rows.as_ref().is_some_and(|output| {
+        matches!(output.projection, PayloadProjection::Relation(_))
+            && plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, LinearStep::Project(_)))
+    });
     let field = match (
         relation_output,
         collect_window_source_field(source, &key.value),

@@ -696,7 +696,8 @@ pub(super) fn lowered_terminals(
                 let graph = graph.clone().project_fields(
                     columns
                         .iter()
-                        .map(|column| ProjectField::named(&column.output.name)),
+                        .map(|column| ProjectField::named(&column.output.name))
+                        .chain(root_route_fields.iter().map(ProjectField::named)),
                 );
                 let requested_names = requested
                     .iter()
