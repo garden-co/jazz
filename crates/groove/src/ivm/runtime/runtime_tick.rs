@@ -2800,18 +2800,11 @@ impl IvmRuntime {
     }
 
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
-        let mut ancestors = HashSet::new();
-        self.graph.mark_ancestors(output_node, &mut ancestors);
-        for ancestor in ancestors {
-            let graph_node = self
-                .graph
-                .node(ancestor)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
-            if matches!(graph_node.descriptor.operator, OpType::Aggregate(_)) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(self
+            .graph
+            .node(output_node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(output_node))?
+            .depends_on_aggregate())
     }
 
     #[allow(clippy::too_many_arguments)]
