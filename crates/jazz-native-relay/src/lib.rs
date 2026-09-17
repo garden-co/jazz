@@ -5591,8 +5591,20 @@ impl RelayWorker {
             let client = self.foreground_client(client)?;
             Rc::clone(&client.db)
         };
+        // Direct mutations are admitted to the core FIFO without polling it.
+        // Ordinary reads must therefore wait for the writes admitted before
+        // this command, while transaction reads retain their existing
+        // transaction-local ordering below.
+        let mutation_barrier = open_tx.is_none().then(|| db.queued_mutation_barrier());
+
         let read_db = Rc::clone(&db);
         let future: ForegroundOperationFuture = Box::pin(async move {
+            if let Some(barrier) = mutation_barrier {
+                barrier
+                    .await
+                    .map_err(|_| RelayError::Closed)?
+                    .map_err(RelayError::Db)?;
+            }
             let release_db = Rc::clone(&read_db);
             let result = read_db
                 .all_serialized_query(
