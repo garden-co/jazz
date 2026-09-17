@@ -3965,6 +3965,70 @@ fn local_replay_routes_keep_independent_live_receivers() {
     }
 }
 
+fn local_replay_restore_point_reads(chain_len: usize) -> usize {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let worker = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd9; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+    }))
+    .unwrap();
+
+    let first = worker
+        .insert(
+            "todos",
+            cells("shared replay root", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let row_id = first.row_uuid();
+    worker.tick().unwrap();
+    for index in 0..chain_len {
+        worker
+            .update(
+                "todos",
+                row_id,
+                cells(&format!("shared replay step {index}"), false, author),
+                Default::default(),
+            )
+            .unwrap();
+        worker.tick().unwrap();
+    }
+
+    eviction.evict_all();
+    let before = control.point_read_count();
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let downstream: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &downstream,
+    ))
+    .unwrap();
+    control.point_read_count() - before
+}
+
+#[test]
+fn reopened_local_subscriber_shares_replay_traversal_work() {
+    let smaller = local_replay_restore_point_reads(16);
+    let larger = local_replay_restore_point_reads(32);
+    assert!(
+        larger <= smaller * 3,
+        "doubling pending roots must stay near-linear: {smaller} reads for 17 roots, {larger} for 33 roots"
+    );
+}
+
 #[test]
 fn local_acknowledgements_do_not_reprobe_retained_history() {
     // Internal topology is necessary to count storage probes at the local
