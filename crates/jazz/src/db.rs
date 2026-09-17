@@ -1924,36 +1924,48 @@ fn register_local_fate_route_state(
 ) {
     let mut routes = routes.borrow_mut();
     routes.retain(|_, pending| {
-        pending.retain(|candidate| candidate.replay_ready || candidate.queue.upgrade().is_some());
+        pending.retain(|candidate| !candidate.replay_ready || candidate.queue.upgrade().is_some());
         !pending.is_empty()
     });
-    if let Some(candidate) = routes
-        .get_mut(&tx_id)
-        .and_then(|pending| pending.iter_mut().find(|route| !route.replay_ready))
-    {
-        candidate.queue = Rc::downgrade(queue);
-        candidate.local_acknowledged = local_acknowledged;
+
+    if let Some(candidate) = routes.get_mut(&tx_id).and_then(|pending| {
+        pending.iter_mut().find(|route| {
+            route
+                .queue
+                .upgrade()
+                .is_some_and(|existing| Rc::ptr_eq(&existing, queue))
+        })
+    }) {
+        candidate.local_acknowledged |= local_acknowledged;
         if replay_ready {
             candidate.replay_ready = true;
             candidate.replay_unit = None;
         } else {
-            candidate.replay_author = replay_author;
+            candidate.replay_author = replay_author.or(candidate.replay_author);
+            if replay_unit.is_some() {
+                candidate.replay_unit = replay_unit;
+            }
+        }
+        return;
+    }
+
+    if !replay_ready
+        && let Some(candidate) = routes.get_mut(&tx_id).and_then(|pending| {
+            pending.iter_mut().find(|route| {
+                !route.replay_ready
+                    && route.queue.upgrade().is_none()
+                    && route.replay_author == replay_author
+            })
+        })
+    {
+        candidate.queue = Rc::downgrade(queue);
+        candidate.local_acknowledged = local_acknowledged;
+        if candidate.replay_unit.is_none() {
             candidate.replay_unit = replay_unit;
         }
         return;
     }
-    if replay_ready
-        && routes.get(&tx_id).is_some_and(|pending| {
-            pending.iter().any(|candidate| {
-                candidate
-                    .queue
-                    .upgrade()
-                    .is_some_and(|candidate| Rc::ptr_eq(&candidate, queue))
-            })
-        })
-    {
-        return;
-    }
+
     routes.entry(tx_id).or_default().push(LocalFateRoute {
         queue: Rc::downgrade(queue),
         local_acknowledged,
