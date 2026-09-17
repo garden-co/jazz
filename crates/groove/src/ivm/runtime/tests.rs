@@ -937,6 +937,44 @@ async fn hydration_memo_survives_empty_ticks_without_replaying_deltas() {
     assert!(subscription.try_recv().is_err());
 }
 
+#[futures_test::test]
+async fn aggregate_hydration_static_dependency_inspection_is_linear() {
+    let schema = albums_schema();
+    let mut runtime = IvmRuntime::new(schema).unwrap();
+    let storage = Rc::new(
+        crate::storage::MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    );
+    let mut graph = GraphBuilder::table("albums");
+    const DEPTH: usize = 128;
+    for _ in 0..DEPTH {
+        graph = graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+    }
+    let graph = GraphBuilder::aggregate(
+        graph,
+        Vec::<String>::new(),
+        [AggregateExpr {
+            function: AggregateFunction::Count,
+            expression: None,
+            distinct: false,
+            output_name: Some("count".to_owned()),
+            output_identity: None,
+        }],
+    );
+
+    let subscription = runtime.subscribe_one_sink(graph, &storage).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(0)], 1)]
+    );
+
+    let graph_nodes = runtime.stats().graph_nodes;
+    let walked = runtime.aggregate_dependency_walk_nodes_for_tests();
+    assert!(
+        walked <= graph_nodes * 4,
+        "static dependency inspection must be linear: walked {walked} ancestors across {graph_nodes} nodes"
+    );
+}
+
 async fn write_two_album_rows(storage: &impl OrderedKvStorage, albums: &RecordDescriptor) {
     let store = RecordStore::new(storage, "albums", albums);
     let first = albums

@@ -137,8 +137,18 @@ impl IvmRuntime {
     pub(super) fn record_hydration_memo_metrics(&mut self, metrics: &TickMetrics) {
         self.hydration_memo_hits += metrics.hydration_memo_hits;
         self.hydration_memo_computes += metrics.hydration_memo_computes;
+        #[cfg(test)]
+        {
+            self.aggregate_dependency_walk_nodes = self
+                .aggregate_dependency_walk_nodes
+                .saturating_add(metrics.aggregate_dependency_walk_nodes);
+        }
         self.hydration_memo_computed_nodes
             .extend(metrics.hydration_memo_computed_nodes.iter().copied());
+    }
+    #[cfg(test)]
+    pub(super) fn aggregate_dependency_walk_nodes_for_tests(&self) -> usize {
+        self.aggregate_dependency_walk_nodes
     }
 
     pub(super) fn add_retainer(&mut self, id: NodeId, retainer: Retainer) -> bool {

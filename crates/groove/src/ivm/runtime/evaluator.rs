@@ -997,9 +997,13 @@ impl TickEvaluator<'_> {
         Ok(false)
     }
 
-    fn node_depends_on_aggregate(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+    fn node_depends_on_aggregate(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
         let mut ancestors = HashSet::new();
         self.graph.mark_ancestors(node, &mut ancestors);
+        #[cfg(test)]
+        {
+            self.metrics.aggregate_dependency_walk_nodes += ancestors.len();
+        }
         for ancestor in ancestors {
             let graph_node = self
                 .graph
