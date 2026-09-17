@@ -1371,32 +1371,24 @@ where
         if self.node.has_pending_local_publications() {
             self.node.poll_local_publication_settlement_once()?;
         }
-        let queued_mutation_pending = self.node.poll_queued_mutation_once();
+        self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
-        self.flush_deferred_rejection_discards_after_tick().await?;
-        // A queued read may await a delivery receipt without retaining the
-        // owner. Keep its FIFO position, but service the semantic/peer work
-        // producing that receipt. Cold operations holding the owner still yield.
-        if queued_mutation_pending && !self.node.owner_is_available() {
-            // A cold FIFO owner operation remains retained at the queue head.
-            // If a close future was cancelled while polling it, its terminal
-            // sweeps still belong to node maintenance and must not wait for
-            // that operation to wake before becoming observable.
-            if self.node.transaction_abandonment_shutdown_is_pending() {
-                self.node.finish_transaction_abandonment_shutdown().await?;
-            }
-            if self.node.subscription_finalization_shutdown_is_pending() {
-                self.node.drain_subscription_finalizations().await?;
-            }
+        // A retained operation or external read may need the next owner/peer
+        // turn to release this lock. Waiting here would prevent that turn.
+        // Leave cleanup queued; close still explicitly drains it before storage.
+        if !self.node.owner_is_available_or_wake_when_released() {
             return Ok(());
         }
+        self.flush_deferred_rejection_discards_after_tick().await?;
         self.node.drain_subscription_finalizations().await?;
         if self.node.has_pending_local_publications() {
             self.node.settle_local_publications().await?;
         }
         self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
-        self.flush_deferred_rejection_discards_after_tick().await?;
+        if self.node.owner_is_available_or_wake_when_released() {
+            self.flush_deferred_rejection_discards_after_tick().await?;
+        }
         Ok(())
     }
 
@@ -1414,28 +1406,22 @@ where
         if self.node.has_pending_local_publications() {
             self.node.poll_local_publication_settlement_once()?;
         }
-        let queued_mutation_pending = self.node.poll_queued_mutation_once();
+        self.node.poll_queued_mutation_once();
         self.node.poll_transaction_wait_observers();
-        self.flush_deferred_rejection_discards_after_tick().await?;
-        // A queued read may await a delivery receipt without retaining the
-        // owner. Keep its FIFO position, but service the semantic/peer work
-        // producing that receipt. Cold operations holding the owner still yield.
-        if queued_mutation_pending && !self.node.owner_is_available() {
-            if self.node.transaction_abandonment_shutdown_is_pending() {
-                self.node.finish_transaction_abandonment_shutdown().await?;
-            }
-            if self.node.subscription_finalization_shutdown_is_pending() {
-                self.node.drain_subscription_finalizations().await?;
-            }
+        // Match tick: do not retain the host turn behind another lock owner.
+        if !self.node.owner_is_available_or_wake_when_released() {
             return Ok(DbTickStats::default());
         }
+        self.flush_deferred_rejection_discards_after_tick().await?;
         self.node.drain_subscription_finalizations().await?;
         if self.node.has_pending_local_publications() {
             self.node.settle_local_publications().await?;
         }
         let stats = self.node.tick().await?;
         self.node.poll_transaction_wait_observers();
-        self.flush_deferred_rejection_discards_after_tick().await?;
+        if self.node.owner_is_available_or_wake_when_released() {
+            self.flush_deferred_rejection_discards_after_tick().await?;
+        }
         Ok(stats)
     }
 
