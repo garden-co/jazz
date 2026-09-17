@@ -3894,6 +3894,78 @@ fn reopened_local_subscriber_replays_after_complete_parent_repair() {
 }
 
 #[test]
+fn local_replay_route_retains_terminal_fate_across_dead_queue() {
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let unrelated_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let author = AuthorSubject::for_test_bytes([0xd2; 16]);
+    let tx_id = TxId::new(TxTime(1), NodeUuid::from_bytes([0xd3; 16]));
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(1)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    register_local_replay_route(&routes, tx_id, &old_queue, author, None);
+    route_local_fate(&routes, tx_id, &fate);
+    drop(old_queue);
+    register_local_fate_route(
+        &routes,
+        TxId::new(TxTime(2), NodeUuid::from_bytes([0xd4; 16])),
+        &unrelated_queue,
+    );
+    register_local_replay_route(&routes, tx_id, &replacement_queue, author, None);
+    register_local_fate_route(&routes, tx_id, &replacement_queue);
+    release_local_replay_fates(&routes);
+
+    assert!(matches!(
+        replacement_queue.borrow().as_slice(),
+        [SyncMessage::FateUpdate {
+            tx_id: received,
+            fate: Fate::Accepted,
+            durability: Some(DurabilityTier::Global),
+            ..
+        }] if *received == tx_id
+    ));
+}
+
+#[test]
+fn local_replay_routes_keep_independent_live_receivers() {
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let first_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let author = AuthorSubject::for_test_bytes([0xd5; 16]);
+    let tx_id = TxId::new(TxTime(3), NodeUuid::from_bytes([0xd6; 16]));
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(2)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    register_local_replay_route(&routes, tx_id, &first_queue, author, None);
+    register_local_replay_route(&routes, tx_id, &second_queue, author, None);
+    route_local_fate(&routes, tx_id, &fate);
+    register_local_fate_route(&routes, tx_id, &first_queue);
+    register_local_fate_route(&routes, tx_id, &second_queue);
+    release_local_replay_fates(&routes);
+
+    for queue in [&first_queue, &second_queue] {
+        assert!(matches!(
+            queue.borrow().as_slice(),
+            [SyncMessage::FateUpdate {
+                tx_id: received,
+                fate: Fate::Accepted,
+                durability: Some(DurabilityTier::Global),
+                ..
+            }] if *received == tx_id
+        ));
+    }
+}
+
+#[test]
 fn local_acknowledgements_do_not_reprobe_retained_history() {
     // Internal topology is necessary to count storage probes at the local
     // acknowledgement boundary independently of unrelated query/persistence
