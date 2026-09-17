@@ -2154,19 +2154,15 @@ mod tests {
                     settled_through: GlobalTime(10_000 + i),
                     version_carriers: Vec::new(),
                     peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    // Exercise the same sized, independently-delivered
-                    // control-plane payload without smuggling authority
-                    // terminal output across the peer wire.
-                    program_fact_adds: vec![
-                        crate::protocol::ProgramFactEntry::ReadFrontierSettled(
-                            crate::protocol::ReadFrontierSettledEntry {
-                                scope: format!("compression-{i}"),
-                                tier: DurabilityTier::Global,
-                                stream: Some(format!("stream-{i}")),
-                                frontier: vec![0xAB; 8],
-                            },
-                        ),
-                    ],
+                    // Use current wire-v2 empty supporting-set successors as
+                    // independently delivered control-plane messages. This is
+                    // a compression roundtrip receipt, not a historical size baseline.
+                    supporting_rows: crate::protocol::SupportingRowsUpdate::Delta {
+                        predecessor: u128::from(i).to_le_bytes(),
+                        revision: u128::from(i + 1).to_le_bytes(),
+                        adds: Vec::new(),
+                        removes: Vec::new(),
+                    },
                 })
             })
             .collect::<Vec<_>>();
