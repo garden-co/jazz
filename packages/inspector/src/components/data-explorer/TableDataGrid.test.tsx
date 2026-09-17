@@ -1199,7 +1199,7 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(mockInsert).toHaveBeenCalledTimes(1));
     expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("maybe_done");
-    expect(mockInsert.mock.calls[0]?.[1]).toMatchObject({ title: "new todo", done: false });
+    expect(mockInsert.mock.calls[0]?.[1]).toEqual({ title: "new todo", done: false });
   });
 
   it("appends a staged insert row and inserts it from the banner", async () => {
@@ -1250,15 +1250,22 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(mockInsert).toHaveBeenCalledTimes(1);
-      expect(mockInsert.mock.calls[0]?.[1]).toEqual(
-        expect.objectContaining({
+      expect(mockInsert).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        {
           title: "new todo",
           done: true,
-        }),
+        },
+        {
+          id: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+          ),
+        },
       );
       expect(mockTransactionWait).toHaveBeenCalledWith({ tier: "local" });
     });
+
+    expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("status");
   });
 
   it("keeps an ambiguous insert non-discardable and submits later edits only after confirmation", async () => {
@@ -1357,11 +1364,13 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(mockInsert).toHaveBeenCalledTimes(1);
-      expect(mockInsert.mock.calls[0]?.[1]).toEqual(
-        expect.objectContaining({
+      expect(mockInsert).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        {
           title: "",
-        }),
+          done: false,
+        },
+        { id: expect.any(String) },
       );
     });
   });
@@ -1402,17 +1411,23 @@ describe("TableDataGrid", () => {
 
     await waitFor(() => {
       expect(mockInsert).toHaveBeenCalledTimes(2);
-      expect(mockInsert.mock.calls[0]?.[1]).toEqual(
-        expect.objectContaining({
+      expect(mockInsert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ _table: "todos" }),
+        {
           title: "first todo",
           done: true,
-        }),
+        },
+        { id: expect.any(String) },
       );
-      expect(mockInsert.mock.calls[1]?.[1]).toEqual(
-        expect.objectContaining({
+      expect(mockInsert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ _table: "todos" }),
+        {
           title: "second todo",
           done: false,
-        }),
+        },
+        { id: expect.any(String) },
       );
       expect(mockTransactionWait).toHaveBeenCalledTimes(1);
     });
