@@ -1354,6 +1354,7 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
     // message itself here: claims and row payloads must not escape through a
     // transport diagnostic.
     match message {
+        SyncMessage::Reserved12(retired) => match *retired {},
         SyncMessage::ChunkRequestBatch(_) => "ChunkRequestBatch",
         SyncMessage::ChunkResponseBatch(_) => "ChunkResponseBatch",
         SyncMessage::ChunkUploadStart(_) => "ChunkUploadStart",
@@ -1370,7 +1371,6 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::PublishSchema { .. } => "PublishSchema",
         SyncMessage::PublishSchemaWithLens { .. } => "PublishSchemaWithLens",
         SyncMessage::PublishLens { .. } => "PublishLens",
-        SyncMessage::SetCurrentWriteSchema { .. } => "SetCurrentWriteSchema",
         SyncMessage::CatalogueAck(_) => "CatalogueAck",
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => "ViewUpdate",
         SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",

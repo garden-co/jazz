@@ -193,9 +193,9 @@ permissions relation payload, rejects reopen rather than selecting a fallback
 or recovering a partial catalogue.
 
 Schema evolution is coordinated through the catalogue, which serializes
-publication and write-pointer changes under administrative authority. Catalogue
+publication and active schema changes under administrative authority. Catalogue
 mutations travel as admin-gated
-`SyncMessage::{PublishSchemaWithLens, PublishLens, SetCurrentWriteSchema}`
+`SyncMessage::{PublishSchemaWithLens, PublishLens}`
 messages with `CatalogueAck` replies; a non-admin author is rejected
 (`INV-LENS-3`). `AuthorSubject::SYSTEM` is the catalogue admin.
 

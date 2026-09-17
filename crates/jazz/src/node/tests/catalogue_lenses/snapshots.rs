@@ -2004,7 +2004,7 @@ fn dynamic_edge_bootstrap_rejects_snapshot_with_ambiguous_genesis() {
 /// only one complete trusted snapshot may cross the bootstrap boundary.
 ///
 /// ```text
-/// stale incremental pointer ──► edge(Uninitialized) ──reject──► no pending pointer row
+/// incremental publication ──► edge(Uninitialized) ──reject──► no catalogue row
 /// ```
 #[test]
 fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue() {
@@ -2017,12 +2017,9 @@ fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue
         .expect("open explicit uninitialized edge");
 
     assert!(matches!(
-        edge.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+        edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
             author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: schema().version_id(),
-            },
+            schema: Box::new(SchemaVersion::new(schema())),
         }),
         Err(Error::CatalogueUninitialized)
     ));
@@ -2031,7 +2028,7 @@ fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue
             .primary_key_scan_raw("jazz_catalogue", &[])
             .expect("scan rejected incremental message")
             .is_empty(),
-        "incremental pointer must not leave a durable pending catalogue row"
+        "incremental publication must not leave a durable catalogue row"
     );
 }
 

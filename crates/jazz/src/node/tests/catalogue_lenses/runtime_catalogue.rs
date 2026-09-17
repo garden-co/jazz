@@ -98,11 +98,6 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
         evolved_payload.id
     );
 
-    assert!(core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema { revision: 3, schema: base.version_id() },
-    }).is_err(), "standalone pointers cannot change the active selection");
-
     let stale = core.activate_catalogue_schema_settled(CurrentWriteSchema {
         revision: 1,
         schema: base.version_id(),

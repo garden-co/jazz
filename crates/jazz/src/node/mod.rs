@@ -409,7 +409,6 @@ pub(crate) fn is_catalogue_mutation(message: &SyncMessage) -> bool {
             | SyncMessage::PublishSchema { .. }
             | SyncMessage::PublishSchemaWithLens { .. }
             | SyncMessage::PublishLens { .. }
-            | SyncMessage::SetCurrentWriteSchema { .. }
     )
 }
 

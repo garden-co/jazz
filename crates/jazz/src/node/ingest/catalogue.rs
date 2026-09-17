@@ -381,10 +381,6 @@ where
                     .apply_publish_lens(author, ingest_context, lens)
                     .await
                     .map(PublicationOutcome::settled),
-                SyncMessage::SetCurrentWriteSchema { author, pointer } => self
-                    .apply_set_current_write_schema(author, ingest_context, pointer)
-                    .await
-                    .map(PublicationOutcome::settled),
                 SyncMessage::CatalogueAck(_) => Ok(PublicationOutcome::settled(Vec::new())),
                 SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_) => Err(
                     Error::UnsupportedSyncMessage("chunk traffic requires peer link context"),
@@ -944,16 +940,6 @@ where
             lens: Some(lens.id),
             applied: true,
         })])
-    }
-
-    async fn apply_set_current_write_schema(
-        &mut self,
-        author: AuthorSubject,
-        ingest_context: Option<CommitUnitIngestContext>,
-        _pointer: CurrentWriteSchema,
-    ) -> Result<Vec<SyncMessage>, Error> {
-        self.require_catalogue_admin(author, ingest_context)?;
-        Err(Error::InvalidCatalogueUpdate("activate schema and permissions together"))
     }
 
     fn require_catalogue_admin(
