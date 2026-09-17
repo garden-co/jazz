@@ -1,29 +1,18 @@
 "use client";
 
-import { JazzSessionProvider, useJazzSession } from "jazz-tools/react";
+import { JazzProvider as JazzAppProvider, useJazzAuth } from "jazz-tools/react";
 
 const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
 const SERVER_URL = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 
 export function useLocalAccount() {
-  const { account, restoreLocalFirst } = useJazzSession();
+  const { account, sessionActions } = useJazzAuth();
   if (!account) throw new Error("Jazz account is not ready");
-  return { account, restore: restoreLocalFirst };
-}
-
-function SessionFallback() {
-  const { error, retry } = useJazzSession();
-  return error ? (
-    <p role="alert">
-      {error.message} <button onClick={() => void retry().catch(() => {})}>Retry</button>
-    </p>
-  ) : (
-    <p>Loading...</p>
-  );
+  return { account, restore: sessionActions.restoreLocalFirst };
 }
 
 function SessionContent({ children }: React.PropsWithChildren) {
-  const { error } = useJazzSession();
+  const { error } = useJazzAuth();
   return (
     <>
       {error && <p role="alert">{error.message}</p>}
@@ -46,11 +35,18 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
   }
 
   return (
-    <JazzSessionProvider
-      config={{ appId: APP_ID, serverUrl: SERVER_URL, initial: "local-first" }}
-      fallback={<SessionFallback />}
+    <JazzAppProvider
+      appId={APP_ID}
+      serverUrl={SERVER_URL}
+      initial="local-first"
+      loading={<p>Loading...</p>}
+      error={({ error, retry }) => (
+        <p role="alert">
+          {error?.message} <button onClick={() => void retry()}>Retry</button>
+        </p>
+      )}
     >
       <SessionContent>{children}</SessionContent>
-    </JazzSessionProvider>
+    </JazzAppProvider>
   );
 }

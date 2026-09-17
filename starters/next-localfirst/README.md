@@ -36,7 +36,7 @@ app/
   page.tsx                     ← homepage (header + todo widget + backup UI)
   globals.css
 components/
-  jazz-provider.tsx            ← JazzSessionProvider configuration
+  jazz-provider.tsx            ← application JazzProvider configuration
   todo-widget.tsx              ← Jazz-powered todo list
   auth-backup.tsx              ← recovery phrase + passkey backup/restore
 schema.ts                      ← Jazz app schema (todos table)
@@ -45,7 +45,7 @@ permissions.ts                 ← row-level access policy ($createdBy)
 
 ## How it works
 
-`JazzSessionProvider` receives the configuration once with `initial: "local-first"`. It restores a usable saved account or creates a local-first account and owns the client lifecycle. Recovery controls call `restoreLocalFirst`; the session waits for sync before replacing the client and preserves a usable account after a failed operation.
+The wrapper in `components/jazz-provider.tsx` configures the SDK's `JazzProvider` with `appId`, `serverUrl`, and `initial="local-first"`. It restores a usable saved account or creates a local-first account and owns the client lifecycle. `useLocalAccount()` reads `useJazzAuth()` and exposes the account plus `sessionActions.restoreLocalFirst` as `restore` for recovery controls. The session waits for sync before replacing the client and preserves a usable account after a failed operation. Loading and startup-error views keep retry available when the account is not ready.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the
@@ -67,6 +67,14 @@ const schema = {
 Row ownership is enforced by `permissions.ts` via the `$createdBy` predicate,
 so you don't need an explicit `ownerId` column. Jazz records the creating
 session on every row and the permission policy scopes reads/writes to it.
+
+## Local development
+
+During `pnpm dev`, `withJazz` serves the development inspector and the SDK's
+`JazzProvider` automatically attaches it to the app. Click the Jazz toggle
+in the bottom-right corner (or press `Alt+Shift+J`), then select `todos` in
+Data Explorer to inspect the app's local rows. The inspector is
+development-only and does not appear in production builds.
 
 ## Environment variables
 

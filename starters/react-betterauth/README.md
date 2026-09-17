@@ -133,6 +133,14 @@ Better Auth's in-memory adapter (`server/auth.ts`) is a placeholder. Swap it
 for a persistent database adapter before shipping, or users will be wiped on
 every process restart.
 
+## JWT configuration
+
+Set `APP_ORIGIN` consistently in `.env` or the process environment. Its default
+is `http://localhost:3001` (the auth server, not Vite). Better Auth uses it for
+its base URL, issuer, and audience; the Jazz plugin uses the same value for
+`jwksUrl`, `jwtIssuer`, and `jwtAudience`. Production Jazz servers need all
+three settings too, and must be able to reach the JWKS URL.
+
 ## Known limitations
 
 - **In-memory user store.** The Better Auth memory adapter keeps everything

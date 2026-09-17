@@ -38,7 +38,7 @@ permissions.ts                   ← row-level access policy ($createdBy)
 
 ## How it works
 
-`JazzSessionProvider` receives the configuration once with `initial: "local-first"`. It restores a usable saved account or creates a local-first account and owns the client lifecycle. Recovery controls call `restoreLocalFirst`; the session waits for sync before replacing the client and preserves a usable account after a failed operation.
+`JazzProvider` receives `appId`, `serverUrl`, and `initial="local-first"` directly. It restores a usable saved account or creates a local-first account and owns the client lifecycle. `useJazzAuth()` exposes the current account, errors, and `sessionActions.restoreLocalFirst` for recovery controls. The session waits for sync before replacing the client and preserves a usable account after a failed operation. Loading and startup-error views keep retry available when the account is not ready.
 
 Data syncs to the Jazz server under that anonymous identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the
@@ -67,6 +67,11 @@ starts a local Jazz dev server and writes `VITE_JAZZ_APP_ID` and
 `VITE_JAZZ_SERVER_URL` into `.env` on the first `pnpm dev`. On the
 second run (and every run after), Vite picks them up from `.env`
 automatically.
+
+During `pnpm dev`, `JazzProvider` automatically attaches the Jazz inspector.
+Click the Jazz toggle in the bottom-right corner (or press `Alt+Shift+J`),
+then select `todos` in Data Explorer to inspect the app's local rows. The
+inspector is development-only and does not appear in production builds.
 
 If you prefer to wire things up front, create `.env` before running
 `pnpm dev`:

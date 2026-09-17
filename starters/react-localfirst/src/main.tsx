@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { JazzSessionProvider, useJazzSession } from "jazz-tools/react";
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 import { App } from "./App";
 import "./App.css";
 
@@ -16,34 +16,30 @@ if (!APP_ID || !SERVER_URL) {
   );
 }
 
-function SessionFallback() {
-  const { error, retry } = useJazzSession();
-  return error ? (
-    <p role="alert">
-      {error.message} <button onClick={() => void retry().catch(() => {})}>Retry</button>
-    </p>
-  ) : (
-    <p>Loading...</p>
-  );
-}
-
 function AccountApp() {
-  const { account, restoreLocalFirst, error } = useJazzSession();
+  const { account, sessionActions, error } = useJazzAuth();
   return (
     <>
       {error && <p role="alert">{error.message}</p>}
-      <App account={account!} onRestore={restoreLocalFirst} />
+      <App account={account!} onRestore={sessionActions.restoreLocalFirst} />
     </>
   );
 }
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <JazzSessionProvider
-      config={{ appId: APP_ID, serverUrl: SERVER_URL, initial: "local-first" }}
-      fallback={<SessionFallback />}
+    <JazzProvider
+      appId={APP_ID}
+      serverUrl={SERVER_URL}
+      initial="local-first"
+      loading={<p>Loading...</p>}
+      error={({ error, retry }) => (
+        <p role="alert">
+          {error?.message} <button onClick={() => void retry()}>Retry</button>
+        </p>
+      )}
     >
       <AccountApp />
-    </JazzSessionProvider>
+    </JazzProvider>
   </StrictMode>,
 );

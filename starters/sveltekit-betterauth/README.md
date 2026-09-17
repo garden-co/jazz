@@ -118,6 +118,14 @@ Better Auth's in-memory adapter (`src/lib/auth.ts`) is a placeholder.
 Swap it for a persistent database adapter before shipping, or users will
 be wiped on every process restart.
 
+## JWT configuration
+
+`APP_ORIGIN` defaults to `http://localhost:5173`. Better Auth uses it for its
+base URL, issuer, and audience; `jazzSvelteKit` uses the same value for
+`jwksUrl`, `jwtIssuer`, and `jwtAudience`. Set it consistently for the app
+and plugin. Production Jazz servers need a reachable JWKS endpoint and
+matching issuer/audience too; JWKS alone is not sufficient to authenticate.
+
 ## Known limitations
 
 - **In-memory user store.** The Better Auth memory adapter keeps
