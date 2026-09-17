@@ -2132,6 +2132,8 @@ pub enum Error {
     InvalidNullFlag(u8),
     #[error("enum {name} has {variants} variants; maximum is 256")]
     EnumTooManyVariants { name: String, variants: usize },
+    #[error("duplicate variant {variant} in enum {enum_name}")]
+    DuplicateEnumVariantName { enum_name: String, variant: String },
     #[error("invalid enum discriminant {discriminant} for enum {enum_name}")]
     InvalidEnumDiscriminant { enum_name: String, discriminant: u8 },
     #[error("unknown enum variant {variant} for enum {enum_name}")]
