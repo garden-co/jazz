@@ -201,6 +201,31 @@ const largeSchema = {
 };
 
 describe("typed app prototype", () => {
+  it.each(["union", "wasmSchema", "schemaAst"])(
+    "rejects a table named %s instead of masking an app control",
+    (tableName) => {
+      expect(() =>
+        s.defineApp({
+          [tableName]: s.table({ value: s.string() }),
+        } as never),
+      ).toThrow(/reserved/i);
+    },
+  );
+
+  it("rejects a table named exists instead of masking the policy control", () => {
+    expect(() => {
+      const reservedApp = s.defineApp({
+        exists: s.table({ value: s.string() }),
+      } as never);
+      s.definePermissions(reservedApp, ({ policy }) => {
+        const existsPolicy = policy.exists as unknown as {
+          where(input: unknown): unknown;
+        };
+        existsPolicy.where({ value: "present" });
+      });
+    }).toThrow(/reserved/i);
+  });
+
   it("allows a table-inferred variable to be reassigned to a refined query", () => {
     let query = app.todos;
 
