@@ -20,7 +20,7 @@ it.each(["removed", "retained"] as const)(
         )
         .encrypted({ space: "projectId", columns: ["body"] }),
     });
-    const permissions = definePermissions(app, ({ policy }) => {
+    const permissions = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
       policy.folders.allowRead.always();
@@ -30,6 +30,14 @@ it.each(["removed", "retained"] as const)(
       policy.notes.allowInsert.always();
       policy.notes.allowUpdate.always();
       policy.notes.allowDelete.always();
+      policy.__e2ee_spaces.allowRead.always();
+      policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+      policy.__e2ee_space_grants.allowRead.always();
+      policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+      policy.__e2ee_space_deliveries.allowRead.always();
+      policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+      policy.__e2ee_space_successors.allowRead.always();
+      policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
     });
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Db | undefined;
@@ -77,7 +85,7 @@ it.each(["removed", "retained"] as const)(
                 ) {
                   started = true;
                   await gate;
-                  const corrupt = envelope.slice();
+                  const corrupt = Uint8Array.from(envelope);
                   corrupt[corrupt.length - 1] = corrupt[corrupt.length - 1]! ^ 1;
                   return adapters.cellCipher.decrypt(key, context, corrupt);
                 }
