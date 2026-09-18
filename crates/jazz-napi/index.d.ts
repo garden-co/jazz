@@ -3,15 +3,15 @@
 /** Owned native stream state, never serialised into JavaScript memory. */
 export declare class E2EeSodiumStream {
   /** Without a header starts encryption; a supplied header starts decryption. */
-  constructor(key: Uint8Array, header?: Uint8Array | undefined | null);
+  constructor(key: Uint8Array, header?: Uint8Array | undefined | null)
   /** Public, non-secret stream header. */
-  get header(): Uint8Array;
+  get header(): Uint8Array
   /** Encrypts one bounded record; final records must be empty. */
-  push(message: Uint8Array, context: Uint8Array, finalRecord: boolean): Uint8Array;
+  push(message: Uint8Array, context: Uint8Array, finalRecord: boolean): Uint8Array
   /** Returns plaintext only after authenticating the record. */
-  pull(ciphertext: Uint8Array, context: Uint8Array): E2EeSodiumStreamRecord;
+  pull(ciphertext: Uint8Array, context: Uint8Array): E2EeSodiumStreamRecord
   /** Wipes stream keys immediately; also called on drop. */
-  dispose(): void;
+  dispose(): void
 }
 
 export declare class JazzServer {
@@ -246,8 +246,8 @@ export declare function e2eeSodiumSigningKeyPair(seed?: Uint8Array | undefined |
 
 /** One authenticated stream record. */
 export interface E2EeSodiumStreamRecord {
-  message: Uint8Array;
-  finalRecord: boolean;
+  message: Uint8Array
+  finalRecord: boolean
 }
 
 /** Verifies a detached Ed25519 signature; malformed sizes return false. */
