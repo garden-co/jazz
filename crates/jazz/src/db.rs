@@ -1973,7 +1973,7 @@ fn register_local_fate_route_state(
                     && candidate.replay_author == replay_author
                     && candidate.queue.upgrade().is_some();
                 live_same_author
-                    .then(|| candidate.held_fate.as_ref())
+                    .then_some(candidate.held_fate.as_ref())
                     .flatten()
                     .filter(|fate| local_fate_is_terminal(fate))
                     .cloned()
