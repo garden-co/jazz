@@ -704,10 +704,48 @@ impl ActiveSchema {
     }
 
     // Policy expressions are lowered against the selected structural schema.
-    // Equal expressions on a different source still require rebuilding live graphs.
-    // A revision-only update is a true authorization no-op.
-    fn same_authorization_source(&self, other: &Self) -> bool {
-        self.schema == other.schema && self.same_permissions(other)
+    // Equal predicates on a different source still require rebuilding live graphs.
+    // Equal absent and literal allow/deny clauses can retain the runtime during
+    // history-only growth when their unpartitioned physical row source is stable.
+    // A revision-only update is also a true authorization no-op.
+    fn same_authorization_source(
+        &self,
+        other: &Self,
+        source_mapping: Option<&SchemaPhysicalMapping>,
+        other_mapping: Option<&SchemaPhysicalMapping>,
+    ) -> bool {
+        self.same_permissions(other)
+            && (self.schema == other.schema
+                || self.compiled.tables.iter().zip(&other.compiled.tables).all(
+                    |(table, other_table)| {
+                        // Even constant policies read a physical row source. A
+                        // replacement table or branch partition changes that source.
+                        if !table.branch_by.is_empty() || !other_table.branch_by.is_empty() {
+                            return false;
+                        }
+                        let Some((source, target)) = source_mapping
+                            .and_then(|mapping| mapping.tables.get(&table.name))
+                            .zip(other_mapping.and_then(|mapping| mapping.tables.get(&table.name)))
+                        else {
+                            return false;
+                        };
+                        if source.table_id != target.table_id {
+                            return false;
+                        }
+                        let allow = crate::query::Query::from(table.name.as_str());
+                        let deny = allow
+                            .clone()
+                            .filter(crate::query::Predicate::Any(Vec::new()));
+                        table
+                            .read_policy
+                            .iter()
+                            .chain(table.write_policies.iter().map(|(_, policy)| policy))
+                            // Compare the complete query, rather than just filters:
+                            // joins, inherited policies and other clauses must not
+                            // accidentally qualify as schema-independent.
+                            .all(|policy| policy == &allow || policy == &deny)
+                    },
+                ))
     }
 
     fn same_permissions(&self, other: &Self) -> bool {

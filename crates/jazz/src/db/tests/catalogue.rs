@@ -1404,20 +1404,30 @@ fn catalogue_after_same_turn_merge_resumes_after_local_settlement() {
 // independently of the local read schema; assertions use visible subscription events.
 #[test]
 fn trusted_snapshot_schema_switch_rebuilds_live_authorization() {
-    assert_authorization_source_refresh(true, false);
+    assert_authorization_source_refresh(true, false, false);
 }
 
 #[test]
 fn direct_schema_switch_with_same_policies_rebuilds_live_authorization() {
-    assert_authorization_source_refresh(false, true);
+    assert_authorization_source_refresh(false, true, false);
 }
 
 #[test]
 fn trusted_snapshot_schema_switch_with_same_policies_rebuilds_live_authorization() {
-    assert_authorization_source_refresh(true, true);
+    assert_authorization_source_refresh(true, true, false);
 }
 
-fn assert_authorization_source_refresh(snapshot_activation: bool, same_policies: bool) {
+#[test]
+fn schema_switch_with_constant_deny_preserves_live_authorization() {
+    assert_authorization_source_refresh(true, true, true);
+    assert_authorization_source_refresh(false, true, true);
+}
+
+fn assert_authorization_source_refresh(
+    snapshot_activation: bool,
+    same_policies: bool,
+    deny_all: bool,
+) {
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let table = |with_body: u8, read_column: Option<&str>| {
@@ -1436,10 +1446,11 @@ fn assert_authorization_source_refresh(snapshot_activation: bool, same_policies:
             table
         };
         let table = if let Some(column) = read_column {
-            table.policies(
-                PublicTablePolicies::new()
-                    .with_select(public_session_eq(column, &["claims", "sub"])),
-            )
+            table.policies(PublicTablePolicies::new().with_select(if deny_all {
+                PublicPolicyExpr::False
+            } else {
+                public_session_eq(column, &["claims", "sub"])
+            }))
         } else {
             table
         };
@@ -1529,7 +1540,7 @@ fn assert_authorization_source_refresh(snapshot_activation: bool, same_policies:
     .unwrap();
     assert_eq!(
         row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
-        vec![first]
+        if deny_all { vec![] } else { vec![first] }
     );
 
     // Replaying the identical authority must retain the live subscription.
@@ -1582,6 +1593,12 @@ fn assert_authorization_source_refresh(snapshot_activation: bool, same_policies:
         ]),
     )
     .unwrap();
+
+    if deny_all {
+        assert_eq!(db.node.node.borrow().groove_runtime_token(), token);
+        assert!(subscription.try_next_event().is_none());
+        return;
+    }
 
     let event = subscription
         .try_next_event()

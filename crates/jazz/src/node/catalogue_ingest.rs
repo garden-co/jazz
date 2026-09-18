@@ -250,10 +250,15 @@ where
         let planned_genesis = catalogue_genesis(&plan.catalogue)?;
         let runtime_semantics_changed =
             !active_runtime_layouts_equal(&self.catalogue, &plan.catalogue);
-        let authorization_source_changed = !self
-            .catalogue
-            .active_schema
-            .same_authorization_source(&plan.catalogue.active_schema);
+        let authorization_source_changed = !self.catalogue.active_schema.same_authorization_source(
+            &plan.catalogue.active_schema,
+            self.catalogue
+                .physical_mappings
+                .get(&self.catalogue.active_schema.schema),
+            plan.catalogue
+                .physical_mappings
+                .get(&plan.catalogue.active_schema.schema),
+        );
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
         let previous_genesis = catalogue_genesis(&previous_catalogue)?;
         // Historical/import-only snapshot growth must not be visible through

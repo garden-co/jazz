@@ -1200,7 +1200,11 @@ self.database.finish_persistence(persisted)?;
 
     fn install_active_schema(&mut self, active: ActiveSchema) {
         let authorization_source_changed =
-            !active.same_authorization_source(&self.catalogue.active_schema);
+            !active.same_authorization_source(
+                &self.catalogue.active_schema,
+                self.catalogue.physical_mappings.get(&active.schema),
+                self.catalogue.physical_mappings.get(&self.catalogue.active_schema.schema),
+            );
         self.catalogue.catalogue_schemas.insert(
             active.schema,
             SchemaVersion::new(active.compiled.without_permissions()),

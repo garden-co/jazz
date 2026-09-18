@@ -92,7 +92,7 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     // This is an internal transport-boundary test: public clients never apply
     // trusted upstream catalogue snapshots directly.
     let base = schema();
-    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let evolved = SchemaVersion::new(catalogue_evolved_schema_with_allow_all());
     let lens = MigrationLens::new(
         base.version_id(),
         evolved.id,
@@ -713,7 +713,7 @@ fn trusted_catalogue_snapshot_imports_historical_lineage_without_rebuilding_acti
     // its activation commits, reopening must retain enough canonical lineage
     // identity to recognize that same prefix on the next upstream connection.
     let base = schema();
-    let snapshot = catalogue_snapshot_fixture();
+    let snapshot = catalogue_snapshot_fixture_for_schema(catalogue_evolved_schema_with_allow_all());
     let (dir, mut receiver) = open_node_with_schema(node(0x3f), base.clone());
     let runtime_before_transition = receiver.groove_runtime_token();
 
@@ -2101,9 +2101,25 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
 }
 
 /// Build the trusted catalogue snapshot shared by bootstrap and recovery tests.
+// History-only scenarios must preserve explicit permissions: omitted policies
+// deny access and would constitute an authorization change from schema().
+fn catalogue_evolved_schema_with_allow_all() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ).allow_all(),
+    )
+}
+
 fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
+    catalogue_snapshot_fixture_for_schema(catalogue_evolved_schema())
+}
+
+fn catalogue_snapshot_fixture_for_schema(evolved: JazzSchema) -> crate::protocol::CatalogueSnapshot {
     let base = schema();
-    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let evolved = SchemaVersion::new(evolved);
     let genesis_physical_identities = PhysicalIdentityManifest::allocate(&base);
     let publication = SchemaLineagePublication::author_from_prior(
         &base,
@@ -2439,4 +2455,32 @@ fn permission_bearing_lineage_snapshot_replay_reopens_without_restoring_old_gran
         reopened.catalogue.active_schema.compiled.public_schema(),
         denied.public_schema()
     );
+}
+
+// Internal because physical source identity and its live-graph invalidation
+// token are the contract under test; schemas still use the public builders.
+#[test]
+fn constant_policy_schema_switch_invalidates_replaced_physical_table() {
+    let base = schema();
+    let evolved = SchemaVersion::new(catalogue_evolved_schema_with_allow_all());
+    let (_dir, mut receiver) = open_node_with_schema(node(0x75), base.clone());
+    let old_table = receiver.physical_table_id_for_schema(base.version_id(), "todos").unwrap();
+    let lens = MigrationLens::new(base.version_id(), evolved.id, Vec::new()).unwrap();
+    publish_schema_lineage(
+        &mut receiver,
+        evolved.clone(),
+        lens,
+        vec!["todos".to_owned()],
+        vec!["todos".to_owned()],
+    ).unwrap();
+    assert_ne!(
+        receiver.physical_table_id_for_schema(evolved.id, "todos").unwrap(),
+        old_table,
+    );
+    let before = receiver.groove_runtime_token();
+    receiver.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
+    }).unwrap();
+    assert_ne!(receiver.groove_runtime_token(), before);
 }
