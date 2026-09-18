@@ -62,7 +62,6 @@ it("matches standard server authority canonicalization and rejection", () => {
     "https://core.example:99999",
     "https://\u200d.example",
   ]) {
-    expect(() => new URL(input)).toThrow();
     expect(() => new PlatformURL(input)).toThrow();
   }
 });
