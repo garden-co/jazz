@@ -35,11 +35,12 @@ try {
   await writeFile(
     resolve(directory, "consumer.mts"),
     `
-    import type { CryptoAdapters } from "jazz-tools/e2ee";
+    import type { CryptoAdapters, LargeValueCipher } from "jazz-tools/e2ee";
     import { createBrowserCrypto } from "jazz-tools/e2ee/browser";
     import { createNativeCrypto } from "jazz-tools/e2ee/native";
     export const browser: Promise<CryptoAdapters> = createBrowserCrypto();
     export const native: Promise<CryptoAdapters> = createNativeCrypto();
+    export type StreamAdapter = LargeValueCipher;
   `,
   );
   await execFile(

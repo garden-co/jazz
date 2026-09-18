@@ -7,8 +7,191 @@ use libsodium_sys::{
     crypto_sign_detached, crypto_sign_keypair, crypto_sign_seed_keypair,
     crypto_sign_verify_detached, randombytes_buf, sodium_init, sodium_memzero,
 };
+use libsodium_sys::{
+    crypto_secretstream_xchacha20poly1305_init_pull,
+    crypto_secretstream_xchacha20poly1305_init_push, crypto_secretstream_xchacha20poly1305_pull,
+    crypto_secretstream_xchacha20poly1305_push, crypto_secretstream_xchacha20poly1305_state,
+};
 use napi::bindgen_prelude::{Error, Result, Uint8Array};
 use napi_derive::napi;
+
+/// Owned native stream state, never serialised into JavaScript memory.
+#[napi]
+pub struct E2eeSodiumStream {
+    state: Option<Box<crypto_secretstream_xchacha20poly1305_state>>,
+    header: Vec<u8>,
+    encrypting: bool,
+}
+
+/// One authenticated stream record.
+#[napi(object)]
+pub struct E2eeSodiumStreamRecord {
+    pub message: Uint8Array,
+    pub final_record: bool,
+}
+
+#[napi]
+impl E2eeSodiumStream {
+    /// Without a header starts encryption; a supplied header starts decryption.
+    #[napi(constructor)]
+    pub fn new(key: Uint8Array, header: Option<Uint8Array>) -> Result<Self> {
+        if key.len() != 32 || header.as_ref().is_some_and(|value| value.len() != 24) {
+            return Err(Error::from_reason("Invalid E2EE stream key or header"));
+        }
+        initialise()?;
+        let encrypting = header.is_none();
+        let mut stream = Self {
+            state: Some(Box::new(crypto_secretstream_xchacha20poly1305_state {
+                k: [0; 32],
+                nonce: [0; 12],
+                _pad: [0; 8],
+            })),
+            header: header.map_or_else(|| vec![0; 24], |value| value.to_vec()),
+            encrypting,
+        };
+        let state = stream
+            .state
+            .as_deref_mut()
+            .ok_or_else(|| Error::from_reason("Closed E2EE stream"))?;
+        // SAFETY: state is uniquely owned; key and header lengths were checked above.
+        let result = unsafe {
+            if encrypting {
+                crypto_secretstream_xchacha20poly1305_init_push(
+                    state,
+                    stream.header.as_mut_ptr(),
+                    key.as_ptr(),
+                )
+            } else {
+                crypto_secretstream_xchacha20poly1305_init_pull(
+                    state,
+                    stream.header.as_ptr(),
+                    key.as_ptr(),
+                )
+            }
+        };
+        if result != 0 {
+            return Err(Error::from_reason("E2EE stream initialisation failed"));
+        }
+        Ok(stream)
+    }
+
+    /// Public, non-secret stream header.
+    #[napi(getter)]
+    pub fn header(&self) -> Uint8Array {
+        self.header.clone().into()
+    }
+
+    /// Encrypts one bounded record; final records must be empty.
+    #[napi]
+    pub fn push(
+        &mut self,
+        message: Uint8Array,
+        context: Uint8Array,
+        final_record: bool,
+    ) -> Result<Uint8Array> {
+        if !self.encrypting || message.len() > 65_536 || (final_record && !message.is_empty()) {
+            return Err(Error::from_reason("Invalid E2EE stream record"));
+        }
+        let state = self
+            .state
+            .as_deref_mut()
+            .ok_or_else(|| Error::from_reason("Closed E2EE stream"))?;
+        let mut output = vec![0; message.len() + 17];
+        let mut length = 0;
+        // SAFETY: state is uniquely owned and output includes the 17-byte authentication overhead.
+        let result = unsafe {
+            crypto_secretstream_xchacha20poly1305_push(
+                state,
+                output.as_mut_ptr(),
+                &mut length,
+                message.as_ptr(),
+                message.len() as u64,
+                context.as_ptr(),
+                context.len() as u64,
+                if final_record { 3 } else { 0 },
+            )
+        };
+        if result != 0 || length != output.len() as u64 {
+            self.dispose();
+            return Err(Error::from_reason("E2EE stream encryption failed"));
+        }
+        if final_record {
+            self.dispose();
+        }
+        Ok(output.into())
+    }
+
+    /// Returns plaintext only after authenticating the record.
+    #[napi]
+    pub fn pull(
+        &mut self,
+        ciphertext: Uint8Array,
+        context: Uint8Array,
+    ) -> Result<E2eeSodiumStreamRecord> {
+        if self.encrypting || !(17..=65_553).contains(&ciphertext.len()) {
+            return Err(Error::from_reason("Invalid E2EE stream record"));
+        }
+        let state = self
+            .state
+            .as_deref_mut()
+            .ok_or_else(|| Error::from_reason("Closed E2EE stream"))?;
+        let mut message = vec![0; ciphertext.len() - 17];
+        let mut length = 0;
+        let mut tag = 0;
+        // SAFETY: ciphertext includes the authentication overhead; message has sufficient capacity.
+        let result = unsafe {
+            crypto_secretstream_xchacha20poly1305_pull(
+                state,
+                message.as_mut_ptr(),
+                &mut length,
+                &mut tag,
+                ciphertext.as_ptr(),
+                ciphertext.len() as u64,
+                context.as_ptr(),
+                context.len() as u64,
+            )
+        };
+        if result != 0
+            || length != message.len() as u64
+            || !matches!(tag, 0 | 3)
+            || (tag == 3 && !message.is_empty())
+        {
+            // SAFETY: the vector owns this writable buffer, which must not escape on failure.
+            unsafe {
+                sodium_memzero(message.as_mut_ptr().cast(), message.len());
+            }
+            self.dispose();
+            return Err(Error::from_reason("E2EE stream authentication failed"));
+        }
+        if tag == 3 {
+            self.dispose();
+        }
+        Ok(E2eeSodiumStreamRecord {
+            message: message.into(),
+            final_record: tag == 3,
+        })
+    }
+
+    /// Wipes stream keys immediately; also called on drop.
+    #[napi]
+    pub fn dispose(&mut self) {
+        if let Some(mut state) = self.state.take() {
+            // SAFETY: the box exclusively owns this correctly sized state allocation.
+            unsafe {
+                sodium_memzero(
+                    (&mut *state as *mut crypto_secretstream_xchacha20poly1305_state).cast(),
+                    std::mem::size_of_val(&*state),
+                );
+            }
+        }
+    }
+}
+
+impl Drop for E2eeSodiumStream {
+    fn drop(&mut self) {
+        self.dispose();
+    }
+}
 
 /// Owned libsodium device encryption keys.
 #[napi(object)]
