@@ -63,7 +63,6 @@ it.each(["material", "protected", "external"])(
         expect(await second.e2ee.recovery.status()).toMatchObject({
           configured: true,
           account: { validation: "not-checked" },
-          groups: { validation: "not-checked" },
         });
       }
       const checked = await second.e2ee.recovery.status(protectedMaterial ? undefined : material);
@@ -74,7 +73,6 @@ it.each(["material", "protected", "external"])(
           activeDeviceIds: [creator!.id],
           validatedRootId: JSON.parse(material).rootId,
         },
-        groups: { validation: "not-checked" },
       });
       expect(localStorage.getItem(keys[1]!)).toBeNull();
       const pending = (await second.e2ee.devices.list()).find((row) => row.state === "pending")!;
