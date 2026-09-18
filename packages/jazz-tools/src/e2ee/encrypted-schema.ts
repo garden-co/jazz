@@ -4,6 +4,7 @@ import type { Table } from "../schema.js";
 export type EncryptionDeclaration = Readonly<{
   space: string;
   columns: readonly string[];
+  indexes?: Readonly<Record<string, "equality">>;
 }>;
 
 export type EncryptedSchema = Readonly<{
@@ -20,14 +21,25 @@ export const encryptedSchemas = new WeakMap<WasmSchema, EncryptedSchema>();
 // Keep this dependency out of the caller's selected result properties.
 export const encryptedRowSpaces = new WeakMap<object, string>();
 
+export function equalityIndexColumn(column: string): string {
+  return `__e2ee_eq_${column}`;
+}
+
 export function encryptedTableToPhysical(table: Table, declaration?: EncryptionDeclaration): Table {
   if (!declaration) return table;
   return {
     ...table,
-    columns: table.columns.map((column) =>
-      declaration.columns.includes(column.name)
-        ? { name: column.name, sqlType: "BYTEA" as const, nullable: false }
-        : column,
-    ),
+    columns: [
+      ...table.columns.map((column) =>
+        declaration.columns.includes(column.name)
+          ? { name: column.name, sqlType: "BYTEA" as const, nullable: false }
+          : column,
+      ),
+      ...Object.keys(declaration.indexes ?? {}).map((name) => ({
+        name: equalityIndexColumn(name),
+        sqlType: "BYTEA" as const,
+        nullable: false,
+      })),
+    ],
   };
 }

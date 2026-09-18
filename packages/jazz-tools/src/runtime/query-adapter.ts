@@ -332,8 +332,14 @@ function toArraySubqueries(
     });
     const selectColumns = visibleFullSelectColumns(resolvedSelectColumns);
     const encryption = encryptedSchemas.get(schema)?.tables.get(rel.toTable);
-    if (encryption)
-      throw new Error("Unsupported encrypted query: nested results are not supported yet");
+    if (
+      encryption &&
+      selectColumns &&
+      resolvedSelectColumns.some((column) => encryption.columns.includes(column)) &&
+      !resolvedSelectColumns.includes(encryption.space)
+    ) {
+      selectColumns.push(encryption.space);
+    }
     const outputColumnName = schema[tableName]?.columns.some((column) => column.name === relName)
       ? hiddenIncludeColumnName(relName)
       : relName;
