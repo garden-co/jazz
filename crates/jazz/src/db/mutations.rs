@@ -2240,84 +2240,94 @@ where
                 )
                 .await
             }
+            // Keep branch-only preparation out of the root update's poll frame:
+            // root writes can refresh subscriptions beneath this call.
             WriteTarget::BranchView { head, base } => {
-                if patch.is_empty() {
-                    return Err(Error::new(
-                        ErrorCode::Schema,
-                        "branch update requires at least one authored column",
-                    ));
-                }
-                let visible_to_session = match identity {
-                    WriteIdentity::Session(author) => Some(
-                        self.visible_branch_view_cells_for_identity(
-                            table,
-                            &head,
-                            base.as_ref(),
-                            row,
-                            author,
-                        )
-                        .await?
-                        .ok_or_else(|| read_for_write_denied("UPDATE", table))?,
-                    ),
-                    WriteIdentity::Database | WriteIdentity::Attribution(_) => None,
-                };
-                let local = self
-                    .node
-                    .node
-                    .lock()
-                    .await
-                    .visible_current_cells_in_branch(table, &head, row)
-                    .await?;
-                let (mut cells, parents, authored_columns, verified_inherited_cells) =
-                    if let Some(cells) = local {
-                        let parent = self
-                            .node
-                            .node
-                            .lock()
-                            .await
-                            .local_content_winner_tx_id_in_branch(table, &head, row)
-                            .await?;
-                        (
-                            visible_to_session.unwrap_or(cells),
-                            parent.into_iter().collect(),
-                            Some(patch.keys().cloned().collect()),
-                            None,
-                        )
-                    } else {
-                        let inherited = self
-                            .node
-                            .node
-                            .lock()
-                            .await
-                            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+                async move {
+                    if patch.is_empty() {
+                        return Err(Error::new(
+                            ErrorCode::Schema,
+                            "branch update requires at least one authored column",
+                        ));
+                    }
+                    let visible_to_session = match identity {
+                        WriteIdentity::Session(author) => Some(
+                            self.visible_branch_view_cells_for_identity(
+                                table,
+                                &head,
+                                base.as_ref(),
+                                row,
+                                author,
+                            )
                             .await?
-                            .ok_or_else(|| {
-                                Error::new(
-                                    ErrorCode::NotObserved,
-                                    format!("row is not visible in branch view: {}", row.0),
-                                )
-                            })?;
-                        let cells = visible_to_session.unwrap_or(inherited);
-                        // This complete cell map came from the locally observed
-                        // branch base. Retain it as engine-only provenance for
-                        // unchanged large descriptors when creating the overlay.
-                        let verified_inherited_cells = cells.clone();
-                        (cells, Vec::new(), None, Some(verified_inherited_cells))
+                            .ok_or_else(|| read_for_write_denied("UPDATE", table))?,
+                        ),
+                        WriteIdentity::Database | WriteIdentity::Attribution(_) => None,
                     };
-                cells.extend(patch);
-                self.write_mergeable_at_ms_with_authorship_in_branch(
-                    made_by,
-                    permission_subject,
-                    table,
-                    row,
-                    cells,
-                    parents,
-                    None,
-                    authored_columns,
-                    now_ms,
-                    head,
-                    verified_inherited_cells,
-                )
+                    let local = self
+                        .node
+                        .node
+                        .lock()
+                        .await
+                        .visible_current_cells_in_branch(table, &head, row)
+                        .await?;
+                    let (mut cells, parents, authored_columns, verified_inherited_cells) =
+                        if let Some(cells) = local {
+                            let parent = self
+                                .node
+                                .node
+                                .lock()
+                                .await
+                                .local_content_winner_tx_id_in_branch(table, &head, row)
+                                .await?;
+                            (
+                                visible_to_session.unwrap_or(cells),
+                                parent.into_iter().collect(),
+                                Some(patch.keys().cloned().collect()),
+                                None,
+                            )
+                        } else {
+                            let inherited = self
+                                .node
+                                .node
+                                .lock()
+                                .await
+                                .visible_current_cells_in_branch_view(
+                                    table,
+                                    &head,
+                                    base.as_ref(),
+                                    row,
+                                )
+                                .await?
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorCode::NotObserved,
+                                        format!("row is not visible in branch view: {}", row.0),
+                                    )
+                                })?;
+                            let cells = visible_to_session.unwrap_or(inherited);
+                            // This complete cell map came from the locally observed
+                            // branch base. Retain it as engine-only provenance for
+                            // unchanged large descriptors when creating the overlay.
+                            let verified_inherited_cells = cells.clone();
+                            (cells, Vec::new(), None, Some(verified_inherited_cells))
+                        };
+                    cells.extend(patch);
+                    self.write_mergeable_at_ms_with_authorship_in_branch(
+                        made_by,
+                        permission_subject,
+                        table,
+                        row,
+                        cells,
+                        parents,
+                        None,
+                        authored_columns,
+                        now_ms,
+                        head,
+                        verified_inherited_cells,
+                    )
+                    .await
+                }
                 .await
             }
         }
