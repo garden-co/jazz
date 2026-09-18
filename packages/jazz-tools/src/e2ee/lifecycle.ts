@@ -1,10 +1,12 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { encryptedSchemas } from "./encrypted-schema.js";
 import { accountRegistry, exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { openRecoveryMaterial, protectRecoveryMaterial } from "./recovery-protection.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
+import { E2eeDataError } from "./data-error.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { beginDbTransactionAfter, prepareDbTransaction } from "../runtime/db.js";
 import type { Db, TableProxy, Transaction, E2eeTransactionScope } from "../runtime/db.js";
@@ -26,10 +28,10 @@ import type { GroupTables } from "./groups.js";
 import { Spaces } from "./space-lifecycle.js";
 import type { SpaceRecoveryPath } from "./space-lifecycle.js";
 import type { SpaceTables } from "./spaces.js";
-import type { JazzCrypto } from "./types.js";
+import type { JazzCrypto, CellCipher } from "./types.js";
 
 export type E2eeConfig = {
-  /** Explicit application including the lifecycle managed tables. */
+  /** Application returned by defineApp; encrypted apps include managed bindings automatically. */
   app?: DeviceTables | { readonly wasmSchema: WasmSchema };
   /** Dedicated local key storage. Do not reuse the account-selection store value. */
   store: AccountStore;
@@ -46,12 +48,73 @@ export type DeviceInfo = Readonly<{
 }>;
 
 const contexts = new WeakMap<Db, E2ee>();
+const cellCrypto = new WeakMap<Db, () => Promise<{ cipher: CellCipher; application: string }>>();
+
+/** @internal Common cell framing owns identity selection, not the crypto adapter. */
+export async function cellCryptoForDb(
+  db: Db,
+): Promise<{ cipher: CellCipher; application: string }> {
+  e2eeForDb(db);
+  return cellCrypto.get(db)!();
+}
+const configuredSchemas = new WeakMap<Db, WasmSchema>();
+/** @internal The configured application can bind a cold transaction's schema. */
+export function e2eeSchemaForDb(db: Db): WasmSchema | undefined {
+  return configuredSchemas.get(db);
+}
+const currentSpaceKeys = new WeakMap<Db, Spaces["withKeys"]>();
 
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
 const initialSpacePrerequisites = new WeakMap<
   Db,
   (recipientIds?: readonly string[]) => Promise<void>
 >();
+
+/** @internal Exclusive transactions on encrypted schemas prepare before opening. */
+export function e2eeInitialPreparationForDb(
+  db: Db,
+): ((recipientIds?: readonly string[]) => Promise<void>) | undefined {
+  const schema = configuredSchemas.get(db);
+  return schema && encryptedSchemas.has(schema) ? initialSpacePrerequisites.get(db) : undefined;
+}
+
+/** @internal Cell operations borrow a verified key; never exported by the public API. */
+export async function withSpaceKeys<T, Init>(
+  db: Db,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  use: Parameters<Spaces["withKeys"]>[2],
+  includeHistory = false,
+): Promise<void> {
+  e2eeForDb(db);
+  let callbackFailure: { error: unknown } | undefined;
+  const operation: typeof use = async (...args) => {
+    try {
+      await use(...args);
+    } catch (error) {
+      callbackFailure = { error };
+      throw error;
+    }
+  };
+  const state = await currentSpaceKeys.get(db)!(scope, identifier, operation, includeHistory).catch(
+    (error: unknown) => {
+      // Key adapters can include secret material in their exceptions.
+      // The operation owns its own crypto diagnostics and ordinary runtime errors.
+      if (error instanceof E2eeDataError || (callbackFailure && callbackFailure.error === error))
+        throw error;
+      throw new E2eeDataError("key-unavailable");
+    },
+  );
+  if (state.state !== "ready") {
+    throw new E2eeDataError(
+      state.state === "refused"
+        ? "key-not-shared"
+        : state.state === "maintenance-required"
+          ? "maintenance-required"
+          : "key-unavailable",
+    );
+  }
+}
 
 /** @internal Cold recipient discovery precedes the immutable transaction snapshot. */
 export function beginInitialSpaceTransaction(
@@ -441,7 +504,22 @@ export class E2ee {
       }
     }
     this.app = app as DeviceTables;
+    configuredSchemas.set(db, this.app.__e2ee_device_requests._schema);
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
+    let cellCipher: Promise<CellCipher> | undefined;
+    cellCrypto.set(db, async () => {
+      this.assertOpen();
+      cellCipher ??= this.config.crypto?.cellCipher
+        ? Promise.resolve(this.config.crypto.cellCipher)
+        : import("./browser.js").then((module) => module.createBrowserCellCipher());
+      const cipher = await cellCipher;
+      this.assertOpen();
+      return { cipher, application: JSON.stringify([accountRegistry(this.account), this.env]) };
+    });
+    currentSpaceKeys.set(db, async (scope, identifier, use, includeHistory) => {
+      await this.prepare();
+      return this.requireSpaces().withKeys(scope, identifier, use, includeHistory);
+    });
     initialSpacePrerequisites.set(db, async (recipientIds) => {
       await this.prepare();
       await this.requireSpaces().warmInitialRecipients(recipientIds);
