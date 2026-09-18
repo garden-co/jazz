@@ -18,6 +18,7 @@ import type {
 } from "../ir.js";
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { assertSchemaNameAllowed } from "../schema-name.js";
 
 type QueryBuilderLike = {
   _rowType: unknown;
@@ -963,10 +964,27 @@ export function definePermissions<TApp extends AppLike>(
   app: TApp,
   factory: (ctx: PolicyContext<TApp>) => void,
 ): CompiledPermissions {
+  const tableNames = Object.entries(app)
+    .filter(
+      ([, value]) =>
+        typeof value === "object" &&
+        value !== null &&
+        "where" in value &&
+        typeof value.where === "function",
+    )
+    .map(([tableName]) => tableName);
+  for (const tableName of tableNames) {
+    assertSchemaNameAllowed(tableName);
+  }
+  const appSchema = "wasmSchema" in app ? app.wasmSchema : undefined;
+  if (appSchema && typeof appSchema === "object") {
+    for (const [tableName] of Object.entries(appSchema)) {
+      assertSchemaNameAllowed(tableName);
+    }
+  }
   const fkReferencesByTable = collectFkReferencesByTable(app);
   const tablesWithTypeColumn = collectTablesWithTypeColumn(app);
   const relationsByTable = collectRelationsByTable(app);
-  const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
   const rules: RuleLike[] = [];
   const seenRules = new Set<RuleLike>();
   const collectRule = (ruleLike: RuleLike): void => {
