@@ -4718,8 +4718,6 @@ struct ConnectedClient {
     pending_subscriptions: BTreeMap<u64, ForegroundSubscriptionOpen>,
     subscriptions: BTreeMap<u64, SubscriptionStream>,
     pending_operations: BTreeMap<u64, ForegroundPendingOperation>,
-    #[cfg(test)]
-    direct_mutation_drive_calls: usize,
 
     mutation_cleanups: Vec<ForegroundOperationFuture>,
     read_cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,
@@ -5469,8 +5467,6 @@ impl RelayWorker {
                 pending_subscriptions: BTreeMap::new(),
                 subscriptions: BTreeMap::new(),
                 pending_operations: BTreeMap::new(),
-                #[cfg(test)]
-                direct_mutation_drive_calls: 0,
                 mutation_cleanups: Vec::new(),
                 read_cleanups: Rc::new(RefCell::new(VecDeque::new())),
                 read_cleanup: None,
@@ -10174,15 +10170,6 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(
-            relay
-                .run(move |worker| {
-                    Ok(worker.foreground_client(id)?.direct_mutation_drive_calls)
-                })
-                .unwrap(),
-            0,
-            "direct admission must not poll the queued mutation on the owner"
-        );
 
         for (tx_id, _) in [first, second] {
             assert_eq!(
