@@ -1205,6 +1205,16 @@ export class NativeRuntimeAdapter implements Runtime {
     return true;
   }
 
+  /** Row identity/defaults only; physical validation and staging happen on insertion. */
+  previewInsert(table: string, values: InsertValues, objectId?: string): WasmRow {
+    const row = this.rowStateFromValues(
+      table,
+      objectId ? parseUuid(objectId) : runtimeRandomBytes(16),
+      values,
+    );
+    return { id: row.id, values: row.values };
+  }
+
   insert(
     table: string,
     values: InsertValues,
