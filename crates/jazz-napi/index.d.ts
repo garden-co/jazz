@@ -13,6 +13,7 @@ export declare class E2EeSodiumStream {
   /** Wipes stream keys immediately; also called on drop. */
   dispose(): void
 }
+export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzServer {
   static start(options: { appId: string; backendSecret: string; adminSecret: string; port?: number; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; upstreamUrl?: string; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }): Promise<JazzServer>
