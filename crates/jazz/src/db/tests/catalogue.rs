@@ -1046,7 +1046,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         panic!("permissions-head refresh must emit a delta reset");
     };
     assert!(reset);
-    assert!(added.is_empty(), "unexpected added rows: {added:?}");
+    assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].row_uuid, first);
