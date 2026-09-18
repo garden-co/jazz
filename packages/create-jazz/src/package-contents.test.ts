@@ -139,7 +139,9 @@ describe("create-jazz package contents", () => {
         NPM_PACK_TIMEOUT_MS,
         "npm pack --dry-run",
       );
-      const packed = JSON.parse(output) as Array<{ files?: Array<{ path: string }> }>;
+      const packed = Object.values(
+        JSON.parse(output) as Record<string, { files?: Array<{ path: string }> }>,
+      );
       const paths = new Set(packed[0]?.files?.map((file) => file.path));
 
       for (const file of bundledSkillFiles) {
