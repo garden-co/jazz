@@ -3965,6 +3965,79 @@ fn local_replay_routes_keep_independent_live_receivers() {
     }
 }
 
+/// A live same-author replay route stores a terminal fate before a second
+/// receiver attaches; repair must make both independent queues deliver:
+///
+/// ```text
+/// A: blocked ──terminal──► held fate
+/// B: blocked ──late attach─┘
+/// A,B: replay ──local ack──► terminal (once each)
+/// ```
+///
+/// This private route-registry seam is required because public APIs cannot
+/// deterministically force a terminal-before-late-attach ordering or inspect
+/// each receiver's queue independently.
+#[test]
+fn local_replay_route_copies_terminal_fate_to_late_live_receiver() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe0; 16]);
+    let worker = open_db(0xe1, author, &schema);
+    let write = worker
+        .insert(
+            "todos",
+            cells("late live replay route", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let replay = worker
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .unwrap();
+
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let first_queue: PendingDownstreamFates = Rc::new(RefCell::new(vec![replay.clone()]));
+    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(vec![replay]));
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(4)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    register_local_replay_route(&routes, tx_id, &first_queue, author, None);
+    route_local_fate(&routes, tx_id, &fate);
+    register_local_replay_route(&routes, tx_id, &second_queue, author, None);
+    register_local_fate_route(&routes, tx_id, &first_queue);
+    register_local_fate_route(&routes, tx_id, &second_queue);
+    block_on(queue_local_acknowledgements(&routes, &worker.node.node));
+    release_local_replay_fates(&routes);
+
+    for queue in [&first_queue, &second_queue] {
+        assert!(matches!(
+            queue.borrow().as_slice(),
+            [
+                SyncMessage::CommitUnit { tx, .. },
+                SyncMessage::FateUpdate {
+                    tx_id: local_id,
+                    fate: Fate::Pending,
+                    durability: Some(DurabilityTier::Local),
+                    ..
+                },
+                SyncMessage::FateUpdate {
+                    tx_id: terminal_id,
+                    fate: Fate::Accepted,
+                    durability: Some(DurabilityTier::Global),
+                    ..
+                }
+            ] if tx.tx_id == tx_id && *local_id == tx_id && *terminal_id == tx_id
+        ));
+    }
+}
+
 #[test]
 fn repaired_local_replay_reconnect_delivers_retained_terminal_fate() {
     let schema = schema();
