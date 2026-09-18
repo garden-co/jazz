@@ -250,12 +250,10 @@ where
         let planned_genesis = catalogue_genesis(&plan.catalogue)?;
         let runtime_semantics_changed =
             !active_runtime_layouts_equal(&self.catalogue, &plan.catalogue);
-        let active_permissions_changed = self.catalogue.active_schema.schema
-            == plan.catalogue.active_schema.schema
-            && !self
-                .catalogue
-                .active_schema
-                .same_permissions(&plan.catalogue.active_schema);
+        let authorization_source_changed = !self
+            .catalogue
+            .active_schema
+            .same_authorization_source(&plan.catalogue.active_schema);
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
         let previous_genesis = catalogue_genesis(&previous_catalogue)?;
         // Historical/import-only snapshot growth must not be visible through
@@ -427,7 +425,7 @@ where
         self.catalogue_activation_failed = false;
         self.catalogue_bootstrap_state = CatalogueBootstrapState::Ready;
         self.catalogue_bootstrap_marker |= bootstrap_uninitialized;
-        if runtime_semantics_changed || active_permissions_changed {
+        if runtime_semantics_changed || authorization_source_changed {
             self.groove_runtime_token = next_groove_runtime_token();
         }
         let drained = self.drain_parked_commit_units().await?;

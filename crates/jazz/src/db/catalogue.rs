@@ -80,6 +80,7 @@ where
         self.finish_publication_outcome(outcome).await
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn validate_schema_activation(
         &self,
         revision: u64,

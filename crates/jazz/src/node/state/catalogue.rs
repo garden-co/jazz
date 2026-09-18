@@ -1138,6 +1138,7 @@ self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn validate_schema_activation(
         &self,
         revision: u64,
@@ -1198,7 +1199,8 @@ self.database.finish_persistence(persisted)?;
     }
 
     fn install_active_schema(&mut self, active: ActiveSchema) {
-        let policies_changed = !active.same_permissions(&self.catalogue.active_schema);
+        let authorization_source_changed =
+            !active.same_authorization_source(&self.catalogue.active_schema);
         self.catalogue.catalogue_schemas.insert(
             active.schema,
             SchemaVersion::new(active.compiled.without_permissions()),
@@ -1211,7 +1213,7 @@ self.database.finish_persistence(persisted)?;
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
-        if policies_changed {
+        if authorization_source_changed {
             self.groove_runtime_token = next_groove_runtime_token();
         }
     }

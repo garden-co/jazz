@@ -703,6 +703,13 @@ impl ActiveSchema {
         }
     }
 
+    // Policy expressions are lowered against the selected structural schema.
+    // Equal expressions on a different source still require rebuilding live graphs.
+    // A revision-only update is a true authorization no-op.
+    fn same_authorization_source(&self, other: &Self) -> bool {
+        self.schema == other.schema && self.same_permissions(other)
+    }
+
     fn same_permissions(&self, other: &Self) -> bool {
         self.compiled
             .tables
