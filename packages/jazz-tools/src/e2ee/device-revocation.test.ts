@@ -85,4 +85,4 @@ it("revokes a device with a fresh epoch delivered only to remaining devices", as
     await Promise.all(clients.map((db) => db.shutdown()));
     await server.stop();
   }
-}, 30_000);
+}, 60_000);

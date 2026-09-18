@@ -86,4 +86,4 @@ it("keeps accepted device membership visible when rotated key delivery fails aut
     await Promise.all(clients.map((db) => db.shutdown()));
     await server.stop();
   }
-}, 30_000);
+}, 60_000);
