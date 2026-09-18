@@ -943,18 +943,23 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         };
         build_public_db_test_schema(PublicSchemaBuilder::new().table(table))
     };
-    let structural = table(false, None);
-    let owner_head = table(true, Some("owner"));
-    let editor_head = table(true, Some("editor"));
-    let owner_payload = SchemaVersion::new(owner_head.clone());
-    assert_eq!(owner_payload.id, editor_head.version_id());
+    let read_owner = table(false, Some("owner"));
+    let read_editor = table(false, Some("editor"));
+    let write_schema = table(true, None);
+    let read_owner_payload = SchemaVersion::new(read_owner.clone());
+    let read_editor_payload = SchemaVersion::new(read_editor.clone());
+    let write_payload = SchemaVersion::new(write_schema.clone());
+    assert_eq!(read_owner_payload.id, read_editor_payload.id);
+    assert_ne!(read_owner_payload.id, write_payload.id);
 
-    let db = open_db(0xa0, AuthorSubject::SYSTEM, &structural);
+    // The owner-policy schema remains the active read schema while the
+    // structurally wider schema is selected only for writes.
+    let db = open_db(0xa0, AuthorSubject::SYSTEM, &read_owner);
     db.set_test_provider_claims(alice, test_provider_claims(alice));
     db.set_test_provider_claims(bob, test_provider_claims(bob));
-    let owner_lens = MigrationLens::new(
-        structural.version_id(),
-        owner_payload.id,
+    let write_lens = MigrationLens::new(
+        read_owner.version_id(),
+        write_payload.id,
         vec![TableLens {
             source_table: "todos".to_owned(),
             target_table: "todos".to_owned(),
@@ -965,24 +970,25 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         }],
     )
     .expect("valid migration lens");
-    let owner_publication = db
+    let write_publication = db
         .author_schema_lineage_publication(
-            owner_payload.clone(),
-            owner_lens,
+            write_payload.clone(),
+            write_lens,
             Vec::<String>::new(),
             Vec::<String>::new(),
         )
         .unwrap();
-    db.publish_schema_with_lens(1, owner_publication).unwrap();
-    // Keep the current-write pointer on the structural schema. The policy head
-    // is a separately selected, non-write schema view.
-    let selected = block_on(db.register_schema_view(owner_head.clone())).unwrap();
+    db.publish_schema_with_lens(1, write_publication).unwrap();
+    db.set_current_write_schema(CurrentWriteSchema {
+        revision: 1,
+        schema: write_payload.id,
+    })
+    .unwrap();
     assert_ne!(
         db.current_write_schema().unwrap().schema,
-        owner_payload.id,
-        "the selected policy schema must not be the current-write schema"
+        read_owner_payload.id,
+        "the policy schema must remain non-write"
     );
-    let db = selected;
     let first = row(0xa1);
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
@@ -992,6 +998,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
             ("title".to_owned(), Value::String("first".to_owned())),
             ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
             ("editor".to_owned(), Value::Uuid(bob.test_uuid())),
+            ("body".to_owned(), Value::String(String::new())),
         ]),
     )
     .unwrap();
@@ -1011,7 +1018,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         vec![first]
     );
 
-    db.publish_schema(SchemaVersion::new(editor_head)).unwrap();
+    db.publish_schema(read_editor_payload).unwrap();
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
         row(0xb2),
@@ -1020,6 +1027,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
             ("title".to_owned(), Value::String("second".to_owned())),
             ("owner".to_owned(), Value::Uuid(bob.test_uuid())),
             ("editor".to_owned(), Value::Uuid(bob.test_uuid())),
+            ("body".to_owned(), Value::String(String::new())),
         ]),
     )
     .unwrap();
@@ -1038,7 +1046,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         panic!("permissions-head refresh must emit a delta reset");
     };
     assert!(reset);
-    assert!(added.is_empty());
+    assert!(added.is_empty(), "unexpected added rows: {added:?}");
     assert!(updated.is_empty());
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].row_uuid, first);
