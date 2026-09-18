@@ -3747,6 +3747,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => ({
               poll: () => (++polls < 2 ? null : encodeRows([])),
+              cancel: () => {},
             }),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -3816,7 +3817,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => ({ poll: () => null }),
+            all: () => ({ poll: () => null, cancel: () => {} }),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
           }),

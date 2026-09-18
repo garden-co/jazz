@@ -125,6 +125,7 @@ export declare class PendingNativePermissionAdvice {
  */
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
+  cancel(): void
 }
 
 /** Thread-affine subscription opening waiting for the core owner. */

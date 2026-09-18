@@ -850,10 +850,19 @@ where
             .map_err(Into::into)
     }
 
-    /// Detach a one-shot query coverage request.
+    /// Detach a one-shot query coverage request. If storage owns the node,
+    /// physical cleanup runs on a subsequent tick after that operation yields it.
     pub fn detach_query(&self, attachment: QueryAttachment) {
         self.detach_query_using(attachment, |subscription| {
-            self.node.node.borrow_mut().apply_unsubscribe(subscription);
+            if let Some(mut owner) = self.node.node.try_lock() {
+                owner.apply_unsubscribe(subscription);
+            } else {
+                let node = Rc::clone(&self.node.node);
+                self.node.enqueue_transaction_cleanup(Box::pin(async move {
+                    node.lock().await.apply_unsubscribe(subscription);
+                    Ok(())
+                }));
+            }
         });
     }
 

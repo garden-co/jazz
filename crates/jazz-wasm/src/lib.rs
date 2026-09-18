@@ -336,6 +336,10 @@ impl WasmPendingNativeRead {
             None => Ok(JsValue::NULL),
         }
     }
+
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+    }
 }
 
 fn pending_operation_waker(callback: js_sys::Function) -> Waker {
@@ -998,10 +1002,6 @@ impl WasmDbInner {
                 };
                 if let Some(open_tx) = open_tx {
                     let pending = $db.enqueue_transaction_read(open_tx, future);
-                    #[allow(unused_variables)]
-                    if let WasmDbInner::Memory(memory) = self {
-                        memory.drive_queued_mutation_once();
-                    }
                     pending.await.map_err(transaction_read_cancelled)?
                 } else {
                     future.await
@@ -4581,16 +4581,24 @@ mod dynamic_schema_view_tests {
         ))
         .unwrap();
         let query = postcard::to_allocvec(&view.table("items")).unwrap();
-        let result = block_on(WasmDbInner::Memory(Rc::clone(&view)).all_serialized_query(
-            query,
-            ReadOpts::default(),
-            Some(batch),
-            None,
-            None,
-            false,
-            f64::INFINITY,
-        ))
-        .unwrap();
+        let inner = WasmDbInner::Memory(Rc::clone(&view));
+        let (result, tick) = block_on(async {
+            // This native fixture has no browser scheduler to drive the owner's queue.
+            futures_util::join!(
+                inner.all_serialized_query(
+                    query,
+                    ReadOpts::default(),
+                    Some(batch),
+                    None,
+                    None,
+                    false,
+                    f64::INFINITY,
+                ),
+                owner.tick(),
+            )
+        });
+        tick.unwrap();
+        let result = result.unwrap();
         let SerializedReadResult::Rows(rows) = result else {
             panic!("plain transaction query must return rows")
         };
