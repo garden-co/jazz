@@ -38,6 +38,13 @@ try {
     resolve(directory, "consumer.mts"),
     `
     import type { CryptoAdapters, LargeValueCipher } from "jazz-tools/e2ee";
+    import type { DeviceInfo } from "jazz-tools";
+    export function deviceState(device: DeviceInfo): "pending" | "active" | "revoked" {
+      return device.state;
+    }
+    export function keyReadiness(device: DeviceInfo): "verified" | "not-verified" {
+      return device.keyReadiness;
+    }
     import { createBrowserCrypto } from "jazz-tools/e2ee/browser";
     import { createNativeCrypto } from "jazz-tools/e2ee/native";
     import { E2EeSodiumStream } from "jazz-napi";
