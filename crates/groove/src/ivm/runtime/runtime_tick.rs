@@ -2813,7 +2813,10 @@ impl IvmRuntime {
                 .graph
                 .node(ancestor)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
-            if matches!(graph_node.descriptor.operator, OpType::Aggregate(_)) {
+            if matches!(
+                graph_node.descriptor.operator,
+                OpType::Aggregate(_) | OpType::ArgMinBy(_) | OpType::ArgMaxBy(_)
+            ) {
                 return Ok(true);
             }
         }

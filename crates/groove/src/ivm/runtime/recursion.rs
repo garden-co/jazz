@@ -1527,15 +1527,15 @@ fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), Ivm
 // Use the maintained operator's shared declared-key/full-record comparator so
 // winner selection cannot diverge by evaluation path.
 
-fn hydrated_arg_by_winners(
-    input: RecordDeltas,
+pub(super) fn hydrated_arg_by_winners(
+    input: &RecordDeltas,
     output_desc: RecordDescriptor,
     group_field_indices: &[usize],
     comparison_field_indices: &[usize],
     direction: ArgByDirection,
 ) -> Result<RecordDeltas, IvmRuntimeError> {
     let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
-    for delta in input.deltas {
+    for delta in &input.deltas {
         if delta.weight <= 0 {
             continue;
         }
@@ -1544,7 +1544,7 @@ fn hydrated_arg_by_winners(
             encoded_record_key_part(output_desc, delta.raw(), comparison_field_indices)?;
         match winners.entry(group_key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert((comparison_key, delta.record));
+                entry.insert((comparison_key, delta.record.clone()));
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let winner = entry.get_mut();
@@ -1556,7 +1556,7 @@ fn hydrated_arg_by_winners(
                     direction,
                 );
                 if replaces {
-                    *winner = (comparison_key, delta.record);
+                    *winner = (comparison_key, delta.record.clone());
                 }
             }
         }
@@ -1725,7 +1725,7 @@ impl HydrationEvaluator<'_> {
                 OpType::ArgMaxBy(arg_max_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     hydrated_arg_by_winners(
-                        input,
+                        &input,
                         output_desc,
                         &arg_max_by.group_field_indices,
                         &arg_max_by.comparison_field_indices,
@@ -1735,7 +1735,7 @@ impl HydrationEvaluator<'_> {
                 OpType::ArgMinBy(arg_min_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     hydrated_arg_by_winners(
-                        input,
+                        &input,
                         output_desc,
                         &arg_min_by.group_field_indices,
                         &arg_min_by.comparison_field_indices,

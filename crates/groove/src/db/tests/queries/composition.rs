@@ -2,6 +2,84 @@
 
 use super::*;
 
+/// Alice probes a prepared-but-unbound graph before Bob subscribes. A cached
+/// winner is not evidence of a seeded candidate index: deleting that winner
+/// must expose its runner-up. Further probes must not erase Bob's live state.
+/// prepare -> one-shot -> bind -> delete winner -> one-shot -> delete runner-up.
+#[futures_test::test]
+async fn arg_by_probe_memo_seeds_later_subscription_and_preserves_live_candidates() {
+    for maximum in [false, true] {
+        let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+        let mut db = Database::new(history_schema(), storage).await.unwrap();
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, 10, 1, "older"));
+        batch.insert("history", history_values(1, 20, 1, "newer"));
+        db.commit_batch(batch).await.unwrap();
+        let input = GraphBuilder::table("history");
+        let graph = if maximum {
+            GraphBuilder::arg_max_by(input, ["row"], ["stamp", "node"])
+        } else {
+            GraphBuilder::arg_min_by(input, ["row"], ["stamp", "node"])
+        }
+        .project(["row", "stamp"]);
+        let params = RecordDescriptor::new([("row", ColumnType::U64)]);
+        let prepared = db
+            .prepare_one_sink(
+                GraphBuilder::join(
+                    GraphBuilder::binding_source("probe_row", params),
+                    graph.clone(),
+                    ["row"],
+                    ["row"],
+                )
+                .project_fields([
+                    ProjectField::renamed("left.row", "row"),
+                    ProjectField::renamed("right.stamp", "stamp"),
+                ]),
+                "probe_row",
+                params,
+                ["row"],
+            )
+            .await
+            .unwrap();
+        let (winner, next) = if maximum { (20, 10) } else { (10, 20) };
+        let values = |stamp| vec![Value::U64(1), Value::U64(stamp)];
+        assert_eq!(
+            db.query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(values(winner), 1)]
+        );
+        let sub = db
+            .bind_shape_one_sink(prepared.id(), &[Value::U64(1)])
+            .await
+            .unwrap();
+        assert_eq!(
+            sub.try_recv().unwrap().to_values().unwrap(),
+            [(values(winner), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, winner, 1));
+        db.commit_batch(batch).await.unwrap();
+        let deltas = sub.try_recv().unwrap().to_values().unwrap();
+        assert_eq!(deltas.len(), 2);
+        assert!(deltas.contains(&(values(winner), -1)));
+        assert!(deltas.contains(&(values(next), 1)));
+        assert_eq!(
+            db.query_graph(graph).await.unwrap().to_values().unwrap(),
+            [(values(next), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, next, 1));
+        db.commit_batch(batch).await.unwrap();
+        assert_eq!(
+            sub.try_recv().unwrap().to_values().unwrap(),
+            [(values(next), -1)]
+        );
+    }
+}
+
 /// Alice and Bob share an extrema query. Attaching Bob and issuing one-shot
 /// reads must not double-count Alice's retained inputs. Identical rows from
 /// two sources contribute twice, but the winner is always emitted once.

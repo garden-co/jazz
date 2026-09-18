@@ -1007,7 +1007,10 @@ impl TickEvaluator<'_> {
                 .graph
                 .node(ancestor)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
-            if matches!(graph_node.descriptor.operator, OpType::Aggregate(_)) {
+            if matches!(
+                graph_node.descriptor.operator,
+                OpType::Aggregate(_) | OpType::ArgMinBy(_) | OpType::ArgMaxBy(_)
+            ) {
                 return Ok(true);
             }
         }
@@ -1035,6 +1038,21 @@ impl TickEvaluator<'_> {
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
         let operator = graph_node.descriptor.operator.clone();
         let inputs = graph_node.descriptor.inputs.clone();
+        if matches!(operator, OpType::ArgMinBy(_) | OpType::ArgMaxBy(_)) {
+            let key = self.operator_key(node)?;
+            let expected = SubTick {
+                tick: self.current_tick,
+                sub_tick: if key.scope == ScopeId::root() {
+                    0
+                } else {
+                    self.context.sub_tick
+                },
+            };
+            if !matches!(self.operator_states.get(&key), Some(OperatorState::ArgBy(state)) if state.as_of() == Some(expected))
+            {
+                return Ok(false);
+            }
+        }
         if let OpType::Aggregate(aggregate) = operator {
             let [input] = inputs.as_slice() else {
                 return Err(IvmRuntimeError::GraphInputArityMismatch(node));
@@ -2041,6 +2059,18 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        if self.context.eval_mode == EvalMode::Hydrate && !self.context.hydrate_arrangements {
+            // A probe needs only the winners, not an index for future deltas.
+            // Keep any installed subscription state intact. Subscription
+            // hydration separately proves/seeds state before reusing a memo.
+            return super::recursion::hydrated_arg_by_winners(
+                input,
+                output_desc,
+                spec.group_field_indices,
+                spec.comparison_field_indices,
+                spec.direction,
+            );
+        }
         let operator_key = self.operator_key(node)?;
         let mut operator = self
             .operator_states
