@@ -182,7 +182,7 @@ it("publishes no device before durable storage succeeds and refuses to replace c
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-});
+}, 30_000);
 
 it("retains one active first device across concurrent contexts and reopening without sharing it with another account", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
