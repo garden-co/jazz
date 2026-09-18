@@ -4050,7 +4050,7 @@ export class Db {
           subscription.hasSnapshot = true;
           const materialized = await materializeEncryptedResult(subscription);
           if (subscription.equality && !(await subscription.equality.isCurrent())) {
-            refreshEquality(subscription);
+            restartEncryptedSubscription(subscription);
             return;
           }
           if (
@@ -4068,7 +4068,16 @@ export class Db {
             } else deliver(typedDelta);
           }
         })
-        .catch((error) => terminalizeSubscription(subscription, error));
+        .catch((error) => {
+          if (frontier === encryptedFrontier) {
+            terminalizeSubscription(subscription, error);
+          } else {
+            // The reducer may contain an undeciphered occurrence from this
+            // failed delta. Reopen from a complete snapshot instead of letting
+            // a newer delta reuse it or rejecting a now child-free frontier.
+            restartEncryptedSubscription(subscription);
+          }
+        });
     };
     const installNativeSubscription = (
       subscription: NativeSubscription,
@@ -4186,7 +4195,7 @@ export class Db {
                     return;
                   const materialized = await materializeEncryptedResult(subscription);
                   if (equality && !(await equality.isCurrent())) {
-                    refreshEquality(subscription);
+                    restartEncryptedSubscription(subscription);
                   } else if (
                     !unsubscribed &&
                     !subscription.retired &&
@@ -4216,11 +4225,12 @@ export class Db {
         .catch((error) => terminalizeSubscription(subscription, error));
       return null;
     };
-    const refreshEquality = (subscription: NativeSubscription) => {
+    const restartEncryptedSubscription = (subscription: NativeSubscription) => {
       if (unsubscribed || subscription.retired || activeSubscription !== subscription) return;
       const replacement = createSubscriptionGeneration();
       retireNativeSubscription(subscription);
       bufferedDeltas.length = 0;
+      manager.clear();
       try {
         onPending?.();
       } catch (error) {
