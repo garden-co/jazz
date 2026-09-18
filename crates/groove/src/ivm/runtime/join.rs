@@ -680,13 +680,17 @@ impl ArrangementState {
         let overlay = Rc::try_unwrap(overlay).unwrap_or_else(|overlay| (*overlay).clone());
         let index = Rc::make_mut(&mut self.index);
         for (key, bucket) in overlay {
-            match bucket {
-                Some(bucket) => {
-                    index.insert(key, bucket);
+            // Release the previous bucket's ownership before checking whether
+            // the new bucket can fold its record deltas without copying history.
+            index.remove(&key);
+            if let Some(mut bucket) = bucket {
+                // A retained evaluator/publication snapshot may still own
+                // either map. Preserve sharing rather than copy a full base
+                // (or accumulated overlay) just to compact it.
+                if Rc::strong_count(&bucket.base) == 1 && Rc::strong_count(&bucket.overlay) == 1 {
+                    bucket.commit_overlay();
                 }
-                None => {
-                    index.remove(&key);
-                }
+                index.insert(key, bucket);
             }
         }
     }
@@ -1739,6 +1743,102 @@ mod tests {
             tick,
             ArrangementUpdateMode::Replace
         ));
+    }
+
+    #[test]
+    fn arrangement_commit_folds_owned_bucket_history_without_copying_base() {
+        // Internal work-bound proof: public result assertions cannot detect
+        // a growing staged map or a copy of the resident bucket on each tick.
+        let key = JoinKey::from_slice(b"history");
+        let bucket = JoinBucket::from_records(
+            (0..2048)
+                .map(|i| (Bytes::from(format!("old-{i}")), 1))
+                .collect(),
+        );
+        let base_ptr = Rc::as_ptr(&bucket.base);
+        let mut live = ArrangementState {
+            index: Rc::new(HashMap::from_iter([(key.clone(), bucket)])),
+            ..ArrangementState::default()
+        };
+        for i in 0..64 {
+            let delta = RecordDelta {
+                record: Bytes::from(format!("new-{i}")),
+                weight: 1,
+            };
+            let mut staged = live.clone();
+            staged.apply_update(
+                &[KeyedRecordDelta {
+                    delta: &delta,
+                    key: key.clone(),
+                }],
+                ArrangementUpdateMode::Accumulate,
+            );
+            assert_eq!(live.bucket(&key).unwrap().get(&delta.record), None);
+            drop(live);
+            staged.commit_overlay();
+            let bucket = staged.bucket(&key).unwrap();
+            assert_eq!(Rc::as_ptr(&bucket.base), base_ptr);
+            assert!(
+                bucket.overlay.is_empty(),
+                "staged history survived tick {i}"
+            );
+            assert_eq!(bucket.get(&delta.record), Some(&1));
+            live = staged;
+        }
+        assert_eq!(live.row_count(), 2112);
+    }
+
+    #[test]
+    fn arrangement_commit_preserves_shared_bucket_and_folds_after_release() {
+        // Internal ownership proof: compaction must not copy a shared base
+        // or mutate the signed multiset retained by a publication snapshot.
+        let key = JoinKey::from_slice(b"shared");
+        let record = Bytes::from_static(b"row");
+        let bucket = JoinBucket::from_records(HashMap::from_iter([
+            (record.clone(), 2),
+            (Bytes::from_static(b"unchanged"), 1),
+        ]));
+        let snapshot = bucket.clone();
+        let base_ptr = Rc::as_ptr(&bucket.base);
+        let mut live = ArrangementState {
+            index: Rc::new(HashMap::from_iter([(key.clone(), bucket)])),
+            ..ArrangementState::default()
+        };
+        for (weight, expected) in [(-2, None), (-1, Some(-1)), (4, Some(3))] {
+            let delta = RecordDelta {
+                record: record.clone(),
+                weight,
+            };
+            live.apply_update(
+                &[KeyedRecordDelta {
+                    delta: &delta,
+                    key: key.clone(),
+                }],
+                ArrangementUpdateMode::Accumulate,
+            );
+            live.commit_overlay();
+            let bucket = live.bucket(&key).unwrap();
+            assert_eq!(Rc::as_ptr(&bucket.base), base_ptr);
+            assert_eq!(bucket.get(&record).copied(), expected);
+            assert_eq!(snapshot.get(&record), Some(&2));
+        }
+        drop(snapshot);
+        let delta = RecordDelta {
+            record: record.clone(),
+            weight: 1,
+        };
+        live.apply_update(
+            &[KeyedRecordDelta {
+                delta: &delta,
+                key: key.clone(),
+            }],
+            ArrangementUpdateMode::Accumulate,
+        );
+        live.commit_overlay();
+        let bucket = live.bucket(&key).unwrap();
+        assert_eq!(Rc::as_ptr(&bucket.base), base_ptr);
+        assert!(bucket.overlay.is_empty());
+        assert_eq!(bucket.get(&record), Some(&4));
     }
 
     #[test]
