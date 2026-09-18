@@ -969,9 +969,16 @@ async fn aggregate_hydration_static_dependency_inspection_is_linear() {
 
     let graph_nodes = runtime.stats().graph_nodes;
     let walked = runtime.aggregate_dependency_walk_nodes_for_tests();
+    // Public subscription output cannot distinguish one metadata lookup from
+    // repeated ancestry traversal, so this private receipt guards the work
+    // directly at its internal dependency-inspection seam.
+    assert!(
+        walked > 0,
+        "aggregate dependency inspection must report work for a hydrated aggregate"
+    );
     assert!(
         walked <= graph_nodes * 4,
-        "static dependency inspection must be linear: walked {walked} ancestors across {graph_nodes} nodes"
+        "static dependency inspection must be linear: inspected {walked} nodes across {graph_nodes} graph nodes"
     );
 }
 
