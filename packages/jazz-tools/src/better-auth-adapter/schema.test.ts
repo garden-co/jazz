@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { jwt } from "better-auth/plugins";
 import { getAuthTables, type BetterAuthDBSchema } from "better-auth/db";
 import {
+  buildJazzSchema,
+  buildJazzSchemaFromTables,
   buildJazzSchemaSourceText,
   buildJazzSchemaSourceTextFromTables,
-  buildJazzSchemaFromTables,
 } from "./schema.js";
 
 describe("better-auth schema helpers", () => {
@@ -21,6 +22,66 @@ describe("better-auth schema helpers", () => {
     });
     expect(renamed).toContain("registeredAt: s.timestamp(),");
     expect(renamed).not.toContain("registeredAt: s.allowExternalProvenanceName");
+  });
+  it.each(["__proto__", "union", "exists", "_schema", "wasmSchema"])(
+    "rejects reserved table name %s in direct Better Auth schema generation",
+    (tableName) => {
+      const tables = {
+        user: {
+          modelName: "user",
+          fields: {
+            value: {
+              type: "string",
+              required: true,
+            },
+          },
+        },
+      } as BetterAuthDBSchema;
+      const getModelName = () => tableName;
+      const getFieldName = ({ field }: { model: string; field: string }) => field;
+
+      expect(() =>
+        buildJazzSchema({
+          tables,
+          getModelName,
+          getFieldName,
+        }),
+      ).toThrow(/reserved/i);
+      expect(() =>
+        buildJazzSchemaSourceText({
+          tables,
+          getModelName,
+          getFieldName,
+        }),
+      ).toThrow(/reserved/i);
+    },
+  );
+
+  it("keeps ordinary, prototype, and hyphenated table names usable in direct generation", () => {
+    const tables = {
+      normal: {
+        modelName: "normal",
+        fields: { value: { type: "string", required: true } },
+      },
+      prototype: {
+        modelName: "prototype",
+        fields: { value: { type: "string", required: true } },
+      },
+      hyphenated: {
+        modelName: "hyphenated",
+        fields: { value: { type: "string", required: true } },
+      },
+    } as BetterAuthDBSchema;
+    const getModelName = (model: string) => (model === "hyphenated" ? "hyphenated-name" : model);
+    const getFieldName = ({ field }: { model: string; field: string }) => field;
+
+    const schema = buildJazzSchema({ tables, getModelName, getFieldName });
+    const source = buildJazzSchemaSourceText({ tables, getModelName, getFieldName });
+
+    expect(Object.keys(schema).sort()).toEqual(["hyphenated-name", "normal", "prototype"]);
+    expect(source).toContain("normal: s.table({");
+    expect(source).toContain("prototype: s.table({");
+    expect(source).toContain('"hyphenated-name": s.table({');
   });
 
   it("retains the installed JWT plugin signing-key metadata", () => {
