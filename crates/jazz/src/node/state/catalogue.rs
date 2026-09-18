@@ -1129,6 +1129,28 @@ self.database.finish_persistence(persisted)?;
         revision: u64,
         compiled: JazzSchema,
     ) -> Result<(), Error> {
+        let active = self.prepare_active_schema(revision, compiled)?;
+        if active == self.catalogue.active_schema {
+            return Ok(());
+        }
+        self.persist_active_schema(&active).await?;
+        self.install_active_schema(active);
+        Ok(())
+    }
+
+    pub(crate) fn validate_schema_activation(
+        &self,
+        revision: u64,
+        compiled: JazzSchema,
+    ) -> Result<(), Error> {
+        self.prepare_active_schema(revision, compiled).map(|_| ())
+    }
+
+    fn prepare_active_schema(
+        &self,
+        revision: u64,
+        compiled: JazzSchema,
+    ) -> Result<ActiveSchema, Error> {
         self.require_catalogue_ready()?;
         if self.catalogue_activation_failed {
             return Err(Error::CatalogueActivationFailed);
@@ -1152,14 +1174,26 @@ self.database.finish_persistence(persisted)?;
             ));
         }
         let previous = self.catalogue.active_schema.schema;
-        if previous != pointer.schema
-            && self
-                .shortest_lens_path_ids(previous, pointer.schema, LensPathDirection::Forward)
-                .is_none()
-            && self
-                .shortest_lens_path_ids(previous, pointer.schema, LensPathDirection::Reverse)
-                .is_none()
-        {
+        let mut seen = BTreeSet::from([previous]);
+        let mut queue = VecDeque::from([previous]);
+        while let Some(schema) = queue.pop_front() {
+            if schema == pointer.schema {
+                break;
+            }
+            for lens in self.catalogue.catalogue_lenses.values() {
+                let next = if lens.source == schema {
+                    lens.target
+                } else if lens.target == schema {
+                    lens.source
+                } else {
+                    continue;
+                };
+                if seen.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+        if !seen.contains(&pointer.schema) {
             return Err(Error::InvalidCatalogueUpdate(
                 "active schema requires a complete migration path",
             ));
@@ -1170,17 +1204,14 @@ self.database.finish_persistence(persisted)?;
                 "stale active schema revision",
             ));
         }
-        if revision == self.catalogue.active_schema.revision {
-            if active != self.catalogue.active_schema {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "conflicting active schema revision",
-                ));
-            }
-            return Ok(());
+        if revision == self.catalogue.active_schema.revision
+            && active != self.catalogue.active_schema
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "conflicting active schema revision",
+            ));
         }
-        self.persist_active_schema(&active).await?;
-        self.install_active_schema(active);
-        Ok(())
+        Ok(active)
     }
 
     fn install_active_schema(&mut self, active: ActiveSchema) {

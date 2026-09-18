@@ -80,6 +80,19 @@ where
         self.finish_publication_outcome(outcome).await
     }
 
+    pub(crate) fn validate_schema_activation(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+    ) -> Result<(), Error> {
+        self.check_catalogue_admin()?;
+        self.node
+            .node
+            .borrow()
+            .validate_schema_activation(revision, schema)?;
+        Ok(())
+    }
+
     /// Activate an admitted structural schema with its explicit permissions.
     /// The revision covers both schema and permissions, including policy-only changes.
     pub async fn activate_schema(

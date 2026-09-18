@@ -610,6 +610,17 @@ impl ShellDb {
         }
     }
 
+    fn validate_schema_activation(&self, revision: u64, schema: JazzSchema) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db
+                .validate_schema_activation(revision, schema)
+                .map_err(Into::into),
+            Self::Durable(db) => db
+                .validate_schema_activation(revision, schema)
+                .map_err(Into::into),
+        }
+    }
+
     fn activate_schema(
         &self,
         revision: u64,
@@ -1144,6 +1155,14 @@ impl InMemoryServerShell {
             return Err(ShellError::MissingEvent("CatalogueAck"));
         }
         Ok(())
+    }
+
+    pub(crate) fn validate_schema_activation(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+    ) -> ShellResult<()> {
+        self.db.validate_schema_activation(revision, schema)
     }
 
     /// Activate a structural schema and its explicit permission bundle together.

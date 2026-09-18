@@ -1003,6 +1003,21 @@ impl ServerRuntimeHandle {
         result
     }
 
+    /// Check a compiled selection without changing runtime or durable state.
+    #[doc(hidden)]
+    pub async fn validate_schema_activation(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+    ) -> Result<(), String> {
+        self.run(move |shell| {
+            shell
+                .validate_schema_activation(revision, schema)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     /// Install the catalogue's active schema and permissions at one authority revision.
     pub async fn activate_schema(
         &self,

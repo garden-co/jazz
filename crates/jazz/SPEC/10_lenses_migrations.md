@@ -679,8 +679,9 @@ The authority's **active schema** selects one structural schema and one explicit
 permission bundle at a single monotone revision. Policy-only updates advance
 that revision without changing structural schema identity or creating migration
 lenses. Admitting structural schemas or lenses does not activate them. Activation
-requires an admitted migration path; an explicit empty permission bundle is a
-valid deny-all selection. The node's local API schema remains independent, so
+requires an admitted migration path, traversing each lens in either direction.
+For example, `A → B` and `A → C` permit switching from B to C through A.
+An explicit empty permission bundle is a valid deny-all selection. The node's local API schema remains independent, so
 older clients retain their schema view across authority activations.
 
 The server catalogue retains the existing permissions-bundle/head encodings and
