@@ -123,11 +123,13 @@ it.each(["read", "write"] as const)(
           : reader
               .update(app.notes, note.id, { title: "Must not be encrypted" })
               .wait({ tier: "local" });
+      // Background reconciliation may already have verified removal before
+      // shutdown. Either refusal is valid; stale retained access never is.
       await expect(
         withTimeout<unknown>(operation, 5_000, "Revoked offline access stalled"),
       ).rejects.toMatchObject({
         name: "E2eeDataError",
-        code: "key-unavailable",
+        code: expect.stringMatching(/^key-(unavailable|not-shared)$/),
       });
     } finally {
       await reader?.shutdown();

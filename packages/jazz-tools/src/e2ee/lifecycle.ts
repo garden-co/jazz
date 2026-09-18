@@ -68,13 +68,6 @@ export async function prepareE2eeStartup(db: Db): Promise<void> {
   if (schema && encryptedSchemas.has(schema)) await startupPreparers.get(db)!();
 }
 
-const configuredAccounts = new WeakMap<Db, string>();
-
-/** @internal Dependency observation follows the caller, not the space author. */
-export function e2eeAccountForDb(db: Db): string {
-  e2eeForDb(db);
-  return configuredAccounts.get(db)!;
-}
 const cellCrypto = new WeakMap<Db, () => Promise<{ cipher: CellCipher; application: string }>>();
 
 /** @internal Common cell framing owns identity selection, not the crypto adapter. */
