@@ -460,6 +460,13 @@ export class SubscriptionsOrchestrator {
             }
           },
           onError: reject,
+          onPending: () => {
+            if (entry.generation !== generation || entry.state.status !== "fulfilled") return;
+            this.resetEntryToPending(entry);
+            for (const listener of Array.from(entry.listeners)) {
+              listener.onReset?.();
+            }
+          },
         },
         entry.options,
         this.session ?? undefined,

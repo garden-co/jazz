@@ -29,7 +29,7 @@ import type { GroupTables } from "./groups.js";
 import { Spaces } from "./space-lifecycle.js";
 import type { SpaceRecoveryPath } from "./space-lifecycle.js";
 import type { SpaceTables } from "./spaces.js";
-import type { JazzCrypto, CellCipher } from "./types.js";
+import type { JazzCrypto, CellCipher, EqualityIndex } from "./types.js";
 
 export type E2eeConfig = {
   /** Application returned by defineApp; encrypted apps include managed bindings automatically. */
@@ -48,6 +48,14 @@ export type DeviceInfo = Readonly<{
   mechanism: CryptoMechanism;
 }>;
 
+const equalityCrypto = new WeakMap<Db, () => Promise<EqualityIndex>>();
+
+/** @internal Index adapters never decide what a candidate is allowed to match. */
+export async function equalityCryptoForDb(db: Db): Promise<EqualityIndex> {
+  e2eeForDb(db);
+  return equalityCrypto.get(db)!();
+}
+
 const contexts = new WeakMap<Db, E2ee>();
 const startupPreparers = new WeakMap<Db, () => Promise<void>>();
 
@@ -55,6 +63,14 @@ const startupPreparers = new WeakMap<Db, () => Promise<void>>();
 export async function prepareE2eeStartup(db: Db): Promise<void> {
   const schema = configuredSchemas.get(db);
   if (schema && encryptedSchemas.has(schema)) await startupPreparers.get(db)!();
+}
+
+const configuredAccounts = new WeakMap<Db, string>();
+
+/** @internal Dependency observation follows the caller, not the space author. */
+export function e2eeAccountForDb(db: Db): string {
+  e2eeForDb(db);
+  return configuredAccounts.get(db)!;
 }
 const cellCrypto = new WeakMap<Db, () => Promise<{ cipher: CellCipher; application: string }>>();
 
@@ -182,6 +198,7 @@ export type RecoveryStatus = Readonly<{
 /** @internal Only verified account-context creation binds lifecycle state. */
 export function attachE2ee(db: Db, account: AccountHandle, config: E2eeConfig, env: string): void {
   contexts.set(db, new E2ee(db, account, config, env));
+  configuredAccounts.set(db, account.id);
 }
 
 /** @internal Schema objects never own account keys or lifecycle state. */
@@ -528,6 +545,16 @@ export class E2ee {
       this.preparation = undefined;
     });
     let cellCipher: Promise<CellCipher> | undefined;
+    let equalityIndex: Promise<EqualityIndex> | undefined;
+    equalityCrypto.set(db, async () => {
+      this.assertOpen();
+      equalityIndex ??= this.config.crypto?.equalityIndex
+        ? Promise.resolve(this.config.crypto.equalityIndex)
+        : import("./browser.js").then((module) => module.createBrowserEqualityIndex());
+      const index = await equalityIndex;
+      this.assertOpen();
+      return index;
+    });
     cellCrypto.set(db, async () => {
       this.assertOpen();
       cellCipher ??= this.config.crypto?.cellCipher

@@ -1,6 +1,25 @@
 import { expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 
+it.each([
+  { indexes: { done: "equality" }, message: 'Index column "done" must be encrypted' },
+  { indexes: { title: "range" }, message: 'Encrypted index "title" only supports equality' },
+])("rejects invalid encrypted index declarations ($message)", ({ indexes, message }) => {
+  expect(() =>
+    s
+      .table(
+        { projectId: s.uuid(), title: s.string(), done: s.boolean() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({
+        space: "projectId",
+        columns: ["title"],
+        // Exercise the runtime boundary for declarations from JavaScript callers.
+        indexes: indexes as { title: "equality" },
+      }),
+  ).toThrow(message);
+});
+
 it("rejects encrypting the reference that identifies a row's space", () => {
   expect(() =>
     s
