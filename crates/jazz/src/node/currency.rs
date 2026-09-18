@@ -753,7 +753,7 @@ where
         )
     }
 
-    fn deletion_storage_prefix_in_schema_and_branch(
+    pub(super) fn deletion_storage_prefix_in_schema_and_branch(
         &self,
         schema_version: SchemaVersionId,
         table: &str,

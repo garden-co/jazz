@@ -761,6 +761,7 @@ where
                 if global_time.is_some() {
                     let previous_global_current = self.query_global_layer_winner_in_batch(
                         batch,
+                        author_schema,
                         &table_schema.name,
                         stored.branch_key(),
                         stored.row_uuid(),
@@ -883,10 +884,8 @@ where
         if source == target {
             return Ok((source, table.to_owned()));
         }
-        for direction in [LensPathDirection::Forward, LensPathDirection::Reverse] {
-            if let Some(path) = self.compiled_lens_path(source, target, direction, table)? {
-                return Ok((target, apply_compiled_lens_path(&path, cells)));
-            }
+        if let Some(path) = self.compiled_lens_path(source, target, table)? {
+            return Ok((target, apply_compiled_lens_path(&path, cells)));
         }
         Ok((source, table.to_owned()))
     }

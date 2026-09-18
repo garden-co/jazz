@@ -590,7 +590,9 @@ selection is deterministic over the schema-version graph. The chosen path is the
 shortest path by lens count. Ties are broken by a stable ordering of candidate
 endpoints and lens content ids; publication or storage iteration order must not
 affect the chosen path. Schema updates are rare, so this is specified as a
-clarity-first graph walk rather than a hot-path optimization.
+clarity-first graph walk rather than a hot-path optimization. Each step can traverse its
+lens forward or backward: B-to-C translation through `A → B` and `A → C` applies
+the reverse A-to-B transformation followed by the forward A-to-C transformation.
 
 RLS policy evaluation under lenses uses the permission-evaluation schema pinned
 by the node/admin policy bundle. Row data is translated into that schema before

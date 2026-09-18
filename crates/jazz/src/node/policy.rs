@@ -674,19 +674,9 @@ where
             return Ok((target, self.table_in_schema(table, target)?, cells));
         }
 
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Forward, table)?
-        {
-            let forward_table = apply_compiled_lens_path(&path, &mut cells);
-            let table = self.table_in_schema(&forward_table, target)?;
-            return Ok((target, table, cells));
-        }
-
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Reverse, table)?
-        {
-            let reverse_table = apply_compiled_lens_path(&path, &mut cells);
-            let table = self.table_in_schema(&reverse_table, target)?;
+        if let Some(path) = self.compiled_lens_path(source, target, table)? {
+            let translated_table = apply_compiled_lens_path(&path, &mut cells);
+            let table = self.table_in_schema(&translated_table, target)?;
             return Ok((target, table, cells));
         }
 
@@ -776,17 +766,7 @@ where
             return Ok(self.table_in_schema(table, target).is_ok());
         }
 
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Forward, table)?
-        {
-            let mut cells = BTreeMap::new();
-            let target_table = apply_compiled_lens_path(&path, &mut cells);
-            return Ok(self.table_in_schema(&target_table, target).is_ok());
-        }
-
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Reverse, table)?
-        {
+        if let Some(path) = self.compiled_lens_path(source, target, table)? {
             let mut cells = BTreeMap::new();
             let target_table = apply_compiled_lens_path(&path, &mut cells);
             return Ok(self.table_in_schema(&target_table, target).is_ok());

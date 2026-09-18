@@ -1173,27 +1173,10 @@ self.database.finish_persistence(persisted)?;
                 "active schema requires admitted structural lineage",
             ));
         }
-        let previous = self.catalogue.active_schema.schema;
-        let mut seen = BTreeSet::from([previous]);
-        let mut queue = VecDeque::from([previous]);
-        while let Some(schema) = queue.pop_front() {
-            if schema == pointer.schema {
-                break;
-            }
-            for lens in self.catalogue.catalogue_lenses.values() {
-                let next = if lens.source == schema {
-                    lens.target
-                } else if lens.target == schema {
-                    lens.source
-                } else {
-                    continue;
-                };
-                if seen.insert(next) {
-                    queue.push_back(next);
-                }
-            }
-        }
-        if !seen.contains(&pointer.schema) {
+        if self
+            .shortest_lens_path(self.catalogue.active_schema.schema, pointer.schema)
+            .is_none()
+        {
             return Err(Error::InvalidCatalogueUpdate(
                 "active schema requires a complete migration path",
             ));

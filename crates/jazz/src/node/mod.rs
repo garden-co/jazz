@@ -472,14 +472,12 @@ pub(super) enum LensPathDirection {
 struct LensPathCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
-    direction: LensPathDirection,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct CompiledLensCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
-    direction: LensPathDirection,
     table: String,
 }
 
@@ -670,8 +668,8 @@ struct SchemaCatalogue {
     next_physical_table_id: u64,
     /// Next database-local physical column id.
     next_physical_column_id: u64,
-    /// Shortest migration-lens paths by schema pair and traversal direction.
-    lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<MigrationLensId>>>,
+    /// Shortest migration-lens paths by schema pair, with a direction for each step.
+    lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<(MigrationLensId, LensPathDirection)>>>,
     /// Table-specific, already-validated lens programs used by hot read/write paths.
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
     /// Immutable lowering plans reused by authored-to-physical row writes.

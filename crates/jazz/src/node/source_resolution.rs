@@ -909,19 +909,11 @@ where
         if source == target {
             return Ok(Some(table.to_owned()));
         }
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Forward, table)?
-        {
-            let forward_table = apply_compiled_lens_path(&path, cells);
-            return Ok(Some(forward_table));
+        if let Some(path) = self.compiled_lens_path(source, target, table)? {
+            let translated_table = apply_compiled_lens_path(&path, cells);
+            return Ok(Some(translated_table));
         }
 
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Reverse, table)?
-        {
-            let reverse_table = apply_compiled_lens_path(&path, cells);
-            return Ok(Some(reverse_table));
-        }
         Ok(None)
     }
 }
