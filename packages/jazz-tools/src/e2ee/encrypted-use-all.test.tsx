@@ -140,22 +140,28 @@ it.each(["ready", "error", "update", "history"])(
       await act(async () => {
         release();
       });
-      await waitFor(() => expect(states.at(-1)?.isLoading).toBe(false), { timeout: 10_000 });
-      if (fail) {
-        expect(states.at(-1)?.data).toBeUndefined();
-        expect(states.at(-1)?.error).toMatchObject({
-          name: "E2eeDataError",
-          code: "invalid-ciphertext",
-          message: "Encrypted data could not be authenticated or decoded",
-        });
-        expect(states.at(-1)?.error).not.toHaveProperty("cause");
-      } else {
-        expect(states.at(-1)).toEqual({
-          data: unchanged ? expect.arrayContaining([note, unchanged]) : [note],
-          isLoading: false,
-          error: null,
-        });
-      }
+      await waitFor(
+        () => {
+          const state = states.at(-1);
+          if (fail) {
+            expect(state?.isLoading).toBe(false);
+            expect(state?.data).toBeUndefined();
+            expect(state?.error).toMatchObject({
+              name: "E2eeDataError",
+              code: "invalid-ciphertext",
+              message: "Encrypted data could not be authenticated or decoded",
+            });
+            expect(state?.error).not.toHaveProperty("cause");
+          } else {
+            expect(state).toEqual({
+              data: unchanged ? expect.arrayContaining([note, unchanged]) : [note],
+              isLoading: false,
+              error: null,
+            });
+          }
+        },
+        { timeout: 10_000 },
+      );
       expect(
         states.every(
           (state) =>
@@ -216,10 +222,17 @@ it.each(["ready", "error", "update", "history"])(
         await act(async () => {
           release();
         });
-        await waitFor(() => expect(states.at(-1)?.isLoading).toBe(false), { timeout: 10_000 });
-        expect(states.at(-1)?.data).toHaveLength(2);
-        expect(states.at(-1)?.data).toEqual(
-          expect.arrayContaining([{ ...note, title: "Updated title" }, unchanged]),
+        await waitFor(
+          () => {
+            const state = states.at(-1);
+            expect(state).toEqual({
+              data: expect.arrayContaining([{ ...note, title: "Updated title" }, unchanged]),
+              isLoading: false,
+              error: null,
+            });
+            expect(state?.data).toHaveLength(2);
+          },
+          { timeout: 10_000 },
         );
       }
     } finally {
