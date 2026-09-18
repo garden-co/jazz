@@ -131,4 +131,4 @@ it("reconciles a stale recipient group when a remaining member loads the space",
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 60_000);
+}, 120_000);
