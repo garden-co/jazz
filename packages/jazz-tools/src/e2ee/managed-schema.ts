@@ -3,6 +3,25 @@ import { defineTable } from "../table-definition.js";
 import { rel, reverse } from "../relationships.js";
 
 export const deviceRequestSchema = {
+  __e2ee_recovery_protectors: defineTable(
+    {
+      rootId: s.uuid(),
+      material: s.bytes(),
+    },
+    {
+      root: rel("__e2ee_recovery_roots", "rootId"),
+    },
+  ),
+  __e2ee_recovery_deliveries: defineTable(
+    {
+      rootId: s.uuid(),
+      epochId: s.string(),
+      envelope: s.bytes(),
+    },
+    {
+      root: rel("__e2ee_recovery_roots", "rootId"),
+    },
+  ),
   __e2ee_recovery_roots: defineTable(
     {
       accountId: s.uuid(),
