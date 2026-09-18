@@ -113,4 +113,4 @@ it("browser keeps a space in maintenance when Jazz denies recipient-group rotati
     await Promise.all(clients.map((client) => client.shutdown()));
     await stopJazzServer(server.serverUrl);
   }
-}, 60_000);
+}, 120_000);

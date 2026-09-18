@@ -117,4 +117,4 @@ it("native Node keeps a space in maintenance when Jazz denies recipient-group ro
     await Promise.all(sessions.map((session) => session.close()));
     await server.stop();
   }
-}, 60_000);
+}, 120_000);

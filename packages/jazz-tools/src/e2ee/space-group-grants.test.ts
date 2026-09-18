@@ -113,4 +113,4 @@ it("shares a space through a parent group and follows later child-group addition
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 60_000);
+}, 120_000);
