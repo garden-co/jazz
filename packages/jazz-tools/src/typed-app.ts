@@ -1,4 +1,5 @@
-import { assertRelationshipDeclaration } from "./relationships.js";
+import { DefinedTable, type TableDefinition } from "./table-definition.js";
+export { DefinedTable, defineTable, type TableDefinition } from "./table-definition.js";
 import type { Relationships, ForwardRelationship, ReverseRelationship } from "./relationships.js";
 import type {
   AnyTypedColumnBuilder,
@@ -27,84 +28,6 @@ import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "
 import type { StreamingValueSource } from "./runtime/client.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
-export type TableDefinition = Record<string, AnyTypedColumnBuilder> & NoExplicitIdColumn;
-
-// Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
-// without changing the column-level schema representation the runtime uses today.
-export class DefinedTable<
-  TColumns extends TableDefinition = TableDefinition,
-  TRelations extends Relationships = Relationships,
-> {
-  public readonly __jazzTableDefinition = true as const;
-
-  constructor(
-    public readonly columns: TColumns,
-    public readonly relations: TRelations,
-    public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
-    public readonly branchColumns?: readonly Extract<keyof TColumns, string>[],
-  ) {
-    for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
-  }
-
-  indexOnly<
-    const TColumnsForIndex extends readonly [
-      Extract<keyof TColumns, string>,
-      ...Extract<keyof TColumns, string>[],
-    ],
-  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
-    const normalizedColumns = [...columns] as Extract<keyof TColumns, string>[];
-    for (const column of normalizedColumns) {
-      if (!(column in this.columns)) {
-        throw new Error(`table.indexOnly(...) references unknown column "${column}".`);
-      }
-    }
-
-    return new DefinedTable(this.columns, this.relations, normalizedColumns, this.branchColumns);
-  }
-
-  branchBy<const TBranchColumn extends Extract<keyof TColumns, string>>(
-    column: TBranchColumn,
-  ): DefinedTable<TColumns, TRelations>;
-  branchBy<
-    const TBranchColumns extends readonly [
-      Extract<keyof TColumns, string>,
-      ...Extract<keyof TColumns, string>[],
-    ],
-  >(columns: TBranchColumns): DefinedTable<TColumns, TRelations>;
-  branchBy(
-    columns:
-      | Extract<keyof TColumns, string>
-      | readonly [Extract<keyof TColumns, string>, ...Extract<keyof TColumns, string>[]],
-  ): DefinedTable<TColumns, TRelations> {
-    const normalizedColumns = (Array.isArray(columns) ? [...columns] : [columns]) as Extract<
-      keyof TColumns,
-      string
-    >[];
-    for (const column of normalizedColumns) {
-      if (!(column in this.columns)) {
-        throw new Error(`table.branchBy(...) references unknown column "${column}".`);
-      }
-    }
-
-    return new DefinedTable(this.columns, this.relations, this.indexedColumns, normalizedColumns);
-  }
-}
-
-/**
- * Define a table with the given columns.
- *
- * @example
- * ```typescript
- * const schema = {
- *   todos: s.table({
- *     title: s.string(),
- *     done: s.boolean(),
- *   }),
- * });
- * type AppSchema = s.Schema<typeof schema>;
- * export const app: s.App<AppSchema> = s.defineApp(schema);
- * ```
- */
 declare const tableRelationsBrand: unique symbol;
 type RelationColumns<T extends TableDefinition> = {
   [K in keyof T & string]: ColumnBuilderSqlType<T[K]> extends
