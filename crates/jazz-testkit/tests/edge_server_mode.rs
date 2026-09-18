@@ -1165,18 +1165,17 @@ async fn edge_reconnects_after_established_core_drop() {
         .run_until(async {
             let schema = todo_schema();
             let app_id = AppId::random();
-            let core_port = reserve_local_port();
             let core = tokio::time::timeout(
                 Duration::from_secs(10),
                 JazzServer::builder()
                     .with_app_id(app_id)
-                    .with_port(core_port)
                     .with_schema(schema.clone())
                     .start(),
             )
             .await
             .expect("initial Core start timed out")
             .expect("start Core server");
+            let core_port = core.port();
             let edge = tokio::time::timeout(
                 Duration::from_secs(10),
                 JazzServer::builder()
