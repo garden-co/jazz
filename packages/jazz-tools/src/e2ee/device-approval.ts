@@ -621,6 +621,11 @@ export class DeviceApproval {
         } // An unauthenticated candidate cannot hide a later valid delivery.
       }
       return undefined;
+    } catch {
+      // Accepted membership is independent of a usable delivery. Authority and
+      // device-store reads occur before this boundary and still reject listing.
+      this.assertOpen();
+      return undefined;
     } finally {
       device.privateKey.fill(0);
       device.signing.privateKey.fill(0);
