@@ -4,6 +4,11 @@ import type { Db, TableProxy, E2eeTransactionScope } from "../runtime/db.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
+import {
+  readAcceptedHistory,
+  prepareInitialHistory,
+  discardInitialHistory,
+} from "./accepted-history.js";
 import { decodeRecoveryMaterial, decodeRecoveryMaterialForInspection } from "./recovery-format.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
 import { spaceRecoveryContext, spaceRecoveryBytes } from "./space-recovery-format.js";
@@ -47,7 +52,6 @@ type Address = { scopeId: string; identifier: string };
 // Only a malformed transcript or a checked signature mismatch proves a root invalid.
 // Missing authority/history and operational failures must not be silently discarded.
 class InvalidSpaceRoot extends Error {}
-
 type Snapshot = {
   roots: Settled<SpaceRoot>;
   grants: Settled<SpaceGrant>;
@@ -100,6 +104,7 @@ export function initialRecipientIds(ids: readonly string[]): string[] {
 
 /** Scoped roots and accepted-only device delivery. Jazz policies own every write. */
 export class Spaces {
+  private readonly knownAddresses = new Map<string, Address>();
   private validated?: {
     input: unknown;
     verify: DeviceSigner["verify"];
@@ -121,20 +126,31 @@ export class Spaces {
       states(tx?: E2eeTransactionScope): Promise<DeviceState>;
     },
     private readonly groups?: Groups,
-  ) {}
+    private readonly staleWrites: "warn" | "reject" = "warn",
+  ) {
+    if (device)
+      db.onE2eeReconnect(() => {
+        for (const address of this.knownAddresses.values()) this.reconcileInBackground(address);
+      });
+  }
 
   private requireDevice() {
     if (!this.device) throw new Error("Device enrolment is required for this space operation");
     return this.device;
   }
 
-  private async address<T, Init>(scope: TableProxy<T, Init>, identifier: string): Promise<Address> {
+  private async address<T, Init>(
+    scope: TableProxy<T, Init>,
+    identifier: string,
+    localOnly = false,
+  ): Promise<Address> {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(identifier))
       throw new Error("Invalid E2EE space identifier");
-    const scopeId = await this.db.tableIdentity(scope);
+    const scopeId = await this.db.tableIdentity(scope, localOnly);
     if (!scopeId) throw new Error("E2EE scope is unavailable");
     this.assertOpen();
     const address = { scopeId, identifier };
+    this.knownAddresses.set(JSON.stringify([scopeId, identifier]), address);
     return address;
   }
 
@@ -379,15 +395,26 @@ export class Spaces {
     await this.warmInitialRecipients([recipientId]);
     const device = await this.requireDevice().load();
     const secret = runtimeRandomBytes(32);
+    let prepared: SpaceRoot | undefined;
     try {
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
-        return this.stageInitial(tx, scope, identifier, [recipientId], address, device, secret);
+        prepared = await this.stageInitial(
+          tx,
+          scope,
+          identifier,
+          [recipientId],
+          address,
+          device,
+          secret,
+        );
+        return prepared;
       });
       const accepted = await proposal.wait({ tier: "global" });
       this.assertOpen();
       await this.deliver(address, accepted, secret, device);
       await this.explain(scope, identifier);
     } finally {
+      if (prepared) discardInitialHistory(this.db, prepared);
       secret.fill(0);
       device.privateKey.fill(0);
       device.signing.privateKey.fill(0);
@@ -548,15 +575,27 @@ export class Spaces {
       initialGrants.push({ ...grant, signature: grantSignature });
     }
     const signedRoot = { ...completeRoot, signature };
-    this.assertOpen();
-    const { id, ...values } = signedRoot;
-    // The settled lookup above rejects visible roots. Exclusive upsert records
-    // an exact-row precondition, so hidden roots and concurrent creators cannot
-    // turn a filtered empty query into a second accepted space.
-    tx.upsert(this.tables.__e2ee_spaces, id, values);
-    for (const { id: grantId, ...grantValues } of initialGrants)
-      tx.insert(this.tables.__e2ee_space_grants, grantValues, { id: grantId });
-    return signedRoot;
+    await prepareInitialHistory(
+      this.db,
+      tx,
+      (reader) => this.readSnapshot(reader, address, root.id, [...recipientIds]),
+      signedRoot,
+      initialGrants,
+    );
+    try {
+      this.assertOpen();
+      const { id, ...values } = signedRoot;
+      // The settled lookup above rejects visible roots. Exclusive upsert records
+      // an exact-row precondition, so hidden roots and concurrent creators cannot
+      // turn a filtered empty query into a second accepted space.
+      tx.upsert(this.tables.__e2ee_spaces, id, values);
+      for (const { id: grantId, ...grantValues } of initialGrants)
+        tx.insert(this.tables.__e2ee_space_grants, grantValues, { id: grantId });
+      return signedRoot;
+    } catch (error) {
+      discardInitialHistory(this.db, signedRoot);
+      throw error;
+    }
   }
 
   async revoke<T, Init>(
@@ -1156,13 +1195,47 @@ export class Spaces {
     return this.explainAddress(address);
   }
 
-  /** Package-internal key access, always backed by a completed authority read. */
+  /** Package-internal cell preparation; key ownership never leaves this callback. */
   async withKeys<T, Init>(
     scope: TableProxy<T, Init>,
     identifier: string,
     use: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<void>,
     includeHistory = false,
+    prepareOnline?: () => Promise<void>,
+    forWrite = false,
   ): Promise<SpaceState> {
+    let used = false;
+    const localUse = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
+      used = true;
+      await use(secret, root);
+    };
+    try {
+      const address = await this.address(scope, identifier, true);
+      const explicitlyOffline = await this.db.e2eeIsExplicitlyOffline();
+      const local = await this.explainAddress(
+        address,
+        localUse,
+        includeHistory,
+        0,
+        true,
+        forWrite && this.staleWrites === "warn",
+      );
+      // A coherent local write decision does not depend on transport state.
+      // Reconciliation may advance the epoch, but must not gate this preparation.
+      if (
+        local.state === "ready" ||
+        explicitlyOffline ||
+        (forWrite && local.state === "maintenance-required")
+      ) {
+        if (!explicitlyOffline) this.reconcileInBackground(address);
+        return local;
+      }
+    } catch (error) {
+      if (used || (await this.db.e2eeIsExplicitlyOffline())) throw error;
+    }
+    // A locally refused recipient may have received a grant since this snapshot.
+    // Online reconciliation must discover it before returning that refusal.
+    await prepareOnline?.();
     const address = await this.address(scope, identifier);
     const state = await this.explainAddress(address, use, includeHistory);
     if (state.state === "ready") this.reconcileInBackground(address);
@@ -1189,29 +1262,41 @@ export class Spaces {
     use?: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<void>,
     includeHistory = false,
     conflicts = 0,
+    localOnly = false,
+    allowStaleWrite = false,
   ): Promise<SpaceState> {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
-    const observed = await this.db.one(
-      this.tables.__e2ee_spaces.where({
-        scopeId: address.scopeId,
-        identifier: address.identifier,
-      }),
-      { tier: "edge" },
-    );
+    const offline = localOnly || (await this.db.e2eeIsExplicitlyOffline());
+    const roots = this.tables.__e2ee_spaces.where({
+      scopeId: address.scopeId,
+      identifier: address.identifier,
+    });
+    // Pending local deletion or coordinate changes must not hide the accepted
+    // root. This observation only locates it; the complete retained history is
+    // still revalidated against accepted-only observations below.
+    const observed = offline
+      ? ((await this.db.observeE2eeHistory([roots]))[0]?.rows[0] as SpaceRoot | undefined)
+      : await this.db.one(roots, { tier: "remote-if-possible" });
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
-    await this.warm(observed);
+    if (!offline) await this.warm(observed);
     const device = await this.requireDevice().load();
     let secret: Uint8Array | undefined;
     try {
-      let snapshot = await this.readAcceptedSnapshot(address, observed.id);
+      let snapshot = await this.readAcceptedSnapshot(address, observed.id, localOnly);
       this.assertOpen();
       if (!snapshot.state.active.has(device.id))
         return { state: "refused", reason: "device-not-active" };
       if (!snapshot.roots.rows.length)
         return { state: "unavailable", reason: "space-not-accepted" };
       let state = await this.validate(snapshot, address);
-      if (!state.groupsReady && !state.sealed && state.members.has(this.accountId) && this.groups) {
+      if (
+        !offline &&
+        !state.groupsReady &&
+        !state.sealed &&
+        state.members.has(this.accountId) &&
+        this.groups
+      ) {
         for (const id of state.groupRecipients.keys()) {
           const group = state.graph.get(id);
           if (group?.rotationRequired && !group.sealed && group.members.has(this.accountId))
@@ -1238,7 +1323,10 @@ export class Spaces {
         isInitialAuthor(root, keyRoot.epochId, this.accountId, device.id, snapshot.state.epochId);
       if (!recipient && !initialHandoff)
         return { state: "refused", reason: "not-a-space-recipient" };
-      if (!state.groupsReady) return { state: "maintenance-required", reason: "group-epoch-stale" };
+      if (!state.groupsReady && !allowStaleWrite)
+        return { state: "maintenance-required", reason: "group-epoch-stale" };
+      if (offline && state.rotationRequired && !allowStaleWrite)
+        return { state: "maintenance-required", reason: "recipient-removed" };
       if (!successor && root.accountId === this.accountId && root.deviceId === device.id) {
         secret = await this.keys.open(
           device,
@@ -1307,13 +1395,13 @@ export class Spaces {
       }
       if (!secret) return { state: "unavailable", reason: "space-key-not-delivered" };
       try {
-        if (state.rotationRequired) {
+        if (state.rotationRequired && !offline) {
           await this.rotate(address, keyRoot, secret, device);
           return this.explainAddress(address, use, includeHistory, conflicts);
         }
         // A verified key read need not wait for envelopes for other devices.
         // Explicit maintenance still delivers and revalidates its changed history.
-        if (!use) {
+        if (!offline && !use) {
           await this.deliver(address, keyRoot, secret, device);
           // Key delivery can add records after the snapshot used to open the key.
           const refreshed = await this.readAcceptedSnapshot(address, observed.id);
@@ -1339,6 +1427,10 @@ export class Spaces {
       }
       if (!recipient) return { state: "refused", reason: "not-a-space-recipient" };
       this.assertOpen();
+      if (allowStaleWrite && (!state.groupsReady || state.rotationRequired))
+        console.warn(
+          "E2EE: writing offline with a known-stale encryption epoch; removed recipients may still decrypt this write.",
+        );
       if (includeHistory) await this.confirmHistory(snapshot, root, secret, use);
       else await use?.(secret, keyRoot);
       return { state: "ready" };
@@ -1349,15 +1441,15 @@ export class Spaces {
     }
   }
 
-  private async readAcceptedSnapshot(address: Address, id: string) {
+  private async readAcceptedSnapshot(address: Address, id: string, localOnly = false) {
     for (let attempt = 0; ; attempt++) {
       try {
-        const read = await exclusiveE2eeTransaction(this.db, (tx) =>
-          this.readSnapshot(tx, address, id),
+        return await readAcceptedHistory(
+          this.db,
+          JSON.stringify(["space", address.scopeId, address.identifier]),
+          (tx, initialRecipients) => this.readSnapshot(tx, address, id, initialRecipients),
+          localOnly,
         );
-        const snapshot = await read.wait({ tier: "global" });
-        this.assertOpen();
-        return snapshot;
       } catch (error) {
         const conflict =
           (error instanceof PersistedWriteRejectedError &&

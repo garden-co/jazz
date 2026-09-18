@@ -658,7 +658,9 @@ export class DeviceApproval {
    * This path only validates history; it never starts a nested handshake write.
    */
   async deviceStates(transaction?: E2eeTransactionScope) {
-    this.throwBackgroundError();
+    // A supplied snapshot is independent of the background online responder.
+    // Keep its error pending for an explicit device operation, not local replay.
+    if (!transaction) this.throwBackgroundError();
     const snapshot = await this.currentSnapshot(transaction);
     for (const challenge of transaction ? [] : snapshot.challenges) {
       if (

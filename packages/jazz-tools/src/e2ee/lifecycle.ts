@@ -1,4 +1,5 @@
 import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { configureAcceptedHistory } from "./accepted-history.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { encryptedSchemas } from "./encrypted-schema.js";
@@ -30,12 +31,22 @@ import type { SpaceRecoveryPath } from "./space-lifecycle.js";
 import type { SpaceTables } from "./spaces.js";
 import type { JazzCrypto, CellCipher, EqualityIndex } from "./types.js";
 
+const equalityCrypto = new WeakMap<Db, () => Promise<EqualityIndex>>();
+
+/** @internal Index adapters never decide what a candidate is allowed to match. */
+export async function equalityCryptoForDb(db: Db): Promise<EqualityIndex> {
+  e2eeForDb(db);
+  return equalityCrypto.get(db)!();
+}
+
 export type E2eeConfig = {
   /** Application returned by defineApp; encrypted apps include managed bindings automatically. */
   app?: DeviceTables | { readonly wasmSchema: WasmSchema };
   /** Dedicated local key storage. Do not reuse the account-selection store value. */
   store: AccountStore;
   crypto?: JazzCrypto;
+  /** Known-stale offline writes warn by default; revoked devices are always refused. */
+  staleWrites?: "warn" | "reject";
 };
 export type DeviceInfo = Readonly<{
   id: string;
@@ -47,22 +58,7 @@ export type DeviceInfo = Readonly<{
   mechanism: CryptoMechanism;
 }>;
 
-const equalityCrypto = new WeakMap<Db, () => Promise<EqualityIndex>>();
-
-/** @internal Index adapters never decide what a candidate is allowed to match. */
-export async function equalityCryptoForDb(db: Db): Promise<EqualityIndex> {
-  e2eeForDb(db);
-  return equalityCrypto.get(db)!();
-}
-
 const contexts = new WeakMap<Db, E2ee>();
-const configuredAccounts = new WeakMap<Db, string>();
-
-/** @internal Dependency observation follows the caller, not the space author. */
-export function e2eeAccountForDb(db: Db): string {
-  e2eeForDb(db);
-  return configuredAccounts.get(db)!;
-}
 const cellCrypto = new WeakMap<Db, () => Promise<{ cipher: CellCipher; application: string }>>();
 
 /** @internal Common cell framing owns identity selection, not the crypto adapter. */
@@ -73,13 +69,20 @@ export async function cellCryptoForDb(
   return cellCrypto.get(db)!();
 }
 const configuredSchemas = new WeakMap<Db, WasmSchema>();
+const configuredAccounts = new WeakMap<Db, string>();
+
+/** @internal Dependency observation follows the caller, not the space author. */
+export function e2eeAccountForDb(db: Db): string {
+  e2eeForDb(db);
+  return configuredAccounts.get(db)!;
+}
+
 /** @internal The configured application can bind a cold transaction's schema. */
 export function e2eeSchemaForDb(db: Db): WasmSchema | undefined {
   return configuredSchemas.get(db);
 }
-const currentSpaceKeys = new WeakMap<Db, Spaces["withKeys"]>();
-
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
+const currentSpaceKeys = new WeakMap<Db, Spaces["withKeys"]>();
 const initialSpacePrerequisites = new WeakMap<
   Db,
   (recipientIds?: readonly string[]) => Promise<void>
@@ -100,6 +103,7 @@ export async function withSpaceKeys<T, Init>(
   identifier: string,
   use: Parameters<Spaces["withKeys"]>[2],
   includeHistory = false,
+  forWrite = false,
 ): Promise<void> {
   e2eeForDb(db);
   let callbackFailure: { error: unknown } | undefined;
@@ -111,15 +115,20 @@ export async function withSpaceKeys<T, Init>(
       throw error;
     }
   };
-  const state = await currentSpaceKeys.get(db)!(scope, identifier, operation, includeHistory).catch(
-    (error: unknown) => {
-      // Key adapters can include secret material in their exceptions.
-      // The operation owns its own crypto diagnostics and ordinary runtime errors.
-      if (error instanceof E2eeDataError || (callbackFailure && callbackFailure.error === error))
-        throw error;
-      throw new E2eeDataError("key-unavailable");
-    },
-  );
+  const state = await currentSpaceKeys.get(db)!(
+    scope,
+    identifier,
+    operation,
+    includeHistory,
+    undefined,
+    forWrite,
+  ).catch((error: unknown) => {
+    // Key adapters can include secret material in their exceptions.
+    // The operation owns its own crypto diagnostics and ordinary runtime errors.
+    if (error instanceof E2eeDataError || (callbackFailure && callbackFailure.error === error))
+      throw error;
+    throw new E2eeDataError("key-unavailable");
+  });
   if (state.state !== "ready") {
     throw new E2eeDataError(
       state.state === "refused"
@@ -214,6 +223,7 @@ export class E2ee {
   private spaceLifecycle: Spaces | undefined;
   private closed = false;
   private preparation: Promise<void> | undefined;
+  private localPreparation: Promise<void> | undefined;
   private readonly scope: string;
   private readonly app: DeviceTables;
   readonly groups = {
@@ -522,6 +532,11 @@ export class E2ee {
     this.app = app as DeviceTables;
     configuredSchemas.set(db, this.app.__e2ee_device_requests._schema);
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
+    configureAcceptedHistory(db, {
+      store: config.store,
+      scope: this.scope,
+      assertOpen: () => this.assertOpen(),
+    });
     let cellCipher: Promise<CellCipher> | undefined;
     let equalityIndex: Promise<EqualityIndex> | undefined;
     equalityCrypto.set(db, async () => {
@@ -542,10 +557,6 @@ export class E2ee {
       this.assertOpen();
       return { cipher, application: JSON.stringify([accountRegistry(this.account), this.env]) };
     });
-    currentSpaceKeys.set(db, async (scope, identifier, use, includeHistory) => {
-      await this.prepare();
-      return this.requireSpaces().withKeys(scope, identifier, use, includeHistory);
-    });
     initialSpacePrerequisites.set(db, async (recipientIds) => {
       await this.prepare();
       await this.requireSpaces().warmInitialRecipients(recipientIds);
@@ -554,6 +565,20 @@ export class E2ee {
       await this.prepare();
       await this.requireSpaces().prepareInitial(...args);
     });
+    currentSpaceKeys.set(
+      db,
+      async (scope, identifier, use, includeHistory, _prepareOnline, forWrite) => {
+        await this.prepare(true);
+        return this.requireSpaces().withKeys(
+          scope,
+          identifier,
+          use,
+          includeHistory,
+          () => this.prepare(),
+          forWrite,
+        );
+      },
+    );
     db.onShutdown(() => {
       this.closed = true;
     });
@@ -564,16 +589,23 @@ export class E2ee {
     accountRegistry(this.account); // Reject logout, including during asynchronous preparation.
   }
 
-  private async prepare(): Promise<void> {
+  private async prepare(localOnly = false): Promise<void> {
     this.assertOpen();
-    await (this.preparation ??= this.prepareRequest().catch((error) => {
+    await (this.localPreparation ??= this.prepareRequest(true).catch((error) => {
+      this.localPreparation = undefined;
+      throw error;
+    }));
+    this.assertOpen();
+    // Local key use must not join an unrelated, stalled online enrolment check.
+    if (localOnly || (await this.db.e2eeIsExplicitlyOffline())) return;
+    await (this.preparation ??= this.prepareRequest(false).catch((error) => {
       this.preparation = undefined;
       throw error;
     }));
     this.assertOpen();
   }
 
-  private async prepareRequest(): Promise<void> {
+  private async prepareRequest(localOnly = false): Promise<void> {
     const envelope =
       this.config.crypto?.keyEnvelope ??
       (await (await import("./browser.js")).createBrowserKeyEnvelope());
@@ -590,7 +622,7 @@ export class E2ee {
       const requests = this.app.__e2ee_device_requests;
       // Once online preparation starts, complete it or reject so it can retry.
       // A later disconnect must not cache skipped enrolment as successful.
-      {
+      if (!localOnly) {
         const query = requests.where({ id: device.id });
         let row = await this.db.one(query, { tier: "edge" });
         if (!row) {
@@ -722,6 +754,7 @@ export class E2ee {
             states: (transaction) => this.approval!.deviceStates(transaction),
           },
           this.groupLifecycle,
+          this.config.staleWrites,
         );
       }
     } finally {
