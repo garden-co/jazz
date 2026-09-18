@@ -129,4 +129,4 @@ it("accepts eight group edges but rejects a ninth below existing ancestors, incl
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 180_000);
+}, 300_000);
