@@ -802,6 +802,12 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
         Some(Value::String("restored todo".to_owned()))
     );
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
+
+    // A restore retains deletion-register history, but the visible row must
+    // still be eligible for a later ordinary deletion.
+    let write = db.delete("todos", todo, Default::default()).unwrap();
+    doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    assert!(prepared_read(&db, &query).is_empty());
 }
 
 /// A facade delete starts or extends only the deletion-register history.
