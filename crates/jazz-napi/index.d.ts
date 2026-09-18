@@ -201,6 +201,36 @@ export interface DeleteOptions {
   updatedAtMs?: number
 }
 
+/** Authenticates before returning plaintext; rejects short or invalid ciphertext. */
+export declare function e2eeSodiumDecrypt(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, ciphertext: Uint8Array): Uint8Array
+
+/** Encrypts with XChaCha20-Poly1305-IETF, returning ciphertext and its appended tag. */
+export declare function e2eeSodiumEncrypt(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, plaintext: Uint8Array): Uint8Array
+
+/** Computes the protocol's 32-byte keyed BLAKE2b digest with a 32-byte key. */
+export declare function e2eeSodiumHash(key: Uint8Array, input: Uint8Array): Uint8Array
+
+/** Generates a device keypair using libsodium's system RNG. */
+export declare function e2eeSodiumKeyPair(): SodiumDeviceKeyPair
+
+/** Returns a fresh 24-byte XChaCha20 nonce from libsodium's system RNG. */
+export declare function e2eeSodiumNonce(): Uint8Array
+
+/** Opens a sealed box, returning plaintext only after successful authentication. */
+export declare function e2eeSodiumOpen(publicKey: Uint8Array, privateKey: Uint8Array, ciphertext: Uint8Array): Uint8Array
+
+/** Seals plaintext to a device; this does not authenticate a sender identity. */
+export declare function e2eeSodiumSeal(publicKey: Uint8Array, plaintext: Uint8Array): Uint8Array
+
+/** Produces a detached Ed25519 signature; rejects inconsistent secret-key material. */
+export declare function e2eeSodiumSign(privateKey: Uint8Array, message: Uint8Array): Uint8Array
+
+/** Generates independent Ed25519 keys, or reconstructs them from an exact 32-byte seed. */
+export declare function e2eeSodiumSigningKeyPair(seed?: Uint8Array | undefined | null): SodiumDeviceKeyPair
+
+/** Verifies a detached Ed25519 signature; malformed sizes return false. */
+export declare function e2eeSodiumVerify(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): boolean
+
 export interface InsertOptions {
   rowId?: Uint8Array
   author?: Uint8Array
@@ -230,6 +260,12 @@ export interface RestoreOptions {
   attribution?: Uint8Array
   branch?: JsonValue
   updatedAtMs?: number
+}
+
+/** Owned libsodium device encryption keys. */
+export interface SodiumDeviceKeyPair {
+  publicKey: Uint8Array
+  privateKey: Uint8Array
 }
 
 export interface SubscriptionClosedEvent {
