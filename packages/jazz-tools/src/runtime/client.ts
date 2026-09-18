@@ -156,6 +156,9 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /** @internal Portable accepted catalogue identity; never a locally allocated alias. */
+  tableIdentity?(table: string): Promise<string | null>;
+  columnIdentity?(table: string, column: string): Promise<string | null>;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
   insert(
@@ -439,6 +442,7 @@ export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
 
 /** @internal Low-level read controls that are not part of the product-facing query API. */
 export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
+  settlementMetadata?: boolean | "with-rows";
   tier?: InternalQueryReadTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
@@ -456,6 +460,7 @@ export interface ResolvedQueryExecutionOptions {
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
+  settlementMetadata?: boolean | "with-rows";
   openTransactionId?: OpenTransactionId;
 };
 
@@ -531,6 +536,14 @@ export interface RestoreOptions extends TimestampOverrideOptions {
 export interface Row {
   id: string;
   values: Value[];
+}
+
+/** @internal Authority metadata for immutable E2EE rows, not snapshot coverage. */
+export interface RowSettlement {
+  rowId: string;
+  transactionId: string;
+  /** Decimal u64; never round through a JavaScript number. */
+  position: string;
 }
 
 export type WriteReceipt =
@@ -640,6 +653,7 @@ function getScheduler(): (task: () => void) => void {
 
 function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): string | undefined {
   const payload: {
+    settlement_metadata?: boolean | "with-rows";
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
     transaction_id?: string;
@@ -663,6 +677,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if (options.openTransactionId) {
     payload.transaction_id = options.openTransactionId;
   }
+  if (options.settlementMetadata) payload.settlement_metadata = options.settlementMetadata;
   if (options.branch) {
     const base = options.branch.base;
     payload.read_view = {
@@ -851,17 +866,18 @@ export class WriteResult<T> extends WriteHandle<T, T> {
 /**
  * Returned by explicitly-committed exclusive transactions.
  *
- * Exclusive transactions are accepted or rejected by the global authority, so
- * callers do not choose a durability tier when waiting for confirmation.
+ * Pass `{ tier: "global" }` to require an authoritative receipt even without
+ * a configured upstream. Omitting options preserves offline local durability.
  */
 export class ExclusiveWriteHandle extends WriteHandle<void> {
   /**
-   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
    */
-  override async wait(): Promise<void> {
-    await this.client().waitForExclusiveTransaction(await this.txId);
+  override async wait(options?: { tier: DurabilityTier }): Promise<void> {
+    await this.client().waitForExclusiveTransaction(await this.txId, options?.tier);
   }
 }
 
@@ -870,13 +886,14 @@ export class ExclusiveWriteHandle extends WriteHandle<void> {
  */
 export class ExclusiveWriteResult<T> extends WriteResult<T> {
   /**
-   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
    * @returns the callback result.
    */
-  override async wait(): Promise<T> {
-    await this.client().waitForExclusiveTransaction(await this.txId);
+  override async wait(options?: { tier: DurabilityTier }): Promise<T> {
+    await this.client().waitForExclusiveTransaction(await this.txId, options?.tier);
     return this.value;
   }
 
@@ -1298,10 +1315,12 @@ export class JazzClient {
     if (!options?.openTransactionId) {
       return resolved;
     }
-    return {
+    const result: ResolvedInternalQueryExecutionOptions = {
       ...resolved,
       openTransactionId: options.openTransactionId,
     };
+    if (options.settlementMetadata) result.settlementMetadata = options.settlementMetadata;
+    return result;
   }
 
   private encodeWriteContext(
@@ -2071,10 +2090,10 @@ export class JazzClient {
   }
 
   /** @internal */
-  async waitForExclusiveTransaction(txId: TxId): Promise<void> {
+  async waitForExclusiveTransaction(txId: TxId, requiredTier?: DurabilityTier): Promise<void> {
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local");
+    await this.waitForTransaction(txId, requiredTier ?? (hasAuthority ? "global" : "local"));
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {

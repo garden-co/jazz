@@ -2,6 +2,69 @@
 
 use super::*;
 
+/// Binding-only rows retain transaction identity across authority acceptance.
+/// This is internal because the public client does not expose CurrentRow or
+/// let callers retain its private node alias while scheduling individual frames.
+/// Alice -> authority acceptance -> Bob's subscription -> opt-in settlement.
+#[test]
+fn row_settlement_is_opt_in_and_follows_authority_acceptance() {
+    let schema = schema();
+    let alice_author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob_author = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let authority = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
+    let alice = open_db(0xa1, alice_author, &schema);
+    let bob = open_db(0xb1, bob_author, &schema);
+    let (alice_up, alice_down) = byte_duplex();
+    let (bob_up, bob_down) = byte_duplex();
+    let _alice_upstream = block_on(alice.connect_upstream(alice_up));
+    let _bob_upstream = block_on(bob.connect_upstream(bob_up));
+    let alice_peer = authority.accept_subscriber(alice_down, alice_author);
+    let bob_peer = authority.accept_subscriber(bob_down, bob_author);
+    let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
+    let opts = global_subscribe_opts();
+    let mut subscription = block_on(bob.subscribe(&prepared, opts.clone())).unwrap();
+    let pump = || {
+        for _ in 0..32 {
+            alice.tick().unwrap();
+            alice_peer.borrow_mut().tick().unwrap();
+            bob.tick().unwrap();
+            bob_peer.borrow_mut().tick().unwrap();
+        }
+    };
+    pump();
+    while subscription.try_next_event().is_some() {}
+    // The public builder uses tools values; the binding-facing Db uses core values.
+    let cells = crate::row_input!("title" => "settlement")
+        .into_iter()
+        .map(|(name, value)| match value {
+            PublicValue::Text(text) => (name, Value::String(text)),
+            _ => unreachable!("fixture contains only text"),
+        })
+        .collect();
+    let write = block_on(alice.insert("todos", cells, Default::default())).unwrap();
+    let local_query = alice.prepare_query(&Query::from("todos")).unwrap();
+    let local = block_on(alice.all(&local_query, ReadOpts::default())).unwrap();
+    assert_eq!(local.len(), 1);
+    assert_eq!(
+        block_on(alice.row_settlement_for_binding(&local[0])).unwrap(),
+        None
+    );
+    pump();
+    block_on(write.wait(DurabilityTier::Global)).unwrap();
+    let received = block_on(bob.all(&prepared, opts.clone())).unwrap();
+    assert_eq!(received.len(), 1);
+    let (tx, position) = block_on(bob.row_settlement_for_binding(&received[0]))
+        .unwrap()
+        .expect("received authority settlement");
+    assert_eq!(tx, write.mergeable_tx_id());
+    assert_eq!(alice.write_state(tx).unwrap().global_time, Some(position));
+    assert_eq!(
+        block_on(alice.row_settlement_for_binding(&local[0])).unwrap(),
+        Some((tx, position))
+    );
+    assert_eq!(block_on(bob.all(&prepared, opts)).unwrap(), received);
+}
+
 #[test]
 fn logical_message_larger_than_frame_round_trips_reordered_and_duplicated() {
     let (left, right) = byte_duplex_raw();

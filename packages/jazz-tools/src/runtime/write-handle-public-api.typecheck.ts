@@ -73,13 +73,12 @@ async function assertWriteHandleContract() {
     () => "committed",
   );
   exclusiveResult.wait();
-  // @ts-expect-error Exclusive mutations are confirmed by the authority without a tier.
+  // Explicit global waits require authority confirmation, including while offline.
   exclusiveResult.wait({ tier: "global" });
 
   const mergeableCommit: WriteHandle = db.beginTransaction().commit();
   const exclusiveCommit: ExclusiveWriteHandle = db.beginExclusiveTransaction().commit();
   exclusiveCommit.wait();
-  // @ts-expect-error Exclusive commits are confirmed by the authority without a tier.
   exclusiveCommit.wait({ tier: "global" });
 
   void restored;
