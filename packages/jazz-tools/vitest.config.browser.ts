@@ -7,6 +7,7 @@ import {
   liveEdgeBackendClose,
 } from "./tests/browser/live-edge-replay-node.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
@@ -125,7 +126,10 @@ export default defineConfig({
     // WebKit gives each browser file its own heavyweight WPE/WASM process.
     // Four concurrent files exceed practical memory pressure before exercising
     // product concurrency; the multi-tab suites below provide that coverage.
-    maxWorkers: browserName === "webkit" ? 1 : 4,
+    maxWorkers:
+      browserName === "webkit"
+        ? 1
+        : Math.max(1, Math.min(4, Math.floor(availableParallelism() / 4))),
     browser: {
       enabled: true,
       provider: playwright(),

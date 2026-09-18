@@ -501,6 +501,9 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
     ...extraArgs,
     ...(wasmStage ? ["--out-dir", wasmStage.outDir] : []),
     ...(napiStage ? ["--output-dir", napiStage] : []),
+    // Keep dev assertions and overflow checks, but avoid unoptimized execution
+    // dominating the full correctness workload. This recipe is source-bound.
+    ...(kind === "wasm" && profile === "fast" ? ["--", "--config", "profile.dev.opt-level=1"] : []),
   ];
   try {
     if (kind === "napi" && process.env.JAZZ_NAPI_BUILD_FAULT === "producer")
