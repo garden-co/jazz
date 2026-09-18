@@ -8,10 +8,36 @@ export function applyDeviceRequestPermissions({
 }: PolicyContext<typeof deviceRequestApp>): void {
   const recoveryRoots = policy.__e2ee_recovery_roots;
   recoveryRoots.allowRead.where(session.where({ authMode: { in: ["local-first", "external"] } }));
-  // Parsing future recovery authority is safe; authoring is enabled by account recovery.
-  recoveryRoots.allowInsert.never();
+  // Account ownership is ordinary policy; recovery authority requires replay.
+  recoveryRoots.allowInsert.where((record) =>
+    allOf([
+      { accountId: session.user.account, "$createdBy.account": session.user.account },
+      policy.__e2ee_account_identities.exists.where({
+        id: record.accountId,
+        "$createdBy.account": session.user.account,
+      }),
+      policy.__e2ee_device_requests.exists.where({
+        id: record.signerId,
+        "$createdBy.account": session.user.account,
+      }),
+    ]),
+  );
   recoveryRoots.allowUpdate.never();
   recoveryRoots.allowDelete.never();
+  const recoveryDeliveries = policy.__e2ee_recovery_deliveries;
+  recoveryDeliveries.allowRead.where({ "$createdBy.account": session.user.account });
+  recoveryDeliveries.allowInsert.where((record) =>
+    recoveryRoots.exists.where({ id: record.rootId, accountId: session.user.account }),
+  );
+  recoveryDeliveries.allowUpdate.never();
+  recoveryDeliveries.allowDelete.never();
+  const protectors = policy.__e2ee_recovery_protectors;
+  protectors.allowRead.where({ "$createdBy.account": session.user.account });
+  protectors.allowInsert.where((record) =>
+    recoveryRoots.exists.where({ id: record.rootId, accountId: session.user.account }),
+  );
+  protectors.allowUpdate.never();
+  protectors.allowDelete.never();
   const publicSuccessors = policy.__e2ee_public_account_successors;
   publicSuccessors.allowRead.where(
     session.where({ authMode: { in: ["local-first", "external"] } }),
