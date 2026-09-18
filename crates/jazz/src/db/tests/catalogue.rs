@@ -974,11 +974,15 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         )
         .unwrap();
     db.publish_schema_with_lens(1, owner_publication).unwrap();
-    db.set_current_write_schema(CurrentWriteSchema {
-        revision: 1,
-        schema: owner_payload.id,
-    })
-    .unwrap();
+    // Keep the current-write pointer on the structural schema. The policy head
+    // is a separately selected, non-write schema view.
+    let selected = block_on(db.register_schema_view(owner_head.clone())).unwrap();
+    assert_ne!(
+        db.current_write_schema().unwrap().schema,
+        owner_payload.id,
+        "the selected policy schema must not be the current-write schema"
+    );
+    let db = selected;
     let first = row(0xa1);
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
@@ -988,7 +992,6 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
             ("title".to_owned(), Value::String("first".to_owned())),
             ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
             ("editor".to_owned(), Value::Uuid(bob.test_uuid())),
-            ("body".to_owned(), Value::String(String::new())),
         ]),
     )
     .unwrap();
@@ -1017,7 +1020,6 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
             ("title".to_owned(), Value::String("second".to_owned())),
             ("owner".to_owned(), Value::Uuid(bob.test_uuid())),
             ("editor".to_owned(), Value::Uuid(bob.test_uuid())),
-            ("body".to_owned(), Value::String(String::new())),
         ]),
     )
     .unwrap();

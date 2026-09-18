@@ -897,49 +897,46 @@ fn ancestry_lookup_avoids_transaction_wide_reads_resident_and_cold() {
 }
 
 #[test]
-fn repeated_row_reachability_checks_reuse_complete_ancestry() {
+fn positive_row_reachability_stops_at_immediate_predecessor() {
     let schema = two_column_schema();
     let (_dir, mut writer) = open_node_with_schema(node(0xe4), schema);
     let row_uuid = row(0xe5);
-    let mut parent = None;
     let chain_len = 96;
+    let mut versions = Vec::with_capacity(chain_len);
+    let mut parent = None;
     for index in 0..chain_len {
         let mut commit = MergeableCommit::new("todos", row_uuid, 10 + index as u64)
             .cells(BTreeMap::from([("title".to_owned(), "revision".to_owned())]));
         if let Some(parent) = parent {
             commit = commit.parents(vec![parent]);
         }
-        parent = Some(writer.commit_mergeable_unit_settled(commit).unwrap().0);
+        let tx_id = writer.commit_mergeable_unit_settled(commit).unwrap().0;
+        versions.push(tx_id);
+        parent = Some(tx_id);
     }
-    let head = parent.expect("history chain has a head");
+    let head = *versions.last().expect("history chain has a head");
+    let immediate_predecessor = versions[chain_len - 2];
     let table_id = writer
         .physical_table_id_for_schema(writer.catalogue.current_write_schema.schema, "todos")
         .unwrap();
-    let missing = TxId::new(TxTime::from(1), node(0xe6));
 
+    // TESTING_GUIDELINES permits this internal counter seam because bounded
+    // ancestry work is not observable through public rows; the reachability
+    // result still asserts the semantic contract at the same private seam.
+    writer.clear_content_version_reachability_cache();
     writer.reset_merge_head_reachability_walks_for_test();
-    assert!(!writer
+    assert!(writer
         .content_version_reaches_tx(
             table_id,
             &BranchKey::default(),
             row_uuid,
             head,
-            missing,
+            immediate_predecessor,
         )
         .unwrap());
-    assert!(!writer
-        .content_version_reaches_tx(
-            table_id,
-            &BranchKey::default(),
-            row_uuid,
-            head,
-            missing,
-        )
-        .unwrap());
-
     assert!(
-        writer.merge_head_reachability_nodes_for_test() <= chain_len,
-        "repeated membership checks must not rescan the complete row ancestry"
+        writer.merge_head_reachability_nodes_for_test() <= 2,
+        "a positive predecessor witness must stop the walk instead of scanning {chain_len} nodes"
     );
 }
 
