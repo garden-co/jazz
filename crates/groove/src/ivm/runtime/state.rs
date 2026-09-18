@@ -59,7 +59,7 @@ pub struct TickMetrics {
     pub recursive_recomputes: usize,
     pub hydration_memo_hits: u64,
     pub hydration_memo_computes: u64,
-    /// Test-only receipt for repeated static aggregate ancestry traversal.
+    /// Test-only receipt for aggregate dependency metadata inspections.
     #[cfg(test)]
     pub(super) aggregate_dependency_walk_nodes: usize,
     pub hydration_memo_computed_nodes: HashSet<NodeId>,
