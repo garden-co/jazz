@@ -332,6 +332,19 @@ _Further invariants._ `INV-TX-19` — predicate validation is sensitive to
 `binding_id`/`binding_values` and uses the inline shape without requiring a prior
 shape registration on the authority.
 
+Schema migrations must preserve the physical identity used by these checks.
+Predicate validation resolves the recorded shape against its matching retained
+schema, rather than interpreting its table names in the current schema alone.
+Snapshot rows and their version witnesses must use that same schema mapping.
+
+Point-read and absent-read records carry a table name but no schema ID.
+Authority validation accepts that name only when all retained mappings for it
+identify the same physical table. This supports unambiguous renames.
+An unknown name, or a name reused for a different physical table, rejects the
+transaction as `ExclusiveConflict`; neither case may be treated as evidence
+that a row is absent. Supporting ambiguous name reuse would require additional
+read-set identity information.
+
 ### 3.8 Rejection and cascade
 
 Rejection records the authority's decision without keeping rejected foreign
