@@ -2660,7 +2660,20 @@ mod tests {
 
     async fn oversized_ws_prelude_never_reaches_admission(message: WsMessage, url: String) {
         let (mut ws, _) = connect_async(url).await.expect("connect websocket");
-        ws.send(message).await.expect("send oversized prelude");
+        // The server may enforce the cap before the oversized send finishes.
+        if let Err(error) = ws.send(message).await {
+            assert!(
+                matches!(
+                    &error,
+                    tokio_tungstenite::tungstenite::Error::Io(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                        )
+                ),
+                "unexpected oversized-prelude send error: {error:?}"
+            );
+        }
         // If the physical cap is accidentally raised, this valid follow-up
         // reaches normal handshake admission and produces a server Hello.
         let _ = ws
