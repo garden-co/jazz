@@ -56,6 +56,7 @@ catalogs:
       version: 2.2.12
 
 overrides:
+  libsodium-wrappers@0.8.3>libsodium: 0.8.3
   react: 19.2.4
   react-dom: 19.2.4
 
@@ -1891,6 +1892,12 @@ importers:
       jsdom:
         specifier: ^26.0.0
         version: 26.1.0
+      libsodium:
+        specifier: 0.8.3
+        version: 0.8.3
+      libsodium-wrappers:
+        specifier: 0.8.3
+        version: 0.8.3
       react-dom:
         specifier: 19.2.4
         version: 19.2.4(react@19.2.4)
@@ -10376,6 +10383,12 @@ packages:
   levn@0.4.1:
     resolution: {integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==}
     engines: {node: '>= 0.8.0'}
+
+  libsodium-wrappers@0.8.3:
+    resolution: {integrity: sha512-Ri4G16uT3HiJsvIobXp1G1bpvGN4dcIjLONh8CHuzwqsT92F3GZ7EAxk3sL53NeuFCwi1XWSggsMMpGJ4Y+x/g==}
+
+  libsodium@0.8.3:
+    resolution: {integrity: sha512-wl+twQjqb04RUbqlkCBV6qoFyajrSlSkquMBLbREDPPBriM8fd9HTIFVmhruGnpaidY6HfhvdYqrwHFMlUFCWw==}
 
   lighthouse-logger@1.4.2:
     resolution: {integrity: sha512-gPWxznF6TKmUHrOQjlVo2UbaL2EJ71mb2CCeRs/2qBpi4L/g4LUVc9+3lKQ6DTUZwJswfM7ainGrLO1+fOqa2g==}
@@ -22854,6 +22867,12 @@ snapshots:
     dependencies:
       prelude-ls: 1.2.1
       type-check: 0.4.0
+
+  libsodium-wrappers@0.8.3:
+    dependencies:
+      libsodium: 0.8.3
+
+  libsodium@0.8.3: {}
 
   lighthouse-logger@1.4.2:
     dependencies:
