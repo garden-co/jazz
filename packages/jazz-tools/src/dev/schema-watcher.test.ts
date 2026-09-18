@@ -16,6 +16,8 @@ import {
 } from "./test-helpers.js";
 
 const tempRoots = createTempRootTracker();
+// Deployment includes debouncing, schema/permissions compilation, and server requests.
+const DEPLOY_TIMEOUT = 10_000;
 let server: LocalJazzServerHandle | null = null;
 
 afterEach(async () => {
@@ -69,7 +71,7 @@ describe("watchSchema", () => {
           ),
         );
         await expect
-          .poll(() => onError.mock.calls.at(-1)?.[0].message)
+          .poll(() => onError.mock.calls.at(-1)?.[0].message ?? "", { timeout: DEPLOY_TIMEOUT })
           .toContain("migrations create");
         const targetHash = await computeSchemaHash(
           (await loadCompiledSchema(schemaDir)).wasmSchema,
@@ -81,7 +83,9 @@ describe("watchSchema", () => {
         );
         const errorsBefore = onError.mock.calls.length;
         await writeFile(migrationFile, "export default undefined;");
-        await expect.poll(() => onError.mock.calls.length).toBeGreaterThan(errorsBefore);
+        await expect
+          .poll(() => onError.mock.calls.length, { timeout: DEPLOY_TIMEOUT })
+          .toBeGreaterThan(errorsBefore);
         await writeFile(
           migrationFile,
           `
@@ -95,7 +99,9 @@ describe("watchSchema", () => {
           });
         `,
         );
-        await expect.poll(() => onPush.mock.calls.at(-1)?.[0]).toBe(targetHash);
+        await expect
+          .poll(() => onPush.mock.calls.at(-1)?.[0], { timeout: DEPLOY_TIMEOUT })
+          .toBe(targetHash);
         await mkdir(join(migrationsDir, "snapshots"), { recursive: true });
         const pushes = onPush.mock.calls.length;
         const errors = onError.mock.calls.length;
