@@ -429,12 +429,11 @@ where
                 "non-genesis schema requires lineage publication",
             ));
         }
-        let active_schema_changed = schema.id == self.catalogue.current_write_schema.schema
-            && self
-                .catalogue
-                .catalogue_schemas
-                .get(&schema.id)
-                .is_some_and(|current| current.schema != schema.schema);
+        let schema_payload_changed = self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema.id)
+            .is_some_and(|current| current.schema != schema.schema);
         self.catalogue
             .catalogue_schemas
             .insert(schema.id, schema.clone());
@@ -449,11 +448,11 @@ where
         self.ensure_provisional_physical_mapping(schema.id).await?;
         self.ensure_schema_version_alias(schema.id).await?;
         self.synchronize_physical_version_tables().await?;
-        if active_schema_changed {
+        if schema_payload_changed {
             // Policy declarations are intentionally outside the schema version
-            // identity. Invalidate maintained handles when that same-version
-            // payload changes so live subscriptions rebuild their authorization
-            // graph without reopening storage through the old catalogue row.
+            // identity. Any accepted same-version payload replacement can
+            // change a selected policy schema, so invalidate maintained handles
+            // rather than reopening storage through the old catalogue row.
             self.query.compiled_query_program_cache.clear();
             self.groove_runtime_token = next_groove_runtime_token();
         }

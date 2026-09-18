@@ -584,14 +584,16 @@ where
             )
             .await?;
         if self.query.compiled_query_program_cache.len() >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
-            && let Some(oldest) = self
+            && let Some(eviction_key) = self
                 .query
                 .compiled_query_program_cache
                 .keys()
                 .next()
                 .cloned()
         {
-            self.query.compiled_query_program_cache.remove(&oldest);
+            self.query
+                .compiled_query_program_cache
+                .remove(&eviction_key);
         }
         self.query
             .compiled_query_program_cache

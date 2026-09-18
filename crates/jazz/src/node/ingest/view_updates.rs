@@ -820,7 +820,16 @@ where
         let mut stack = vec![start];
         let mut ancestors = FxHashSet::default();
         let mut complete = true;
+        let mut reaches = false;
         while let Some(tx_id) = stack.pop() {
+            if tx_id == target {
+                reaches = true;
+                // A witness is enough for this query, but the remaining
+                // ancestry was not inspected and must not be cached as a
+                // complete closure.
+                complete = false;
+                break;
+            }
             if !ancestors.insert(tx_id) {
                 continue;
             }
@@ -869,7 +878,6 @@ where
                 complete = false;
             }
         }
-        let reaches = ancestors.contains(&target);
         if complete {
             self.cache_content_version_reachability(key, ancestors);
         }
