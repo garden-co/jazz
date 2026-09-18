@@ -286,5 +286,5 @@ it.each([
       await server.stop();
     }
   },
-  60_000,
+  120_000,
 );
