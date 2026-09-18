@@ -13,12 +13,20 @@ it("does not let a pending root deletion hide accepted offline encryption histor
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
       .encrypted({ space: "projectId", columns: ["body"] }),
   });
-  const permissions = definePermissions(app, ({ policy }) => {
+  const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
     policy.notes.allowUpdate.always();
+    policy.__e2ee_spaces.allowRead.always();
+    policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+    policy.__e2ee_space_grants.allowRead.always();
+    policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+    policy.__e2ee_space_deliveries.allowRead.always();
+    policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+    policy.__e2ee_space_successors.allowRead.always();
+    policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_spaces.allowDelete.never();
   });
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
