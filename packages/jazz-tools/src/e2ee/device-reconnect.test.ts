@@ -26,7 +26,7 @@ it("retries device enrolment after disconnecting during local key loading", asyn
       e2ee: {
         store: {
           async read() {
-            if (disconnectOnRead && stored !== null) {
+            if (disconnectOnRead) {
               disconnectOnRead = false;
               await db!.disconnect();
               disconnected();
