@@ -2379,3 +2379,64 @@ fn legacy_edge_upgrades_active_schema_during_open() {
             .is_err()
     );
 }
+
+/// Uses internal APIs to recreate an older schema publication with embedded permissions.
+#[test]
+fn permission_bearing_lineage_snapshot_replay_reopens_without_restoring_old_grants() {
+    let mut snapshot = catalogue_snapshot_fixture();
+    let granted = crate::schema::JazzSchema::new(
+        &crate::tools::SchemaBuilder::new()
+            .table(
+                crate::tools::TableSchema::builder("todos")
+                    .column("title", crate::tools::ColumnType::Text)
+                    .column("body", crate::tools::ColumnType::Text)
+                    .policies(
+                        crate::tools::TablePolicies::new()
+                            .with_select(crate::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    )
+    .unwrap();
+    let original = &snapshot.lineages[0].1;
+    let publication = SchemaLineagePublication::author_from_prior(
+        &snapshot.schemas[0].schema,
+        &snapshot.genesis_physical_identities,
+        SchemaVersion::new(granted.clone()),
+        original.lens.clone(),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    snapshot.lineages[0].1 = publication.clone();
+    // The active bundle revokes the grant retained in the immutable receipt.
+    let denied = granted.without_permissions();
+    snapshot.schemas[1] = SchemaVersion::new(denied.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xca)).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    drop(edge);
+
+    let mut reopened = fresh_dynamic_edge_open(dir.path(), node(0xca))
+        .expect("replay must leave a reopenable catalogue");
+    assert_eq!(
+        reopened.catalogue.active_schema.compiled.public_schema(),
+        denied.public_schema()
+    );
+    assert_eq!(
+        reopened.catalogue_snapshot().unwrap().lineages[0].1,
+        publication
+    );
+    reopened
+        .apply_trusted_catalogue_snapshot_settled(snapshot)
+        .unwrap();
+    drop(reopened);
+    let reopened = fresh_dynamic_edge_open(dir.path(), node(0xca)).unwrap();
+    assert_eq!(
+        reopened.catalogue.active_schema.compiled.public_schema(),
+        denied.public_schema()
+    );
+}

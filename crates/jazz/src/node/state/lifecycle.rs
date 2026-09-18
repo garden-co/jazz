@@ -394,9 +394,13 @@ where
                     Self::validate_durable_staged_lineage(staged, &schemas)?;
                     match active_lineages.remove(&staged.publication.id) {
                         Some(sequence) if sequence == staged.catalogue_seq => {
-                            if schemas.get(&staged.publication.schema.id)
-                                != Some(&staged.publication.schema)
-                                || !active_lineage_targets.insert(staged.publication.schema.id)
+                            // Legacy receipts retain their original grants, while
+                            // activation stores permissions separately. Compare all
+                            // remaining schema metadata without reviving those grants.
+                            if schemas.get(&staged.publication.schema.id).is_none_or(|schema| {
+                                schema.schema.without_permissions()
+                                    != staged.publication.schema.schema.without_permissions()
+                            }) || !active_lineage_targets.insert(staged.publication.schema.id)
                             {
                                 return Err(Error::InvalidStoredValue(
                                     "catalogue bootstrap active lineage does not own its schema",

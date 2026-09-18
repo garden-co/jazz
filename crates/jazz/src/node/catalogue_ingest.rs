@@ -355,6 +355,11 @@ where
                 ],
             );
         }
+        // Retain the immutable lineage receipts, then write the selected
+        // structural payloads so first install and replay persist the same view.
+        for staged in &plan.activated_lineages {
+            Self::write_active_schema_lineage_to_batch(&mut batch, staged)?;
+        }
         for schema in plan.catalogue.catalogue_schemas.values() {
             batch.update(
                 "jazz_catalogue",
@@ -364,9 +369,6 @@ where
                     Value::Bytes(codec::encode_catalogue_schema(schema)?),
                 ],
             );
-        }
-        for staged in &plan.activated_lineages {
-            Self::write_active_schema_lineage_to_batch(&mut batch, staged)?;
         }
         for (schema_version, mapping) in &plan.catalogue.physical_mappings {
             let alias = plan.catalogue.schema_version_aliases[schema_version];
