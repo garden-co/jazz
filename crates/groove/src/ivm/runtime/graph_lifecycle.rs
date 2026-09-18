@@ -221,8 +221,8 @@ impl IvmRuntime {
                 .retain(|key, _| !removed.contains(&key.node));
             self.arrangement_states
                 .retain(|key, _| !removed.contains(&key.input));
-            self.eval_memo.retain(|key, _| !removed.contains(&key.node));
             for node in removed {
+                self.remove_node_eval_memo(node);
                 self.arrangement_keys_by_input.remove(&node);
                 self.node_meta.remove(&node);
             }
