@@ -19,6 +19,9 @@ import {
   readPublicMembershipHistory,
   replayAccountMembership,
 } from "./public-membership.js";
+import { Groups } from "./group-lifecycle.js";
+import type { GroupRecoveryPath } from "./group-lifecycle.js";
+import type { GroupTables } from "./groups.js";
 import type { JazzCrypto } from "./types.js";
 
 export type E2eeConfig = {
@@ -50,6 +53,7 @@ export type RecoveryStatus = Readonly<{
     validation: "not-checked" | "validated";
     validatedRootId?: string;
   };
+  groups: { validation: "not-checked" } | { validation: "checked"; paths: GroupRecoveryPath[] };
 }>;
 
 /** @internal Only verified account-context creation binds lifecycle state. */
@@ -67,11 +71,50 @@ export function e2eeForDb(db: Db): E2ee {
 /** First-device activation; approval and rotation are separate lifecycle operations. */
 export class E2ee {
   private approval: DeviceApproval | undefined;
+  private groupLifecycle: Groups | undefined;
   private closed = false;
   private preparation: Promise<void> | undefined;
   private readonly scope: string;
   private readonly app: DeviceTables;
+  readonly groups = {
+    leave: (groupId: string): { wait(): Promise<void> } =>
+      this.groups.remove(groupId, this.account.id),
+    remove: (groupId: string, memberId: string): { wait(): Promise<void> } => {
+      const completion = (async () => {
+        await this.prepare();
+        return this.requireGroups().remove(groupId, memberId);
+      })();
+      completion.catch(() => {});
+      return { wait: () => completion };
+    },
+    add: (groupId: string, memberId: string): { wait(): Promise<void> } => {
+      const completion = (async () => {
+        await this.prepare();
+        return this.requireGroups().add(groupId, memberId);
+      })();
+      completion.catch(() => {});
+      return { wait: () => completion };
+    },
+    create: (): { id: string; wait(): Promise<{ id: string }> } => {
+      const id = crypto.randomUUID();
+      const completion = (async () => {
+        await this.prepare();
+        return this.requireGroups().create(id);
+      })();
+      completion.catch(() => {});
+      return { id, wait: () => completion };
+    },
+  };
 
+  async explain(target: { groupId: string }) {
+    await this.prepare();
+    return this.requireGroups().explain(target.groupId);
+  }
+
+  private requireGroups(): Groups {
+    if (!this.groupLifecycle) throw new Error("E2EE groups require groupSchema in the application");
+    return this.groupLifecycle;
+  }
   readonly recovery = {
     status: async (material?: string): Promise<RecoveryStatus> => {
       this.assertOpen();
@@ -104,6 +147,7 @@ export class E2ee {
           recoveryRootIds: membership?.recoveryRoots.map((root) => root.id).sort() ?? [],
           validation: "not-checked",
         },
+        groups: { validation: "not-checked" },
       };
     },
     use: (material?: string): { wait(): Promise<void> } => {
@@ -111,6 +155,7 @@ export class E2ee {
         await this.prepare();
         if (material !== undefined) {
           await this.approval!.useRecovery(material);
+          await this.groupLifecycle?.restoreRecovery(material);
         } else await this.restoreProtectedRecovery();
       })();
       completion.catch(() => {});
@@ -120,6 +165,7 @@ export class E2ee {
       const completion = (async () => {
         await this.prepare();
         const result = await this.approval!.createRecovery();
+        await this.groupLifecycle?.protectRecovery(result.material);
         if (this.account.identity.issuer === "urn:jazz:local-first") {
           const secret = parseAuthSecret(exportLocalFirstSecret(this.account));
           try {
@@ -166,13 +212,31 @@ export class E2ee {
     );
     const account = await reader.inspectRecovery(material);
     this.assertOpen();
-    return { configured: true, account };
+    let groups: Groups | undefined;
+    let groupCoverage: RecoveryStatus["groups"] = { validation: "not-checked" };
+    if ("__e2ee_groups" in this.app && "__e2ee_group_recovery_deliveries" in this.app) {
+      groups = new Groups(
+        this.db,
+        this.account.id,
+        this.scope,
+        this.app as DeviceTables & GroupTables,
+        keys,
+        signer,
+        () => this.assertOpen(),
+        (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+      );
+      const paths = await groups.inspectRecovery(material, account.epochId);
+      this.assertOpen();
+      groupCoverage = { validation: "checked", paths };
+    }
+    return { configured: true, account, groups: groupCoverage };
   }
 
   private restoreProtectedRecovery(): Promise<void> {
     return this.withProtectedRecovery(async (material) => {
       await this.approval!.useRecovery(material);
       this.assertOpen();
+      await this.groupLifecycle?.restoreRecovery(material);
     });
   }
 
@@ -390,6 +454,24 @@ export class E2ee {
         this.app,
         { id: device.id, load: loadDevice },
       );
+      if ("__e2ee_groups" in this.app && "__e2ee_group_deliveries" in this.app) {
+        this.groupLifecycle = new Groups(
+          this.db,
+          this.account.id,
+          this.scope,
+          this.app as DeviceTables & GroupTables,
+          envelope,
+          signer,
+          () => this.assertOpen(),
+          (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+          {
+            store: this.config.store,
+            isKnownRevoked: () => this.approval!.isKnownRevoked(),
+            load: loadDevice,
+            states: (transaction) => this.approval!.deviceStates(transaction),
+          },
+        );
+      }
     } finally {
       device.privateKey.fill(0);
       device.signing.privateKey.fill(0);
