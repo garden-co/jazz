@@ -6,7 +6,8 @@ import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { openRecoveryMaterial, protectRecoveryMaterial } from "./recovery-protection.js";
 import { E2eeRecoveryError } from "./recovery-error.js";
 import type { AccountHandle } from "../accounts/state.js";
-import type { Db } from "../runtime/db.js";
+import { beginDbTransactionAfter, prepareDbTransaction } from "../runtime/db.js";
+import type { Db, TableProxy, Transaction, E2eeTransactionScope } from "../runtime/db.js";
 import { deviceRequestApp, deviceRequestSchema } from "./device-requests.js";
 import type { DeviceTables } from "./device-requests.js";
 import { encodeEnvelope } from "./envelope.js";
@@ -22,6 +23,9 @@ import {
 import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
 import type { GroupTables } from "./groups.js";
+import { Spaces } from "./space-lifecycle.js";
+import type { SpaceRecoveryPath } from "./space-lifecycle.js";
+import type { SpaceTables } from "./spaces.js";
 import type { JazzCrypto } from "./types.js";
 
 export type E2eeConfig = {
@@ -43,6 +47,61 @@ export type DeviceInfo = Readonly<{
 
 const contexts = new WeakMap<Db, E2ee>();
 
+const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
+const initialSpacePrerequisites = new WeakMap<
+  Db,
+  (recipientIds?: readonly string[]) => Promise<void>
+>();
+
+/** @internal Cold recipient discovery precedes the immutable transaction snapshot. */
+export function beginInitialSpaceTransaction(
+  db: Db,
+  recipientIds?: readonly string[],
+): Transaction<"exclusive"> {
+  const recipients = recipientIds?.slice();
+  return beginDbTransactionAfter(db, async () => {
+    e2eeForDb(db);
+    await initialSpacePrerequisites.get(db)!(recipients);
+  });
+}
+
+/** @internal Not exported from the package API; used by transaction preparation. */
+export async function prepareInitialSpaceForTransaction<T, Init>(
+  db: Db,
+  tx: Transaction<"exclusive">,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  prepareData: Parameters<Spaces["prepareInitial"]>[3],
+  recipientIds?: readonly string[],
+): Promise<void> {
+  const recipients = recipientIds?.slice();
+  try {
+    await prepareDbTransaction(tx, async (prepared) => {
+      await prepareInitialSpaceRows(db, prepared, scope, identifier, prepareData, recipients);
+    });
+  } catch (error) {
+    try {
+      await tx.rollback();
+    } catch {
+      // Preserve the preparation error, including failures before keys are loaded.
+    }
+    throw error;
+  }
+}
+
+/** @internal Reuses an already-prepared transaction; never queues behind itself. */
+export async function prepareInitialSpaceRows<T, Init>(
+  db: Db,
+  tx: E2eeTransactionScope,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  prepareData: Parameters<Spaces["prepareInitial"]>[3],
+  recipientIds?: readonly string[],
+): Promise<void> {
+  e2eeForDb(db);
+  await initialSpacePreparers.get(db)!(tx, scope, identifier, prepareData, recipientIds);
+}
+
 export type RecoveryStatus = Readonly<{
   configured: boolean;
   account: {
@@ -54,6 +113,7 @@ export type RecoveryStatus = Readonly<{
     validatedRootId?: string;
   };
   groups: { validation: "not-checked" } | { validation: "checked"; paths: GroupRecoveryPath[] };
+  spaces: { validation: "not-checked" } | { validation: "checked"; paths: SpaceRecoveryPath[] };
 }>;
 
 /** @internal Only verified account-context creation binds lifecycle state. */
@@ -72,6 +132,7 @@ export function e2eeForDb(db: Db): E2ee {
 export class E2ee {
   private approval: DeviceApproval | undefined;
   private groupLifecycle: Groups | undefined;
+  private spaceLifecycle: Spaces | undefined;
   private closed = false;
   private preparation: Promise<void> | undefined;
   private readonly scope: string;
@@ -106,9 +167,44 @@ export class E2ee {
     },
   };
 
-  async explain(target: { groupId: string }) {
+  readonly spaces = {
+    revoke: <T, Init>(
+      scope: TableProxy<T, Init>,
+      identifier: string,
+      recipientId: string,
+    ): { wait(): Promise<void> } => {
+      const completion = (async () => {
+        await this.prepare();
+        return this.requireSpaces().revoke(scope, identifier, recipientId);
+      })();
+      completion.catch(() => {});
+      return { wait: () => completion };
+    },
+    grant: <T, Init>(
+      scope: TableProxy<T, Init>,
+      identifier: string,
+      recipientId: string,
+    ): { wait(): Promise<void> } => {
+      const completion = (async () => {
+        await this.prepare();
+        return this.requireSpaces().grant(scope, identifier, recipientId);
+      })();
+      completion.catch(() => {});
+      return { wait: () => completion };
+    },
+  };
+
+  async explain<T, Init>(
+    target: { groupId: string } | { scope: TableProxy<T, Init>; identifier: string },
+  ) {
     await this.prepare();
+    if ("scope" in target) return this.requireSpaces().explain(target.scope, target.identifier);
     return this.requireGroups().explain(target.groupId);
+  }
+
+  private requireSpaces(): Spaces {
+    if (!this.spaceLifecycle) throw new Error("E2EE spaces require spaceSchema in the application");
+    return this.spaceLifecycle;
   }
 
   private requireGroups(): Groups {
@@ -148,6 +244,7 @@ export class E2ee {
           validation: "not-checked",
         },
         groups: { validation: "not-checked" },
+        spaces: { validation: "not-checked" },
       };
     },
     use: (material?: string): { wait(): Promise<void> } => {
@@ -156,6 +253,7 @@ export class E2ee {
         if (material !== undefined) {
           await this.approval!.useRecovery(material);
           await this.groupLifecycle?.restoreRecovery(material);
+          await this.spaceLifecycle?.restoreRecovery(material);
         } else await this.restoreProtectedRecovery();
       })();
       completion.catch(() => {});
@@ -166,6 +264,7 @@ export class E2ee {
         await this.prepare();
         const result = await this.approval!.createRecovery();
         await this.groupLifecycle?.protectRecovery(result.material);
+        await this.spaceLifecycle?.protectRecovery(result.material);
         if (this.account.identity.issuer === "urn:jazz:local-first") {
           const secret = parseAuthSecret(exportLocalFirstSecret(this.account));
           try {
@@ -229,7 +328,24 @@ export class E2ee {
       this.assertOpen();
       groupCoverage = { validation: "checked", paths };
     }
-    return { configured: true, account, groups: groupCoverage };
+    let spaceCoverage: RecoveryStatus["spaces"] = { validation: "not-checked" };
+    if ("__e2ee_spaces" in this.app && "__e2ee_space_recovery_deliveries" in this.app) {
+      const spaces = new Spaces(
+        this.db,
+        this.account.id,
+        this.app as DeviceTables & SpaceTables,
+        keys,
+        signer,
+        (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+        () => this.assertOpen(),
+        undefined,
+        groups,
+      );
+      const paths = await spaces.inspectRecovery(material, account.epochId);
+      this.assertOpen();
+      spaceCoverage = { validation: "checked", paths };
+    }
+    return { configured: true, account, groups: groupCoverage, spaces: spaceCoverage };
   }
 
   private restoreProtectedRecovery(): Promise<void> {
@@ -237,6 +353,7 @@ export class E2ee {
       await this.approval!.useRecovery(material);
       this.assertOpen();
       await this.groupLifecycle?.restoreRecovery(material);
+      await this.spaceLifecycle?.restoreRecovery(material);
     });
   }
 
@@ -325,6 +442,14 @@ export class E2ee {
     }
     this.app = app as DeviceTables;
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
+    initialSpacePrerequisites.set(db, async (recipientIds) => {
+      await this.prepare();
+      await this.requireSpaces().warmInitialRecipients(recipientIds);
+    });
+    initialSpacePreparers.set(db, async (...args) => {
+      await this.prepare();
+      await this.requireSpaces().prepareInitial(...args);
+    });
     db.onShutdown(() => {
       this.closed = true;
     });
@@ -470,6 +595,29 @@ export class E2ee {
             load: loadDevice,
             states: (transaction) => this.approval!.deviceStates(transaction),
           },
+        );
+      }
+      if (
+        "__e2ee_spaces" in this.app &&
+        "__e2ee_space_grants" in this.app &&
+        "__e2ee_space_successors" in this.app &&
+        "__e2ee_space_deliveries" in this.app
+      ) {
+        this.spaceLifecycle = new Spaces(
+          this.db,
+          this.account.id,
+          this.app as DeviceTables & SpaceTables,
+          envelope,
+          signer,
+          (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+          () => this.assertOpen(),
+          {
+            store: this.config.store,
+            isKnownRevoked: () => this.approval!.isKnownRevoked(),
+            load: loadDevice,
+            states: (transaction) => this.approval!.deviceStates(transaction),
+          },
+          this.groupLifecycle,
         );
       }
     } finally {
