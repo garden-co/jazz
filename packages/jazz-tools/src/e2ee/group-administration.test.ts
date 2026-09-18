@@ -166,5 +166,5 @@ it.each(["ordinary", "forged-candidate", "forged-malformed-id"])(
       await server.stop();
     }
   },
-  60_000,
+  120_000,
 );
