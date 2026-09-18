@@ -1966,13 +1966,29 @@ fn register_local_fate_route_state(
         return;
     }
 
+    let held_fate = if !replay_ready {
+        routes.get(&tx_id).and_then(|pending| {
+            pending.iter().find_map(|candidate| {
+                let live_same_author = !candidate.replay_ready
+                    && candidate.replay_author == replay_author
+                    && candidate.queue.upgrade().is_some();
+                live_same_author
+                    .then(|| candidate.held_fate.as_ref())
+                    .flatten()
+                    .filter(|fate| local_fate_is_terminal(fate))
+                    .cloned()
+            })
+        })
+    } else {
+        None
+    };
     routes.entry(tx_id).or_default().push(LocalFateRoute {
         queue: Rc::downgrade(queue),
         local_acknowledged,
         replay_ready,
         replay_author,
         replay_unit,
-        held_fate: None,
+        held_fate,
     });
 }
 
