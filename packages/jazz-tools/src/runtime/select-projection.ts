@@ -1,4 +1,5 @@
 import type { WasmSchema } from "../drivers/types.js";
+import { encryptedSchemas } from "../e2ee/encrypted-schema.js";
 
 export const HIDDEN_INCLUDE_COLUMN_PREFIX = "__jazz_include_";
 
@@ -11,7 +12,7 @@ export function resolveSelectedColumns(
   schema: WasmSchema,
   projection: readonly string[] | undefined,
 ): string[] {
-  const table = schema[tableName];
+  const table = encryptedSchemas.get(schema)?.logical[tableName] ?? schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
