@@ -19,6 +19,11 @@ import type {
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
+import { encryptedSchemas } from "../e2ee/encrypted-schema.js";
+import { applyDeviceRequestPermissions } from "../e2ee/device-policy.js";
+import { applyGroupTopologyPermissions, groupTopologyTables } from "../e2ee/group-policy.js";
+import { groupSchema, spaceSchema } from "../e2ee/managed-schema.js";
+import { permissionDefaults } from "../schema-permissions.js";
 
 type QueryBuilderLike = {
   _rowType: unknown;
@@ -1003,8 +1008,60 @@ export function definePermissions<TApp extends AppLike>(
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
+  let managed: CompiledPermissions = {};
+  const encrypted = "wasmSchema" in app && encryptedSchemas.has(app.wasmSchema as WasmSchema);
+  if (encrypted) {
+    applyDeviceRequestPermissions(
+      ctx as unknown as Parameters<typeof applyDeviceRequestPermissions>[0],
+    );
+    managed = compileRules(rules, fkReferencesByTable, relationsByTable);
+    rules.length = 0;
+    seenRules.clear();
+  }
   factory(ctx);
-  return compileRules(rules, fkReferencesByTable, relationsByTable);
+  const application = compileRules(rules, fkReferencesByTable, relationsByTable);
+  const defaults: CompiledPermissions = {};
+  for (const table of Object.keys(application)) {
+    if (Object.hasOwn(managed, table)) {
+      throw new Error(`Cannot override package-owned E2EE permissions for "${table}"`);
+    }
+  }
+  if (encrypted) {
+    // Keep fallbacks out of the explicit table map: partial policy objects are
+    // composed with spread, which must not erase another object's write rules.
+    for (const table of [...Object.keys(groupSchema), ...Object.keys(spaceSchema)]) {
+      const denied = compileCondition(
+        resolveWhereInput(neverCondition(), tablesWithTypeColumn.has(table)),
+        table,
+        fkReferencesByTable,
+        relationsByTable,
+      );
+      defaults[table] = {
+        select: { using: denied },
+        insert: { with_check: denied },
+        update: { using: denied, with_check: denied },
+        delete: { using: denied },
+      };
+    }
+    // Compile package-owned reads separately; retain every application write rule.
+    const topologyRules: RuleLike[] = [];
+    applyGroupTopologyPermissions({
+      ...ctx,
+      policy: buildPolicyContext(
+        [...groupTopologyTables],
+        relationsByTable,
+        tablesWithTypeColumn,
+        (rule) => topologyRules.push(rule),
+      ),
+    } as unknown as Parameters<typeof applyGroupTopologyPermissions>[0]);
+    const topology = compileRules(topologyRules, fkReferencesByTable, relationsByTable);
+    for (const table of groupTopologyTables) {
+      defaults[table] = { ...defaults[table], select: topology[table]!.select };
+      if (Object.hasOwn(application, table))
+        application[table] = { ...application[table], select: topology[table]!.select };
+    }
+  }
+  return encrypted ? { [permissionDefaults]: defaults, ...managed, ...application } : application;
 }
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
