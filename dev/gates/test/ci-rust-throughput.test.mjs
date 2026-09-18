@@ -1911,6 +1911,53 @@ test("parallel TypeScript runner waits for both suites and combines their failur
   }
 });
 
+test("bounded browser runner completes dependent suites after a failure", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-browser-continuation-"));
+  const packages = ["jazz-tools", "inspector", "auth-workos-chat"];
+  try {
+    fs.writeFileSync(path.join(fixture, "package.json"), JSON.stringify({ private: true }));
+    fs.writeFileSync(path.join(fixture, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+    for (const name of packages) {
+      const directory = path.join(fixture, "packages", name);
+      const marker = path.join(fixture, `${name}-completed`);
+      const command = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "completed"); process.exit(${name === "jazz-tools" ? 7 : 0});`;
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(
+        path.join(directory, "package.json"),
+        JSON.stringify({
+          name,
+          version: "0.0.0",
+          private: true,
+          dependencies: name === "jazz-tools" ? {} : { "jazz-tools": "workspace:*" },
+          scripts: { "test:browser": `node -e ${JSON.stringify(command)}` },
+        }),
+      );
+    }
+    const env = {
+      ...process.env,
+      JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
+      JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
+      JAZZ_NODE_TEST_COMMAND: "true",
+      RUNNER_TEMP: fixture,
+    };
+    delete env.JAZZ_BROWSER_TEST_COMMAND;
+    const result = spawnSync("bash", [path.join(root, "dev/gates/run-ts-tests.sh")], {
+      cwd: fixture,
+      encoding: "utf8",
+      env,
+      timeout: 30_000,
+    });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.deepEqual(
+      packages.filter((name) => fs.existsSync(path.join(fixture, `${name}-completed`))),
+      packages,
+      "every selected browser suite must finish even when its workspace dependency fails",
+    );
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("a missing prepared native artifact prevents both TypeScript suites from starting", () => {
   const runner = path.join(root, "dev/gates/run-ts-tests.sh");
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-prebuild-"));
