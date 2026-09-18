@@ -757,6 +757,31 @@ where
         .map_err(Into::into)
     }
 
+    /// Resolve the observed authority settlement of a row returned by this Db.
+    ///
+    /// Binding-only, opt-in metadata: ordinary reads do not perform this lookup.
+    /// The position identifies the returned content version's transaction, not
+    /// the row's creation time or a proof of complete/current query coverage.
+    /// Callers must retain the read's separate authoritative snapshot contract.
+    /// Pending, rejected, unknown and synthetic rows have no accepted position.
+    /// Rows must come from this Db; their internal node aliases are local.
+    #[doc(hidden)]
+    pub async fn row_settlement_for_binding(
+        &self,
+        row: &CurrentRow,
+    ) -> Result<Option<(TxId, GlobalTime)>, Error> {
+        let mut node = self.node.node.lock().await;
+        let Some(tx_id) = node.current_row_tx_id(row).await else {
+            return Ok(None);
+        };
+        let Some((Fate::Accepted, Some(position), DurabilityTier::Global)) =
+            node.transaction_state(tx_id).await
+        else {
+            return Ok(None);
+        };
+        Ok(Some((tx_id, position)))
+    }
+
     /// Resolve physical indirect scalars before a subscription event crosses
     /// a language binding boundary.
     #[doc(hidden)]

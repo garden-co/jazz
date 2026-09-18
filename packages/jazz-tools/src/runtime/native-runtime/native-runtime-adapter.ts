@@ -217,6 +217,9 @@ type NativeDb = {
     connected: boolean;
   };
   registerSchema(schema: Uint8Array): NativeDb;
+  /** Empty bytes mean absent; otherwise the portable table UUID is exactly 16 bytes. */
+  tableIdentity?(table: string): NativeReadResult | Promise<NativeReadResult>;
+  columnIdentity?(table: string, column: string): NativeReadResult | Promise<NativeReadResult>;
   beginTransaction(
     openTransactionId: string,
     kind: TransactionKind,
@@ -225,6 +228,14 @@ type NativeDb = {
   ): void;
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openTransactionId: string): void;
+  allSettlementMetadata?(
+    query: Uint8Array,
+    opts: unknown,
+    openTransactionId: OpenTransactionId,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+    includeRows?: boolean,
+  ): NativeReadResult | Promise<NativeReadResult>;
   all(
     query: Uint8Array,
     opts: unknown,
@@ -758,6 +769,24 @@ export class NativeRuntimeAdapter implements Runtime {
       selfSignedClientProof: opts?.selfSignedClientProof,
       scopeIsolatedRelay: opts?.scopeIsolatedRelay,
     });
+  }
+
+  async tableIdentity(table: string): Promise<string | null> {
+    if (!this.db.tableIdentity)
+      throw new Error("Runtime does not expose catalogue table identities");
+    const bytes = await this.awaitNativeRead(this.db.tableIdentity(table));
+    if (bytes.length === 0) return null;
+    if (bytes.length !== 16) throw new Error("Invalid catalogue table identity length");
+    return formatUuid(bytes);
+  }
+
+  async columnIdentity(table: string, column: string): Promise<string | null> {
+    if (!this.db.columnIdentity)
+      throw new Error("Runtime does not expose catalogue column identities");
+    const bytes = await this.awaitNativeRead(this.db.columnIdentity(table, column));
+    if (bytes.length === 0) return null;
+    if (bytes.length !== 16) throw new Error("Invalid catalogue column identity length");
+    return formatUuid(bytes);
   }
 
   registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
@@ -1867,12 +1896,17 @@ export class NativeRuntimeAdapter implements Runtime {
     optionsJson?: string | null,
   ): Promise<unknown> {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
-    assertSupportedReadOptions(tier, optionsJson);
+    const settlementMetadata = assertSupportedReadOptions(tier, optionsJson);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
+    if (settlementMetadata && (pendingTx?.kind !== "exclusive" || !this.db.allSettlementMetadata))
+      throw new Error("E2EE settlement reads require a supported exclusive transaction");
+    // The Rust serialized-query boundary rejects relation reads in transactions.
+    if (settlementMetadata && queryHasArraySubqueries(coreQueryJson))
+      throw new Error("E2EE settlement reads require ordinary stored rows");
     // Browser runtimes still materialize row bodies from their in-memory
     // cache, but an Edge/Global read must keep its requested tier while doing
     // so. The settled membership from the worker is the authorization
@@ -1890,6 +1924,35 @@ export class NativeRuntimeAdapter implements Runtime {
       this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     }
     this.emitQueryCoverageTrace("attach");
+    if (settlementMetadata && pendingTx && this.db.allSettlementMetadata) {
+      const bytes = await this.awaitNativeRead(
+        this.db.allSettlementMetadata(
+          query,
+          opts,
+          pendingTx.id,
+          this.nativeReadAuthor(readContext),
+          this.nativeReadClaims(readContext),
+          settlementMetadata === "with-rows",
+        ),
+        transportTier ?? undefined,
+      );
+      this.emitQueryCoverageTrace("covered");
+      if (settlementMetadata !== "with-rows") return JSON.parse(textDecoder.decode(bytes));
+      if (bytes.length < 4) throw new Error("Invalid E2EE settled-row frame");
+      const length = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(
+        0,
+        true,
+      );
+      if (length > bytes.length - 4) throw new Error("Invalid E2EE settled-row frame");
+      return {
+        settlements: JSON.parse(textDecoder.decode(bytes.subarray(4, 4 + length))),
+        rows: rowsFromBatches(
+          readRowBatches(bytes.subarray(4 + length)),
+          this.schema,
+          subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+        ),
+      };
+    }
     if (queryHasArraySubqueries(coreQueryJson)) {
       if (pendingTx) {
         const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
@@ -4162,11 +4225,14 @@ function readPropagationIsFull(optionsJson?: string | null): boolean {
   }
 }
 
-function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
+function assertSupportedReadOptions(
+  tier?: string | null,
+  optionsJson?: string | null,
+): boolean | "with-rows" {
   if (tier != null && !["local", "edge", "global"].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
-  if (optionsJson != null) readSupportedReadOptions(optionsJson);
+  return optionsJson != null && readSupportedReadOptions(optionsJson);
 }
 
 function parsedAccountId(value: unknown): string | undefined {
@@ -4257,7 +4323,7 @@ function closeSubscriptionSource(source: SubscriptionSource): void {
   source.close();
 }
 
-function readSupportedReadOptions(optionsJson: string): void {
+function readSupportedReadOptions(optionsJson: string): boolean | "with-rows" {
   const parsed = JSON.parse(optionsJson) as Record<string, unknown>;
   const propagation = parsed.propagation;
   if (propagation != null && propagation !== "full" && propagation !== "local-only") {
@@ -4265,6 +4331,9 @@ function readSupportedReadOptions(optionsJson: string): void {
       `Native runtime does not support read propagation '${String(propagation)}' yet`,
     );
   }
+  return parsed.settlement_metadata === "with-rows"
+    ? "with-rows"
+    : parsed.settlement_metadata === true;
 }
 
 function queryIncludesDeleted(queryJson: string): boolean {
