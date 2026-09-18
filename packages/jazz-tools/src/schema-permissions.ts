@@ -16,7 +16,20 @@ import type {
   TablePolicies,
 } from "./schema.js";
 
-export type CompiledPermissionsMap = Record<string, TablePolicies>;
+// Enumerable symbol metadata survives policy-object spread without overwriting
+// explicit table rules. Materialise it before validation or runtime encoding.
+export const permissionDefaults = Symbol.for("jazz.permissions.defaults");
+export type CompiledPermissionsMap = Record<string, TablePolicies> & {
+  [permissionDefaults]?: Record<string, TablePolicies>;
+};
+
+function materializePermissionDefaults(
+  permissions: CompiledPermissionsMap,
+): CompiledPermissionsMap {
+  return permissions[permissionDefaults]
+    ? { ...permissions[permissionDefaults], ...permissions }
+    : permissions;
+}
 export type ExplicitPolicyOperation = "read" | "insert" | "update" | "delete";
 export type PolicyDiagnosticOperation = ExplicitPolicyOperation | "table";
 
@@ -474,7 +487,7 @@ function validatePermissionTables(
   compiledPermissions: CompiledPermissionsMap,
 ): void {
   const knownTables = new Set(schemaTableNames);
-  const unknownTables = Object.keys(compiledPermissions).filter(
+  const unknownTables = Object.keys(materializePermissionDefaults(compiledPermissions)).filter(
     (tableName) => !knownTables.has(tableName),
   );
 
@@ -533,6 +546,7 @@ export function collectMissingExplicitPolicyDiagnostics(
   schemaTableNames: readonly string[],
   compiledPermissions?: CompiledPermissionsMap,
 ): MissingExplicitPolicyDiagnostic[] {
+  if (compiledPermissions) compiledPermissions = materializePermissionDefaults(compiledPermissions);
   const operations: ExplicitPolicyOperation[] = ["read", "insert", "update", "delete"];
 
   return schemaTableNames.flatMap<MissingExplicitPolicyDiagnostic>((tableName) => {
@@ -564,7 +578,9 @@ export function normalizePermissionsForWasm(
   compiledPermissions: CompiledPermissionsMap,
 ): Record<string, WasmTablePolicies> {
   const normalized: Record<string, WasmTablePolicies> = {};
-  for (const [tableName, tablePolicies] of Object.entries(compiledPermissions)) {
+  for (const [tableName, tablePolicies] of Object.entries(
+    materializePermissionDefaults(compiledPermissions),
+  )) {
     normalized[tableName] = {
       select: normalizeOperationPolicyForWasm(tablePolicies.select),
       insert: normalizeOperationPolicyForWasm(tablePolicies.insert),
@@ -579,6 +595,7 @@ export function mergePermissionsIntoSchema(
   schema: Schema,
   compiledPermissions: CompiledPermissionsMap,
 ): Schema {
+  compiledPermissions = materializePermissionDefaults(compiledPermissions);
   validatePermissionTables(
     schema.tables.map((table) => table.name),
     compiledPermissions,

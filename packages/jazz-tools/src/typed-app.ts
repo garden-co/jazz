@@ -14,6 +14,12 @@ import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
+import { deviceRequestSchema, groupSchema, spaceSchema } from "./e2ee/managed-schema.js";
+import {
+  encryptedSchemas,
+  encryptedTableToPhysical,
+  type EncryptionDeclaration,
+} from "./e2ee/encrypted-schema.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import {
   PROVENANCE_MAGIC_COLUMNS,
@@ -56,13 +62,28 @@ type ValidateSchemaColumnNames<TSchema extends SchemaDefinition> = {
   [TTable in keyof TSchema]: TSchema[TTable] extends DefinedTable ? unknown : NoExplicitIdColumn;
 };
 export type Simplify<T> = { [K in keyof T]: T[K] } & {};
+type ManagedEncryptionSchema = typeof deviceRequestSchema & typeof groupSchema & typeof spaceSchema;
+type AutomaticEncryptionSchema<TSchema extends SchemaDefinition> = [
+  {
+    [K in keyof TSchema]: TSchema[K] extends DefinedTable<any, any, infer TEncryption>
+      ? [TEncryption] extends [EncryptionDeclaration]
+        ? K
+        : never
+      : never;
+  }[keyof TSchema],
+] extends [never]
+  ? {}
+  : ManagedEncryptionSchema;
+
 export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
   [TTable in keyof TSchema]: NormalizeTableDefinition<TSchema[TTable]>;
 }>;
 
 declare const definedSchemaBrand: unique symbol;
+declare const automaticEncryptionSchemaBrand: unique symbol;
 export interface Schema<TSchema extends SchemaDefinition = SchemaDefinition> {
   readonly [definedSchemaBrand]: CompactSchema<TSchema>;
+  readonly [automaticEncryptionSchemaBrand]: AutomaticEncryptionSchema<TSchema>;
 }
 
 export type DefinedSchema<TSchema extends SchemaDefinition = SchemaDefinition> = Schema<TSchema>;
@@ -103,10 +124,12 @@ type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
     };
 
 type NormalizedSchema<TSchema extends SchemaLike> =
-  TSchema extends Schema<infer TDefinition>
-    ? CompactSchema<TDefinition>
+  TSchema extends Schema<any>
+    ? CompactSchema<
+        TSchema[typeof definedSchemaBrand] & TSchema[typeof automaticEncryptionSchemaBrand]
+      >
     : TSchema extends SchemaDefinition
-      ? CompactSchema<TSchema>
+      ? CompactSchema<TSchema & AutomaticEncryptionSchema<TSchema>>
       : never;
 
 type TableName<TSchema extends SchemaLike> = Extract<keyof NormalizedSchema<TSchema>, string>;
@@ -912,6 +935,20 @@ function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value;
 }
 
+function rejectNonFiniteEncryptedPredicate(value: unknown): void {
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    throw new Error("Non-finite numbers are not supported in encrypted query predicates");
+  }
+  if (
+    value &&
+    typeof value === "object" &&
+    !(value instanceof Date) &&
+    !ArrayBuffer.isView(value)
+  ) {
+    for (const child of Object.values(value)) rejectNonFiniteEncryptedPredicate(child);
+  }
+}
+
 function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
   return {
     ...(relation.table ? { table: relation.table } : {}),
@@ -1169,6 +1206,15 @@ export class TypedTableQueryBuilder<
   }
 
   _build(): string {
+    const encrypted = encryptedSchemas.get(this._schema)?.tables.get(this._table);
+    if (encrypted) {
+      if (this._gatherVal) throw new Error("Unsupported encrypted query plan: gather");
+      for (const condition of this._conditions) {
+        if (encrypted.columns.includes(condition.column)) {
+          rejectNonFiniteEncryptedPredicate(condition.value);
+        }
+      }
+    }
     return JSON.stringify(
       {
         table: this._table,
@@ -1223,7 +1269,8 @@ export class TypedTableQueryBuilder<
 
   private _whereConditions(conditions: Record<string, unknown>): BuiltCondition[] {
     const built: BuiltCondition[] = [];
-    const tableSchema = this._schema[this._table];
+    const tableSchema =
+      encryptedSchemas.get(this._schema)?.logical[this._table] ?? this._schema[this._table];
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
       const declaredColumn = tableSchema?.columns.find((column) => column.name === key);
@@ -1383,7 +1430,20 @@ export type TypedApp<TSchema extends SchemaLike> = App<TSchema>;
 type SchemaSlice<
   TSchema extends SchemaLike,
   TTables extends readonly TableName<TSchema>[],
-> = Schema<Pick<NormalizedSchema<TSchema>, TTables[number]>>;
+> = Schema<
+  Pick<
+    NormalizedSchema<TSchema>,
+    | TTables[number]
+    | Extract<
+        keyof (TSchema extends Schema<any>
+          ? TSchema[typeof automaticEncryptionSchemaBrand]
+          : TSchema extends SchemaDefinition
+            ? AutomaticEncryptionSchema<TSchema>
+            : {}),
+        TableName<TSchema>
+      >
+  >
+>;
 
 export interface SliceableApp<TSchema extends SchemaLike> {
   readonly wasmSchema: WasmSchema;
@@ -1580,6 +1640,53 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
   return definition as unknown as Schema<TSchema>;
 }
 
+/** Internal: keep app compilation and migration witnesses on the same managed tables. */
+export function withManagedEncryptionTables(definition: SchemaDefinition): SchemaDefinition {
+  if (
+    Object.values(definition).some(
+      (table) => table instanceof DefinedTable && table.encryption !== undefined,
+    )
+  ) {
+    const managed = { ...deviceRequestSchema, ...groupSchema, ...spaceSchema };
+    for (const [name, table] of Object.entries(managed)) {
+      if (Object.hasOwn(definition, name) && definition[name] !== table) {
+        throw new Error(`Cannot replace managed E2EE table "${name}"`);
+      }
+    }
+    definition = { ...managed, ...definition };
+  }
+  return definition;
+}
+
+function compileAppSchema(definition: SchemaDefinition) {
+  definition = withManagedEncryptionTables(definition);
+  const logical = definitionToSchema(definition);
+  const encrypted = new Map<string, EncryptionDeclaration & { scope: string }>();
+  for (const table of logical.tables) {
+    const source = definition[table.name] as DefinedTable | undefined;
+    const declaration = source?.__jazzTableDefinition === true ? source.encryption : undefined;
+    if (!declaration) continue;
+    const scope = table.columns.find((column) => column.name === declaration.space)?.references;
+    if (!scope || !logical.tables.some((candidate) => candidate.name === scope))
+      throw new Error(`Unknown encryption scope for table "${table.name}"`);
+    encrypted.set(table.name, { ...declaration, scope });
+  }
+  if (!encrypted.size) return { schema: logical, wasmSchema: schemaToWasm(logical) };
+  const schema: SchemaAst = {
+    ...logical,
+    tables: logical.tables.map((table) =>
+      encryptedTableToPhysical(table, encrypted.get(table.name)),
+    ),
+  };
+  const wasmSchema = schemaToWasm(schema);
+  encryptedSchemas.set(wasmSchema, {
+    logical: schemaToWasm(logical),
+    tables: encrypted,
+    scopes: new Set([...encrypted.values()].map((table) => table.scope)),
+  });
+  return { schema, wasmSchema };
+}
+
 /**
  * Create an app from a schema definition.
  *
@@ -1603,14 +1710,8 @@ export function defineApp(
   definition: SchemaDefinition | Schema<any>,
 ): App<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
-  const schema = definitionToSchema(normalizedDefinition);
-  const wasmSchema = schemaToWasm(schema);
-  return createAppForTables(
-    Object.keys(normalizedDefinition),
-    wasmSchema,
-    normalizedDefinition,
-    schema,
-  );
+  const { schema, wasmSchema } = compileAppSchema(normalizedDefinition);
+  return createAppForTables(Object.keys(wasmSchema), wasmSchema, normalizedDefinition, schema);
 }
 
 /**
@@ -1636,8 +1737,7 @@ export function defineSliceableApp(
   definition: SchemaDefinition | Schema<any>,
 ): SliceableApp<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
-  const schema = definitionToSchema(normalizedDefinition);
-  const wasmSchema = schemaToWasm(schema);
+  const { wasmSchema } = compileAppSchema(normalizedDefinition);
 
   return {
     wasmSchema,
@@ -1648,7 +1748,7 @@ export function defineSliceableApp(
 
       for (const tableName of tableNames) {
         assertSchemaNameAllowed(tableName);
-        if (!(tableName in normalizedDefinition)) {
+        if (!Object.hasOwn(wasmSchema, tableName)) {
           throw new Error(`slice(...) references unknown table "${tableName}".`);
         }
       }
@@ -1680,6 +1780,16 @@ function createAppForTables(
   const columnTransformsByTable = definition ? columnTransformsForSchema(definition) : undefined;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
 
+  if (encryptedSchemas.has(wasmSchema)) {
+    tableNames = [
+      ...new Set([
+        ...tableNames,
+        ...Object.keys(deviceRequestSchema),
+        ...Object.keys(groupSchema),
+        ...Object.keys(spaceSchema),
+      ]),
+    ];
+  }
   for (const tableName of tableNames) {
     assertSchemaNameAllowed(tableName);
     tables[tableName] = new TypedTableQueryBuilder(

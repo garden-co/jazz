@@ -4,6 +4,7 @@
 
 import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
 import type { ColumnType } from "../drivers/types.js";
+import { encryptedRowSpaces, encryptedSchemas } from "../e2ee/encrypted-schema.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import {
   isPermissionIntrospectionColumn,
@@ -230,6 +231,17 @@ function transformRowValues(
     }
   }
 
+  // An included relation may replace its foreign-key field in the logical row.
+  const encryption = encryptedSchemas.get(schema)?.tables.get(tableName);
+  if (encryption) {
+    const space = obj[encryption.space];
+    if (typeof space === "string") encryptedRowSpaces.set(obj, space);
+    else {
+      const hiddenSpace = getNamedValue(valuesByColumn, encryption.space);
+      if (hiddenSpace?.type === "Uuid") encryptedRowSpaces.set(obj, hiddenSpace.value);
+    }
+  }
+
   for (let i = 0; i < includePlans.length; i++) {
     const plan = includePlans[i];
     if (!plan) continue;
@@ -249,7 +261,12 @@ function transformRowValues(
   }
 
   return applyRootTransforms
-    ? applyTableColumnTransforms(obj, tableName, transformsByTable, includedRelationNames)
+    ? applyTableColumnTransforms(
+        obj,
+        tableName,
+        transformsByTable,
+        encryption ? [...includedRelationNames, ...encryption.columns] : includedRelationNames,
+      )
     : obj;
 }
 
@@ -284,6 +301,23 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
       return toByteArray((v as { value: unknown }).value);
     case "Null":
       return null;
+    case "Enum": {
+      const entry =
+        columnType?.type === "EnumPayload"
+          ? columnType.cases.find((candidate) => candidate.name === v.value.case)
+          : undefined;
+      if (!entry || entry.fields.length !== v.value.values.length)
+        throw new Error("Invalid payload enum result");
+      return {
+        type: entry.name,
+        ...Object.fromEntries(
+          entry.fields.map((field, index) => [
+            field.name,
+            unwrapValue(v.value.values[index]!, field.column_type, field.name),
+          ]),
+        ),
+      };
+    }
     case "Array":
       if (columnType?.type === "Array") {
         return v.value.map((entry) => unwrapValue(entry, columnType.element));
@@ -336,7 +370,7 @@ export function transformRows<T>(
   const includedRelationNames = includePlans.map((plan) => plan.relation.name);
 
   return rows.map((row: WasmRowWithNamedValues) => {
-    return transformRowValues(
+    const result = transformRowValues(
       row.values as WasmValue[],
       schema,
       tableName,
@@ -347,7 +381,8 @@ export function transformRows<T>(
       transformsByTable,
       includedRelationNames,
       applyRootTransforms,
-    ) as T;
+    );
+    return result as T;
   });
 }
 
