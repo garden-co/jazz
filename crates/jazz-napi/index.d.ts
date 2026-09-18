@@ -78,6 +78,10 @@ export declare class NapiDb {
    */
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
+  /** Read an accepted table UUID without blocking pending native storage. */
+  tableIdentity(table: string): Uint8Array | PendingNativeRead
+  /** Read an accepted column UUID without blocking pending native storage. */
+  columnIdentity(table: string, column: string): Uint8Array | PendingNativeRead
   /** Register and return a typed view backed by this same runtime owner. */
   registerSchema(schema: Uint8Array): NapiDb
   /** Begin one owner-wide transaction. */
@@ -93,6 +97,11 @@ export declare class NapiDb {
    * never crosses the language boundary.
    */
   all(query: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
+  /**
+   * Opt-in transaction settlement sidecar for E2EE; ordinary rows and their
+   * codec remain unchanged. The caller still needs global snapshot acceptance.
+   */
+  allSettlementMetadata(query: Uint8Array, opts: JsonValue | undefined | null, openTransactionId: string, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null, includeRows?: boolean | undefined | null): Uint8Array | PendingNativeRead
   /** Bind receipt-correlation claims to this client's own admitted identity. */
   setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
   /**

@@ -125,8 +125,74 @@ where
     }
 
     /// Highest contiguously activated authoritative catalogue position.
+    ///
+    /// See also [`Self::catalogue_table_identity`] for portable table identities.
     pub fn active_catalogue_seq(&self) -> u64 {
         self.node.node.borrow().active_catalogue_seq()
+    }
+
+    /// Resolve a table name in an accepted schema to its portable lineage UUID.
+    ///
+    /// Compatible renames retain this identity. Unknown schemas or table names
+    /// return `None`; authored or pending catalogue proposals are not accepted
+    /// identities. This does not initialise a schema, grant access or allocate IDs.
+    ///
+    /// # Errors
+    /// Returns an error when the catalogue is uninitialised or unusable.
+    pub fn catalogue_table_identity(
+        &self,
+        schema: SchemaVersionId,
+        table: &str,
+    ) -> Result<Option<crate::ids::GlobalPhysicalTableId>, Error> {
+        self.node
+            .node
+            .borrow()
+            .catalogue_table_identity(schema, table)
+            .map_err(Into::into)
+    }
+
+    /// Resolve a table's portable identity in this handle's schema view.
+    ///
+    /// Fixed views retain their schema; the owner follows the current write
+    /// schema. Waits for the node lock when storage work is in progress.
+    /// Missing tables return `None`; this does not grant access or allocate IDs.
+    ///
+    /// # Errors
+    /// Returns an error when the catalogue is uninitialised or unusable.
+    pub async fn table_identity(
+        &self,
+        table: &str,
+    ) -> Result<Option<crate::ids::GlobalPhysicalTableId>, Error> {
+        let node = self.node.node.lock().await;
+        let schema = if self.schema_view_is_fixed {
+            self.schema_version_id
+        } else {
+            node.current_write_schema()?.schema
+        };
+        node.catalogue_table_identity(schema, table)
+            .map_err(Into::into)
+    }
+
+    /// Resolve a column's portable identity in this handle's accepted schema view.
+    ///
+    /// Compatible renames retain the column epoch. Missing columns return `None`;
+    /// this read does not initialise a schema, allocate an identity or grant access.
+    ///
+    /// # Errors
+    /// Returns an error when the catalogue is uninitialised or unusable.
+    pub async fn column_identity(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<crate::ids::GlobalPhysicalColumnId>, Error> {
+        let node = self.node.node.lock().await;
+        let schema = if self.schema_view_is_fixed {
+            self.schema_version_id
+        } else {
+            node.current_write_schema()?.schema
+        };
+        node.catalogue_column_identity(schema, table, column)
+            .map_err(Into::into)
     }
 
     /// Return a published migration lens known to this database.

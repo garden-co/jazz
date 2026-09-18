@@ -32,6 +32,8 @@ import {
   type RestoreOptions as InternalRestoreOptions,
   type UpdateOptions as InternalUpdateOptions,
   type DurabilityTier,
+  type RowSettlement,
+  type TransactionPreparationIO,
   type QueryExecutionOptions,
   type InternalQueryExecutionOptions,
   type QueryPropagation,
@@ -1433,52 +1435,46 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     return reading;
   }
 
-  private async readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+  /**
+   * @internal Covered E2EE history and its authority order. Valid only after
+   * this exclusive transaction's global wait succeeds. A local read plus a
+   * global wait is insufficient: conflict checks do not hydrate missing history.
+   */
+  allSettledForE2ee<T extends { id: string }>(
+    query: QueryBuilder<T>,
+  ): Promise<{ rows: T[]; settlements: RowSettlement[] }> {
+    if (this.kind !== "exclusive")
+      throw new Error("E2EE settlement reads require an exclusive transaction");
+    const reading = (async () => {
+      const { rows, settlements } = await this.readAll(query, { tier: "global" }, "with-rows");
+      checkTransactionSettlements(rows, settlements);
+      return { rows, settlements };
+    })();
+    this.pendingReads.add(reading);
+    const settled = () => this.pendingReads.delete(reading);
+    reading.then(settled, settled);
+    return reading;
+  }
+
+  private readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]>;
+  private readAll<T>(
+    query: QueryBuilder<T>,
+    options: QueryOptions | undefined,
+    settlementMetadata: "with-rows",
+  ): Promise<SettledRows<T>>;
+  private async readAll<T>(
+    query: QueryBuilder<T>,
+    options: QueryOptions | undefined,
+    settlementMetadata: false | "with-rows" = false,
+  ): Promise<T[] | SettledRows<T>> {
     this.bindQuery(query);
     const client = this.resolveClient(query._schema);
-    const { openTransactionId, session } = this.requireBinding("query");
-    const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
-    const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
-    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
-    // Transactions accept the same public options surface as Db. Lower before
-    // reaching native options so JavaScript callers cannot smuggle runtime
-    // controls (for example `localUpdates` or `openTransactionId`) through this
-    // otherwise separate execution path.
-    const queryOptions = nativeDbQueryOptions(
-      query._schema,
-      builtQuery.table,
-      lowerPublicDbQueryOptions(options),
-    );
-    const rows = await client.queryInternal(
-      translateQuery(builderJson, planningSchema),
-      {
-        ...queryOptions,
-        localUpdates: "deferred",
-        openTransactionId,
-      },
-      session,
-    );
-    const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
-    const outputRelationNames = Object.keys(outputIncludes);
-    const transformedRows = transformRows<Record<string, unknown>>(
-      rows,
-      outputSchema,
-      outputTable,
-      outputIncludes,
-      builtQuery.select,
-      query._columnTransformsByTable,
-      false,
-    );
-    return transformedRows.map(
-      (row) =>
-        applyColumnTransforms(
-          applyPartialValueSelections(row, builtQuery.partialSelect),
-          outputTransforms,
-          outputRelationNames,
-        ) as T,
+    return readTransactionRows(
+      query,
+      options,
+      settlementMetadata,
+      this.requireBinding("query"),
+      client,
     );
   }
 
@@ -1500,7 +1496,134 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
   Transaction<TKind>
 >;
 
+/** @internal Typed operations needed by E2EE metadata preparation, not a public transaction surface. */
+export type E2eeTransactionScope = Pick<
+  TransactionScope<"exclusive">,
+  "kind" | "all" | "one" | "insert" | "upsert" | "allSettledForE2ee"
+>;
+
+type SettledRows<T> = { rows: T[]; settlements: RowSettlement[] };
+
+function checkTransactionSettlements(rows: { id: string }[], settlements: RowSettlement[]): void {
+  const ids = new Set(rows.map((row) => row.id));
+  if (
+    ids.size !== rows.length ||
+    settlements.length !== ids.size ||
+    settlements.some(
+      (entry) =>
+        !ids.delete(entry.rowId) ||
+        typeof entry.transactionId !== "string" ||
+        typeof entry.position !== "string" ||
+        !/^[0-9]+$/.test(entry.position) ||
+        BigInt(entry.position) > 18446744073709551615n,
+    )
+  )
+    throw new Error("Incomplete E2EE authority settlement metadata");
+}
+
+function readTransactionRows<T>(
+  query: QueryBuilder<T>,
+  options: QueryOptions | undefined,
+  settlementMetadata: false,
+  binding: DbTransactionHandleBinding,
+  client: Pick<JazzClient, "queryInternal">,
+): Promise<T[]>;
+function readTransactionRows<T>(
+  query: QueryBuilder<T>,
+  options: QueryOptions | undefined,
+  settlementMetadata: true,
+  binding: DbTransactionHandleBinding,
+  client: Pick<JazzClient, "queryInternal">,
+): Promise<RowSettlement[]>;
+function readTransactionRows<T>(
+  query: QueryBuilder<T>,
+  options: QueryOptions | undefined,
+  settlementMetadata: "with-rows",
+  binding: DbTransactionHandleBinding,
+  client: Pick<JazzClient, "queryInternal">,
+): Promise<SettledRows<T>>;
+function readTransactionRows<T>(
+  query: QueryBuilder<T>,
+  options: QueryOptions | undefined,
+  settlementMetadata: false | "with-rows",
+  binding: DbTransactionHandleBinding,
+  client: Pick<JazzClient, "queryInternal">,
+): Promise<T[] | SettledRows<T>>;
+async function readTransactionRows<T>(
+  query: QueryBuilder<T>,
+  options: QueryOptions | undefined,
+  settlementMetadata: boolean | "with-rows",
+  binding: DbTransactionHandleBinding,
+  client: Pick<JazzClient, "queryInternal">,
+): Promise<T[] | RowSettlement[] | SettledRows<T>> {
+  const { openTransactionId, session } = binding;
+  const builderJson = query._build();
+  const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
+  const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
+  const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
+  const outputSchema = requireSchemaWithTable(query._schema, outputTable);
+  // Transactions accept the same public options surface as Db. Lower before
+  // reaching native options so JavaScript callers cannot smuggle runtime
+  // controls (for example `localUpdates` or `openTransactionId`) through this
+  // otherwise separate execution path.
+  const queryOptions = nativeDbQueryOptions(
+    query._schema,
+    builtQuery.table,
+    lowerPublicDbQueryOptions(options),
+  );
+  if (settlementMetadata) queryOptions.settlementMetadata = settlementMetadata;
+  const result = await client.queryInternal(
+    translateQuery(builderJson, planningSchema),
+    {
+      ...queryOptions,
+      localUpdates: "deferred",
+      openTransactionId,
+    },
+    session,
+  );
+  if (settlementMetadata === true) return result as unknown as RowSettlement[];
+  const settled =
+    settlementMetadata === "with-rows"
+      ? (result as unknown as SettledRows<(typeof result)[number]>)
+      : undefined;
+  const rows = settled ? settled.rows : result;
+  const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
+  const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
+  const outputRelationNames = Object.keys(outputIncludes);
+  const transformedRows = transformRows<Record<string, unknown>>(
+    rows,
+    outputSchema,
+    outputTable,
+    outputIncludes,
+    builtQuery.select,
+    query._columnTransformsByTable,
+    false,
+  );
+  const decoded = transformedRows.map(
+    (row) =>
+      applyColumnTransforms(
+        applyPartialValueSelections(row, builtQuery.partialSelect),
+        outputTransforms,
+        outputRelationNames,
+      ) as T,
+  );
+  return settled ? { rows: decoded, settlements: settled.settlements } : decoded;
+}
+
 const transactionAdmission = new WeakMap<Db, () => Promise<void>>();
+
+/** @internal Lifecycle work must not wait for the enrolment it implements. */
+export function exclusiveE2eeTransaction<TResult>(
+  db: Db,
+  callback: (tx: TransactionScope<"exclusive">) => TResult | Promise<TResult>,
+): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
+  const transaction = beginDbTransactionAfter(db, async () => {});
+  return runInTransaction(
+    transaction,
+    callback,
+    () => getDbTxHandleBinding(transaction, "result").ownerClient,
+  );
+}
 
 /** @internal The compiler opts in before staging any operations. */
 export function beginDbTransactionAfter(
@@ -1513,6 +1636,74 @@ export function beginDbTransactionAfter(
   } finally {
     transactionAdmission.delete(db);
   }
+}
+
+/** @internal Register before returning; the outer commit drains this work. */
+export function prepareDbTransaction(
+  transaction: Transaction<"exclusive">,
+  prepare: (scope: E2eeTransactionScope, io: TransactionPreparationIO) => Promise<void>,
+): Promise<void> {
+  if (transaction.kind !== "exclusive")
+    throw new Error("E2EE initialisation requires an exclusive transaction");
+  transaction.openTransactionId();
+  const binding = getDbTxHandleBinding(transaction, "prepare");
+  const { ownerClient, openTransactionId } = binding;
+  return ownerClient.prepareTransaction(openTransactionId, async (io) => {
+    await prepare(preparedTransactionScope(binding, io), io);
+  });
+}
+
+function preparedTransactionScope(
+  binding: DbTransactionHandleBinding,
+  io: TransactionPreparationIO,
+): E2eeTransactionScope {
+  const { openTransactionId, session, attribution } = binding;
+  const scope: E2eeTransactionScope = {
+    kind: "exclusive",
+    upsert(table, id, data, options) {
+      const transformed = transformInputColumns(table, data);
+      const values = toWriteRecordForOperation("Upsert", transformed, table._schema, table._table);
+      io.upsertInternal(
+        table._table,
+        id,
+        values,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        session,
+        attribution,
+        openTransactionId,
+      );
+    },
+    all: (query, options) => readTransactionRows(query, options, false, binding, io),
+    async one(query, options) {
+      const rows = await scope.all(limitQueryToOne(query), options);
+      return rows[0] ?? null;
+    },
+    insert(table, data, options) {
+      const transformed = transformInputColumns(table, data);
+      const values = toWriteRecordForOperation("Insert", transformed, table._schema, table._table);
+      const row = io.insertInternal(
+        table._table,
+        values,
+        normalizeInsertOptions(table._schema, table._table, options),
+        session,
+        attribution,
+        openTransactionId,
+      );
+      return transformOutputRow(table, transformRow(row, table._schema, table._table));
+    },
+    async allSettledForE2ee(query) {
+      const { rows, settlements } = await readTransactionRows(
+        query,
+        { tier: "global" },
+        "with-rows",
+        binding,
+        io,
+      );
+      checkTransactionSettlements(rows, settlements);
+      return { rows, settlements };
+    },
+  };
+  return scope;
 }
 
 /**
@@ -2057,6 +2248,118 @@ export class Db {
    */
   getRuntimeSchema(): WasmSchema | null {
     return this.connection.getRuntimeSchema();
+  }
+
+  /** @internal Observe explicit reconnection until this Db shuts down. */
+  onE2eeReconnect(listener: () => void): void {
+    let wasOffline = this.connection.isExplicitlyOffline();
+    this.connection.onExplicitOfflineChange((offline) => {
+      const reconnected = wasOffline && !offline;
+      wasOffline = offline;
+      if (reconnected) listener();
+    }, this.shutdownAbort.signal);
+  }
+
+  /** @internal Honour the initial worker connection state before an E2EE offline read. */
+  async e2eeIsExplicitlyOffline(): Promise<boolean> {
+    const initial = this.connection.initialExplicitOfflineState();
+    if (initial) await initial;
+    this.assertOpen();
+    return this.connection.isExplicitlyOffline();
+  }
+
+  /** @internal Observations only: these reads do not prove complete history. */
+  async observeE2eeHistory(queries: readonly QueryBuilder<{ id: string }>[]) {
+    this.assertOpen();
+    if (!queries.length || queries.some((query) => !query._table.startsWith("__e2ee_")))
+      throw new Error("E2EE observations require metadata queries");
+    this.getClient(queries[0]!._schema);
+    // Hydrate the durable owner's inputs before freezing a browser snapshot.
+    // Discard these potentially pending rows; only the accepted-only read below
+    // supplies observation evidence.
+    await Promise.all(queries.map((query) => this.all(query, { tier: "local" })));
+    const tx = beginDbTransactionAfter(this, async () => {});
+    const binding = getDbTxHandleBinding(tx, "query");
+    const local: Pick<JazzClient, "queryInternal"> = {
+      queryInternal: (query, options, session) =>
+        binding.ownerClient.queryInternal(
+          query,
+          { ...options, propagation: "local-only" },
+          session,
+        ),
+    };
+    try {
+      const settlements = await Promise.all(
+        queries.map((query) =>
+          readTransactionRows(query, { tier: "global" }, true, binding, local),
+        ),
+      );
+      return await Promise.all(
+        queries.map(async (query, index) => {
+          const rows = await readTransactionRows(query, { tier: "global" }, false, binding, local);
+          checkTransactionSettlements(rows, settlements[index]!);
+          return { rows, settlements: settlements[index]! };
+        }),
+      );
+    } finally {
+      await tx.rollback();
+    }
+  }
+
+  private readonly coveredE2eeTableIdentities = new WeakMap<JazzClient, Map<string, string>>();
+
+  /** @internal Resolve the accepted table lineage for E2EE scope selection. */
+  async tableIdentity<T, Init>(
+    table: TableProxy<T, Init>,
+    localOnly = false,
+  ): Promise<string | null> {
+    const client = this.getClient(table._schema);
+    const runtime = client.getRuntime();
+    if (!runtime.tableIdentity)
+      throw new Error("Runtime does not expose catalogue table identities");
+    const localIdentity = await runtime.tableIdentity(table._table);
+    this.assertOpen();
+    if (localOnly) return localIdentity;
+    // Bootstrap UUIDs are candidates until this client covers the catalogue.
+    if (
+      localIdentity &&
+      this.coveredE2eeTableIdentities.get(client)?.get(table._table) === localIdentity
+    )
+      return localIdentity;
+    const initialOfflineState = this.connection.initialExplicitOfflineState();
+    if (initialOfflineState) await initialOfflineState;
+    const offline = this.connection.isExplicitlyOffline();
+    await this.ensureReady(offline ? "local" : "edge");
+    // Cover the catalogue without rows and outside the preparation queue.
+    // Offline identities are observations, not accepted encryption membership.
+    if (!offline)
+      await client.query(JSON.stringify({ table: table._table, limit: 0 }), { tier: "edge" });
+    const identity = await runtime.tableIdentity(table._table);
+    this.assertOpen();
+    if (!offline && identity) {
+      let covered = this.coveredE2eeTableIdentities.get(client);
+      if (!covered) {
+        covered = new Map();
+        this.coveredE2eeTableIdentities.set(client, covered);
+      }
+      covered.set(table._table, identity);
+    }
+    return identity;
+  }
+
+  /** @internal Resolve the accepted column epoch for encrypted-cell context binding. */
+  async columnIdentity<T, Init>(
+    table: TableProxy<T, Init>,
+    column: string,
+    localOnly = false,
+  ): Promise<string | null> {
+    await this.tableIdentity(table, localOnly);
+    const runtime = this.getClient(table._schema).getRuntime();
+    if (!runtime.columnIdentity)
+      throw new Error("Runtime does not expose catalogue column identities");
+    const identity = await runtime.columnIdentity(table._table, column);
+    this.assertOpen();
+    return identity;
   }
 
   /** @internal Open a control channel for the same-origin embedded inspector. */

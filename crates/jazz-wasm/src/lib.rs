@@ -981,12 +981,19 @@ impl WasmDbInner {
         author: Option<AuthorSubject>,
         require_coverage: bool,
         coverage_deadline_ms: f64,
+        restrict_observation_to_accepted: bool,
     ) -> Result<SerializedReadResult, Error> {
         macro_rules! read {
             ($db:expr) => {{
                 let owner = Rc::clone($db);
                 let release_db = Rc::clone($db);
                 let future = async move {
+                    // Transaction creation must run before snapshot restriction.
+                    if let Some(open_tx) = open_tx.filter(|_| restrict_observation_to_accepted) {
+                        owner
+                            .restrict_e2ee_observation_snapshot_for_binding(open_tx)
+                            .await?;
+                    }
                     owner
                         .all_serialized_query(
                             &query,
@@ -1029,6 +1036,21 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| db
             .subscribe_serialized_query(&query, opts, request_scope, authorization)
             .await)
+    }
+
+    async fn row_settlement_for_binding(
+        &self,
+        row: &jazz::node::CurrentRow,
+    ) -> Result<Option<(jazz::tx::TxId, jazz::time::GlobalTime)>, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => db.row_settlement_for_binding(row).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.row_settlement_for_binding(row).await,
+            Self::Closed => Err(Error {
+                code: ErrorCode::Protocol,
+                message: "WasmDb is closed".into(),
+            }),
+        }
     }
 
     fn begin_exclusive(
@@ -1692,6 +1714,44 @@ impl WasmDb {
         })
     }
 
+    /// Read an accepted table UUID after pending owner work completes.
+    #[wasm_bindgen(js_name = tableIdentity)]
+    pub fn table_identity(&self, table: String) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.open_inner()?;
+        Ok(future_to_promise(async move {
+            let id = match &inner {
+                WasmDbInner::Memory(db) => db.table_identity(&table).await,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db.table_identity(&table).await,
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }
+            .map_err(to_js_error)?;
+            let bytes = id.map_or_else(Vec::new, |id| id.0.as_bytes().to_vec());
+            Ok(js_sys::Uint8Array::from(bytes.as_slice()).into())
+        }))
+    }
+
+    /// Read an accepted column UUID after pending owner work completes.
+    #[wasm_bindgen(js_name = columnIdentity)]
+    pub fn column_identity(
+        &self,
+        table: String,
+        column: String,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.open_inner()?;
+        Ok(future_to_promise(async move {
+            let id = match &inner {
+                WasmDbInner::Memory(db) => db.column_identity(&table, &column).await,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db.column_identity(&table, &column).await,
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }
+            .map_err(to_js_error)?;
+            let bytes = id.map_or_else(Vec::new, |id| id.0.as_bytes().to_vec());
+            Ok(js_sys::Uint8Array::from(bytes.as_slice()).into())
+        }))
+    }
+
     /// Register a typed schema view backed by this same runtime owner.
     #[wasm_bindgen(js_name = registerSchema)]
     pub fn register_schema(&self, schema: Vec<u8>) -> Result<WasmDb, JsValue> {
@@ -1837,6 +1897,7 @@ impl WasmDb {
                     author,
                     requires_coverage,
                     js_sys::Date::now() + 15_000.0,
+                    false,
                 )
                 .await
                 .map_err(to_js_error)?;
@@ -1847,6 +1908,81 @@ impl WasmDb {
             .map_err(to_js_error)
         });
         wasm_read_or_pending(future)
+    }
+
+    /// Opt-in E2EE transaction sidecar; global snapshot acceptance is separate.
+    #[wasm_bindgen(js_name = allSettlementMetadata)]
+    pub fn all_settlement_metadata(
+        &self,
+        query: Vec<u8>,
+        opts: JsValue,
+        open_transaction_id: String,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+        include_rows: Option<bool>,
+    ) -> Result<JsValue, JsValue> {
+        let inner = self.open_inner()?;
+        let opts = read_opts_from_js(opts)?;
+        let has_explicit_author = author.is_some();
+        let author = self.read_author(author)?;
+        let admission = if has_explicit_author {
+            author
+                .map(|author| Ok::<_, JsValue>((author, claims_from_js(author, claims)?)))
+                .transpose()?
+        } else {
+            None
+        };
+        let non_durable_client = self.non_durable_client.get();
+        let tx_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        wasm_read_or_pending(Box::pin(async move {
+            let restrict_observation_to_accepted = opts.propagation == Propagation::LocalOnly;
+            let requires_coverage = non_durable_client
+                || (opts.tier >= DurabilityTier::Edge && opts.propagation == Propagation::Full);
+            let result = inner
+                .all_serialized_query(
+                    query,
+                    opts,
+                    Some(tx_id),
+                    admission,
+                    author,
+                    requires_coverage,
+                    js_sys::Date::now() + 15_000.0,
+                    restrict_observation_to_accepted,
+                )
+                .await
+                .map_err(to_js_error)?;
+            let SerializedReadResult::Rows(rows) = result else {
+                return Err(JsValue::from_str(
+                    "E2EE settlement reads require ordinary stored rows",
+                ));
+            };
+            let mut metadata = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let (tx, position) = inner
+                    .row_settlement_for_binding(row)
+                    .await
+                    .map_err(to_js_error)?
+                    .ok_or_else(|| JsValue::from_str("Authority settlement unavailable"))?;
+                metadata.push(serde_json::json!({
+                    "rowId": row.row_uuid().0.to_string(),
+                    "transactionId": TransactionId::from_committed_tx(tx).to_string(),
+                    "position": position.0.to_string(),
+                }));
+            }
+            let metadata = serde_json::to_vec(&metadata).map_err(to_js_error)?;
+            if include_rows != Some(true) {
+                return Ok(metadata);
+            }
+            // Binding-only frame: u32 LE JSON length, JSON settlements, existing row codec.
+            // Both parts describe the same covered read; global acceptance is still required.
+            let length = u32::try_from(metadata.len()).map_err(to_js_error)?;
+            let mut payload = length.to_le_bytes().to_vec();
+            payload.extend_from_slice(&metadata);
+            payload.extend_from_slice(&encode_rows(&rows).map_err(to_js_error)?);
+            Ok(payload)
+        }))
     }
 
     /// Bind correlation claims to this already-open client's own identity.
@@ -4593,6 +4729,7 @@ mod dynamic_schema_view_tests {
                     None,
                     false,
                     f64::INFINITY,
+                    false,
                 ),
                 owner.tick(),
             )
@@ -4692,6 +4829,7 @@ mod dynamic_schema_view_tests {
                 None,
                 false,
                 f64::INFINITY,
+                false,
             )
             .await
             .expect("attached facade reads its staged row");
