@@ -204,7 +204,10 @@ pub struct IvmRuntime {
     /// Input-owned memoization for pure node evaluation results. Entries are
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
+    /// Only hydration snapshots are retained; tick deltas stay in staged evaluation.
     eval_memo: HashMap<EvalMemoKey, EvalMemoEntry>,
+    /// Node-owned keys keep capture, replacement, and retirement graph-local.
+    eval_memo_keys_by_node: HashMap<NodeId, HashSet<EvalMemoKey>>,
     table_frontiers: HashMap<String, u64>,
     binding_frontiers: HashMap<BindingSourceKey, u64>,
     memo_use_clock: u64,
@@ -270,6 +273,7 @@ impl IvmRuntime {
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),
             eval_memo: HashMap::default(),
+            eval_memo_keys_by_node: HashMap::default(),
             table_frontiers: HashMap::default(),
             binding_frontiers: HashMap::default(),
             memo_use_clock: 0,

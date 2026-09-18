@@ -809,10 +809,7 @@ impl<'a> IncrementalEvaluation<'a> {
             .arrangement_keys_by_input
             .extend(std::mem::take(&mut self.arrangement_keys_by_input));
 
-        runtime
-            .eval_memo
-            .extend(std::mem::take(&mut self.eval_memo));
-        runtime.eval_memo_bytes = runtime.eval_memo_bytes.saturating_add(self.eval_memo_bytes);
+        runtime.install_eval_memo(std::mem::take(&mut self.eval_memo));
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
         // Retainers are owned by graph lifecycle operations, not by this
         // evaluation snapshot. Preserve their current live value when a
@@ -1286,11 +1283,11 @@ impl<'a> EvaluationSession<'a> {
                 }
             }
         }
-        let eval_memo = runtime
-            .eval_memo
+        let eval_memo = relevant_nodes
             .iter()
-            .filter(|(key, _)| relevant_nodes.contains(&key.node))
-            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .filter_map(|node| runtime.eval_memo_keys_by_node.get(node))
+            .flatten()
+            .map(|key| (key.clone(), runtime.eval_memo[key].clone()))
             .collect::<HashMap<_, _>>();
         let eval_memo_bytes = eval_memo.values().map(|entry| entry.payload_bytes).sum();
         let node_meta = relevant_nodes
@@ -1634,15 +1631,10 @@ impl<'a> EvaluationSession<'a> {
         runtime
             .arrangement_keys_by_input
             .extend(self.arrangement_keys_by_input);
-        runtime
-            .eval_memo
-            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
-        runtime.eval_memo.extend(self.eval_memo);
-        runtime.eval_memo_bytes = runtime
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
+        for node in &self.relevant_nodes {
+            runtime.remove_node_eval_memo(*node);
+        }
+        runtime.install_eval_memo(self.eval_memo);
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
         for node in &self.relevant_nodes {
             runtime.node_meta.remove(node);
@@ -1711,14 +1703,8 @@ impl IvmRuntime {
     fn fail_evaluation_nodes(&mut self, failure: &EvaluationFailure) {
         self.operator_states
             .retain(|key, _| !failure.affected_nodes.contains(&key.node));
-        self.eval_memo
-            .retain(|key, _| !failure.affected_nodes.contains(&key.node));
-        self.eval_memo_bytes = self
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
         for node in &failure.affected_nodes {
+            self.remove_node_eval_memo(*node);
             if let Some(keys) = self.arrangement_keys_by_input.remove(node) {
                 for key in keys {
                     self.arrangement_states.remove(&key);
@@ -2625,54 +2611,64 @@ impl IvmRuntime {
         );
     }
 
-    fn evict_eval_memo(&mut self) {
-        if self.eval_memo.keys().any(|key| key.tick_epoch.is_some()) {
-            let mut retained_bytes = 0usize;
-            self.eval_memo.retain(|key, entry| {
-                let keep = key.tick_epoch.is_none();
-                if keep {
-                    retained_bytes = retained_bytes.saturating_add(entry.payload_bytes);
+    fn install_eval_memo(&mut self, entries: HashMap<EvalMemoKey, EvalMemoEntry>) {
+        for (key, entry) in entries {
+            // Tick results are disposable deltas. Only input-validated
+            // hydration snapshots survive publication.
+            if key.tick_epoch.is_some() {
+                continue;
+            }
+            self.eval_memo_bytes = self.eval_memo_bytes.saturating_add(entry.payload_bytes);
+            match self.eval_memo.entry(key) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let previous = slot.insert(entry);
+                    self.eval_memo_bytes =
+                        self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
                 }
-                keep
-            });
-            self.eval_memo_bytes = retained_bytes;
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    self.eval_memo_keys_by_node
+                        .entry(slot.key().node)
+                        .or_default()
+                        .insert(slot.key().clone());
+                    slot.insert(entry);
+                }
+            }
         }
-        if self.eval_memo.len() <= EVAL_MEMO_MAX_ENTRIES
-            && self.eval_memo_bytes <= EVAL_MEMO_MAX_BYTES
-        {
+    }
+
+    pub(super) fn remove_node_eval_memo(&mut self, node: NodeId) {
+        let Some(keys) = self.eval_memo_keys_by_node.remove(&node) else {
+            return;
+        };
+        for key in keys {
+            let entry = self.eval_memo.remove(&key).expect("indexed memo exists");
+            self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
+        }
+    }
+
+    fn remove_eval_memo(&mut self, key: &EvalMemoKey) {
+        let Some(entry) = self.eval_memo.remove(key) else {
+            return;
+        };
+        self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
+        let keys = self
+            .eval_memo_keys_by_node
+            .get_mut(&key.node)
+            .expect("retained memo is indexed");
+        keys.remove(key);
+        if keys.is_empty() {
+            self.eval_memo_keys_by_node.remove(&key.node);
+        }
+    }
+
+    fn evict_eval_memo(&mut self) {
+        self.evict_eval_memo_to_limits(EVAL_MEMO_MAX_ENTRIES, EVAL_MEMO_MAX_BYTES);
+    }
+
+    fn evict_eval_memo_to_limits(&mut self, max_entries: usize, max_bytes: usize) {
+        if self.eval_memo.len() <= max_entries && self.eval_memo_bytes <= max_bytes {
             return;
         }
-        let mut entries = self
-            .eval_memo
-            .iter()
-            .map(|(key, entry)| (key.clone(), entry.last_used))
-            .collect::<Vec<_>>();
-        entries.sort_unstable_by_key(|(_, last_used)| *last_used);
-        for (key, _) in entries {
-            if self.eval_memo.len() <= EVAL_MEMO_MAX_ENTRIES
-                && self.eval_memo_bytes <= EVAL_MEMO_MAX_BYTES
-            {
-                break;
-            }
-            if let Some(entry) = self.eval_memo.remove(&key) {
-                self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn recompute_eval_memo_bytes(&mut self) {
-        self.eval_memo_bytes = self
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
-    }
-
-    #[cfg(test)]
-    pub(super) fn evict_eval_memo_for_tests(&mut self, max_entries: usize, max_bytes: usize) {
-        self.eval_memo.retain(|key, _| key.tick_epoch.is_none());
-        self.recompute_eval_memo_bytes();
         let mut entries = self
             .eval_memo
             .iter()
@@ -2683,10 +2679,13 @@ impl IvmRuntime {
             if self.eval_memo.len() <= max_entries && self.eval_memo_bytes <= max_bytes {
                 break;
             }
-            if let Some(entry) = self.eval_memo.remove(&key) {
-                self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
-            }
+            self.remove_eval_memo(&key);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn evict_eval_memo_for_tests(&mut self, max_entries: usize, max_bytes: usize) {
+        self.evict_eval_memo_to_limits(max_entries, max_bytes);
     }
 
     pub(super) async fn hydration_snapshot<S>(

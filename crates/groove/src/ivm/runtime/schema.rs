@@ -824,19 +824,22 @@ impl IvmRuntime {
 
     fn invalidate_table_inputs(&mut self, table: &str) {
         *self.table_frontiers.entry(table.to_owned()).or_default() += 1;
-        self.eval_memo.retain(|key, _| {
-            self.node_meta
-                .get(&key.node)
-                .and_then(|meta| meta.input_signature.as_ref())
-                .is_none_or(|signature| {
-                    !signature.tables.iter().any(|candidate| candidate == table)
-                })
-        });
-        self.eval_memo_bytes = self
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
+        let invalidated = self
+            .eval_memo_keys_by_node
+            .keys()
+            .filter(|node| {
+                self.node_meta
+                    .get(node)
+                    .and_then(|meta| meta.input_signature.as_ref())
+                    .is_some_and(|signature| {
+                        signature.tables.iter().any(|candidate| candidate == table)
+                    })
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for node in invalidated {
+            self.remove_node_eval_memo(node);
+        }
     }
 
     pub fn index(&self, table: &str, index_name: &str) -> Option<&IndexSchema> {
