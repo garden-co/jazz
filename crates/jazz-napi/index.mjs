@@ -8,6 +8,9 @@ const nativeBinding = require("./index.cjs");
 
 export default nativeBinding;
 export const {
+  e2eeSodiumSigningKeyPair,
+  e2eeSodiumSign,
+  e2eeSodiumVerify,
   JazzServer,
   NapiDb,
   StreamingMutation,
