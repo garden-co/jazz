@@ -25,9 +25,9 @@ export function encryptedTableToPhysical(table: Table, declaration?: EncryptionD
   return {
     ...table,
     columns: table.columns.map((column) =>
-        declaration.columns.includes(column.name)
-          ? { name: column.name, sqlType: "BYTEA" as const, nullable: false }
-          : column,
-      ),
+      declaration.columns.includes(column.name)
+        ? { name: column.name, sqlType: "BYTEA" as const, nullable: false }
+        : column,
+    ),
   };
 }
