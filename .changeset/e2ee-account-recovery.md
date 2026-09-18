@@ -13,3 +13,5 @@ diagnostic text or causes.
 Correctness WASM builds retain development safety checks with basic optimization.
 Bound worker and browser-package concurrency so multi-client lifecycle tests keep
 their existing deadlines; the complete CI job has a separate execution budget.
+Browser file workers also respect host CPU capacity, and package-content checks
+read both keyed and array-shaped npm pack receipts without changing their assertions.
