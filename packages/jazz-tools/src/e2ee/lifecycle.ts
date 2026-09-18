@@ -26,7 +26,7 @@ import {
 import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
 import type { GroupTables } from "./groups.js";
-import { Spaces } from "./space-lifecycle.js";
+import { Spaces, SpaceInitialisationRequired } from "./space-lifecycle.js";
 import type { SpaceRecoveryPath } from "./space-lifecycle.js";
 import type { SpaceTables } from "./spaces.js";
 import type { JazzCrypto, CellCipher, EqualityIndex } from "./types.js";
@@ -82,6 +82,7 @@ export function e2eeSchemaForDb(db: Db): WasmSchema | undefined {
   return configuredSchemas.get(db);
 }
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
+const missingSpacePreparers = new WeakMap<Db, Spaces["prepareMissing"]>();
 const currentSpaceKeys = new WeakMap<Db, Spaces["withKeys"]>();
 const initialSpacePrerequisites = new WeakMap<
   Db,
@@ -173,6 +174,36 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
       // Preserve the preparation error, including failures before keys are loaded.
     }
     throw error;
+  }
+}
+
+/** @internal Reuses an already-prepared transaction; never queues behind itself. */
+export async function prepareMissingSpaceWrite(
+  db: Db,
+  ...args: Parameters<Spaces["prepareMissing"]>
+): Promise<boolean> {
+  e2eeForDb(db);
+  const [tx, scope, identifier, prepareData] = args;
+  let callbackFailure: { error: unknown } | undefined;
+  try {
+    return await missingSpacePreparers.get(db)!(tx, scope, identifier, async (...values) => {
+      try {
+        await prepareData(...values);
+      } catch (error) {
+        callbackFailure = { error };
+        throw error;
+      }
+    });
+  } catch (error) {
+    // As with ordinary key lookup, adapter exceptions may contain key material.
+    // Preserve the internal retry signal and the caller's own operation errors.
+    if (
+      error instanceof SpaceInitialisationRequired ||
+      error instanceof E2eeDataError ||
+      (callbackFailure && callbackFailure.error === error)
+    )
+      throw error;
+    throw new E2eeDataError("key-unavailable");
   }
 }
 
@@ -564,6 +595,10 @@ export class E2ee {
     initialSpacePreparers.set(db, async (...args) => {
       await this.prepare();
       await this.requireSpaces().prepareInitial(...args);
+    });
+    missingSpacePreparers.set(db, async (...args) => {
+      await this.prepare();
+      return this.requireSpaces().prepareMissing(...args);
     });
     currentSpaceKeys.set(
       db,

@@ -62,6 +62,7 @@ decisions. Guidance appendices are entirely non-normative.
 | 17  | Integrability roadmap                                                                 | TS/WASM/NAPI, server shell, protocol, storage, topology                        |
 | 18  | Representation ownership                                                              | public, wire, binding and internal carrier boundaries                          |
 | 19  | Large-value capabilities                                                              | authorization, proxy, publication and retention of Groove chunks               |
+| 20  | End-to-end encryption                                                                 | encrypted logical values, key lifecycle, BYOC and atomic initialisation        |
 | A–E | _guidance:_ implementation discipline · benchmarks · performance · testing · glossary |
 | —   | _registry:_ `INVARIANTS.md`                                                           | out-of-band: every `INV-` id → test + impl                                     |
 

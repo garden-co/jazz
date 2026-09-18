@@ -52,6 +52,16 @@ type Address = { scopeId: string; identifier: string };
 // Only a malformed transcript or a checked signature mismatch proves a root invalid.
 // Missing authority/history and operational failures must not be silently discarded.
 class InvalidSpaceRoot extends Error {}
+
+/** @internal Only standalone writes may retry with a fresh exclusive transaction. */
+export class SpaceInitialisationRequired extends Error {
+  constructor() {
+    super(
+      "Initialising an encryption space requires beginExclusiveTransaction() or exclusiveTransaction()",
+    );
+    this.name = "SpaceInitialisationRequired";
+  }
+}
 type Snapshot = {
   roots: Settled<SpaceRoot>;
   grants: Settled<SpaceGrant>;
@@ -426,6 +436,33 @@ export class Spaces {
       if (recipientId !== this.accountId)
         await prefetchPublicMembershipHistory(this.db, recipientId, this.tables);
     await this.groups?.warmMembership(null);
+  }
+
+  /** An unavailable key alone never establishes that a space is absent. */
+  async prepareMissing<T, Init>(
+    tx: E2eeTransactionScope | undefined,
+    scope: TableProxy<T, Init>,
+    identifier: string,
+    prepareData: Parameters<Spaces["prepareInitial"]>[3],
+  ): Promise<boolean> {
+    const address = await this.address(scope, identifier);
+    const roots = this.tables.__e2ee_spaces.where(address);
+    if (tx) {
+      if ((await tx.allSettledForE2ee(roots)).rows.length) return false;
+      // Hydrate a pre-existing scope row in this transaction, not in a later snapshot.
+      await tx.one(
+        new TypedTableQueryBuilder(scope._table, scope._schema)
+          .where({ id: identifier })
+          .select("id"),
+        { tier: "global" },
+      );
+      await this.prepareInitial(tx, scope, identifier, prepareData);
+      return true;
+    }
+    if (await this.db.one(roots, { tier: "global" })) return false;
+    // This read only chooses a retry. The fresh exclusive transaction must
+    // independently validate absence and accept root, grant and data together.
+    throw new SpaceInitialisationRequired();
   }
 
   /** Internal preparation only: the caller owns the enclosing transaction and acceptance. */
