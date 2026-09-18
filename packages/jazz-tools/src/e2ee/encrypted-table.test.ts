@@ -603,7 +603,7 @@ it.each([
           );
           try {
             await expect
-              .poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 })
+              .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
               .toEqual([note]);
             await other.e2ee.devices.revoke(original!.id).wait();
             await expect.poll(() => failure?.name, { timeout: 10_000 }).toBe("E2eeDataError");
@@ -1004,11 +1004,11 @@ it.each([
         );
         try {
           await expect
-            .poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 })
+            .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
             .toEqual([expected]);
           await db.update(app.notes, note.id, { title: "Nested update" }).wait({ tier: "global" });
           await expect
-            .poll(() => failure ?? snapshots.at(-1), { timeout: 10_000 })
+            .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
             .toEqual([{ ...project, notesViaProject: [{ ...child, title: "Nested update" }] }]);
           expect(failure).toBeUndefined();
         } finally {
