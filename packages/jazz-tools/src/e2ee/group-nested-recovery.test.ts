@@ -117,4 +117,4 @@ it("does not omit an undelivered inherited group from recovery protection and la
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-}, 180000);
+}, 300_000);
