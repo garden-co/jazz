@@ -157,8 +157,9 @@ The near-term implementation plan is:
 - remove duplicate Clippy and duplicate named-test execution;
 - give setup, compilation, and execution coherent separate budgets and retain
   structured partial receipts on failure or cancellation;
-- use the existing fast, unoptimized WASM artifact for correctness tests while
-  retaining optimized WASM validation in package/publish workflows;
+- use fast dev-profile WASM with Cargo `opt-level=1`, retaining development
+  assertions and overflow checks, for correctness tests; retain fully optimized
+  release WASM validation in package/publish workflows;
 - build NAPI once, verifying it before any conditional repair;
 - run independent WASM and NAPI builds concurrently;
 - shard the complete Rust inventory after removing per-shard setup taxes, then
