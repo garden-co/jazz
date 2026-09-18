@@ -49,6 +49,25 @@ original-parent receipts in [#2913](https://github.com/garden-co/jazz/issues/291
   longer appeared in the new sampled cold graph, but this was not an endpoint
   win. Do not infer savings from disappearance of an optimized stack frame.
 
+## E2EE duplicate discovery as a CI repair (2026-09-18)
+
+The `joe/e2ee-ci-group-discovery-trial` branch at `c83cb5e872` moves group
+membership discovery to the callers of delivery, avoiding a second discovery
+inside inspection while retaining fresh write-time authority validation.
+Compared with `0c62c00eb5` on Apple M4, with release NAPI, dev WASM at
+`opt-level=1`, two Vitest workers, and the same 13 group/space cases, both runs
+passed. Test execution changed from 247.6s to 224.6s (-9.3%). Discovery call/time
+attribution confirmed less work; however, nested-space reconciliation changed
+from 35.3s to 36.1s (+2.4%), and native denied-group rotation changed only from
+23.6s to 23.3s (-1.3%).
+
+The changed premise was remaining timeouts after bounding worker concurrency
+and optimizing dev-WASM code generation. This trial is not retained as their
+CI repair: it does not resolve all affected paths, and one local pair is not a
+hosted or general product-performance receipt. Preserve the caller-owned
+discovery tradeoff for a separately justified performance change rather than
+coupling crypto lifecycle changes to correctness-fixture execution budgets.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.

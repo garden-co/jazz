@@ -167,6 +167,15 @@ The near-term implementation plan is:
 - preserve fast PR diagnosis and a complete merge gate rather than silently
   skipping coverage.
 
+Multi-client E2EE correctness fixtures are not latency canaries. Their bounded
+execution allowance includes account setup, accepted-history replay, key
+delivery, recovery, and teardown under the complete concurrent suite. The
+affected group/space scenarios allow two minutes; the eight-edge graph and
+nested-recovery scenarios allow five. The complete TypeScript CI job allows
+sixty minutes, including cold native artifact production and offline/migration
+consumers. These bounds do not change assertions, polling deadlines, performance
+canaries, worker limits, or artifact admission checks.
+
 **Implemented first step (2026-08-11).** `test-rust` installs the pinned
 prebuilt `cargo-nextest` release instead of compiling it from source; repeated
 #1348 GitHub runs measured that source build at **115–169 seconds**. In the

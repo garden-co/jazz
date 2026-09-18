@@ -11,7 +11,8 @@ material-import parser and private-key adapter failures without retaining their
 diagnostic text or causes.
 
 Correctness WASM builds retain development safety checks with basic optimization.
-Bound worker and browser-package concurrency so multi-client lifecycle tests keep
-their existing deadlines; the complete CI job has a separate execution budget.
+Bound worker and browser-package concurrency to avoid oversubscribing multi-client
+lifecycle tests. Correctness-fixture and aggregate CI budgets are separate from
+performance canaries; assertion and polling contracts remain unchanged.
 Browser file workers also respect host CPU capacity, and package-content checks
 read both keyed and array-shaped npm pack receipts without changing their assertions.
