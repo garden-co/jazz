@@ -2,6 +2,7 @@ export type {
   CellCipher,
   EqualityIndex,
   KeyEnvelope,
+  LargeValueCipher,
   JazzCrypto,
   CryptoAdapters,
   DeviceKeyPair,
