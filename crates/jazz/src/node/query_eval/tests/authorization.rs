@@ -1343,3 +1343,231 @@ fn production_policy_union_labels_survive_reorder_and_unrelated_insertion() {
     assert_eq!(reordered_with_insert.len(), original.len() + 1);
     assert_ne!(labels(&node, &["open"]), labels(&node, &["changed"]));
 }
+
+/// Internal evaluation is necessary to prove lazy authorization: these valid
+/// references deliberately have no stored chunks, so ownership can pass only
+/// if the policy never materializes its unrelated payload. The public native
+/// integration separately proves actual insert/update settlement.
+#[test]
+fn owner_policy_does_not_materialize_unreferenced_large_scalar_candidates() {
+    use groove::large_values::{LargeValueKind, prepare_with_fixture_locators};
+    for (column_type, kind) in [
+        (PublicColumnType::Text, LargeValueKind::String),
+        (
+            PublicColumnType::Json { schema: None },
+            LargeValueKind::Json,
+        ),
+        (PublicColumnType::Bytea, LargeValueKind::Bytes),
+        (PublicColumnType::Text, LargeValueKind::String),
+    ] {
+        // Identical table/column names and logical Text/JSON carriers also
+        // exercise descriptor cache isolation in both declaration orders.
+        let schema = public_query_eval_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("lazy_documents")
+                    .column("owner", PublicColumnType::Text)
+                    .column("payload", column_type),
+            ),
+        );
+        let table = schema.tables[0].clone();
+        let schema_version = schema.version_id();
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xc3; 16]), schema);
+        let raw = format!("{{\"text\":\"{}\"}}", "x".repeat(800_000 - 11));
+        let prepared =
+            prepare_with_fixture_locators(kind, raw.as_bytes(), b"unstaged-policy-payload")
+                .unwrap();
+        let policy = Query::from("lazy_documents").filter(eq(col("owner"), lit("alice")));
+        let provenance = RowProvenance {
+            created_by: author(1),
+            created_at: 1,
+            updated_by: author(1),
+            updated_at: 1,
+        };
+        for (owner, expected) in [("alice", true), ("bob", false)] {
+            let cells = BTreeMap::from([
+                ("owner".to_owned(), Value::String(owner.to_owned())),
+                (
+                    "payload".to_owned(),
+                    Value::Large(Box::new(prepared.value_ref.clone())),
+                ),
+            ]);
+            let candidate = current_row_from_cells_with_explicit_provenance(
+                &table,
+                row(1),
+                &cells,
+                provenance,
+                None,
+            )
+            .expect("schema-derived candidate must retain its large scalar kind");
+            assert_eq!(
+                candidate.cell(&table, "payload"),
+                cells.get("payload").cloned()
+            );
+            for insert_candidate in [true, false] {
+                let allowed = crate::db::block_on(
+                    node.write_policy_query_allows_candidate_with_provenance_for_schema(
+                        schema_version,
+                        &table,
+                        &policy,
+                        row(1),
+                        &cells,
+                        author(1),
+                        insert_candidate,
+                        provenance,
+                    ),
+                )
+                .expect("ownership policy must not request unstaged payload chunks");
+                assert_eq!(
+                    allowed, expected,
+                    "{kind:?}, insert={insert_candidate}, owner={owner}"
+                );
+            }
+        }
+        let cells = BTreeMap::from([
+            ("owner".to_owned(), Value::String("alice".to_owned())),
+            (
+                "payload".to_owned(),
+                Value::Large(Box::new(prepared.value_ref.clone())),
+            ),
+        ]);
+        let literal = if kind == LargeValueKind::Bytes {
+            Value::Bytes(raw.as_bytes().to_vec())
+        } else {
+            Value::String(raw.clone())
+        };
+        let content_policy = Query::from("lazy_documents").filter(eq(col("payload"), lit(literal)));
+        let result = crate::db::block_on(
+            node.write_policy_query_allows_candidate_with_provenance_for_schema(
+                schema_version,
+                &table,
+                &content_policy,
+                row(1),
+                &cells,
+                author(1),
+                true,
+                provenance,
+            ),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(Error::Groove(groove::db::Error::IvmRuntime(
+                    groove::ivm::runtime::IvmRuntimeError::Chunk(
+                        groove::chunks::ChunkError::Unavailable
+                    )
+                )))
+            ),
+            "a policy that inspects {kind:?} must request its absent chunks: {result:?}"
+        );
+        // A JSON reference must never become accepted as text (or vice versa)
+        // merely because their logical carriers share the String type.
+        let wrong_kind = if kind == LargeValueKind::Json {
+            LargeValueKind::String
+        } else {
+            LargeValueKind::Json
+        };
+        let wrong = prepare_with_fixture_locators(wrong_kind, raw.as_bytes(), b"wrong-policy-kind")
+            .unwrap();
+        let cells = BTreeMap::from([
+            ("owner".to_owned(), Value::String("alice".to_owned())),
+            (
+                "payload".to_owned(),
+                Value::Large(Box::new(wrong.value_ref)),
+            ),
+        ]);
+        assert!(
+            current_row_from_cells_with_explicit_provenance(
+                &table,
+                row(1),
+                &cells,
+                provenance,
+                None
+            )
+            .is_err()
+        );
+    }
+}
+
+/// Runtime candidate encoding must preserve nullable JSON wrappers for Alice's
+/// ownership check; Bob remains denied. This internal seam isolates runtime
+/// carriers from the separate canonical nullable-JSON storage contract.
+#[test]
+fn nullable_json_policy_candidates_preserve_logical_wrappers() {
+    let mut failures = Vec::new();
+    // Reuse the same names so the process-global descriptor cache must retain
+    // nullability independently of JSON's physical scalar kind.
+    for nullable in [false, true, false] {
+        let table_builder = PublicTableSchemaBuilder::new("nullable_json_documents")
+            .column("owner", PublicColumnType::Text);
+        let table_builder = if nullable {
+            table_builder.nullable_column("payload", PublicColumnType::Json { schema: None })
+        } else {
+            table_builder.column("payload", PublicColumnType::Json { schema: None })
+        };
+        let schema = public_query_eval_schema(PublicSchemaBuilder::new().table(table_builder));
+        let table = schema.tables[0].clone();
+        let schema_version = schema.version_id();
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xc4; 16]), schema);
+        let text = Value::String("{\"ok\":true}".to_owned());
+        let values = if nullable {
+            vec![Value::Nullable(None), Value::Nullable(Some(Box::new(text)))]
+        } else {
+            vec![text]
+        };
+        let provenance = RowProvenance {
+            created_by: author(1),
+            created_at: 1,
+            updated_by: author(1),
+            updated_at: 1,
+        };
+        let policy = Query::from("nullable_json_documents").filter(eq(col("owner"), lit("alice")));
+        for payload in values {
+            for (owner, expected) in [("alice", true), ("bob", false)] {
+                let cells = BTreeMap::from([
+                    ("owner".to_owned(), Value::String(owner.to_owned())),
+                    ("payload".to_owned(), payload.clone()),
+                ]);
+                match current_row_from_cells_with_explicit_provenance(
+                    &table,
+                    row(1),
+                    &cells,
+                    provenance,
+                    None,
+                ) {
+                    Ok(candidate) => {
+                        assert_eq!(candidate.cell(&table, "payload"), Some(payload.clone()))
+                    }
+                    Err(error) => {
+                        failures.push(format!(
+                            "nullable={nullable} payload={payload:?}: candidate {error:?}"
+                        ));
+                        continue;
+                    }
+                }
+                for insert_candidate in [true, false] {
+                    match crate::db::block_on(
+                        node.write_policy_query_allows_candidate_with_provenance_for_schema(
+                            schema_version,
+                            &table,
+                            &policy,
+                            row(1),
+                            &cells,
+                            author(1),
+                            insert_candidate,
+                            provenance,
+                        ),
+                    ) {
+                        Ok(allowed) => assert_eq!(allowed, expected),
+                        Err(error) => failures.push(format!(
+                            "nullable={nullable} payload={payload:?}: policy {error:?}"
+                        )),
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "runtime nullable JSON failures: {failures:#?}"
+    );
+}

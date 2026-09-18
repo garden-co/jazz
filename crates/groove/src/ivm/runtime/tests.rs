@@ -1060,6 +1060,75 @@ async fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     );
 }
 
+/// Rehydrating a shared extrema operator after output memo eviction must replace
+/// its candidate bag, not add the complete snapshot to the retained candidates.
+/// Internal coverage is necessary because public queries cannot force eviction
+/// of the disposable memo while keeping the operator and subscribers alive.
+#[futures_test::test]
+async fn shared_arg_by_rehydration_replaces_retained_candidates() {
+    for maximum in [false, true] {
+        let schema = albums_schema();
+        let albums = schema.table("albums").unwrap().record_schema();
+        let mut runtime = IvmRuntime::new(schema).unwrap();
+        let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+        write_two_album_rows(&storage, &albums).await;
+        let input = GraphBuilder::table("albums");
+        let graph = if maximum {
+            GraphBuilder::arg_max_by(input, Vec::<String>::new(), ["id"])
+        } else {
+            GraphBuilder::arg_min_by(input, Vec::<String>::new(), ["id"])
+        };
+        let values = |id| {
+            vec![
+                Value::U64(id),
+                Value::String(if id == 1 { "one" } else { "two" }.into()),
+            ]
+        };
+        let (winner, runner_up) = if maximum { (2, 1) } else { (1, 2) };
+        let mut subscriptions = Vec::new();
+        for _ in 0..3 {
+            runtime.evict_eval_memo_for_tests(0, 0);
+            let subscription = runtime
+                .subscribe_one_sink(graph.clone(), &storage)
+                .await
+                .unwrap();
+            assert_eq!(
+                subscription.try_recv().unwrap().to_values().unwrap(),
+                [(values(winner), 1)],
+                "each hydration returns one complete winner snapshot"
+            );
+            subscriptions.push(subscription);
+        }
+        for (removed, expected) in [
+            (winner, vec![(values(winner), -1), (values(runner_up), 1)]),
+            (runner_up, vec![(values(runner_up), -1)]),
+        ] {
+            runtime
+                .tick(
+                    vec![TableDelta {
+                        variant_tag: 0,
+                        table: "albums".into(),
+                        descriptor: albums,
+                        deltas: vec![RecordDelta {
+                            record: albums.create(&values(removed)).unwrap().into(),
+                            weight: -1,
+                        }],
+                    }],
+                    &storage,
+                )
+                .await
+                .unwrap();
+            for subscription in &subscriptions {
+                let actual = subscription.try_recv().unwrap().to_values().unwrap();
+                assert_eq!(actual.len(), expected.len());
+                for change in &expected {
+                    assert!(actual.contains(change), "missing {change:?} in {actual:?}");
+                }
+            }
+        }
+    }
+}
+
 /// Alice, Bob, and Carol share a collector after its disposable output memo
 /// is evicted. Rehydrating Bob/Carol must not multiply Alice's resident rows.
 /// Alice opens -> evict memo -> Bob opens -> evict -> Carol opens -> update/delete.

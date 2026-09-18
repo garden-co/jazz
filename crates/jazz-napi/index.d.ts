@@ -125,6 +125,7 @@ export declare class PendingNativePermissionAdvice {
  */
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
+  cancel(): void
 }
 
 /** Thread-affine subscription opening waiting for the core owner. */
@@ -175,6 +176,8 @@ export declare class TestJwtIssuer {
 export declare class Transport {
   routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | null
   recvAuxiliaryWireFrames(): Array<Uint8Array>
+  auxiliaryReceiveTimeoutMs(): number | null
+  expireAuxiliaryReceive(): void
   auxiliaryOutboundReady(): boolean
   sendWireFrame(frame: Uint8Array): void
   sendWireFrames(frames: Array<Uint8Array>): void

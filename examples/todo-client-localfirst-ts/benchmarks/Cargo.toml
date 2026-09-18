@@ -23,3 +23,7 @@ harness = false
 [[bin]]
 name = "todo-profile"
 path = "src/bin/profile.rs"
+
+[[bin]]
+name = "todo-history-depth"
+path = "src/bin/history_depth.rs"

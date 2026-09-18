@@ -531,6 +531,16 @@ function containsReference(sqlType: SqlType): boolean {
   );
 }
 
+function isUuidArrayReference(builder: ColumnBuilder): boolean {
+  const sqlType = builder._sqlType;
+  return (
+    typeof sqlType === "object" &&
+    sqlType.kind === "ARRAY" &&
+    sqlType.element === "UUID" &&
+    builder._references !== undefined
+  );
+}
+
 class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
@@ -590,7 +600,13 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   private _mergeStrategy: ColumnMergeStrategy | undefined;
   _transform?: ColumnTransform<unknown, unknown>;
 
-  constructor(public _element: T) {}
+  constructor(public _element: T) {
+    if (isUuidArrayReference(_element)) {
+      throw new Error(
+        "Nested reference arrays are not supported; use a direct array(ref(...)) column.",
+      );
+    }
+  }
 
   optional(): this {
     if (this._mergeStrategy === "g-set") {

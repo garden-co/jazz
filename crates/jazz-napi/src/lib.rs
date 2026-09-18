@@ -1042,10 +1042,7 @@ impl PendingNativeRead {
 
 impl Drop for PendingNativeRead {
     fn drop(&mut self) {
-        self.future.borrow_mut().take();
-        if let Some(cleanup) = self.cleanup.borrow_mut().take() {
-            cleanup();
-        }
+        self.cancel();
     }
 }
 
@@ -1095,6 +1092,14 @@ impl PendingNativeRead {
     #[napi]
     pub fn poll(&self) -> napi::Result<Option<Uint8Array>> {
         self.poll_once()
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.future.borrow_mut().take();
+        if let Some(cleanup) = self.cleanup.borrow_mut().take() {
+            cleanup();
+        }
     }
 }
 
@@ -1480,6 +1485,23 @@ impl Transport {
             frames.push(Uint8Array::new(frame));
         }
         Ok(frames)
+    }
+
+    #[napi(js_name = "auxiliaryReceiveTimeoutMs")]
+    pub fn auxiliary_receive_timeout_ms(&self) -> Option<u32> {
+        self.auxiliary_pump
+            .incomplete_receive_timeout_ms()
+            .map(|delay| delay.min(u64::from(u32::MAX)) as u32)
+    }
+
+    #[napi(js_name = "expireAuxiliaryReceive")]
+    pub fn expire_auxiliary_receive(&self) -> napi::Result<()> {
+        self.auxiliary_pump
+            .expire_incomplete_receive()
+            .map_err(|error| {
+                self.auxiliary_pump.disconnect();
+                napi::Error::from_reason(error)
+            })
     }
 
     #[napi(js_name = "auxiliaryOutboundReady")]
@@ -2934,10 +2956,12 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         macro_rules! read {
             ($db:expr) => {{
+                let drive_read = matches!(db, NapiDbInnerStorage::Memory(_));
                 let db = Rc::clone($db);
                 let release_db = Rc::clone(&db);
                 let preceding_writes =
                     (!synchronous && open_tx.is_none()).then(|| db.queued_mutation_barrier());
+                let transaction_owner = open_tx.map(|_| Rc::clone(&db));
                 let future = Box::pin(async move {
                     if let Some(preceding_writes) = preceding_writes {
                         preceding_writes
@@ -2975,7 +2999,24 @@ impl NapiDb {
                     .map(Uint8Array::new)
                     .map_err(napi_error)
                 });
-                native_covered_read_or_pending(future, Box::new(|| {}))
+                if let Some((open_tx, owner)) = open_tx.zip(transaction_owner) {
+                    let read =
+                        owner.enqueue_transaction_read(open_tx, async move { Ok(future.await) });
+                    if drive_read {
+                        owner.drive_queued_mutation_once();
+                    }
+                    native_read_or_pending(Box::pin(async move {
+                        read.await
+                            .map_err(|_| {
+                                napi::Error::from_reason(
+                                    "transaction read owner operation was cancelled",
+                                )
+                            })?
+                            .map_err(napi_error)?
+                    }))
+                } else {
+                    native_covered_read_or_pending(future, Box::new(|| {}))
+                }
             }};
         }
         match db {

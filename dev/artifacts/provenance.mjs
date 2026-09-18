@@ -348,9 +348,34 @@ export function workspaceDependencyInputs(root, rootManifest) {
       if (!dependency.path || dependency.kind === "dev") continue;
       const dependencyDirectory = resolve(dependency.path);
       if (!packages.has(dependencyDirectory)) {
-        throw new Error(
-          `artifact provenance: cargo metadata omitted path dependency ${dependency.name} at ${dependencyDirectory}`,
+        // Excluded vendored packages are intentionally outside the root
+        // workspace, so --no-deps omits them. Ask their own manifest for the
+        // same declared dependency metadata, without resolving registry crates.
+        const vendored = spawnSync(
+          "cargo",
+          [
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+            join(dependencyDirectory, "Cargo.toml"),
+          ],
+          { cwd: root, encoding: "utf8" },
         );
+        if (vendored.status !== 0) {
+          throw new Error(
+            `artifact provenance: cargo metadata failed for path dependency ${dependency.name}: ${vendored.stderr.trim()}`,
+          );
+        }
+        for (const nested of JSON.parse(vendored.stdout).packages) {
+          packages.set(dirname(resolve(nested.manifest_path)), nested);
+        }
+        if (!packages.has(dependencyDirectory)) {
+          throw new Error(
+            `artifact provenance: cargo metadata omitted path dependency ${dependency.name} at ${dependencyDirectory}`,
+          );
+        }
       }
       pending.push(dependencyDirectory);
     }

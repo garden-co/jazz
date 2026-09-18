@@ -92,7 +92,7 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     // This is an internal transport-boundary test: public clients never apply
     // trusted upstream catalogue snapshots directly.
     let base = schema();
-    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let evolved = SchemaVersion::new(catalogue_evolved_schema_with_allow_all());
     let lens = MigrationLens::new(
         base.version_id(),
         evolved.id,
@@ -115,12 +115,9 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .unwrap();
     let (_, authored) = authority
@@ -286,18 +283,15 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .unwrap();
 
     let (_receiver_dir, mut receiver) =
         open_node_with_schema(node(0x61), evolved.schema.clone());
-    let local_alias = receiver.catalogue.current_schema_version_alias.unwrap();
+    let local_alias = receiver.catalogue.local_schema_version_alias.unwrap();
     let local_mapping = receiver.catalogue.physical_mappings[&evolved.id].clone();
     let authority_identities = authority.catalogue.physical_mappings[&evolved.id]
         .identities
@@ -352,7 +346,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     );
 
     assert_eq!(
-        receiver.catalogue.current_schema_version_alias,
+        receiver.catalogue.local_schema_version_alias,
         Some(local_alias)
     );
     let received_mapping = &receiver.catalogue.physical_mappings[&evolved.id];
@@ -368,6 +362,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     // read schema even though it does not change that schema version's hash.
     // A trusted same-version semantic change must retire live runtime handles.
     let mut active_policy_change = authority.catalogue_snapshot().unwrap();
+    active_policy_change.current_write_schema.revision += 1;
     active_policy_change
         .schemas
         .iter_mut()
@@ -465,12 +460,9 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .unwrap();
 
@@ -566,12 +558,9 @@ fn authored_columns_follow_a_renamed_column_through_wire_and_reopen() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: renamed.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
         })
         .unwrap();
     let (new_tx, new_unit) = authority
@@ -644,12 +633,9 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .unwrap();
 
@@ -727,8 +713,15 @@ fn trusted_catalogue_snapshot_imports_historical_lineage_without_rebuilding_acti
     // its activation commits, reopening must retain enough canonical lineage
     // identity to recognize that same prefix on the next upstream connection.
     let base = schema();
-    let snapshot = catalogue_snapshot_fixture();
+    let snapshot = catalogue_snapshot_fixture_for_schema(catalogue_evolved_schema_with_allow_all());
     let (dir, mut receiver) = open_node_with_schema(node(0x3f), base.clone());
+    // Establish the authority's UUIDs first: adding historical lineage below
+    // must not accidentally also test adoption of a fresh genesis manifest.
+    let mut genesis = snapshot.clone();
+    genesis.lineages.clear();
+    genesis.schemas.retain(|schema| schema.id == base.version_id());
+    genesis.current_write_schema = CurrentWriteSchema { revision: 0, schema: base.version_id() };
+    receiver.apply_trusted_catalogue_snapshot_settled(genesis).unwrap();
     let runtime_before_transition = receiver.groove_runtime_token();
 
     receiver
@@ -921,6 +914,7 @@ fn test_catalogue_kind(kind: &[u8]) -> crate::node::codec::CatalogueRecordKind {
         b"schema_lineage_active" => CatalogueRecordKind::SchemaLineageActive,
         b"write_pointer_pending" => CatalogueRecordKind::WritePointerPending,
         b"bootstrap_ready" => CatalogueRecordKind::BootstrapReady,
+        b"active_schema" => CatalogueRecordKind::ActiveSchema,
         _ => panic!("unknown test catalogue kind: {kind:?}"),
     }
 }
@@ -976,13 +970,14 @@ fn catalogue_kernel_kind_fixture_is_exact_and_closed() {
         (CatalogueRecordKind::SchemaLineageActive, 5),
         (CatalogueRecordKind::WritePointerPending, 6),
         (CatalogueRecordKind::BootstrapReady, 7),
+        (CatalogueRecordKind::ActiveSchema, 8),
     ];
 
     for (kind, bytes) in fixture {
         assert_eq!(kind.key(), bytes, "epoch-pinned kind fixture changed");
         assert_eq!(CatalogueRecordKind::from_key(bytes).unwrap(), kind);
     }
-    assert!(CatalogueRecordKind::from_key(8).is_err());
+    assert!(CatalogueRecordKind::from_key(9).is_err());
     assert!(CatalogueRecordKind::from_key(u64::MAX).is_err());
 }
 
@@ -1648,7 +1643,7 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
     edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .expect("install exact trusted core catalogue");
     assert_eq!(edge.catalogue_bootstrap_state(), CatalogueBootstrapState::Ready);
-    assert_eq!(edge.catalogue.current_schema_version_id, authority_genesis);
+    assert_eq!(edge.catalogue.local_schema_version_id, authority_genesis);
     assert_eq!(edge.catalogue.schema, schema());
     assert_eq!(edge.current_write_schema().unwrap(), snapshot.current_write_schema);
     assert_eq!(edge.active_catalogue_seq(), 1);
@@ -1661,7 +1656,7 @@ fn dynamic_edge_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready(
         .expect("fresh process discovers durable authority genesis");
     assert_eq!(reopened.catalogue_bootstrap_state(), CatalogueBootstrapState::Ready);
     assert_eq!(
-        reopened.catalogue.current_schema_version_id,
+        reopened.catalogue.local_schema_version_id,
         authority_genesis,
         "reopen must use the authority genesis, never the empty temporary schema"
     );
@@ -1778,7 +1773,7 @@ fn dynamic_edge_reopen_rejects_catalogue_stripped_history() {
         MergeableCommit::new("todos", row(0x9f), 10).cells(title_cells("durable history")),
     )
     .unwrap();
-    let alias = durable_node.catalogue.current_schema_version_alias.unwrap();
+    let alias = durable_node.catalogue.local_schema_version_alias.unwrap();
     delete_catalogue_record(&mut durable_node, b"genesis", base.version_id().0);
     delete_catalogue_record(&mut durable_node, b"schema", base.version_id().0);
     delete_schema_mapping_record(&mut durable_node, alias);
@@ -2016,7 +2011,7 @@ fn dynamic_edge_bootstrap_rejects_snapshot_with_ambiguous_genesis() {
 /// only one complete trusted snapshot may cross the bootstrap boundary.
 ///
 /// ```text
-/// stale incremental pointer ──► edge(Uninitialized) ──reject──► no pending pointer row
+/// incremental publication ──► edge(Uninitialized) ──reject──► no catalogue row
 /// ```
 #[test]
 fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue() {
@@ -2029,12 +2024,9 @@ fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue
         .expect("open explicit uninitialized edge");
 
     assert!(matches!(
-        edge.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+        edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
             author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: schema().version_id(),
-            },
+            schema: Box::new(SchemaVersion::new(schema())),
         }),
         Err(Error::CatalogueUninitialized)
     ));
@@ -2043,7 +2035,7 @@ fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue
             .primary_key_scan_raw("jazz_catalogue", &[])
             .expect("scan rejected incremental message")
             .is_empty(),
-        "incremental pointer must not leave a durable pending catalogue row"
+        "incremental publication must not leave a durable catalogue row"
     );
 }
 
@@ -2116,9 +2108,25 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
 }
 
 /// Build the trusted catalogue snapshot shared by bootstrap and recovery tests.
+// History-only scenarios must preserve explicit permissions: omitted policies
+// deny access and would constitute an authorization change from schema().
+fn catalogue_evolved_schema_with_allow_all() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text),
+        ).allow_all(),
+    )
+}
+
 fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
+    catalogue_snapshot_fixture_for_schema(catalogue_evolved_schema())
+}
+
+fn catalogue_snapshot_fixture_for_schema(evolved: JazzSchema) -> crate::protocol::CatalogueSnapshot {
     let base = schema();
-    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let evolved = SchemaVersion::new(evolved);
     let genesis_physical_identities = PhysicalIdentityManifest::allocate(&base);
     let publication = SchemaLineagePublication::author_from_prior(
         &base,
@@ -2210,12 +2218,9 @@ fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reop
     assert_eq!(core.catalogue_schemas().len(), 1);
     assert_eq!(core.current_write_schema().unwrap().revision, 0);
     assert!(matches!(
-        core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: base.version_id(),
-            },
+        core.activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: base.version_id(),
         }),
         Err(Error::CatalogueActivationFailed)
     ));
@@ -2339,4 +2344,268 @@ fn lineage_equality_preserves_content_and_declaration_multiplicity() {
             assert_ne!(original.content_id(), changed.content_id());
         }
     }
+}
+
+/// Opening an old edge upgrades storage before any snapshot is received.
+/// Internal because creating an old durable layout requires writing catalogue records.
+#[test]
+fn legacy_edge_upgrades_active_schema_during_open() {
+    let base = schema();
+    let (_authority_dir, authority) = open_node_with_schema(node(0xc8), base.clone());
+    let mut current = authority.catalogue_snapshot().unwrap();
+    current.current_write_schema.revision = 2;
+    let mut legacy = current.clone();
+    legacy.current_write_schema.revision = 7;
+    let dir = tempfile::tempdir().unwrap();
+    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(legacy)
+        .unwrap();
+    // Old edges stored the selected permissions in the schema payload and had no active-schema record.
+    delete_catalogue_record(&mut edge, b"active_schema", uuid::Uuid::nil());
+    write_catalogue_record(
+        &mut edge,
+        b"schema",
+        base.version_id().0,
+        codec::encode_catalogue_schema(&SchemaVersion::new(base)).unwrap(),
+    );
+    drop(edge);
+
+    let edge = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
+    assert_eq!(edge.current_write_schema().unwrap().revision, 0);
+    assert_eq!(edge.catalogue_snapshot().unwrap().schemas, current.schemas);
+    drop(edge);
+    // The conversion is durable even if no server has connected yet.
+    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
+    assert_eq!(edge.current_write_schema().unwrap().revision, 0);
+    edge.apply_trusted_catalogue_snapshot_settled(current.clone())
+        .unwrap();
+    assert_eq!(edge.current_write_schema().unwrap().revision, 2);
+    let mut conflicting = current.clone();
+    conflicting.schemas[0] =
+        SchemaVersion::new(conflicting.schemas[0].schema.without_permissions());
+    assert!(
+        edge.apply_trusted_catalogue_snapshot_settled(conflicting)
+            .is_err()
+    );
+    let mut stale = current;
+    stale.current_write_schema.revision = 1;
+    assert!(
+        edge.apply_trusted_catalogue_snapshot_settled(stale.clone())
+            .is_err()
+    );
+    drop(edge);
+    let mut reopened = fresh_dynamic_edge_open(dir.path(), node(0xc9)).unwrap();
+    assert_eq!(reopened.current_write_schema().unwrap().revision, 2);
+    assert!(
+        reopened
+            .apply_trusted_catalogue_snapshot_settled(stale)
+            .is_err()
+    );
+}
+
+/// Uses internal APIs to recreate an older schema publication with embedded permissions.
+#[test]
+fn permission_bearing_lineage_snapshot_replay_reopens_without_restoring_old_grants() {
+    let mut snapshot = catalogue_snapshot_fixture();
+    let granted = crate::schema::JazzSchema::new(
+        &crate::tools::SchemaBuilder::new()
+            .table(
+                crate::tools::TableSchema::builder("todos")
+                    .column("title", crate::tools::ColumnType::Text)
+                    .column("body", crate::tools::ColumnType::Text)
+                    .policies(
+                        crate::tools::TablePolicies::new()
+                            .with_select(crate::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    )
+    .unwrap();
+    let original = &snapshot.lineages[0].1;
+    let publication = SchemaLineagePublication::author_from_prior(
+        &snapshot.schemas[0].schema,
+        &snapshot.genesis_physical_identities,
+        SchemaVersion::new(granted.clone()),
+        original.lens.clone(),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    snapshot.lineages[0].1 = publication.clone();
+    // The active bundle revokes the grant retained in the immutable receipt.
+    let denied = granted.without_permissions();
+    snapshot.schemas[1] = SchemaVersion::new(denied.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let mut edge = fresh_dynamic_edge_open(dir.path(), node(0xca)).unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    edge.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    drop(edge);
+
+    let mut reopened = fresh_dynamic_edge_open(dir.path(), node(0xca))
+        .expect("replay must leave a reopenable catalogue");
+    assert_eq!(
+        reopened.catalogue.active_schema.compiled.public_schema(),
+        denied.public_schema()
+    );
+    assert_eq!(
+        reopened.catalogue_snapshot().unwrap().lineages[0].1,
+        publication
+    );
+    reopened
+        .apply_trusted_catalogue_snapshot_settled(snapshot)
+        .unwrap();
+    drop(reopened);
+    let reopened = fresh_dynamic_edge_open(dir.path(), node(0xca)).unwrap();
+    assert_eq!(
+        reopened.catalogue.active_schema.compiled.public_schema(),
+        denied.public_schema()
+    );
+}
+
+// Internal because physical source identity and its live-graph invalidation
+// token are the contract under test; schemas still use the public builders.
+#[test]
+fn constant_policy_schema_switch_invalidates_replaced_physical_table() {
+    let base = schema();
+    let evolved = SchemaVersion::new(catalogue_evolved_schema_with_allow_all());
+    let (_dir, mut receiver) = open_node_with_schema(node(0x75), base.clone());
+    let old_table = receiver.physical_table_id_for_schema(base.version_id(), "todos").unwrap();
+    let lens = MigrationLens::new(base.version_id(), evolved.id, Vec::new()).unwrap();
+    publish_schema_lineage(
+        &mut receiver,
+        evolved.clone(),
+        lens,
+        vec!["todos".to_owned()],
+        vec!["todos".to_owned()],
+    ).unwrap();
+    assert_ne!(
+        receiver.physical_table_id_for_schema(evolved.id, "todos").unwrap(),
+        old_table,
+    );
+    let before = receiver.groove_runtime_token();
+    receiver.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
+    }).unwrap();
+    assert_ne!(receiver.groove_runtime_token(), before);
+}
+
+#[test]
+fn trusted_identity_rebind_updates_live_peer_support_coordinates() {
+    // Real independently opened catalogues mint distinct provisional UUIDs.
+    // The usual shared test catalogue helper intentionally masks this race.
+    let schema = schema();
+    let open = |id| {
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+        let node = NodeState::new(node(id), schema.clone(), storage).unwrap();
+        (dir, node)
+    };
+    let (_authority_dir, authority) = open(0x71);
+    let (_relay_dir, mut relay) = open(0x72);
+    let schema_id = schema.version_id();
+    let expected = authority.scope_physical_table(schema_id, "todos").unwrap();
+    assert_ne!(
+        relay.scope_physical_table(schema_id, "todos").unwrap(),
+        expected
+    );
+    let tx = relay
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x73), 10)
+                .cells(title_cells("pending-before-rebind")),
+        )
+        .unwrap();
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (_receiver_dir, mut receiver) = open(0x74);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(relay.catalogue_snapshot().unwrap())
+        .unwrap();
+    register_shape_binding(&mut receiver, &shape, &binding);
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let key = receiver
+        .authority_result_key_for_subscription(subscription)
+        .unwrap();
+    let baseline_subscriptions = relay.runtime_stats_for_test().active_subscriptions;
+    let mut downstream = PeerState::new();
+    let initial = downstream
+        .rehydrate_query(&mut relay, &shape, &binding)
+        .unwrap();
+    receiver.apply_sync_message_settled(initial).unwrap();
+    let generation = receiver.applied_authority_result_generation(&key);
+    assert!(receiver.has_settled_authority_result(&key));
+    let snapshot = authority.catalogue_snapshot().unwrap();
+    relay
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    assert_eq!(
+        relay.scope_physical_table(schema_id, "todos").unwrap(),
+        expected
+    );
+    assert!(!receiver.has_settled_authority_result(&key));
+    assert_eq!(
+        receiver.applied_authority_result_generation(&key),
+        generation
+    );
+    assert!(
+        receiver.query.authority_results[&key]
+            .compiled_covered_input_sources
+            .is_none()
+    );
+    let token = relay.groove_runtime_token();
+    let identity_generation = relay.physical_identity_generation();
+    relay
+        .apply_trusted_catalogue_snapshot_settled(snapshot)
+        .unwrap();
+    assert_eq!(
+        relay.groove_runtime_token(),
+        token,
+        "identical snapshot must preserve query validity"
+    );
+    assert_eq!(relay.physical_identity_generation(), identity_generation);
+    relay.accept_global_for_test(tx).unwrap();
+    let update = crate::protocol::ViewUpdatePayload::from_view_update(
+        downstream
+            .query_update(&mut relay, &shape, &binding)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        update.supporting_rows.is_snapshot(),
+        "rebound peer must replace its old closure"
+    );
+    assert_eq!(update.supporting_rows.added_rows().len(), 1);
+    assert_eq!(
+        update.supporting_rows.added_rows()[0].physical_table,
+        expected,
+        "live peer support must use the same permanent identities as its announced catalogue"
+    );
+    receiver
+        .apply_sync_message_settled(update.into_view_update())
+        .unwrap();
+    assert!(receiver.has_settled_authority_result(&key));
+    assert!(receiver.applied_authority_result_generation(&key) > generation);
+    assert_eq!(receiver.scalar_authority_input_rows(&key, "todos").len(), 1);
+    assert_eq!(
+        relay.runtime_stats_for_test().active_subscriptions,
+        baseline_subscriptions + 1,
+        "identity refresh must retire the old peer graph immediately"
+    );
+    downstream.forget_subscription_with_node(&mut relay, subscription);
+    assert_eq!(
+        relay.runtime_stats_for_test().active_subscriptions,
+        baseline_subscriptions,
+        "forget must release the replacement without waiting for another runtime tick"
+    );
 }

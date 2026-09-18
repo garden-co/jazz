@@ -446,7 +446,7 @@ pub trait OrderedKvStorage {
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
             Ok(collect_scan(
-                self.scan(ScanRequest::prefix(cf, prefix).reversed())
+                self.scan(ScanRequest::prefix(cf, prefix).reversed().with_max_items(1))
                     .await?,
             )
             .await?
@@ -1187,7 +1187,11 @@ impl OrderedKvStorage for LayoutStorage {
             let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix)?;
             Ok(collect_scan(
                 self.inner
-                    .scan(ScanRequest::prefix(physical_cf, physical_prefix).reversed())
+                    .scan(
+                        ScanRequest::prefix(physical_cf, physical_prefix)
+                            .reversed()
+                            .with_max_items(1),
+                    )
                     .await?,
             )
             .await?
@@ -4782,6 +4786,190 @@ mod tests {
             Some((b"user:3".to_vec(), b"staged-3".to_vec()))
         );
         assert_eq!(storage.scans.get(), 1);
+    }
+
+    /// Internal work-bound receipt: returned values alone cannot distinguish a
+    /// point seek from materializing thousands of discarded candidates. Alice's
+    /// durable keys and Bob's staged replacements/deletions use real storage.
+    /// durable base -> optional layout -> staged overlay -> greatest visible key.
+    #[futures_test::test]
+    async fn last_prefix_lookup_bounds_physical_entries_with_layout_and_staged_deletions() {
+        struct Meter {
+            inner: MemoryStorage,
+            requests: Rc<RefCell<Vec<ScanRequest>>>,
+            entries: Rc<Cell<usize>>,
+        }
+        struct Cursor<'a> {
+            inner: StorageScan<'a>,
+            entries: Rc<Cell<usize>>,
+        }
+        impl StorageCursor for Cursor<'_> {
+            fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+                Box::pin(async move {
+                    let batch = self.inner.next_batch().await?;
+                    self.entries
+                        .set(self.entries.get() + batch.as_ref().map_or(0, Vec::len));
+                    Ok(batch)
+                })
+            }
+        }
+        impl OrderedKvStorage for Meter {
+            fn get(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
+                self.inner.get(cf, key)
+            }
+            fn put_if_absent(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
+                self.inner.put_if_absent(cf, key, value)
+            }
+            fn compare_and_delete(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<bool, Error>> {
+                self.inner.compare_and_delete(cf, key, value)
+            }
+            fn set(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.set(cf, key, value)
+            }
+            fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.delete(cf, key)
+            }
+            fn write_many(
+                &self,
+                operations: Vec<OwnedWriteOperation>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.write_many(operations)
+            }
+            fn column_family_names(&self) -> Option<Vec<String>> {
+                self.inner.column_family_names()
+            }
+            fn scan(
+                &self,
+                request: ScanRequest,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.requests.borrow_mut().push(request.clone());
+                Box::pin(async move {
+                    Ok(Box::new(Cursor {
+                        inner: self.inner.scan(request).await?,
+                        entries: self.entries.clone(),
+                    }) as StorageScan<'_>)
+                })
+            }
+        }
+        impl ReopenableStorage for Meter {
+            fn reopen(
+                self,
+                column_families: Vec<String>,
+            ) -> StorageFuture<'static, Result<Self, Error>> {
+                Box::pin(async move {
+                    Ok(Self {
+                        inner: self.inner.reopen(column_families).await?,
+                        requests: self.requests,
+                        entries: self.entries,
+                    })
+                })
+            }
+        }
+        fn key(i: usize) -> Vec<u8> {
+            format!("row:{i:05}").into_bytes()
+        }
+        async fn exercise<S: OrderedKvStorage>(
+            storage: &S,
+            requests: &RefCell<Vec<ScanRequest>>,
+            entries: &Cell<usize>,
+        ) {
+            let cf = "jazz_tasks_history";
+            storage
+                .write_many(
+                    (0..2048)
+                        .map(|i| OwnedWriteOperation::Set {
+                            cf: cf.into(),
+                            key: key(i),
+                            value: key(i),
+                        })
+                        .collect(),
+                )
+                .await
+                .unwrap();
+            for removals in [0, 3] {
+                let staged = RefCell::new(StagedWriteState::from(
+                    (0..removals)
+                        .map(|i| OwnedWriteOperation::Delete {
+                            cf: cf.into(),
+                            key: key(2047 - i),
+                        })
+                        .collect::<Vec<_>>(),
+                ));
+                let overlay = StagedWriteOverlay::new(storage, &staged);
+                requests.borrow_mut().clear();
+                entries.set(0);
+                assert_eq!(
+                    overlay
+                        .last_with_prefix(cf.into(), b"row:".to_vec())
+                        .await
+                        .unwrap(),
+                    Some((key(2047 - removals), key(2047 - removals)))
+                );
+                assert_eq!(entries.get(), 1 + removals);
+                assert_eq!(requests.borrow().len(), 1);
+                assert_eq!(requests.borrow()[0].direction, ScanDirection::Reverse);
+                assert_eq!(requests.borrow()[0].max_items, Some(1 + removals));
+            }
+            requests.borrow_mut().clear();
+            entries.set(0);
+            assert_eq!(
+                storage
+                    .last_with_prefix(cf.into(), b"row:".to_vec())
+                    .await
+                    .unwrap(),
+                Some((key(2047), key(2047)))
+            );
+            assert_eq!(entries.get(), 1);
+            assert_eq!(requests.borrow()[0].max_items, Some(1));
+            assert_eq!(
+                storage
+                    .last_with_prefix(cf.into(), b"missing:".to_vec())
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let entries = Rc::new(Cell::new(0));
+        let storage = Meter {
+            inner: MemoryStorage::new(&["jazz_tasks_history"]).unwrap(),
+            requests: requests.clone(),
+            entries: entries.clone(),
+        };
+        exercise(&storage, &requests, &entries).await;
+        let layout = StorageLayout::jazz_class_v1();
+        let families = layout.physical_column_families(["jazz_tasks_history"]);
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = LayoutStorage::new(
+            Meter {
+                inner: MemoryStorage::new(&refs).unwrap(),
+                requests: requests.clone(),
+                entries: entries.clone(),
+            },
+            layout,
+        )
+        .await
+        .unwrap();
+        exercise(&storage, &requests, &entries).await;
     }
 
     #[futures_test::test]

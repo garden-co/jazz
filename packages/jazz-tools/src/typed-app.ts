@@ -171,6 +171,15 @@ export function defineTable<
       if (!column)
         throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
       if (
+        typeof column.sqlType === "object" &&
+        column.sqlType.kind === "ARRAY" &&
+        typeof column.sqlType.element === "object" &&
+        column.sqlType.element.kind === "ARRAY"
+      )
+        throw new Error(
+          `Relationship "${name}" cannot use a nested reference array column; "${relation.column}" must be a UUID or UUID[] column.`,
+        );
+      if (
         column.sqlType !== "UUID" &&
         !(
           typeof column.sqlType === "object" &&

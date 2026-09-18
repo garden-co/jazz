@@ -939,7 +939,7 @@ fn assert_retained_publication_policy_revocation(incremental: bool) {
     assert_eq!(schema.version_id(), denied_schema.version_id());
     let catalogue_seq = authority.server.node().borrow().active_catalogue_seq();
     authority
-        .publish_schema(SchemaVersion::new(denied_schema))
+        .activate_schema_for_test(1, denied_schema)
         .unwrap();
     assert_eq!(
         authority.server.node().borrow().active_catalogue_seq(),

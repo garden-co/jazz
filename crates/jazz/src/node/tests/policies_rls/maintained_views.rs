@@ -24,8 +24,7 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
     );
     let deleted_readable_delete = accept_global(
         &mut core,
-        MergeableCommit::new("todos", row(0x93), 21)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("todos", row(0x93), 21).deletion(DeletionEvent::Deleted),
     );
     let _deleted_unreadable_content = accept_global(
         &mut core,
@@ -33,8 +32,7 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
     );
     let deleted_unreadable_delete = accept_global(
         &mut core,
-        MergeableCommit::new("todos", row(0x94), 23)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("todos", row(0x94), 23).deletion(DeletionEvent::Deleted),
     );
 
     let shape = Query::from("todos")
@@ -145,8 +143,7 @@ fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
     );
     accept_global(
         &mut core,
-        MergeableCommit::new("todos", row(0x93), 21)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("todos", row(0x93), 21).deletion(DeletionEvent::Deleted),
     );
     let _deleted_unreadable_content = accept_global(
         &mut core,
@@ -154,8 +151,7 @@ fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
     );
     accept_global(
         &mut core,
-        MergeableCommit::new("todos", row(0x94), 23)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("todos", row(0x94), 23).deletion(DeletionEvent::Deleted),
     );
 
     let shape = Query::from("todos")
@@ -195,8 +191,7 @@ fn maintained_view_system_identity_bypasses_root_read_policy() {
     );
     accept_global(
         &mut core,
-        MergeableCommit::new("todos", row(0xa2), 13)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("todos", row(0xa2), 13).deletion(DeletionEvent::Deleted),
     );
 
     let shape = Query::from("todos")
@@ -245,7 +240,8 @@ fn prepared_maintained_owner_or_editor_policy_keeps_union_arm_occurrences() {
                     .column("title", PublicColumnType::Text)
                     .column("owner_match", PublicColumnType::Boolean)
                     .column("editor_match", PublicColumnType::Boolean),
-            ),
+            )
+            .allow_all(),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
@@ -262,23 +258,30 @@ fn prepared_maintained_owner_or_editor_policy_keeps_union_arm_occurrences() {
     query.filters = vec![crate::query::Predicate::Any(Vec::new())];
     query.policy_branches = vec![
         crate::query::PolicyBranch {
-            filters: vec![eq(col("owner_match"), lit(true)), eq(col("title"), param("title"))],
+            filters: vec![
+                eq(col("owner_match"), lit(true)),
+                eq(col("title"), param("title")),
+            ],
             joins: Vec::new(),
             reachable: Vec::new(),
             inherits: Vec::new(),
         },
         crate::query::PolicyBranch {
-            filters: vec![eq(col("editor_match"), lit(true)), eq(col("title"), param("title"))],
+            filters: vec![
+                eq(col("editor_match"), lit(true)),
+                eq(col("title"), param("title")),
+            ],
             joins: Vec::new(),
             reachable: Vec::new(),
             inherits: Vec::new(),
         },
     ];
-    let shape = query
-        .validate_runtime(&core.catalogue.schema)
-        .unwrap();
+    let shape = query.validate_runtime(&core.catalogue.schema).unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("title".to_owned(), Value::String("shared".to_owned()))]))
+        .bind(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("shared".to_owned()),
+        )]))
         .unwrap();
     let mut peer = PeerState::client_link(reader);
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
@@ -416,11 +419,13 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
 
 #[test]
 fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas_without_full_recompute()
-{
+ {
+    use crate::tools::test_support::AllowAll;
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
                 PublicTableSchemaBuilder::new("sharedTodos")
+                    .allow_all()
                     .column("title", PublicColumnType::Text)
                     .fk_column("owner", "members"),
             )
@@ -428,13 +433,12 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
                 PublicTableSchemaBuilder::new("members")
                     .column("name", PublicColumnType::Text)
                     .column("userID", PublicColumnType::Uuid)
-                    .policies(
-                        PublicTablePolicies::new()
-                            .with_select(PublicPolicyExpr::eq_session(
-                                "userID",
-                                vec!["claims".to_owned(), "user_id".to_owned()],
-                            )),
-                    ),
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
+                            "userID",
+                            vec!["claims".to_owned(), "user_id".to_owned()],
+                        ),
+                    )),
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
@@ -489,9 +493,9 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     assert_eq!(
         canonical_view_update_rows(&grant),
         vec![
-                ("members".to_owned().into(), member_row, visible_member_tx),
-                ("sharedTodos".to_owned().into(), todo_row, todo_tx),
-            ]
+            ("members".to_owned().into(), member_row, visible_member_tx),
+            ("sharedTodos".to_owned().into(), todo_row, todo_tx),
+        ]
     );
     assert_view_update_only_references_rows(&grant, BTreeSet::from([member_row, todo_row]));
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
@@ -521,7 +525,8 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
 
 #[test]
 fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_derivations() {
-    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
+    let mut wire_membership =
+        crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let reader = user(0xa1);
     let other = user(0xb2);
     let container = row(0xc1);
@@ -545,13 +550,13 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
                 PublicTableSchemaBuilder::new("entries")
                     .fk_column("container", "containers")
                     .column("title", PublicColumnType::Text)
-                    .policies(PublicTablePolicies::new().with_select(
-                        PublicPolicyExpr::Inherits {
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::Inherits {
                             operation: PublicOperation::Select,
                             via_column: "container".to_owned(),
                             max_depth: None,
-                        },
-                    )),
+                        }),
+                    ),
             )
             .table(
                 PublicTableSchemaBuilder::new("containerAccess")
@@ -624,14 +629,15 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
 
     accept_global(
         &mut core,
-        MergeableCommit::new("containerAccess", first_edge, 15)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("containerAccess", first_edge, 15).deletion(DeletionEvent::Deleted),
     );
     let first_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
     let first_revoke = wire_membership.observe(&first_revoke);
-    let first_revoke_entries =
-        canonical_view_update_rows_for_table(&first_revoke, "entries");
-    assert_eq!(first_revoke_entries, vec![("entries".to_owned().into(), entry, entry_tx)]);
+    let first_revoke_entries = canonical_view_update_rows_for_table(&first_revoke, "entries");
+    assert_eq!(
+        first_revoke_entries,
+        vec![("entries".to_owned().into(), entry, entry_tx)]
+    );
     assert_eq!(
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
             .unwrap()
@@ -643,8 +649,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
 
     accept_global(
         &mut core,
-        MergeableCommit::new("containerAccess", second_edge, 16)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("containerAccess", second_edge, 16).deletion(DeletionEvent::Deleted),
     );
     let last_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
     let last_revoke = wire_membership.observe(&last_revoke);
@@ -684,7 +689,8 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
 
 #[test]
 fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_incremental() {
-    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
+    let mut wire_membership =
+        crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let (_core_dir, mut core) = open_node_with_schema(node(9), priority_schema());
     let first = row(0x11);
     let second = row(0x22);
@@ -738,8 +744,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
 
     accept_global(
         &mut core,
-        MergeableCommit::new("todos", zeroth, 15)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("todos", zeroth, 15).deletion(DeletionEvent::Deleted),
     );
     let shifted_back = peer.query_update(&mut core, &shape, &binding).unwrap();
     let shifted_back = wire_membership.observe(&shifted_back);
@@ -751,8 +756,7 @@ fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_increm
 
     accept_global(
         &mut core,
-        MergeableCommit::new("todos", second, 16)
-            .deletion(DeletionEvent::Deleted),
+        MergeableCommit::new("todos", second, 16).deletion(DeletionEvent::Deleted),
     );
     let fill_from_tail = peer.query_update(&mut core, &shape, &binding).unwrap();
     let fill_from_tail = wire_membership.observe(&fill_from_tail);
@@ -778,10 +782,7 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
                     .column("title", PublicColumnType::Text)
                     .fk_column("author", "authors"),
             )
-            .table(
-                PublicTableSchemaBuilder::new("authors")
-                    .column("name", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("authors").column("name", PublicColumnType::Text)),
     );
     let (_ref_dir, mut ref_core) = open_node_with_schema(node(9), ref_schema);
     let shape = Query::from("todos")
@@ -798,9 +799,8 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
 
     // Control: the same query on a table with no references is supported.
     let plain_schema = build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
     );
     let (_plain_dir, mut plain_core) = open_node_with_schema(node(9), plain_schema);
     let plain_shape = Query::from("todos")
@@ -818,6 +818,7 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
 
 #[test]
 fn maintained_subscription_view_explicit_include_keeps_other_implicit_references() {
+    use crate::tools::test_support::AllowAll;
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -826,10 +827,8 @@ fn maintained_subscription_view_explicit_include_keeps_other_implicit_references
                     .fk_column("primary", "targets")
                     .fk_column("secondary", "targets"),
             )
-            .table(
-                PublicTableSchemaBuilder::new("targets")
-                    .column("name", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("targets").column("name", PublicColumnType::Text))
+            .allow_all(),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let included = row(0x11);
@@ -869,15 +868,20 @@ fn maintained_subscription_view_explicit_include_keeps_other_implicit_references
 
 #[test]
 fn retained_user_param_filter_graph_matches_literal_filter() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("docs")
-            .column("title", PublicColumnType::Text)
-            .column("owner", PublicColumnType::Uuid)
-            .policies(public_all_policies().with_select(public_claim_eq("owner", "sub"))),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(public_all_policies().with_select(public_claim_eq("owner", "sub"))),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
-    core.set_test_provider_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]));
+    core.set_test_provider_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
+    );
     accept_global(
         &mut core,
         MergeableCommit::new("docs", row(0xd1), 10).cells(BTreeMap::from([
@@ -898,7 +902,10 @@ fn retained_user_param_filter_graph_matches_literal_filter() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.test_uuid()))]))
+        .bind(BTreeMap::from([(
+            "owner".to_owned(),
+            Value::Uuid(owner.test_uuid()),
+        )]))
         .unwrap();
     let (shape, binding, plan) = core
         .prepare_query_binding_for_link(&shape, &binding, DurabilityTier::Global, owner)
@@ -925,12 +932,14 @@ fn retained_user_param_filter_graph_matches_literal_filter() {
 
 #[test]
 fn session_sub_claim_remains_an_application_owned_value() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("docs")
-            .column("title", PublicColumnType::Text)
-            .column("owner", PublicColumnType::Uuid)
-            .policies(public_all_policies().with_select(public_claim_eq("owner", "sub"))),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(public_all_policies().with_select(public_claim_eq("owner", "sub"))),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
     let other = user(0xb2);
@@ -951,7 +960,10 @@ fn session_sub_claim_remains_an_application_owned_value() {
             ("owner".to_owned(), Value::Uuid(other.test_uuid())),
         ])),
     );
-    core.set_test_provider_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(other.test_uuid()))]));
+    core.set_test_provider_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(other.test_uuid()))]),
+    );
 
     let shape = Query::from("docs")
         .validate(&core.catalogue.schema)

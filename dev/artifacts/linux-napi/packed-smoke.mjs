@@ -21,7 +21,7 @@ assert.equal(direct.nativeArtifactFingerprint(), cjs.nativeArtifactFingerprint()
 const { createJazzContext } = await import(
   pathToFileURL(join(require.resolve("jazz-tools/backend"), "..", "create-jazz-context.js"))
 );
-const app = s.defineApp({ entries: s.table({ text: s.string() }) });
+const app = s.defineApp({ entries: s.table({ text: s.string() }, {}) });
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.entries.allowRead.always();
   policy.entries.allowInsert.always();

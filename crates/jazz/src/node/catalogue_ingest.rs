@@ -22,14 +22,14 @@ pub(super) fn active_runtime_layouts_equal(
     left: &SchemaCatalogue,
     right: &SchemaCatalogue,
 ) -> bool {
-    if left.current_schema_version_id != right.current_schema_version_id
-        || left.current_schema_version_alias != right.current_schema_version_alias
+    if left.local_schema_version_id != right.local_schema_version_id
+        || left.local_schema_version_alias != right.local_schema_version_alias
         || left.schema != right.schema
     {
         return false;
     }
 
-    let active = left.current_schema_version_id;
+    let active = left.local_schema_version_id;
     left.schema_version_aliases.get(&active) == right.schema_version_aliases.get(&active)
         && left
             .physical_mappings
@@ -250,6 +250,29 @@ where
         let planned_genesis = catalogue_genesis(&plan.catalogue)?;
         let runtime_semantics_changed =
             !active_runtime_layouts_equal(&self.catalogue, &plan.catalogue);
+        // Global UUID adoption does not change local storage layouts, but live
+        // query metadata captures those identities (including table/column/enum
+        // manifests). Retire those plans and authority proofs after activation
+        // while retaining the storage runtime and raw history subscriptions.
+        let physical_identities_changed =
+            self.catalogue
+                .physical_mappings
+                .iter()
+                .any(|(schema, previous)| {
+                    plan.catalogue
+                        .physical_mappings
+                        .get(schema)
+                        .is_some_and(|next| previous.identities != next.identities)
+                });
+        let authorization_source_changed = !self.catalogue.active_schema.same_authorization_source(
+            &plan.catalogue.active_schema,
+            self.catalogue
+                .physical_mappings
+                .get(&self.catalogue.active_schema.schema),
+            plan.catalogue
+                .physical_mappings
+                .get(&plan.catalogue.active_schema.schema),
+        );
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
         let previous_genesis = catalogue_genesis(&previous_catalogue)?;
         // Historical/import-only snapshot growth must not be visible through
@@ -337,7 +360,7 @@ where
             );
             let ready = CatalogueBootstrapReady {
                 genesis: planned_genesis,
-                current_write_schema: plan.catalogue.current_write_schema,
+                current_write_schema: plan.catalogue.active_schema.wire_pointer(),
                 active_catalogue_seq: plan.catalogue.active_catalogue_seq,
             };
             batch.update(
@@ -349,6 +372,11 @@ where
                 ],
             );
         }
+        // Retain the immutable lineage receipts, then write the selected
+        // structural payloads so first install and replay persist the same view.
+        for staged in &plan.activated_lineages {
+            Self::write_active_schema_lineage_to_batch(&mut batch, staged)?;
+        }
         for schema in plan.catalogue.catalogue_schemas.values() {
             batch.update(
                 "jazz_catalogue",
@@ -359,9 +387,6 @@ where
                 ],
             );
         }
-        for staged in &plan.activated_lineages {
-            Self::write_active_schema_lineage_to_batch(&mut batch, staged)?;
-        }
         for (schema_version, mapping) in &plan.catalogue.physical_mappings {
             let alias = plan.catalogue.schema_version_aliases[schema_version];
             Self::write_schema_version_mapping_to_batch(
@@ -371,14 +396,19 @@ where
                 mapping,
             )?;
         }
-        if plan.catalogue.current_write_schema != previous_catalogue.current_write_schema {
+        if plan.catalogue.active_schema.wire_pointer()
+            != previous_catalogue.active_schema.wire_pointer()
+        {
             batch.update(
                 "jazz_catalogue_pointer",
                 vec![
-                    Value::U64(plan.catalogue.current_write_schema.revision),
-                    Value::Uuid(plan.catalogue.current_write_schema.schema.0),
+                    Value::U64(plan.catalogue.active_schema.revision),
+                    Value::Uuid(plan.catalogue.active_schema.schema.0),
                 ],
             );
+        }
+        if plan.catalogue.active_schema.revision > 0 {
+            Self::write_active_schema_to_batch(&mut batch, &plan.catalogue.active_schema)?;
         }
         let persistence = async {
             let applied = self.database.apply_batch(batch).await?;
@@ -398,12 +428,12 @@ where
 
         self.catalogue.staged_lineages.clear();
         self.catalogue.pending_lineages.clear();
-        self.catalogue.pending_write_pointers.clear();
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
         self.catalogue.physical_write_plan_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
+        self.query.compiled_query_program_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
@@ -415,7 +445,11 @@ where
         self.catalogue_activation_failed = false;
         self.catalogue_bootstrap_state = CatalogueBootstrapState::Ready;
         self.catalogue_bootstrap_marker |= bootstrap_uninitialized;
-        if runtime_semantics_changed {
+        if physical_identities_changed {
+            self.invalidate_subscription_scopes();
+            self.physical_identity_generation = next_groove_runtime_token();
+        }
+        if runtime_semantics_changed || authorization_source_changed {
             self.groove_runtime_token = next_groove_runtime_token();
         }
         let drained = self.drain_parked_commit_units().await?;
@@ -432,9 +466,7 @@ where
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<PlannedCatalogueSnapshot, Error> {
-        if !self.catalogue.pending_lineages.is_empty()
-            || !self.catalogue.staged_lineages.is_empty()
-            || !self.catalogue.pending_write_pointers.is_empty()
+        if !self.catalogue.pending_lineages.is_empty() || !self.catalogue.staged_lineages.is_empty()
         {
             return Err(Error::InvalidCatalogueUpdate(
                 "trusted catalogue snapshot conflicts with pending catalogue work",
@@ -497,12 +529,12 @@ where
         .then(|| {
             self.catalogue
                 .schema_version_aliases
-                .get(&self.catalogue.current_schema_version_id)
+                .get(&self.catalogue.local_schema_version_id)
                 .copied()
                 .zip(
                     self.catalogue
                         .physical_mappings
-                        .get(&self.catalogue.current_schema_version_id)
+                        .get(&self.catalogue.local_schema_version_id)
                         .cloned(),
                 )
         })
@@ -520,27 +552,29 @@ where
                 )?;
                 let genesis_id = genesis.id;
                 SchemaCatalogue {
-                    current_schema_version_id: genesis_id,
-                    current_schema_version_alias: Some(SchemaVersionAlias(1)),
+                    local_schema_version_id: genesis_id,
+                    local_schema_version_alias: Some(SchemaVersionAlias(1)),
                     schema: genesis.schema.clone(),
                     schema_version_aliases: BTreeMap::from([(genesis_id, SchemaVersionAlias(1))]),
-                    catalogue_schemas: BTreeMap::from([(genesis_id, genesis)]),
+                    catalogue_schemas: BTreeMap::from([(genesis_id, genesis.clone())]),
                     catalogue_lenses: BTreeMap::new(),
                     physical_mappings: BTreeMap::from([(genesis_id, mapping)]),
                     staged_lineages: BTreeMap::new(),
                     pending_lineages: BTreeMap::new(),
                     active_lineages_by_target: BTreeMap::new(),
                     active_catalogue_seq: 0,
-                    pending_write_pointers: BTreeMap::new(),
                     next_physical_table_id,
                     next_physical_column_id,
                     lens_path_cache: BTreeMap::new(),
                     compiled_lens_cache: BTreeMap::new(),
                     physical_write_plan_cache: BTreeMap::new(),
-                    current_write_schema: CurrentWriteSchema {
-                        revision: 0,
-                        schema: genesis_id,
-                    },
+                    active_schema: ActiveSchema::new(
+                        CurrentWriteSchema {
+                            revision: 0,
+                            schema: genesis_id,
+                        },
+                        genesis.schema,
+                    )?,
                 }
             }
             None => self.catalogue.clone(),
@@ -700,7 +734,7 @@ where
         // reconcile the received lineage around it rather than orphaning the
         // pending rows by adopting a newly allocated alias/mapping.
         if let Some((local_alias, mut local_mapping)) = local_schema_storage_anchor {
-            let anchor = planned.current_schema_version_id;
+            let anchor = planned.local_schema_version_id;
             let authority_identities = planned
                 .physical_mappings
                 .get(&anchor)
@@ -809,9 +843,9 @@ where
             }
         }
 
-        if snapshot.current_write_schema.revision < planned.current_write_schema.revision
-            || (snapshot.current_write_schema.revision == planned.current_write_schema.revision
-                && snapshot.current_write_schema != planned.current_write_schema)
+        if snapshot.current_write_schema.revision < planned.active_schema.revision
+            || (snapshot.current_write_schema.revision == planned.active_schema.revision
+                && snapshot.current_write_schema != planned.active_schema.wire_pointer())
             || !planned
                 .catalogue_schemas
                 .contains_key(&snapshot.current_write_schema.schema)
@@ -820,22 +854,44 @@ where
                 "trusted catalogue snapshot conflicts at write-schema revision",
             ));
         }
-        planned.current_write_schema = snapshot.current_write_schema;
+        let active = ActiveSchema::new(
+            snapshot.current_write_schema,
+            planned.catalogue_schemas[&snapshot.current_write_schema.schema]
+                .schema
+                .clone(),
+        )?;
+        if active.revision > 0
+            && active.revision == planned.active_schema.revision
+            && !active.same_permissions(&planned.active_schema)
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "conflicting active schema revision",
+            ));
+        }
+        planned.active_schema = active;
+        if planned.active_schema.revision > 0 {
+            let structural =
+                SchemaVersion::new(planned.active_schema.compiled.without_permissions());
+            planned.catalogue_schemas.insert(structural.id, structural);
+        }
         // `schema` is the active read-schema payload supplied when this node
         // was opened. Its policy metadata is intentionally outside the
         // structural schema id and may therefore be refreshed by a snapshot
         // even while the current write pointer names another schema.
         planned.schema = planned
             .catalogue_schemas
-            .get(&planned.current_schema_version_id)
+            .get(&planned.local_schema_version_id)
             .ok_or(Error::InvalidCatalogueUpdate(
                 "trusted catalogue snapshot omits the active read schema",
             ))?
             .schema
             .clone();
-        planned.current_schema_version_alias = planned
+        if planned.local_schema_version_id == planned.active_schema.schema {
+            planned.schema = planned.active_schema.compiled.clone();
+        }
+        planned.local_schema_version_alias = planned
             .schema_version_aliases
-            .get(&planned.current_schema_version_id)
+            .get(&planned.local_schema_version_id)
             .copied();
         // Validate the complete authority graph, including retained mappings.
         // The live catalogue can additionally contain the application's local

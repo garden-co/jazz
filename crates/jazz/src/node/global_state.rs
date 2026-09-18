@@ -56,7 +56,7 @@ where
         global_base: GlobalTime,
     ) -> Result<bool, Error> {
         let table_id =
-            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
         let Some(raw) = self
             .database
             .index_last_raw(
@@ -86,7 +86,7 @@ where
                 .await;
         }
         let table_id =
-            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
         let records = self
             .database
             .index_scan_raw(

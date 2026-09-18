@@ -788,12 +788,9 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: renamed.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: renamed.id,
     })
     .unwrap();
     core.commit_mergeable_settled(
@@ -870,7 +867,7 @@ fn ancestry_lookup_avoids_transaction_wide_reads_resident_and_cold() {
             .cells(BTreeMap::from([("title".to_owned(), "second".to_owned())])),
     ).unwrap();
     let table_id = writer.physical_table_id_for_schema(
-        writer.catalogue.current_write_schema.schema, "todos",
+        writer.catalogue.active_schema.schema, "todos",
     ).unwrap();
     // Force the resident branch, then repeat against cold persisted history.
     let versions = writer.query_versions_for_tx(child).unwrap();
@@ -896,6 +893,50 @@ fn ancestry_lookup_avoids_transaction_wide_reads_resident_and_cold() {
     }
 }
 
+#[test]
+fn positive_row_reachability_stops_at_immediate_predecessor() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xe4), schema);
+    let row_uuid = row(0xe5);
+    let chain_len = 96;
+    let mut versions = Vec::with_capacity(chain_len);
+    let mut parent = None;
+    for index in 0..chain_len {
+        let mut commit = MergeableCommit::new("todos", row_uuid, 10 + index as u64)
+            .cells(BTreeMap::from([("title".to_owned(), "revision".to_owned())]));
+        if let Some(parent) = parent {
+            commit = commit.parents(vec![parent]);
+        }
+        let tx_id = writer.commit_mergeable_unit_settled(commit).unwrap().0;
+        versions.push(tx_id);
+        parent = Some(tx_id);
+    }
+    let head = *versions.last().expect("history chain has a head");
+    let immediate_predecessor = versions[chain_len - 2];
+    let table_id = writer
+        .physical_table_id_for_schema(writer.catalogue.active_schema.schema, "todos")
+        .unwrap();
+
+    // TESTING_GUIDELINES permits this internal counter seam because bounded
+    // ancestry work is not observable through public rows; the reachability
+    // result still asserts the semantic contract at the same private seam.
+    writer.clear_content_version_reachability_cache();
+    writer.reset_merge_head_reachability_walks_for_test();
+    assert!(writer
+        .content_version_reaches_tx(
+            table_id,
+            &BranchKey::default(),
+            row_uuid,
+            head,
+            immediate_predecessor,
+        )
+        .unwrap());
+    assert!(
+        writer.merge_head_reachability_nodes_for_test() <= 2,
+        "a positive predecessor witness must stop the walk instead of scanning {chain_len} nodes"
+    );
+}
+
 // Internal work-count receipt: transaction fate handling may read the full
 // unit once; exact row matching must not add another transaction-wide read.
 #[test]
@@ -913,4 +954,69 @@ fn known_transaction_matching_probes_only_incoming_history_keys() {
     writer.ingest_known_transaction(tx, versions, state.fate.clone(), state.global_time, state.durability).unwrap();
     assert_eq!(query_versions_for_tx_call_count(), 1, "only fate processing needs a whole-transaction read");
     assert_eq!(writer.query_versions_for_tx(tx_id).unwrap().len(), 32);
+}
+
+// These internal receipts exercise the row-local ancestry/cache seam: neither
+// traversal work nor retained cache memory is exposed by the public API.
+#[test]
+fn repeated_row_reachability_checks_reuse_complete_ancestry() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xe6), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0xea), schema);
+    let row_uuid = row(0xe7);
+    let (parent, parent_unit) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row_uuid, 10)
+            .cells(BTreeMap::from([("title".to_owned(), "parent".to_owned())])),
+    ).unwrap();
+    let (child, child_unit) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row_uuid, 11).parents(vec![parent])
+            .cells(BTreeMap::from([("title".to_owned(), "child".to_owned())])),
+    ).unwrap();
+    let table_id = writer.physical_table_id_for_schema(writer.catalogue.active_schema.schema, "todos").unwrap();
+    let absent = TxId::new(TxTime(1), node(0xef));
+    let reader_table = reader.physical_table_id_for_schema(reader.catalogue.active_schema.schema, "todos").unwrap();
+    assert!(!reader.content_version_reaches_tx(reader_table, &BranchKey::default(), row_uuid, child, absent).unwrap());
+    assert!(reader.content_version_reachability_cache.is_empty(), "missing transaction history must never establish a complete closure");
+    reader.apply_sync_message_settled(parent_unit).unwrap();
+    reader.apply_sync_message_settled(child_unit).unwrap();
+    assert!(reader.content_version_reaches_tx(reader_table, &BranchKey::default(), row_uuid, child, parent).unwrap(), "newly received history must repair an earlier unknown answer");
+    writer.clear_content_version_reachability_cache();
+    writer.reset_merge_head_reachability_walks_for_test();
+    assert!(!writer.content_version_reaches_tx(table_id, &BranchKey::default(), row_uuid, child, absent).unwrap());
+    let cold_nodes = writer.merge_head_reachability_nodes_for_test();
+    assert!(cold_nodes >= 2);
+    assert!(!writer.content_version_reaches_tx(table_id, &BranchKey::default(), row_uuid, child, absent).unwrap());
+    assert!(writer.content_version_reaches_tx(table_id, &BranchKey::default(), row_uuid, child, parent).unwrap());
+    assert_eq!(writer.merge_head_reachability_nodes_for_test(), cold_nodes, "both positive and negative answers reuse the complete closure");
+    assert!(!writer.content_version_reaches_tx(table_id, &BranchKey::default(), row(0xe8), child, parent).unwrap(), "another row must not inherit the cached ancestry");
+    writer.clear_content_version_reachability_cache();
+    assert!(writer.content_version_reaches_tx(table_id, &BranchKey::default(), row_uuid, child, parent).unwrap());
+    assert!(writer.merge_head_reachability_nodes_for_test() > cold_nodes, "invalidation must force a new walk");
+}
+
+#[test]
+fn ancestry_cache_bounds_entry_count_and_total_transaction_ids() {
+    let (_dir, mut writer) = open_node_with_schema(node(0xe9), two_column_schema());
+    let key = |index| ContentVersionReachabilityCacheKey {
+        table_id: PhysicalTableId(1), branch_key: BranchKey::default(), row_uuid: row(1),
+        start: TxId::new(TxTime(index), node(1)),
+    };
+    for index in 0..65 {
+        writer.cache_content_version_reachability(key(index), [key(index).start].into_iter().collect());
+    }
+    assert_eq!(writer.content_version_reachability_cache.len(), 64);
+    assert_eq!(writer.content_version_reachability_cache_order.len(), 64);
+    assert_eq!(writer.content_version_reachability_cache_tx_ids, 64);
+    assert!(!writer.content_version_reachability_cache.contains_key(&key(0)));
+    writer.clear_content_version_reachability_cache();
+    let ancestors = (0..32_768).map(|index| key(index).start).collect::<FxHashSet<_>>();
+    for index in 0..3 {
+        writer.cache_content_version_reachability(key(index), ancestors.clone());
+    }
+    assert_eq!(writer.content_version_reachability_cache.len(), 2);
+    assert_eq!(writer.content_version_reachability_cache_tx_ids, 65_536);
+    let oversized = (0..65_537).map(|index| key(index).start).collect();
+    writer.cache_content_version_reachability(key(4), oversized);
+    assert_eq!(writer.content_version_reachability_cache.len(), 2);
+    assert_eq!(writer.content_version_reachability_cache_tx_ids, 65_536);
 }

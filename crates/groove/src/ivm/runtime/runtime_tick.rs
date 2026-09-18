@@ -247,6 +247,7 @@ struct PendingSubscriptionHydration {
     session: EvaluationSession<'static>,
     binding_snapshots: HashMap<BindingSourceKey, RecordDeltas>,
     hydrate_arrangements: bool,
+    lifetime: SubscriptionLifetime,
     metrics: TickMetrics,
 }
 
@@ -780,6 +781,9 @@ impl<'a> IncrementalEvaluation<'a> {
             }
             if let OperatorState::TopBy(top_by) = state {
                 top_by.value_mut().commit_overlays();
+            }
+            if let OperatorState::ArgBy(arg_by) = state {
+                arg_by.value_mut().commit_overlay();
             }
             if let OperatorState::SemiJoin(semi_join) = state {
                 semi_join.commit_published_overlay();
@@ -1603,6 +1607,9 @@ impl<'a> EvaluationSession<'a> {
             if let OperatorState::TopBy(top_by) = state {
                 top_by.value_mut().commit_overlays();
             }
+            if let OperatorState::ArgBy(arg_by) = state {
+                arg_by.value_mut().commit_overlay();
+            }
             if let OperatorState::SemiJoin(semi_join) = state {
                 semi_join.commit_published_overlay();
             }
@@ -1652,6 +1659,7 @@ impl<'a> EvaluationSession<'a> {
 }
 
 impl IvmRuntime {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn enqueue_subscription_hydration(
         &mut self,
         subscription_id: SubscriptionId,
@@ -1660,6 +1668,7 @@ impl IvmRuntime {
         binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
         binding_frontier_advance: Option<&str>,
         initial: Arc<Mutex<Option<MultisinkDeltas>>>,
+        lifetime: SubscriptionLifetime,
     ) -> Result<(), IvmRuntimeError> {
         let mut seen_roots = HashSet::new();
         let roots = outputs
@@ -1668,9 +1677,10 @@ impl IvmRuntime {
             .flatten()
             .filter(|root| seen_roots.insert(*root))
             .collect::<VecDeque<_>>();
-        let hydrate_arrangements = roots.iter().copied().try_fold(false, |found, root| {
-            Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
-        })?;
+        let hydrate_arrangements = lifetime == SubscriptionLifetime::Retained
+            && roots.iter().copied().try_fold(false, |found, root| {
+                Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
+            })?;
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
         if let Some(shape) = binding_frontier_advance {
             session.advance_binding_input(&self.graph, shape);
@@ -1691,6 +1701,7 @@ impl IvmRuntime {
             session,
             binding_snapshots: binding_snapshots.unwrap_or_else(|| self.binding_snapshot_deltas()),
             hydrate_arrangements,
+            lifetime,
             metrics: TickMetrics::default(),
         });
         let mut pending = self.pending_incremental.0.borrow_mut();
@@ -2098,7 +2109,12 @@ impl IvmRuntime {
                             &hydration.session.terminal_deltas,
                         );
                         let completed = hydration.session.work_queue.registered_nodes();
-                        hydration.session.install(self);
+                        // First-result evaluation borrows shared inputs, but its
+                        // temporary state is not a maintenance proof. Never
+                        // overwrite a live sibling's indexes with that state.
+                        if hydration.lifetime == SubscriptionLifetime::Retained {
+                            hydration.session.install(self);
+                        }
                         state.release_temporal_successors(evaluation_id, completed);
                         self.record_hydration_memo_metrics(&hydration.metrics);
                         self.evict_eval_memo();
@@ -2109,6 +2125,9 @@ impl IvmRuntime {
                                     .lock()
                                     .expect("subscription initial snapshot mutex poisoned") =
                                     Some(snapshot);
+                                if hydration.lifetime == SubscriptionLifetime::FirstResult {
+                                    self.unsubscribe(hydration.subscription_id);
+                                }
                             }
                             Err(error) => {
                                 if let Some(subscription) =
@@ -2148,7 +2167,13 @@ impl IvmRuntime {
                             Poll::Ready(Err(failure.into_error())),
                         );
                     }
-                    self.fail_evaluation_nodes(&failure);
+                    // A failed first-result session has not published mutable
+                    // state. Its scoped error cannot invalidate live siblings.
+                    if !matches!(&evaluation, PendingEvaluation::SubscriptionHydration(hydration)
+                        if hydration.lifetime == SubscriptionLifetime::FirstResult)
+                    {
+                        self.fail_evaluation_nodes(&failure);
+                    }
                     let released_nodes =
                         if matches!(&evaluation, PendingEvaluation::SubscriptionHydration(_)) {
                             evaluation.work_queue().registered_nodes()
@@ -2541,13 +2566,14 @@ impl IvmRuntime {
         let mut retained_roots = affected_nodes
             .iter()
             .filter(|node| {
-                self.node_meta
-                    .get(node)
-                    .is_some_and(|meta| !meta.retainers.is_empty())
-                    && self
-                        .graph
-                        .node(**node)
-                        .is_some_and(|node| !node.is_durable())
+                self.node_meta.get(node).is_some_and(|meta| {
+                    meta.retainers
+                        .iter()
+                        .any(|retainer| !matches!(retainer, Retainer::Hydration(_)))
+                }) && self
+                    .graph
+                    .node(**node)
+                    .is_some_and(|node| !node.is_durable())
             })
             .copied()
             .collect::<Vec<_>>();
@@ -2807,7 +2833,10 @@ impl IvmRuntime {
                 .graph
                 .node(ancestor)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
-            if matches!(graph_node.descriptor.operator, OpType::Aggregate(_)) {
+            if matches!(
+                graph_node.descriptor.operator,
+                OpType::Aggregate(_) | OpType::ArgMinBy(_) | OpType::ArgMaxBy(_)
+            ) {
                 return Ok(true);
             }
         }

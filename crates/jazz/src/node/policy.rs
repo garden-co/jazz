@@ -144,9 +144,16 @@ where
         version: &VersionRecord,
         author: AuthorSubject,
         candidate_tx_id: Option<TxId>,
+        candidate_versions: &[VersionRecord],
     ) -> Result<bool, Error> {
-        self.write_policy_allows_version_record_for_view(version, author, None, candidate_tx_id)
-            .await
+        self.write_policy_allows_version_record_for_view(
+            version,
+            author,
+            None,
+            candidate_tx_id,
+            candidate_versions,
+        )
+        .await
     }
 
     /// A session update/upsert of an existing row also requires that the fate
@@ -165,9 +172,6 @@ where
         }
         let (policy_schema_version, table, _) =
             self.policy_projection_for_version_record(version)?;
-        let Some(read_policy) = table.read_policy.clone() else {
-            return Ok(true);
-        };
         let Some(previous) = self
             .policy_previous_content_subject_row(
                 policy_schema_version,
@@ -181,6 +185,7 @@ where
             // which INV-RLS-20 does not require prior read visibility.
             return Ok(true);
         };
+        let read_policy = super::query_eval::authorization_query_from_read_policy(&table);
         let previous_cells = table
             .columns
             .iter()
@@ -231,9 +236,7 @@ where
         let source = self.version_record_from_row(&source)?;
         let (policy_schema_version, table, cells) =
             self.policy_projection_for_version_record(&source)?;
-        let Some(read_policy) = table.read_policy.clone() else {
-            return Ok(true);
-        };
+        let read_policy = super::query_eval::authorization_query_from_read_policy(&table);
         let provenance = version_provenance(&source);
         self.read_policy_query_allows_candidate_with_provenance_for_schema(
             policy_schema_version,
@@ -253,6 +256,7 @@ where
         author: AuthorSubject,
         exact_view: Option<&JazzSchema>,
         candidate_tx_id: Option<TxId>,
+        candidate_versions: &[VersionRecord],
     ) -> Result<bool, Error> {
         if author == AuthorSubject::SYSTEM {
             return Ok(true);
@@ -278,22 +282,24 @@ where
         } else {
             self.policy_projection_for_version_record(version)?
         };
-        // A table stays open until it declares its first policy clause. From
-        // that point on the policy set is closed: a missing operation clause
-        // is a denial, rather than an accidental public grant.
-        if !table.has_any_policy() {
-            return Ok(true);
-        }
+        // Every user operation requires an explicit grant, including on a
+        // table with no policies at all. SYSTEM is the explicit bypass above.
         if version.deletion() == Some(DeletionEvent::Deleted) {
             let Some(policy) = table.write_policies.delete_using.clone() else {
                 return Ok(false);
             };
             let current = match self
-                .policy_delete_subject_row(policy_schema_version, &table, version, candidate_tx_id)
+                .policy_delete_subject_row(
+                    policy_schema_version,
+                    &table,
+                    version,
+                    candidate_tx_id,
+                    candidate_versions,
+                )
                 .await?
             {
                 Some(current) => current,
-                None => current_row_from_cells(&table, version.row_uuid(), &cells)?,
+                None => return Ok(false),
             };
             let current_cells = table
                 .columns
@@ -416,11 +422,11 @@ where
         &mut self,
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
-        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let write_schema_version = self.catalogue.active_schema.schema;
         let (commit, permission_subject) = self.durable_author_policy_preview(commit)?;
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
-        self.write_policy_allows_version_record(&version, permission_subject, None)
+        self.write_policy_allows_version_record(&version, permission_subject, None, &[])
             .await
     }
 
@@ -429,11 +435,8 @@ where
         &mut self,
         commit: MergeableCommit,
     ) -> Result<bool, Error> {
-        self.dry_run_mergeable_write_allows_in_schema(
-            self.catalogue.current_write_schema.schema,
-            commit,
-        )
-        .await
+        self.dry_run_mergeable_write_allows_in_schema(self.catalogue.active_schema.schema, commit)
+            .await
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -445,7 +448,7 @@ where
         let (commit, permission_subject) = self.durable_author_policy_preview(commit)?;
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
-        self.write_policy_allows_version_record(&version, permission_subject, None)
+        self.write_policy_allows_version_record(&version, permission_subject, None, &[])
             .await
     }
 
@@ -468,6 +471,7 @@ where
             permission_subject,
             Some(exact_view),
             None,
+            &[],
         )
         .await
     }
@@ -481,7 +485,7 @@ where
         self.dry_run_read_current_allows_in_schema(
             table_name,
             row_uuid,
-            self.catalogue.current_schema_version_id,
+            self.catalogue.local_schema_version_id,
             identity,
             false,
         )
@@ -499,7 +503,9 @@ where
         identity: AuthorSubject,
         include_deleted: bool,
     ) -> Result<bool, Error> {
-        let schema = if schema_version == self.catalogue.current_schema_version_id {
+        let schema = if schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -552,9 +558,6 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        if !table.has_any_policy() {
-            return Ok(true);
-        }
         let Some(row) = self
             .policy_local_current_subject_row(&table, row_uuid)
             .await?
@@ -581,9 +584,6 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        if !table.has_any_policy() {
-            return Ok(true);
-        }
         let Some(row) = self
             .policy_local_current_subject_row(&table, row_uuid)
             .await?
@@ -674,19 +674,9 @@ where
             return Ok((target, self.table_in_schema(table, target)?, cells));
         }
 
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Forward, table)?
-        {
-            let forward_table = apply_compiled_lens_path(&path, &mut cells);
-            let table = self.table_in_schema(&forward_table, target)?;
-            return Ok((target, table, cells));
-        }
-
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Reverse, table)?
-        {
-            let reverse_table = apply_compiled_lens_path(&path, &mut cells);
-            let table = self.table_in_schema(&reverse_table, target)?;
+        if let Some(path) = self.compiled_lens_path(source, target, table)? {
+            let translated_table = apply_compiled_lens_path(&path, &mut cells);
+            let table = self.table_in_schema(&translated_table, target)?;
             return Ok((target, table, cells));
         }
 
@@ -699,14 +689,11 @@ where
     }
 
     pub(super) fn policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
-        let write_schema = self.catalogue.current_write_schema.schema;
-        if self
-            .table_in_schema(table, write_schema)
-            .is_ok_and(|table| table.has_any_policy())
-        {
+        let write_schema = self.catalogue.active_schema.schema;
+        if self.table_in_schema(table, write_schema).is_ok() {
             write_schema
         } else {
-            self.catalogue.current_schema_version_id
+            self.catalogue.local_schema_version_id
         }
     }
 
@@ -716,11 +703,9 @@ where
         query_schema: SchemaVersionId,
         shape: &NormalizedRowSetShape,
     ) -> SchemaVersionId {
-        let write_schema = self.catalogue.current_write_schema.schema;
-        let current_schema = self.catalogue.current_schema_version_id;
-        if self
-            .table_in_schema(table, write_schema)
-            .is_ok_and(|table| table.has_any_policy())
+        let write_schema = self.catalogue.active_schema.schema;
+        let current_schema = self.catalogue.local_schema_version_id;
+        if self.table_in_schema(table, write_schema).is_ok()
             && self.policy_schema_resolves_query_sources(write_schema, shape)
         {
             write_schema
@@ -754,18 +739,18 @@ where
         source: SchemaVersionId,
         table: &str,
     ) -> Result<SchemaVersionId, Error> {
-        let write_schema = self.catalogue.current_write_schema.schema;
+        let write_schema = self.catalogue.active_schema.schema;
         if self.source_reaches_write_policy_table(source, write_schema, table)? {
             Ok(write_schema)
         } else if self.source_reaches_write_policy_table(
             source,
-            self.catalogue.current_schema_version_id,
+            self.catalogue.local_schema_version_id,
             table,
         )? || self
-            .table_in_schema(table, self.catalogue.current_schema_version_id)
+            .table_in_schema(table, self.catalogue.local_schema_version_id)
             .is_ok()
         {
-            Ok(self.catalogue.current_schema_version_id)
+            Ok(self.catalogue.local_schema_version_id)
         } else {
             Ok(source)
         }
@@ -778,34 +763,16 @@ where
         table: &str,
     ) -> Result<bool, Error> {
         if source == target {
-            return Ok(self
-                .table_in_schema(table, target)
-                .is_ok_and(|table| table.has_any_policy()));
+            return Ok(self.table_in_schema(table, target).is_ok());
         }
 
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Forward, table)?
-        {
+        if let Some(path) = self.compiled_lens_path(source, target, table)? {
             let mut cells = BTreeMap::new();
             let target_table = apply_compiled_lens_path(&path, &mut cells);
-            return Ok(self
-                .table_in_schema(&target_table, target)
-                .is_ok_and(|table| table.has_any_policy()));
+            return Ok(self.table_in_schema(&target_table, target).is_ok());
         }
 
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Reverse, table)?
-        {
-            let mut cells = BTreeMap::new();
-            let target_table = apply_compiled_lens_path(&path, &mut cells);
-            return Ok(self
-                .table_in_schema(&target_table, target)
-                .is_ok_and(|table| table.has_any_policy()));
-        }
-
-        Ok(self
-            .table_in_schema(table, target)
-            .is_ok_and(|table| table.has_any_policy()))
+        Ok(self.table_in_schema(table, target).is_ok())
     }
 
     async fn policy_delete_subject_row(
@@ -814,14 +781,43 @@ where
         table: &TableSchema,
         version: &VersionRecord,
         candidate_tx_id: Option<TxId>,
+        candidate_versions: &[VersionRecord],
     ) -> Result<Option<CurrentRow>, Error> {
-        self.policy_previous_content_subject_row(
-            policy_schema_version,
-            table,
-            version,
-            candidate_tx_id,
-        )
-        .await
+        if let Some(previous) = self
+            .policy_previous_content_subject_row(
+                policy_schema_version,
+                table,
+                version,
+                candidate_tx_id,
+            )
+            .await?
+        {
+            return Ok(Some(previous));
+        }
+        // An insert followed by a delete in one transaction has no prior
+        // content row. Admission runs before persistence, so inspect the
+        // same incoming unit for its content and real creation provenance.
+        for candidate in candidate_versions {
+            if candidate.row_uuid() != version.row_uuid()
+                || candidate.deletion().is_some()
+                || candidate.branch_key() != version.branch_key()
+            {
+                continue;
+            }
+            let (_, projected_table, cells) =
+                self.policy_projection_for_version_record(candidate)?;
+            if projected_table.name == table.name {
+                return current_row_from_cells_with_explicit_provenance(
+                    table,
+                    version.row_uuid(),
+                    &cells,
+                    version_provenance(candidate),
+                    None,
+                )
+                .map(Some);
+            }
+        }
+        Ok(None)
     }
 
     async fn policy_previous_content_subject_row(
@@ -832,7 +828,7 @@ where
         candidate_tx_id: Option<TxId>,
     ) -> Result<Option<CurrentRow>, Error> {
         let subject_table = if self
-            .table_in_schema(version.table(), self.catalogue.current_write_schema.schema)
+            .table_in_schema(version.table(), self.catalogue.active_schema.schema)
             .is_ok()
         {
             version.table()

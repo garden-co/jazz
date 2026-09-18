@@ -20,7 +20,7 @@ where
         let mut pending = vec![tx_id];
         for (table, branch, row) in rows {
             let table_id = self
-                .physical_table_id_for_schema(self.catalogue.current_write_schema.schema, &table)?;
+                .physical_table_id_for_schema(self.catalogue.active_schema.schema, &table)?;
             for head in self.merge_head_tx_ids(table_id, &branch, row).await? {
                 let state = self
                     .query_transaction(head)
@@ -266,7 +266,7 @@ where
                     now_ms,
                     tx_id.time.physical_ms(),
                 ))?;
-            let staged_versions = self
+            let (staged_versions, staged_fate, staged_time) = self
                 .stage_transaction_and_versions_with_current_indexes(
                     &mut batch,
                     unit.tx,
@@ -281,8 +281,8 @@ where
                 .await?;
             self.finalize_staged_transaction_ingest(
                 &mut batch,
-                Fate::Accepted,
-                Some(global_time),
+                staged_fate,
+                staged_time,
                 &mut staged_global_times,
                 &staged_versions,
             )

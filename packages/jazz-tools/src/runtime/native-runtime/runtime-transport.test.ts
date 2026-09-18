@@ -45,6 +45,58 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("coalesces receive deadlines, advances earlier wakes and re-arms later peers", async () => {
+    vi.useFakeTimers();
+    let schedule: ((urgency: "immediate" | "deferred" | `after:${number}`) => void) | undefined;
+    const deadlines = [10, 100];
+    let ticks = 0;
+    const start = performance.now();
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: typeof schedule) => {
+              schedule = callback;
+            },
+            tick: () => {
+              ticks += 1;
+              const elapsed = performance.now() - start;
+              while (deadlines.length && deadlines[0]! <= elapsed) deadlines.shift();
+              if (deadlines.length) schedule?.(`after:${deadlines[0]! - elapsed}`);
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      schedule?.("after:100");
+      for (let i = 0; i < 100; i += 1) schedule?.("after:100");
+      schedule?.("after:10");
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(9);
+      expect(ticks).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ticks).toBe(1);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(90);
+      expect(ticks).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+      schedule?.("after:100");
+      await runtime.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("marks external peer admission as requiring a distinct peer pass", () => {
     const runtime = new NativeRuntimeAdapter(
       {
@@ -2310,6 +2362,72 @@ describe("NativeRuntimeAdapter server transport", () => {
       pump.close();
       await runtime.close();
     }
+  });
+
+  it("expires silent auxiliary ingress and closes its carrier while a core tick is held", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    let deadline: number | undefined;
+    let retired = false;
+    let hold = false;
+    const blocked = deferred<void>();
+    const transport = Object.assign(new FakeTransport([]), {
+      routeAuxiliaryWireFrame: () => {
+        deadline = performance.now() + 20;
+        return undefined;
+      },
+      auxiliaryReceiveTimeoutMs: () =>
+        deadline === undefined ? undefined : Math.max(0, deadline - performance.now()),
+      expireAuxiliaryReceive: () => {
+        if (deadline !== undefined && performance.now() >= deadline) {
+          retired = true;
+          deadline = undefined;
+          throw new Error("incomplete channel message expired");
+        }
+      },
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => (hold ? blocked.promise : undefined),
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    hold = true;
+    const held = runtime.progressPeerTransport();
+    try {
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([17, 1])]));
+      await vi.waitFor(() => expect(retired).toBe(true));
+      expect(sockets[0]!.closed).toBe(true);
+      expect(terminal).toHaveBeenCalledOnce();
+      expect(String(terminal.mock.calls[0]?.[0])).toContain("expired");
+      expect(transport.closed).toBe(false); // semantic retirement waits; core expiry does not
+    } finally {
+      hold = false;
+      blocked.resolve();
+      await held;
+      await runtime.close();
+    }
+    expect(transport.closed).toBe(true);
   });
 
   it("stages an already-arrived websocket frame group before one native transport tick", async () => {

@@ -452,6 +452,8 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
         unreachable!("expected old upstream")
     };
     pending_row_version_repairs.push_back(PendingRowVersionRepair {
+        pending_tx_ids: BTreeSet::new(),
+        lease: None,
         superseded: false,
         update: view_update(old_subscription, GlobalTime(3)),
         authority_receipt_eligible: true,

@@ -802,6 +802,12 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
         Some(Value::String("restored todo".to_owned()))
     );
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
+
+    // A restore retains deletion-register history, but the visible row must
+    // still be eligible for a later ordinary deletion.
+    let write = db.delete("todos", todo, Default::default()).unwrap();
+    doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    assert!(prepared_read(&db, &query).is_empty());
 }
 
 /// A facade delete starts or extends only the deletion-register history.
@@ -922,7 +928,9 @@ fn full_row_replacement_cannot_bless_an_inherited_large_value_descriptor() {
 
 #[test]
 fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    use crate::tools::test_support::AllowAll;
+    let schema = doctest_support::schema().allow_all();
+    let db = open_db(0x11, AuthorSubject::for_test_bytes([0xa1; 16]), &schema);
     let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
     block_on(async {
         db.node.node.lock().await.set_chunk_storage(chunks.clone());
@@ -1896,6 +1904,59 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
     assert_eq!(events[0].transaction.kind, TransactionKind::Mergeable);
 }
 
+// Local persistence must not claim a later authority rejection.
+#[test]
+fn completed_local_wait_preserves_later_mutation_error() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let client = open_db(0xc1, author, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+
+    let write = client
+        .insert(
+            "todos",
+            cells("rejected", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .unwrap();
+
+    client.tick().unwrap();
+    assert!(events.borrow().is_empty());
+    client.tick().unwrap();
+
+    let events = events.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        client.write_state(write.mergeable_tx_id()).unwrap(),
+        WriteState {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: DurabilityTier::Edge,
+        }
+    );
+    assert_eq!(events[0].code, "permission_denied");
+    assert_eq!(
+        events[0].transaction.transaction_id,
+        TransactionId::from_committed_tx(write.mergeable_tx_id())
+    );
+    assert_eq!(events[0].transaction.kind, TransactionKind::Mergeable);
+}
+
 #[test]
 fn internal_observer_does_not_consume_authority_rejection() {
     let author = AuthorSubject::for_test_bytes([0xb5; 16]);
@@ -2160,7 +2221,15 @@ fn queued_validation_failure_waits_until_the_following_turn_for_fallback() {
 /// it must never manufacture a second row version or become unobservable.
 #[test]
 fn queued_empty_update_aliases_current_transaction_without_publishing() {
-    let schema = schema();
+    // This is a local scheduling fixture; no authority grant is needed.
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid),
+        ),
+    );
     let author = AuthorSubject::for_test_bytes([0xc0; 16]);
     let db = open_db(0xc0, author, &schema);
     let row = row(0xc1);

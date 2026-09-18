@@ -26,7 +26,7 @@ const query = app.groups
 // includes. This fixture replaces browser transport with the real native owner.
 describe("React Native structured reads", () => {
   it("returns empty local hop results before inserts and after removing their last match", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const related = app.tasks.where({ title: "included" }).hopTo("group").orderBy("name");
       expect(await db.all(related, { tier: "local" })).toEqual([]);
@@ -39,7 +39,7 @@ describe("React Native structured reads", () => {
   });
 
   it("executes a public hop through canonical async relation preparation", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const first = db.insert(app.groups, { name: "first" }).value;
       const second = db.insert(app.groups, { name: "second" }).value;
@@ -55,7 +55,7 @@ describe("React Native structured reads", () => {
   });
 
   it("maintains filtered relation hops through the canonical subscription", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const first = db.insert(app.groups, { name: "first" }).value;
       const second = db.insert(app.groups, { name: "second" }).value;
@@ -76,7 +76,7 @@ describe("React Native structured reads", () => {
   });
 
   it("hydrates selected nested includes and isolates transaction overlays", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const group = db.insert(app.groups, { name: "group" }).value;
       const task = db.insert(app.tasks, { title: "task", group_id: group.id }).value;
@@ -109,7 +109,7 @@ describe("React Native structured reads", () => {
   });
 
   it("delivers nested child updates and removals through shared subscription decoding", async () => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const group = db.insert(app.groups, { name: "group" }).value;
       const task = db.insert(app.tasks, { title: "task", group_id: group.id }).value;

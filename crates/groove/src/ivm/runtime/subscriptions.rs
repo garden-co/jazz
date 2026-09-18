@@ -16,6 +16,25 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+/// Consumer lifetime, independent of compiled graph and prepared-shape identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionLifetime {
+    /// Publish one complete initial result, then release the consumer automatically.
+    /// Temporary evaluation state never replaces state owned by live consumers.
+    FirstResult,
+    /// Hydrate the indexes needed to maintain subsequent committed changes.
+    Retained,
+}
+
+impl SubscriptionLifetime {
+    fn retainer(self, id: SubscriptionId) -> Retainer {
+        match self {
+            Self::FirstResult => Retainer::Hydration(id.retainer_key()),
+            Self::Retained => Retainer::Subscription(id.retainer_key()),
+        }
+    }
+}
+
 /// Runtime-scoped handle returned to callers for subscription management.
 /// Handles from a replaced runtime cannot address its replacement subscriptions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -3075,7 +3094,11 @@ impl IvmRuntime {
                 progress_waker,
             );
         }
-        let multisink = self.subscribe_staged(vec![(DEFAULT_SINK.to_owned(), graph)], storage)?;
+        let multisink = self.subscribe_staged(
+            vec![(DEFAULT_SINK.to_owned(), graph)],
+            storage,
+            SubscriptionLifetime::Retained,
+        )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
@@ -3106,11 +3129,31 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage + 'static,
     {
+        self.subscribe_with_lifetime(
+            sinks,
+            storage,
+            SubscriptionLifetime::Retained,
+            progress_waker,
+        )
+    }
+
+    pub(crate) fn subscribe_with_lifetime<I, K, S>(
+        &mut self,
+        sinks: I,
+        storage: &Rc<S>,
+        lifetime: SubscriptionLifetime,
+        progress_waker: Option<&Waker>,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+        S: OrderedKvStorage + 'static,
+    {
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
-        let subscription = self.subscribe_staged(sinks, storage)?;
+        let subscription = self.subscribe_staged(sinks, storage, lifetime)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
@@ -3147,6 +3190,7 @@ impl IvmRuntime {
         &mut self,
         sinks: Vec<(String, GraphBuilder)>,
         storage: &Rc<S>,
+        lifetime: SubscriptionLifetime,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -3193,7 +3237,7 @@ impl IvmRuntime {
                 outputs.insert(sink, compiled);
             }
             for output in outputs.values() {
-                runtime.retain_as_subscription(subscription_id, output.node);
+                runtime.add_retainer(output.node, lifetime.retainer(subscription_id));
             }
             install.commit();
             outputs
@@ -3208,7 +3252,9 @@ impl IvmRuntime {
                 failed: false,
             },
         );
-        self.index_subscription_outputs(subscription_id, &outputs);
+        if lifetime == SubscriptionLifetime::Retained {
+            self.index_subscription_outputs(subscription_id, &outputs);
+        }
         let initial = Arc::new(Mutex::new(None));
         self.enqueue_subscription_hydration(
             subscription_id,
@@ -3217,6 +3263,7 @@ impl IvmRuntime {
             None,
             None,
             Arc::clone(&initial),
+            lifetime,
         )?;
         Ok(MultisinkSubscription {
             id: subscription_id,
@@ -3361,24 +3408,26 @@ impl IvmRuntime {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage, None)
     }
 
-    /// Internal owner-loop counterpart to [`Self::bind_shape`].
-    pub(crate) fn bind_shape_with_waker<S>(
+    pub(crate) fn bind_shape_with_lifetime<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
         storage: &Rc<S>,
+        lifetime: SubscriptionLifetime,
         progress_waker: Option<&Waker>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
     {
-        self.bind_shape_with_public_fields(
+        let subscription = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
             BTreeMap::new(),
             storage,
-            progress_waker,
-        )
+            lifetime,
+        )?;
+        self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
+        Ok(subscription)
     }
 
     fn bind_shape_with_public_fields<S>(
@@ -3397,6 +3446,7 @@ impl IvmRuntime {
             binding_values,
             public_fields,
             storage,
+            SubscriptionLifetime::Retained,
         )?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
@@ -3412,6 +3462,7 @@ impl IvmRuntime {
         binding_values: &[Value],
         public_fields: BTreeMap<String, Vec<String>>,
         storage: &Rc<S>,
+        lifetime: SubscriptionLifetime,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -3447,8 +3498,8 @@ impl IvmRuntime {
                 outputs.insert(sink.clone(), output);
             }
             let binding_shape = runtime.binding_source_shape_name(shape_id)?;
-            let cancelled_retraction =
-                runtime.cancel_pending_binding_retraction(&binding_shape, &binding_key);
+            let cancelled_retraction = lifetime == SubscriptionLifetime::Retained
+                && runtime.cancel_pending_binding_retraction(&binding_shape, &binding_key);
             let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
             let mut binding_snapshots = runtime.binding_snapshot_deltas();
             let snapshot = binding_snapshots
@@ -3467,13 +3518,15 @@ impl IvmRuntime {
                     snapshot.deltas.push(delta.clone());
                 }
             }
-            let installed_delta = runtime.add_binding_ref(shape_id, binding_key.clone())?;
-            debug_assert_eq!(installed_delta.deltas, binding_delta.deltas);
-            if !cancelled_retraction {
-                runtime.bump_input_frontiers(&[], std::slice::from_ref(&installed_delta));
+            if lifetime == SubscriptionLifetime::Retained {
+                let installed_delta = runtime.add_binding_ref(shape_id, binding_key.clone())?;
+                debug_assert_eq!(installed_delta.deltas, binding_delta.deltas);
+                if !cancelled_retraction {
+                    runtime.bump_input_frontiers(&[], std::slice::from_ref(&installed_delta));
+                }
             }
             for output in outputs.values() {
-                runtime.retain_as_subscription(subscription_id, output.node);
+                runtime.add_retainer(output.node, lifetime.retainer(subscription_id));
             }
             install.commit();
             (outputs, binding_snapshots)
@@ -3491,14 +3544,20 @@ impl IvmRuntime {
                 sender,
                 receiver_liveness: Arc::downgrade(&receiver_liveness),
                 outputs: outputs.clone(),
-                target: MultisinkSubscriptionTarget::RoutedShape {
-                    shape_id,
-                    binding_key: binding_key.clone(),
+                target: if lifetime == SubscriptionLifetime::Retained {
+                    MultisinkSubscriptionTarget::RoutedShape {
+                        shape_id,
+                        binding_key: binding_key.clone(),
+                    }
+                } else {
+                    MultisinkSubscriptionTarget::Direct
                 },
                 failed: false,
             },
         );
-        self.index_subscription_outputs(subscription_id, &outputs);
+        if lifetime == SubscriptionLifetime::Retained {
+            self.index_subscription_outputs(subscription_id, &outputs);
+        }
         let initial = Arc::new(Mutex::new(None));
         self.enqueue_subscription_hydration(
             subscription_id,
@@ -3507,6 +3566,7 @@ impl IvmRuntime {
             Some(binding_snapshots),
             Some(&shape.shape),
             Arc::clone(&initial),
+            lifetime,
         )?;
         Ok(MultisinkSubscription {
             id: subscription_id,
@@ -3619,6 +3679,7 @@ impl IvmRuntime {
             binding_values,
             BTreeMap::new(),
             storage,
+            SubscriptionLifetime::Retained,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
@@ -3649,6 +3710,7 @@ impl IvmRuntime {
             binding_values,
             [(DEFAULT_SINK.to_owned(), public_fields)].into(),
             storage,
+            SubscriptionLifetime::Retained,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
