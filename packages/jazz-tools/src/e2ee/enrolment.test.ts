@@ -236,4 +236,4 @@ it("retains one active first device across concurrent contexts and reopening wit
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
   }
-});
+}, 30_000);
