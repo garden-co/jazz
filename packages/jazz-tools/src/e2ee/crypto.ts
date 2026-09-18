@@ -6,6 +6,7 @@ import type {
   JazzCrypto,
   KeyEnvelope,
   EqualityIndex,
+  LargeValueCipher,
 } from "./types.js";
 
 /** Common selection seam; supplied adapters do not initialise their defaults. */
@@ -16,6 +17,7 @@ export async function resolveCrypto(
     keyEnvelope(): Promise<KeyEnvelope>;
     deviceSigner(): Promise<DeviceSigner>;
     equalityIndex?(): Promise<EqualityIndex>;
+    largeValueCipher?(): Promise<LargeValueCipher>;
   },
 ): Promise<CryptoAdapters> {
   const [cellCipher, keyEnvelope, deviceSigner] = await Promise.all([
@@ -28,6 +30,7 @@ export async function resolveCrypto(
     keyEnvelope,
     deviceSigner,
     equalityIndex: overrides.equalityIndex ?? (await defaults.equalityIndex?.()),
+    largeValueCipher: overrides.largeValueCipher ?? (await defaults.largeValueCipher?.()),
   };
   for (const adapter of Object.values(adapters)) {
     if (adapter !== undefined) encodeEnvelope(adapter.mechanism, new Uint8Array());
