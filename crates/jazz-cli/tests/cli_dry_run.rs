@@ -765,6 +765,8 @@ fn connect_upstream_with_receive_window(addr: SocketAddr) -> (TcpStream, usize) 
     );
 
     let sockaddr = libc::sockaddr_in {
+        #[cfg(target_vendor = "apple")]
+        sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
         sin_family: libc::AF_INET as libc::sa_family_t,
         sin_port: addr.port().to_be(),
         sin_addr: libc::in_addr {
