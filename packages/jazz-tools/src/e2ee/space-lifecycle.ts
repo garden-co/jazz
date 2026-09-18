@@ -1268,13 +1268,16 @@ export class Spaces {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
     const offline = localOnly || (await this.db.e2eeIsExplicitlyOffline());
-    const observed = await this.db.one(
-      this.tables.__e2ee_spaces.where({
-        scopeId: address.scopeId,
-        identifier: address.identifier,
-      }),
-      { tier: localOnly ? "local" : "remote-if-possible" },
-    );
+    const roots = this.tables.__e2ee_spaces.where({
+      scopeId: address.scopeId,
+      identifier: address.identifier,
+    });
+    // Pending local deletion or coordinate changes must not hide the accepted
+    // root. This observation only locates it; the complete retained history is
+    // still revalidated against accepted-only observations below.
+    const observed = offline
+      ? ((await this.db.observeE2eeHistory([roots]))[0]?.rows[0] as SpaceRoot | undefined)
+      : await this.db.one(roots, { tier: "remote-if-possible" });
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
     if (!offline) await this.warm(observed);
     const device = await this.requireDevice().load();
