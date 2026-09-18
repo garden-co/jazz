@@ -332,6 +332,34 @@ _Further invariants._ `INV-TX-19` — predicate validation is sensitive to
 `binding_id`/`binding_values` and uses the inline shape without requiring a prior
 shape registration on the authority.
 
+Before publication, local validation compares a single-table source-row
+predicate's `(RowUuid, TxId)` output at the fixed base snapshot against a
+comparison snapshot that also covers newly visible non-rejected transactions,
+including local writes without an authority receipt. A row outside the
+predicate does not cause a conflict; a matching insert, removal, or changed
+output-row version does. For example, a read of `bucket = "destination"`
+may commit after an insert into `bucket = "unrelated"`, but must reject
+after an insert into `bucket = "destination"`.
+
+This local comparison only advances root-table history. Relational predicates,
+aggregate predicates, and degenerate whole-table predicates retain conservative
+local conflict detection. An aggregate input rewrite therefore conflicts
+locally even if its aggregate payload is unchanged. Authority validation still
+compares aggregate group identities and public payloads as described above.
+
+Schema migrations must preserve the physical identity used by these checks.
+Predicate validation resolves the recorded shape against its matching retained
+schema, rather than interpreting its table names in the current schema alone.
+Snapshot rows and their version witnesses must use that same schema mapping.
+
+Point-read and absent-read records carry a table name but no schema ID.
+Authority validation accepts that name only when all retained mappings for it
+identify the same physical table. This supports unambiguous renames.
+An unknown name, or a name reused for a different physical table, rejects the
+transaction as `ExclusiveConflict`; neither case may be treated as evidence
+that a row is absent. Supporting ambiguous name reuse would require additional
+read-set identity information.
+
 ### 3.8 Rejection and cascade
 
 Rejection records the authority's decision without keeping rejected foreign
