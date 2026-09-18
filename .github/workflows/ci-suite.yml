@@ -212,7 +212,9 @@ jobs:
 
   test-ts:
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 20
+    # Cold native production plus complete, bounded-concurrency consumer suites.
+    # This execution allowance is not a latency gate.
+    timeout-minutes: 60
     # JAZZ_NAPI_RELEASE=0 (debug builds) removed 2026-07-19: debug-profile
     # jazz-napi .node files fail dlopen on the Linux runners deterministically
     # (root cause TBD; see dev/CI_NOTES.md). Release builds load fine.
