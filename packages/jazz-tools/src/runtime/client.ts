@@ -1751,6 +1751,11 @@ export class JazzClient {
   }
 
   /** @internal */
+  transactionPreparation(openTransactionId: OpenTransactionId): Promise<void> | undefined {
+    return this.transactionPreparations.get(openTransactionId)?.pending;
+  }
+
+  /** @internal */
   async queryInternal(
     query: string,
     options?: InternalQueryExecutionOptions,
