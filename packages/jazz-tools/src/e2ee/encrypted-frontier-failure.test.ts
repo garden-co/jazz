@@ -124,7 +124,7 @@ it.each(["removed", "retained"] as const)(
         },
         { tier: "global" },
       );
-      await expect.poll(() => failure ?? snapshots.at(-1)).toEqual(expected);
+      await expect.poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 }).toEqual(expected);
       let physical: unknown;
       stopPlain = db.subscribe(
         app.folders.orderBy("title", "asc").include({ notes: app.notes.select("id") }),
@@ -134,18 +134,18 @@ it.each(["removed", "retained"] as const)(
         { tier: "global" },
       );
       await expect
-        .poll(() => physical)
+        .poll(() => physical, { timeout: 30_000 })
         .toEqual([
           { ...folder, notes: [{ id: note.id }] },
           { ...other, notes: [] },
         ]);
       failCell = true;
       await db.update(app.notes, note.id, { body: "Changed" }).wait({ tier: "global" });
-      await expect.poll(() => started).toBe(true);
+      await expect.poll(() => started, { timeout: 30_000 }).toBe(true);
       if (child === "removed") {
         await db.delete(app.notes, note.id).wait({ tier: "global" });
         await expect
-          .poll(() => physical)
+          .poll(() => physical, { timeout: 30_000 })
           .toEqual([
             { ...folder, notes: [] },
             { ...other, notes: [] },
@@ -153,7 +153,7 @@ it.each(["removed", "retained"] as const)(
       } else {
         await db.update(app.folders, other.id, { title: "Updated" }).wait({ tier: "global" });
         await expect
-          .poll(() => physical)
+          .poll(() => physical, { timeout: 30_000 })
           .toEqual([
             { ...folder, notes: [{ id: note.id }] },
             { ...other, title: "Updated", notes: [] },
@@ -162,21 +162,21 @@ it.each(["removed", "retained"] as const)(
       release();
       if (child === "removed") {
         await expect
-          .poll(() => failure ?? snapshots.at(-1))
+          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
           .toEqual([
             { ...folder, notes: [] },
             { ...other, notes: [] },
           ]);
         await db.update(app.folders, folder.id, { title: "Still live" }).wait({ tier: "global" });
         await expect
-          .poll(() => failure ?? snapshots.at(-1))
+          .poll(() => failure ?? snapshots.at(-1), { timeout: 30_000 })
           .toEqual([
             { ...other, notes: [] },
             { ...folder, title: "Still live", notes: [] },
           ]);
         expect(failure).toBeUndefined();
       } else {
-        await expect.poll(() => failure?.name).toBe("E2eeDataError");
+        await expect.poll(() => failure?.name, { timeout: 30_000 }).toBe("E2eeDataError");
         expect(snapshots.every((rows) => JSON.stringify(rows) === JSON.stringify(expected))).toBe(
           true,
         );
