@@ -9,7 +9,10 @@ it("retries device enrolment after disconnecting during local key loading", asyn
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let stored: string | null = null;
   let disconnectOnRead = true;
-  let interrupted = false;
+  let disconnected!: () => void;
+  const interruption = new Promise<void>((resolve) => {
+    disconnected = resolve;
+  });
   try {
     await deploy({
       serverUrl: server.url,
@@ -25,8 +28,8 @@ it("retries device enrolment after disconnecting during local key loading", asyn
           async read() {
             if (disconnectOnRead && stored !== null) {
               disconnectOnRead = false;
-              interrupted = true;
               await db!.disconnect();
+              disconnected();
             }
             return stored;
           },
@@ -37,10 +40,9 @@ it("retries device enrolment after disconnecting during local key loading", asyn
       },
     });
     const listing = db.e2ee.devices.list().catch(() => undefined);
-    await expect.poll(() => interrupted).toBe(true);
-    // Online listing may remain pending while disconnected; it must not prevent retry.
-    await Promise.race([listing, new Promise((resolve) => setTimeout(resolve, 250))]);
-    expect(interrupted).toBe(true);
+    // Online listing may remain pending while disconnected; reconnect after
+    // the transport transition finishes, without waiting for that listing.
+    await interruption;
     await db.reconnect();
     await listing;
     const devices = await db.e2ee.devices.list();
