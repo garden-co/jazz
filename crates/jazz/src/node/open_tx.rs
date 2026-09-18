@@ -291,20 +291,20 @@ where
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-        let rows = self
-            .query_table_versions(table)
+        let mut rows = BTreeSet::new();
+        for version in self
+            .query_versions_in_schema(schema_version, table, None)
             .await?
-            .iter()
-            .filter(|version| version.table() == table)
-            .map(|version| version.row_uuid())
-            .chain(
-                self.open_tx(tx_id)?
-                    .writes
-                    .iter()
-                    .filter(|write| write.table == table)
-                    .map(|write| write.row_uuid),
-            )
-            .collect::<BTreeSet<_>>();
+        {
+            rows.insert(version.row_uuid());
+        }
+        rows.extend(
+            self.open_tx(tx_id)?
+                .writes
+                .iter()
+                .filter(|write| write.table == table)
+                .map(|write| write.row_uuid),
+        );
         let mut current = Vec::new();
         for row_uuid in rows {
             let snapshot_row = self
@@ -1010,6 +1010,7 @@ where
         for write in open_tx.writes {
             let snapshot_content = self
                 .snapshot_layer_winner(
+                    write.schema_version,
                     &write.table,
                     write.row_uuid,
                     VersionLayer::Content,
@@ -1155,6 +1156,7 @@ where
             }
         }
         for predicate in &open_tx.predicate_reads {
+            let mut comparison: Option<Snapshot> = None;
             for version in self.query_table_versions(&predicate.table).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
@@ -1162,6 +1164,45 @@ where
                     .await?
                     .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
+                    if comparison.is_none() {
+                        let query = &predicate.shape;
+                        // This comparison advances only root-table history.
+                        // Preserve conservative rejection for relational reads
+                        // and aggregates, whose output hides input rewrites.
+                        if query.aggregate.is_some()
+                            || !query.joins.is_empty()
+                            || query.flat_join.is_some()
+                            || !query.policy_branches.is_empty()
+                            || !query.reachable.is_empty()
+                            || !query.inherits.is_empty()
+                            || !query.includes.is_empty()
+                            || !query.array_subqueries.is_empty()
+                            || query.relation.is_some()
+                            || self.predicate_read_is_degenerate_whole_table(predicate)?
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    comparison
+                        .get_or_insert_with(|| open_tx.base_snapshot.clone())
+                        .dots
+                        .push(tx_id);
+                }
+            }
+            if let Some(mut current) = comparison {
+                current.dots.sort_unstable();
+                current.dots.dedup();
+                // A newer row outside the filter is not a phantom. Retain the
+                // fixed base and compare against every newly visible version,
+                // including local writes that have no authority receipt yet.
+                if self
+                    .shape_predicate_outputs_differ(
+                        predicate,
+                        &open_tx.base_snapshot,
+                        Some(&current),
+                    )
+                    .await?
+                {
                     return Ok(false);
                 }
             }
@@ -1578,10 +1619,22 @@ where
         snapshot: &Snapshot,
     ) -> Result<SnapshotRow, Error> {
         let content = self
-            .snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot)
+            .snapshot_layer_winner(
+                schema_version,
+                table,
+                row_uuid,
+                VersionLayer::Content,
+                snapshot,
+            )
             .await;
         let deletion = self
-            .snapshot_layer_winner(table, row_uuid, VersionLayer::Deletion, snapshot)
+            .snapshot_layer_winner(
+                schema_version,
+                table,
+                row_uuid,
+                VersionLayer::Deletion,
+                snapshot,
+            )
             .await;
         let deleted = matches!(
             deletion.as_ref().and_then(|version| version.deletion()),
@@ -1654,6 +1707,7 @@ where
 
     pub(super) async fn snapshot_layer_winner(
         &mut self,
+        schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         layer: VersionLayer,
@@ -1663,7 +1717,10 @@ where
         // Intervals can REOPEN when a late arrival shifts the DAG winner, so
         // they cannot serve snapshot reads; domination over the fixed member
         // set depends only on immutable payload and is stable by construction.
-        let versions = self.query_row_versions(table, row_uuid).await.ok()?;
+        let versions = self
+            .query_versions_in_schema(schema_version, table, Some(row_uuid))
+            .await
+            .ok()?;
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             let tx_id = self.version_tx_id(version).ok()?;
@@ -1677,12 +1734,19 @@ where
 
     pub(super) async fn snapshot_content_witness(
         &mut self,
+        schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
         snapshot: &Snapshot,
     ) -> Option<TxId> {
         let version = self
-            .snapshot_layer_winner(table, row_uuid, VersionLayer::Content, snapshot)
+            .snapshot_layer_winner(
+                schema_version,
+                table,
+                row_uuid,
+                VersionLayer::Content,
+                snapshot,
+            )
             .await?;
         self.version_tx_id(&version).ok()
     }

@@ -1,5 +1,68 @@
 // Stable wire UUID identity across local alias assignment.
 
+/// Public query rows do not expose the immutable wire schema identity. Exercise
+/// the maintained-witness boundary with a read-schema projection of an unchanged
+/// table: its identical layout must not let it masquerade as authored history.
+#[test]
+fn maintained_witness_with_projected_schema_keeps_immutable_history_identity() {
+    let base = schema();
+    let evolved = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("controls").column("value", PublicColumnType::Text),
+            ),
+    );
+    let (_dir, mut owner) = open_node_with_schema(node(0xb2), base.clone());
+    let tx = owner
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0xb2), 10).cells(title_cells("retained")),
+        )
+        .unwrap();
+    publish_schema_lineage(
+        &mut owner,
+        SchemaVersion::new(evolved.clone()),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.version_id(),
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![],
+            }],
+        )
+        .unwrap(),
+        vec!["controls".to_owned()],
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    let original = owner.query_versions_for_tx(tx).unwrap().remove(0);
+    let alias = owner
+        .ensure_schema_version_alias(evolved.version_id())
+        .unwrap();
+    let mut projected = original.clone();
+    let mut values = projected.record.to_values().unwrap();
+    values[HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX] = Value::U64(alias.0);
+    projected.record = owned_record_from_storage_values_with_descriptor(
+        owner
+            .table_in_schema_ref("todos", evolved.version_id())
+            .unwrap()
+            .history_storage_table()
+            .record_schema(),
+        values,
+    )
+    .unwrap();
+
+    let canonical = owner
+        .canonical_history_version_for_maintained_witness(&projected)
+        .unwrap();
+    assert_eq!(
+        canonical.schema_version_alias(),
+        original.schema_version_alias()
+    );
+    assert_eq!(canonical, original);
+}
+
 #[test]
 fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     let schema = schema();

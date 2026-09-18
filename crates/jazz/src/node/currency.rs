@@ -81,6 +81,49 @@ where
         Ok(versions)
     }
 
+    pub(super) async fn query_versions_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: Option<RowUuid>,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let table_id = self.physical_table_id_for_schema(schema_version, table)?;
+        let branch = BranchKey::default();
+        let mut content_prefix = vec![Value::Bytes(branch.canonical_bytes())];
+        if let Some(row_uuid) = row_uuid {
+            content_prefix.push(Value::Uuid(row_uuid.0));
+        }
+        let deletion_prefix =
+            self.deletion_storage_prefix_in_schema(schema_version, table, row_uuid)?;
+        let mut versions = Vec::new();
+        for (storage_table, prefix) in [
+            (physical_history_table_name(table_id), content_prefix),
+            (SHARED_DELETION_HISTORY_TABLE.to_owned(), deletion_prefix),
+        ] {
+            let records = self
+                .database
+                .primary_key_scan_raw(&storage_table, &prefix)
+                .await?
+                .into_iter()
+                .map(|record| record.owned_record())
+                .collect::<Vec<_>>();
+            for record in records {
+                // Keep the authoring name; the schema selected the physical
+                // identity before the scan, including after a table rename.
+                versions.push(self.decode_history_owned_record("", &storage_table, record)?);
+            }
+        }
+        let aliases = &self.node_aliases;
+        versions.sort_by_key(|version| {
+            (
+                version.row_uuid(),
+                version_tx_id_from_aliases(version, aliases).expect("valid version tx id"),
+                version.layer(),
+            )
+        });
+        Ok(versions)
+    }
+
     pub(super) async fn query_table_versions_in_branch(
         &mut self,
         table: &str,
