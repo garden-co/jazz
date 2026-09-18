@@ -94,6 +94,9 @@ it("delivers a cold encrypted subscription while optional device delivery is pen
     const note = tx.insert(app.notes, { projectId: project.id, title: "Shared note" });
     await tx.commit().wait({ tier: "global" });
     await owner.e2ee.spaces.grant(app.projects, project.id, bob.account.id).wait();
+    // Only the instrumented reader may backfill the new device. The owner's
+    // background reconciliation must not satisfy delivery before our barrier.
+    await owner.shutdown();
     const secondDevice = await createDb({ ...bob, e2ee: { app, store: store() } });
     clients.push(secondDevice);
     const pending = (await secondDevice.e2ee.devices.list()).find(
