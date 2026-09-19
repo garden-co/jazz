@@ -133,6 +133,8 @@ describe("withJazz", () => {
 
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID).toBeUndefined();
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_INSPECTOR).toBeUndefined();
+    expect(resolved.rewrites).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_APP_ID).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
   });
@@ -516,6 +518,78 @@ describe("withJazz", () => {
     } finally {
       await serverHandle.stop();
     }
+  }, 30_000);
+
+  it("serves the inspector through a reusable loopback rewrite without replacing app routes", async () => {
+    const schemaDir = await tempRoots.create("jazz-next-inspector-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
+    const appRoutes = {
+      beforeFiles: [{ source: "/api/:path*", destination: "http://localhost:3001/:path*" }],
+      afterFiles: [{ source: "/old", destination: "/new" }],
+      fallback: [{ source: "/:path*", destination: "/fallback/:path*" }],
+    };
+    const wrapped = withJazz(
+      { rewrites: async () => appRoutes },
+      { schemaDir, server: { inMemory: true } },
+    );
+    const resolved = await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
+    const rewrites = await (resolved.rewrites as () => Promise<typeof appRoutes>)();
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_INSPECTOR).toBe("1");
+    expect(rewrites.beforeFiles.slice(1)).toEqual(appRoutes.beforeFiles);
+    expect(rewrites.afterFiles).toEqual(appRoutes.afterFiles);
+    expect(rewrites.fallback).toEqual(appRoutes.fallback);
+    const route = rewrites.beforeFiles[0]!;
+    expect(route.source).toBe("/__jazz/embedded/:path*");
+    const url = route.destination.replace(":path*", "embedded.html");
+    expect(new URL(url).hostname).toBe("127.0.0.1");
+    const response = await fetch(url);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(await response.text()).toContain("<script");
+
+    const repeated = await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
+    const repeatedRoutes = await (repeated.rewrites as () => Promise<typeof appRoutes>)();
+    expect(repeatedRoutes.beforeFiles[0]).toEqual(route);
+    await __resetJazzNextPluginForTests();
+    await expect(fetch(url)).rejects.toThrow();
+  }, 30_000);
+
+  it("keeps array-form application rewrites in the afterFiles phase", async () => {
+    const schemaDir = await tempRoots.create("jazz-next-inspector-array-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
+    const appRoutes = [{ source: "/old", destination: "/new" }];
+    const resolved = await resolveWrappedConfig(
+      withJazz({ rewrites: async () => appRoutes }, { schemaDir, server: { inMemory: true } }),
+      DEVELOPMENT_PHASE,
+    );
+    const routes = await (
+      resolved.rewrites as () => Promise<{
+        beforeFiles: typeof appRoutes;
+        afterFiles: typeof appRoutes;
+        fallback: typeof appRoutes;
+      }>
+    )();
+    expect(routes.beforeFiles[0]?.source).toBe("/__jazz/embedded/:path*");
+    expect(routes.afterFiles).toEqual(appRoutes);
+    expect(routes.fallback).toEqual([]);
+  }, 30_000);
+
+  it("leaves inspector routing disabled when opted out", async () => {
+    const schemaDir = await tempRoots.create("jazz-next-no-inspector-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
+    const appRoutes = [{ source: "/old", destination: "/new" }];
+    const resolved = await resolveWrappedConfig(
+      withJazz(
+        { rewrites: async () => appRoutes },
+        { inspector: false, schemaDir, server: { inMemory: true } },
+      ),
+      DEVELOPMENT_PHASE,
+    );
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_INSPECTOR).toBeUndefined();
+    expect(await (resolved.rewrites as () => Promise<typeof appRoutes>)()).toEqual(appRoutes);
   }, 30_000);
 });
 

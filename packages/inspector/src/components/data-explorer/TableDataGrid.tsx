@@ -68,9 +68,10 @@ function formatCellValue(value: unknown): string {
 }
 
 function serializeFilterClauses(clauses: TableFilterClause[]): string {
-  return JSON.stringify(clauses, (_key, value) =>
-    typeof value === "bigint" ? value.toString() : value,
-  );
+  return JSON.stringify(clauses, (_key, value) => {
+    if (value instanceof Uint8Array) return Array.from(value);
+    return typeof value === "bigint" ? value.toString() : value;
+  });
 }
 
 const RELATION_LABEL_COLUMN_PRIORITY = [
