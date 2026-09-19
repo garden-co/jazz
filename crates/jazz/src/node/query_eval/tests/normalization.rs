@@ -101,16 +101,69 @@ fn predicate_params_collects_every_operand_position_and_operator() {
         ])
     );
 }
+#[test]
+fn empty_in_parameter_normalizes_to_false_without_late_missing_param() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("issues").column("state", PublicColumnType::Text)),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x20; 16]), schema.clone());
+
+    for query in [
+        Query::from("issues").filter(in_list(param("p"), [])),
+        Query::from("issues").filter(Predicate::Not(Box::new(in_list(param("p"), [])))),
+    ] {
+        let shape = query.validate_runtime(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
+        let Some(RowSetExpr::Filter { predicate, .. }) = normalized
+            .nodes
+            .get(&RowSetNodeId("query:filter".to_owned()))
+        else {
+            panic!("expected a normalized filter node");
+        };
+        match (&query.filters[0], predicate) {
+            (Predicate::In(_, _), NormalizedPredicateExpr::Or(predicates)) => {
+                assert!(predicates.is_empty());
+            }
+            (Predicate::Not(_), NormalizedPredicateExpr::Not(child)) => {
+                assert!(matches!(
+                    child.as_ref(),
+                    NormalizedPredicateExpr::Or(predicates) if predicates.is_empty()
+                ));
+            }
+            _ => panic!("empty IN must normalize to false, with Not preserving negation"),
+        }
+    }
+}
+
+#[test]
+fn literal_empty_in_remains_a_valid_false_query() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("issues").column("state", PublicColumnType::Text)),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x21; 16]), schema.clone());
+    let shape = Query::from("issues")
+        .filter(in_list(lit("open"), []))
+        .validate_runtime(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    node.normalized_row_set_shape(&shape, &binding)
+        .expect("literal empty IN remains executable");
+}
 
 /// A caller's top-level inherited parent remains a receiver source through
 /// policy-branch normalization, while a branch's inherited proof stays
 /// authority-local.
 #[test]
 fn policy_branch_query_keeps_explicit_inherited_parent_contribution() {
+    use crate::tools::test_support::AllowAll;
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("parents").column("state", PublicColumnType::Text))
-            .table(PublicTableSchemaBuilder::new("children").fk_column("parent", "parents")),
+            .table(PublicTableSchemaBuilder::new("children").fk_column("parent", "parents"))
+            .allow_all(),
     );
     let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0x24; 16]), schema.clone());
     let mut query = Query::from("children").inherits("parent");

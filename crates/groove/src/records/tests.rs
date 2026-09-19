@@ -28,6 +28,93 @@ fn system_enum_registry_identity_survives_trusted_serde_round_trip() {
     assert_ne!(restored.registry_id() & (1 << 63), 0);
 }
 
+#[test]
+fn scalar_enum_constructor_rejects_duplicate_variant_names_case_sensitively() {
+    let distinct = ScalarEnumSchema::new("state", ["Open", "open"]).unwrap();
+    assert_eq!(distinct.discriminant("Open"), Ok(0));
+    assert_eq!(distinct.discriminant("open"), Ok(1));
+    assert_eq!(distinct.variant(0), Ok("Open"));
+    assert_eq!(distinct.variant(1), Ok("open"));
+
+    let descriptor = RecordDescriptor::new([("state", ValueType::EnumTag(distinct))]);
+    let encoded = encode_record_descriptor(&descriptor).unwrap();
+    assert_eq!(decode_record_descriptor(&encoded).unwrap(), descriptor);
+    assert_eq!(encode_record_descriptor(&descriptor).unwrap(), encoded);
+
+    let result = ScalarEnumSchema::new("state", ["Open", "open", "Open"]);
+    assert!(
+        result.is_err(),
+        "a scalar enum cannot contain a repeated case-sensitive variant name"
+    );
+}
+
+fn duplicate_scalar_descriptor_bytes(
+    encode: fn(&RecordDescriptor) -> Result<Vec<u8>, Error>,
+) -> Vec<u8> {
+    let schema = ScalarEnumSchema::new("state", ["Open", "Done"]).unwrap();
+    let descriptor = RecordDescriptor::new([("state", ValueType::EnumTag(schema))]);
+    let mut encoded = encode(&descriptor).unwrap();
+
+    // Keep the valid descriptor's layout and all framing bytes intact while
+    // making the second equal-length variant spelling an ambiguous duplicate.
+    let duplicate = b"Done";
+    let offset = encoded
+        .windows(duplicate.len())
+        .position(|window| window == duplicate)
+        .expect("fixture must contain the second variant spelling");
+    encoded[offset..offset + duplicate.len()].copy_from_slice(b"Open");
+    encoded
+}
+
+#[test]
+fn scalar_enum_descriptor_decoders_reject_duplicate_variant_names() {
+    for (encoding, decode) in [
+        (
+            "execution",
+            decode_record_descriptor as fn(&[u8]) -> Result<RecordDescriptor, Error>,
+        ),
+        (
+            "persisted",
+            decode_persisted_record_descriptor as fn(&[u8]) -> Result<RecordDescriptor, Error>,
+        ),
+    ] {
+        let encoded = duplicate_scalar_descriptor_bytes(match encoding {
+            "execution" => encode_record_descriptor,
+            "persisted" => encode_persisted_record_descriptor,
+            _ => unreachable!("all fixture encodings are named above"),
+        });
+
+        assert!(
+            decode(&encoded).is_err(),
+            "{encoding} descriptor ingress must reject duplicate scalar enum names"
+        );
+    }
+}
+
+#[test]
+fn scalar_enum_serde_ingress_rejects_duplicate_variant_names() {
+    let schema = ScalarEnumSchema::new("state", ["Open", "Done", "Closed"]).unwrap();
+    let schema_json = serde_json::to_string(&schema)
+        .unwrap()
+        .replacen("\"Closed\"", "\"Open\"", 1);
+    let schema = serde_json::from_str::<ScalarEnumSchema>(&schema_json);
+    assert!(
+        schema.is_err(),
+        "serde scalar enum ingress must reject duplicate variant names"
+    );
+
+    let schema = ScalarEnumSchema::new("state", ["Open", "Done"]).unwrap();
+    let descriptor = RecordDescriptor::new([("state", ValueType::EnumTag(schema))]);
+    let descriptor_json = serde_json::to_string(&descriptor)
+        .unwrap()
+        .replacen("\"Done\"", "\"Open\"", 1);
+    let descriptor = serde_json::from_str::<RecordDescriptor>(&descriptor_json);
+    assert!(
+        descriptor.is_err(),
+        "serde descriptor ingress must reject duplicate scalar enum names"
+    );
+}
+
 crate::define_record! {
     struct TestStaticRow {
         0 => id: u64,

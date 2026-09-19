@@ -1,5 +1,6 @@
 use jazz::account_registry::AccountId;
 use jazz::query::Query;
+use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, ObjectId, SchemaBuilder, TableSchema, Value};
 use jazz_server::{JazzServer, TEST_JWT_ISSUER};
 use jazz_testkit::{connect, enroll_test_context, wait_for_edge_txs};
@@ -10,6 +11,7 @@ async fn public_native_client_requires_enrollment_and_cannot_choose_another_acco
         .run_until(async {
             let schema = SchemaBuilder::new()
                 .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+                .allow_all()
                 .build();
             let server = JazzServer::start_with_schema(schema.clone())
                 .await

@@ -2493,7 +2493,7 @@ where
         let register_table = self
             .node
             .physical_register_table_for_schema(
-                self.node.catalogue.current_schema_version_id,
+                self.node.catalogue.local_schema_version_id,
                 &table.name,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
@@ -3064,7 +3064,7 @@ where
     }
 
     pub(crate) fn can_use_bounded_historical_source(&self, table: &str) -> bool {
-        if self.read_view.read_schema != self.node.catalogue.current_schema_version_id {
+        if self.read_view.read_schema != self.node.catalogue.local_schema_version_id {
             return false;
         }
         self.node
@@ -4044,13 +4044,15 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
     branch_columns_nonnullable: bool,
     include_deletion_marker: bool,
 ) -> RecordDescriptor {
+    // Inline policy candidates may still contain indirect scalars. Preserve
+    // their semantic kind through this second encoding into query sources.
     let mut fields = std::iter::once(records::DescriptorField::new("row_uuid", ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
             let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
             {
-                column.column_type.clone()
+                current_row_column_type(column)
             } else {
-                ValueType::Nullable(Box::new(column.column_type.clone()))
+                ValueType::Nullable(Box::new(current_row_column_type(column)))
             };
             current_row_column_field(column, value_type)
         }))

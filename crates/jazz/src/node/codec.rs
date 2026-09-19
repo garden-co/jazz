@@ -423,6 +423,7 @@ pub(super) enum CatalogueRecordKind {
     SchemaLineageActive,
     WritePointerPending,
     BootstrapReady,
+    ActiveSchema,
 }
 
 impl CatalogueRecordKind {
@@ -436,6 +437,7 @@ impl CatalogueRecordKind {
             Self::SchemaLineageActive => 5,
             Self::WritePointerPending => 6,
             Self::BootstrapReady => 7,
+            Self::ActiveSchema => 8,
         }
     }
 
@@ -449,6 +451,7 @@ impl CatalogueRecordKind {
             5 => Ok(Self::SchemaLineageActive),
             6 => Ok(Self::WritePointerPending),
             7 => Ok(Self::BootstrapReady),
+            8 => Ok(Self::ActiveSchema),
             _ => Err(records::Error::NonCanonicalRecord),
         }
     }
@@ -1047,6 +1050,7 @@ pub(super) fn decode_catalogue_bootstrap_ready(
     })
 }
 
+#[cfg(test)]
 pub(super) fn encode_catalogue_write_pointer(pointer: CurrentWriteSchema) -> Vec<u8> {
     let mut payload = Vec::with_capacity(1 + 8 + 16);
     payload.push(CATALOGUE_WRITE_POINTER_VERSION);
@@ -4363,6 +4367,7 @@ pub(super) fn sort_current_rows(rows: &mut [CurrentRow]) {
 /// Build a current row from cells that are already app-facing values.
 ///
 /// Build a row from ordinary app-facing cells.
+#[cfg(test)]
 pub(super) fn current_row_from_cells(
     table: &TableSchema,
     row_uuid: RowUuid,
@@ -4503,6 +4508,27 @@ fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRo
     values.push(Value::U64(provenance.tx_node_alias().0));
 }
 
+/// Runtime carriers preserve logical nullable wrappers while retaining the
+/// semantic kind of indirect JSON. History/wire storage descriptors have their
+/// own null representation and must not be changed for this runtime concern.
+pub(super) fn current_row_column_type(column: &crate::schema::ColumnSchema) -> records::ValueType {
+    fn json_type(logical: &records::ValueType) -> records::ValueType {
+        match logical {
+            records::ValueType::Nullable(inner) => {
+                records::ValueType::Nullable(Box::new(json_type(inner)))
+            }
+            _ => groove::large_values::physical_storage_value_type(
+                groove::large_values::LargeValueKind::Json,
+            ),
+        }
+    }
+    if column.large_value_kind == crate::schema::LargeValueSemanticKind::Json {
+        json_type(&column.column_type)
+    } else {
+        column.column_type.clone()
+    }
+}
+
 fn current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<CurrentRowDescriptorCacheEntry>>> =
         std::sync::OnceLock::new();
@@ -4533,7 +4559,7 @@ impl CurrentRowDescriptorCacheEntry {
             columns: table
                 .columns
                 .iter()
-                .map(|column| (column.name.clone(), column.column_type.clone()))
+                .map(|column| (column.name.clone(), current_row_column_type(column)))
                 .collect(),
             descriptor,
         }
@@ -4547,11 +4573,14 @@ impl CurrentRowDescriptorCacheEntry {
                 .iter()
                 .zip(&table.columns)
                 .all(|((name, column_type), column)| {
-                    name == &column.name && column_type == &column.column_type
+                    name == &column.name && column_type == &current_row_column_type(column)
                 })
     }
 }
 
+// Runtime current rows can carry unresolved scalar references during policy
+// evaluation. Retain the schema-derived JSON kind without materializing cells;
+// these descriptors are not persisted history or wire formats.
 fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     records::RecordDescriptor::new_with_fields(
         std::iter::once(records::DescriptorField::new(
@@ -4561,7 +4590,7 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
         .chain(table.columns.iter().map(|column| {
             records::DescriptorField::new(
                 user_column_field(&column.name),
-                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                records::ValueType::Nullable(Box::new(current_row_column_type(column))),
             )
             .with_identity(records::FieldIdentity::Name(column.name.clone()))
         }))
@@ -4965,5 +4994,72 @@ mod authority_storage_codec_tests {
         ] {
             assert_eq!(physical_version_table_id(name, false), None, "{name}");
         }
+    }
+}
+
+// Active-schema record v1: version byte, revision u64 LE,
+// CATS v1 payload length u32 LE,
+// then the existing canonical public-schema envelope. This stores the selected
+// permissions separately from structural catalogue entries; no serde layout
+// is part of this envelope's durable contract.
+pub(super) fn encode_active_schema(active: &ActiveSchema) -> Result<Vec<u8>, Error> {
+    let schema = encode_catalogue_schema(&SchemaVersion::new(active.compiled.clone()))?;
+    let length = u32::try_from(schema.len())
+        .map_err(|_| Error::InvalidStoredValue("active schema too large"))?;
+    let mut bytes = vec![1];
+    bytes.extend_from_slice(&active.revision.to_le_bytes());
+    bytes.extend_from_slice(&length.to_le_bytes());
+    bytes.extend_from_slice(&schema);
+    Ok(bytes)
+}
+
+pub(super) fn decode_active_schema(bytes: &[u8]) -> Result<ActiveSchema, Error> {
+    let mut cursor = CataloguePayloadCursor::new(bytes, 1, "invalid active schema payload")?;
+    let revision = cursor.u64()?;
+    let length = cursor.u32()? as usize;
+    let schema = decode_catalogue_schema(cursor.bytes(length)?)?;
+    cursor.finish()?;
+    let active = ActiveSchema::new(
+        CurrentWriteSchema {
+            revision,
+            schema: schema.id,
+        },
+        schema.schema,
+    )?;
+    Ok(active)
+}
+
+#[cfg(test)]
+mod active_schema_tests {
+    use super::*;
+
+    // Internal because the canonical durable envelope is not a public API.
+    #[test]
+    fn active_schema_v1_bytes_are_pinned_and_reject_malformed_payloads() {
+        let schema = JazzSchema::empty();
+        let active = ActiveSchema::new(
+            CurrentWriteSchema {
+                revision: 7,
+                schema: schema.version_id(),
+            },
+            schema,
+        )
+        .unwrap();
+        let golden = vec![
+            1, 7, 0, 0, 0, 0, 0, 0, 0, 34, 0, 0, 0, 1, 23, 227, 35, 59, 23, 250, 83, 135, 186, 173,
+            138, 61, 188, 160, 144, 152, 13, 0, 0, 0, 123, 34, 116, 97, 98, 108, 101, 115, 34, 58,
+            123, 125, 125,
+        ];
+        assert_eq!(encode_active_schema(&active).unwrap(), golden);
+        assert_eq!(decode_active_schema(&golden).unwrap(), active);
+        for length in 0..golden.len() {
+            assert!(decode_active_schema(&golden[..length]).is_err());
+        }
+        let mut trailing = golden.clone();
+        trailing.push(0);
+        assert!(decode_active_schema(&trailing).is_err());
+        let mut unsupported = golden.clone();
+        unsupported[0] = 2;
+        assert!(decode_active_schema(&unsupported).is_err());
     }
 }

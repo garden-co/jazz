@@ -1,37 +1,47 @@
 use crate::query::{in_list, is_null};
 
 fn access_path_schema() -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("docs")
-            .column("owner", PublicColumnType::Uuid)
-            .column("status", PublicColumnType::Text)
-            .column("body", PublicColumnType::Text)
-            .index_only(["owner"]),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("owner", PublicColumnType::Uuid)
+                .column("status", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .index_only(["owner"]),
+        ),
+    )
 }
 
 fn multi_index_access_path_schema() -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("docs")
-            .column("owner", PublicColumnType::Uuid)
-            .column("status", PublicColumnType::Text)
-            .column("body", PublicColumnType::Text)
-            .index_only(["owner", "status"]),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("owner", PublicColumnType::Uuid)
+                .column("status", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .index_only(["owner", "status"]),
+        ),
+    )
 }
 
 fn policy_indexed_access_path_schema(policy: PublicPolicyExpr) -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("docs")
-            .column("owner", PublicColumnType::Uuid)
-            .column("status", PublicColumnType::Text)
-            .column("body", PublicColumnType::Text)
-            .policies(public_all_policies().with_select(policy))
-            .index_only(["owner"]),
-    ))
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("owner", PublicColumnType::Uuid)
+                .column("status", PublicColumnType::Text)
+                .column("body", PublicColumnType::Text)
+                .policies(public_all_policies().with_select(policy))
+                .index_only(["owner"]),
+        ),
+    )
 }
 
-fn access_path_doc_cells(owner: AuthorSubject, status: &str, body: &str) -> BTreeMap<String, Value> {
+fn access_path_doc_cells(
+    owner: AuthorSubject,
+    status: &str,
+    body: &str,
+) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
         ("status".to_owned(), Value::String(status.to_owned())),
@@ -88,7 +98,11 @@ fn query_rows_by_uuid_for_identity(
     // This harness models a UUID-backed application `sub` claim separately
     // from the canonical authenticated author used to select the session.
     if identity != AuthorSubject::SYSTEM {
-        let mut claims = node.session_claims.get(&identity).cloned().unwrap_or_default();
+        let mut claims = node
+            .session_claims
+            .get(&identity)
+            .cloned()
+            .unwrap_or_default();
         claims
             .entry("sub".to_owned())
             .or_insert_with(|| Value::Uuid(identity.test_uuid()));
@@ -115,7 +129,11 @@ fn maintained_rows_by_uuid_for_identity(
     // Keep the maintained subscription path on the same authenticated claim
     // binding as the public one-shot helper above.
     if identity != AuthorSubject::SYSTEM {
-        let mut claims = node.session_claims.get(&identity).cloned().unwrap_or_default();
+        let mut claims = node
+            .session_claims
+            .get(&identity)
+            .cloned()
+            .unwrap_or_default();
         claims
             .entry("sub".to_owned())
             .or_insert_with(|| Value::Uuid(identity.test_uuid()));
@@ -170,36 +188,16 @@ fn indexed_read_policy_matches_local_scan_for_allowed_and_denied_identities() {
     let denied = user(0xc3);
     let query = Query::from("docs");
 
-    let (global_allowed, global_allowed_metrics) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Global,
-        owner,
-    );
-    let (local_allowed, local_allowed_metrics) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Local,
-        owner,
-    );
-    let (edge_allowed, edge_allowed_metrics) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Edge,
-        owner,
-    );
-    let (global_denied, global_denied_metrics) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Global,
-        denied,
-    );
-    let (local_denied, _) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query,
-        DurabilityTier::Local,
-        denied,
-    );
+    let (global_allowed, global_allowed_metrics) =
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, owner);
+    let (local_allowed, local_allowed_metrics) =
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Local, owner);
+    let (edge_allowed, edge_allowed_metrics) =
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Edge, owner);
+    let (global_denied, global_denied_metrics) =
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, denied);
+    let (local_denied, _) =
+        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, denied);
 
     assert_eq!(global_allowed, local_allowed);
     assert_eq!(global_allowed, edge_allowed);
@@ -400,16 +398,16 @@ fn policy_access_path_planner_falls_back_for_or_and_non_equality() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
     let query = Query::from("docs");
-    let (global, global_metrics) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Global,
-        owner,
-    );
-    let (local, _) = query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
+    let (global, global_metrics) =
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, owner);
+    let (local, _) =
+        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
     assert_eq!(global, local);
     assert_eq!(global, vec![first]);
-    assert_eq!(global_metrics.source_index_probes, 0, "OR must retain the full-scan path");
+    assert_eq!(
+        global_metrics.source_index_probes, 0,
+        "OR must retain the full-scan path"
+    );
 
     let non_equality = PublicPolicyExpr::Cmp {
         column: "owner".to_owned(),
@@ -421,16 +419,16 @@ fn policy_access_path_planner_falls_back_for_or_and_non_equality() {
     let (_core_dir, mut core) = open_node_with_schema(node(11), schema);
     let (_first, second, owner) = seed_access_path_docs(&mut writer, &mut core);
     let query = Query::from("docs");
-    let (global, global_metrics) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Global,
-        owner,
-    );
-    let (local, _) = query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
+    let (global, global_metrics) =
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, owner);
+    let (local, _) =
+        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
     assert_eq!(global, local);
     assert_eq!(global, vec![second]);
-    assert_eq!(global_metrics.source_index_probes, 0, "non-equality must retain the full-scan path");
+    assert_eq!(
+        global_metrics.source_index_probes, 0,
+        "non-equality must retain the full-scan path"
+    );
 }
 
 #[test]
@@ -441,29 +439,23 @@ fn policy_access_path_planner_falls_back_for_missing_or_nullable_claims_and_join
     seed_access_path_docs(&mut writer, &mut core);
     let reader = user(0xc3);
     let query = Query::from("docs");
-    let (global_missing, global_missing_metrics) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Global,
-        reader,
-    );
-    let (local_missing, _) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Local,
-        reader,
-    );
+    let (global_missing, global_missing_metrics) =
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, reader);
+    let (local_missing, _) =
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Local, reader);
     assert_eq!(global_missing, local_missing);
     assert!(global_missing.is_empty());
     assert_eq!(global_missing_metrics.source_index_probes, 0);
 
-    let nullable_schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("docs")
-            .nullable_column("owner", PublicColumnType::Uuid)
-            .column("status", PublicColumnType::Text)
-            .policies(public_all_policies().with_select(public_claim_eq("owner", "tenant")))
-            .index_only(["owner"]),
-    ));
+    let nullable_schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .nullable_column("owner", PublicColumnType::Uuid)
+                .column("status", PublicColumnType::Text)
+                .policies(public_all_policies().with_select(public_claim_eq("owner", "tenant")))
+                .index_only(["owner"]),
+        ),
+    );
     let (_writer_dir, mut writer) = open_node_with_schema(node(10), nullable_schema.clone());
     let (_core_dir, mut nullable_core) = open_node_with_schema(node(11), nullable_schema);
     commit_mergeable_global(
@@ -487,12 +479,8 @@ fn policy_access_path_planner_falls_back_for_missing_or_nullable_claims_and_join
         DurabilityTier::Global,
         reader,
     );
-    let (local_nullable, _) = query_rows_by_uuid_for_identity(
-        &mut nullable_core,
-        query,
-        DurabilityTier::Local,
-        reader,
-    );
+    let (local_nullable, _) =
+        query_rows_by_uuid_for_identity(&mut nullable_core, query, DurabilityTier::Local, reader);
     assert_eq!(global_nullable, local_nullable);
     assert!(global_nullable.is_empty());
     assert_eq!(global_nullable_metrics.source_index_probes, 0);
@@ -540,16 +528,16 @@ fn policy_access_path_planner_falls_back_for_missing_or_nullable_claims_and_join
         ])),
     );
     let query = Query::from("docs");
-    let (global, metrics) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Global,
-        reader,
-    );
-    let (local, _) = query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, reader);
+    let (global, metrics) =
+        query_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, reader);
+    let (local, _) =
+        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, reader);
     assert_eq!(global, local);
     assert_eq!(global, vec![first]);
-    assert_eq!(metrics.source_index_probes, 0, "join policies must retain the full-scan path");
+    assert_eq!(
+        metrics.source_index_probes, 0,
+        "join policies must retain the full-scan path"
+    );
 }
 
 /// Current-row index probes must preserve the logical nullable reference
@@ -667,10 +655,7 @@ fn one_shot_filtered_read_uses_primary_key_scan_for_id_equality() {
 fn inverse_join_via_column_uses_root_row_id() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("parents")
-                    .column("label", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("parents").column("label", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("children")
                     .fk_column("parent", "parents")
@@ -684,9 +669,10 @@ fn inverse_join_via_column_uses_root_row_id() {
     commit_mergeable_global(
         &mut writer,
         &mut core,
-        MergeableCommit::new("parents", parent, 10).cells(BTreeMap::from([
-            ("label".to_owned(), Value::String("parent".to_owned())),
-        ])),
+        MergeableCommit::new("parents", parent, 10).cells(BTreeMap::from([(
+            "label".to_owned(),
+            Value::String("parent".to_owned()),
+        )])),
     );
     commit_mergeable_global(
         &mut writer,
@@ -752,9 +738,8 @@ fn local_indexed_read_includes_ahead_winners_outside_the_settled_prefix() {
     ] {
         let tx_id = core
             .commit_mergeable_settled(
-                MergeableCommit::new("docs", row_uuid, tx_time).cells(access_path_doc_cells(
-                    owner, "open", "settled",
-                )),
+                MergeableCommit::new("docs", row_uuid, tx_time)
+                    .cells(access_path_doc_cells(owner, "open", "settled")),
             )
             .unwrap();
         let global_time = core.allocate_global_time_for_test();
@@ -767,41 +752,35 @@ fn local_indexed_read_includes_ahead_winners_outside_the_settled_prefix() {
         .unwrap();
     }
 
-    core.commit_mergeable_settled(
-        MergeableCommit::new("docs", moved_out, 20).cells(access_path_doc_cells(
-            owner_b,
-            "open",
-            "ahead owner changed",
-        )),
-    )
-    .unwrap();
-    core.commit_mergeable_settled(
-        MergeableCommit::new("docs", moved_in, 21).cells(access_path_doc_cells(
-            owner_a,
-            "open",
-            "ahead owner changed in",
-        )),
-    )
-    .unwrap();
-    core.commit_mergeable_settled(
-        MergeableCommit::new("docs", duplicate, 22).cells(access_path_doc_cells(
-            owner_a,
-            "open",
-            "ahead duplicate prefix",
-        )),
-    )
-    .unwrap();
-    core.commit_mergeable_settled(MergeableCommit::new("docs", deleted, 23).deletion(
-        DeletionEvent::Deleted,
+    core.commit_mergeable_settled(MergeableCommit::new("docs", moved_out, 20).cells(
+        access_path_doc_cells(owner_b, "open", "ahead owner changed"),
     ))
+    .unwrap();
+    core.commit_mergeable_settled(MergeableCommit::new("docs", moved_in, 21).cells(
+        access_path_doc_cells(owner_a, "open", "ahead owner changed in"),
+    ))
+    .unwrap();
+    core.commit_mergeable_settled(MergeableCommit::new("docs", duplicate, 22).cells(
+        access_path_doc_cells(owner_a, "open", "ahead duplicate prefix"),
+    ))
+    .unwrap();
+    core.commit_mergeable_settled(
+        MergeableCommit::new("docs", deleted, 23).deletion(DeletionEvent::Deleted),
+    )
     .unwrap();
 
     let query = Query::from("docs").filter(eq(col("owner"), lit(Value::Uuid(owner_a.test_uuid()))));
     let (global, _) = query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
     let (local, metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
 
-    assert_eq!(global.into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([moved_out, duplicate, deleted]));
-    assert_eq!(local.into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([moved_in, duplicate]));
+    assert_eq!(
+        global.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([moved_out, duplicate, deleted])
+    );
+    assert_eq!(
+        local.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([moved_in, duplicate])
+    );
     assert_eq!(metrics.source_index_probes, 1);
     assert_eq!(metrics.source_full_scans, 1);
 }
@@ -825,7 +804,12 @@ fn parameterized_one_shot_index_read_does_not_fall_back_to_cached_full_scan() {
 
     core.reset_storage_read_metrics();
     let rows = core
-        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, AuthorSubject::SYSTEM)
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+        )
         .expect("run parameterized indexed one-shot");
     let metrics = core.take_storage_read_metrics();
 
@@ -887,9 +871,8 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
     // results use the public protocol/query APIs, while physical read counts
     // and index names are implementation details with no public equivalent.
     let base = build_public_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
     );
     let indexed = SchemaVersion::new(build_public_test_schema(
         PublicSchemaBuilder::new().table(
@@ -976,17 +959,15 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
                     default: Value::String(String::new()),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 2,
-            schema: extended.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 2,
+        schema: extended.id,
     })
     .unwrap();
 
@@ -1014,13 +995,11 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
         vec![existing]
     );
     assert_eq!(
-        three_variant_reads.global_current_indexes,
-        indexed_reads.global_current_indexes,
+        three_variant_reads.global_current_indexes, indexed_reads.global_current_indexes,
         "adding a schema variant must not add an index source"
     );
     assert_eq!(
-        three_variant_reads.global_current_rows,
-        indexed_reads.global_current_rows,
+        three_variant_reads.global_current_rows, indexed_reads.global_current_rows,
         "adding a schema variant must not add a current-row source"
     );
 }
@@ -1071,12 +1050,8 @@ fn one_shot_filtered_read_counts_full_scan_for_unindexed_filter() {
 fn whole_table_predicate_probe_uses_table_change_watermark() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text),
-            ),
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("notes").column("title", PublicColumnType::Text)),
     );
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
@@ -1108,8 +1083,10 @@ fn history_subscriptions_flow_through_groove() {
     let subscription = node.subscribe_history("todos").unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row(8), 10).cells(title_cells("notify")))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(8), 10).cells(title_cells("notify")),
+    )
+    .unwrap();
 
     assert!(!subscription.recv().unwrap().is_empty());
 }
@@ -1186,11 +1163,12 @@ fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
             let action = (rng >> 48) % 9;
             let deletion = matches!(action, 0..=3);
             let mut commit = MergeableCommit::new("todos", row_uuid, 1_000 + step);
-            if let Some(parent) = parents
-                .get(&row_uuid)
-                .and_then(|(content, deletion_parent)| {
-                    if deletion { *deletion_parent } else { *content }
-                })
+            if let Some(parent) =
+                parents.get(&row_uuid).and_then(
+                    |(content, deletion_parent)| {
+                        if deletion { *deletion_parent } else { *content }
+                    },
+                )
             {
                 commit = commit.parents(vec![parent]);
             }
@@ -1345,11 +1323,8 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
             .unwrap()
     );
     assert!(
-        core.shape_predicate_changed_after(
-            predicate,
-            tx.base_snapshot.as_ref().unwrap()
-        )
-        .unwrap()
+        core.shape_predicate_changed_after(predicate, tx.base_snapshot.as_ref().unwrap())
+            .unwrap()
     );
     let [fate] = core
         .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
@@ -1457,16 +1432,22 @@ fn binding_delta_validates_shape_arity_and_cleans_up_binding_usage() {
     }))
     .unwrap();
     assert!(
-        node.query.registered_bindings
+        node.query
+            .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
             .contains_key(&(usage_binding_id, usage_subscription.read_view, None))
     );
     assert!(
-        node.query.registered_bindings
+        node.query
+            .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view, None))
+            .contains_key(&(
+                other_usage_binding_id,
+                other_usage_subscription.read_view,
+                None
+            ))
     );
 
     node.apply_sync_message_settled(SyncMessage::Unsubscribe {
@@ -1474,16 +1455,23 @@ fn binding_delta_validates_shape_arity_and_cleans_up_binding_usage() {
     })
     .unwrap();
     assert!(
-        !node.query.registered_bindings
+        !node
+            .query
+            .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
             .contains_key(&(usage_binding_id, usage_subscription.read_view, None))
     );
     assert!(
-        node.query.registered_bindings
+        node.query
+            .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view, None))
+            .contains_key(&(
+                other_usage_binding_id,
+                other_usage_subscription.read_view,
+                None
+            ))
     );
 
     node.apply_sync_message_settled(SyncMessage::Unsubscribe {
@@ -1491,10 +1479,16 @@ fn binding_delta_validates_shape_arity_and_cleans_up_binding_usage() {
     })
     .unwrap();
     assert!(
-        !node.query.registered_bindings
+        !node
+            .query
+            .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view, None))
+            .contains_key(&(
+                other_usage_binding_id,
+                other_usage_subscription.read_view,
+                None
+            ))
     );
 }
 
@@ -1557,10 +1551,12 @@ fn parked_subscription_unsubscribe_matches_usage_and_cleans_bucket() {
         subscription: second_subscription,
     })
     .unwrap();
-    assert!(!node
-        .parking
-        .parked_binding_deltas
-        .contains_key(&shape.shape_id()));
+    assert!(
+        !node
+            .parking
+            .parked_binding_deltas
+            .contains_key(&shape.shape_id())
+    );
 
     node.apply_sync_message_settled(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
@@ -1568,10 +1564,12 @@ fn parked_subscription_unsubscribe_matches_usage_and_cleans_bucket() {
         opts: crate::protocol::RegisterShapeOptions::default(),
     })
     .unwrap();
-    assert!(!node
-        .query
-        .registered_bindings
-        .contains_key(&shape.shape_id()));
+    assert!(
+        !node
+            .query
+            .registered_bindings
+            .contains_key(&shape.shape_id())
+    );
 }
 
 #[test]
@@ -1620,8 +1618,7 @@ fn parked_subscription_unsubscribe_preserves_other_policy_scopes() {
         "a bare handle must fail closed across policy scopes"
     );
 
-    let first_policy =
-        crate::protocol::PolicyBindingKey::from_delegated_session(&first_session);
+    let first_policy = crate::protocol::PolicyBindingKey::from_delegated_session(&first_session);
     node.apply_unsubscribe_with_admitted_policy_binding(subscription, first_policy);
     let parked = node
         .parking
@@ -1630,7 +1627,12 @@ fn parked_subscription_unsubscribe_preserves_other_policy_scopes() {
         .unwrap();
     assert_eq!(parked.len(), 1);
     assert_eq!(
-        parked[0].subscribe.delegated_session.as_ref().unwrap().identity,
+        parked[0]
+            .subscribe
+            .delegated_session
+            .as_ref()
+            .unwrap()
+            .identity,
         second_session.identity
     );
 
@@ -1647,7 +1649,9 @@ fn parked_subscription_unsubscribe_preserves_other_policy_scopes() {
         .expect("the uncancelled policy scope must activate");
     assert_eq!(
         survivor.authority_result_key.policy_binding,
-        Some(crate::protocol::PolicyBindingKey::from_delegated_session(&second_session)),
+        Some(crate::protocol::PolicyBindingKey::from_delegated_session(
+            &second_session
+        )),
         "shape installation must preserve the surviving immutable claims"
     );
 }
@@ -1725,35 +1729,35 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
             .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&(
-                branch_usage_subscription.binding_id,
-                branch_read_view,
-                None,
-            ))
+            .contains_key(&(branch_usage_subscription.binding_id, branch_read_view, None,))
     );
 
     node.apply_sync_message_settled(SyncMessage::Unsubscribe {
         subscription: branch_usage_subscription,
     })
     .unwrap();
-    assert!(!node
-        .query
-        .registered_bindings
-        .get(&shape.shape_id())
-        .is_some_and(|bindings| {
-            bindings.contains_key(&(
-                branch_usage_subscription.binding_id,
-                branch_read_view,
-                None,
-            ))
-        }));
+    assert!(
+        !node
+            .query
+            .registered_bindings
+            .get(&shape.shape_id())
+            .is_some_and(|bindings| {
+                bindings.contains_key(&(
+                    branch_usage_subscription.binding_id,
+                    branch_read_view,
+                    None,
+                ))
+            })
+    );
 }
 
 #[test]
 fn prepared_query_lowering_supports_ne_parameter_predicates() {
     let (_temp_dir, mut node) = open_node();
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x31), 10).cells(title_cells("keep")))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x31), 10).cells(title_cells("keep")),
+    )
+    .unwrap();
     let shape = Query::from("todos")
         .filter(ne(col("title"), param("blocked")))
         .validate(&schema())
@@ -1776,9 +1780,7 @@ fn prepared_query_lowering_supports_ne_parameter_predicates() {
 fn relation_snapshot_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("todos")
                     .column("title", PublicColumnType::Text)
@@ -1795,19 +1797,18 @@ fn relation_snapshot_schema() -> JazzSchema {
 fn relation_snapshot_policy_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
             .table(
-                PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text),
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .fk_column("todo_id", "todos"),
             )
+            .allow_all()
             .table(
                 PublicTableSchemaBuilder::new("todos")
                     .column("title", PublicColumnType::Text)
                     .fk_column("owner_id", "users")
                     .policies(public_owner_policies("owner_id")),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("comments")
-                    .column("body", PublicColumnType::Text)
-                    .fk_column("todo_id", "todos"),
             ),
     )
 }
@@ -1815,20 +1816,7 @@ fn relation_snapshot_policy_schema() -> JazzSchema {
 fn routed_nested_collector_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("todos")
-                    .column("title", PublicColumnType::Text)
-                    .fk_column("owner_id", "users")
-                    .policies(
-                        PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
-                            "owner_id",
-                            vec!["claims".to_owned(), "sub".to_owned()],
-                        )),
-                    ),
-            )
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("comments")
                     .column("body", PublicColumnType::Text)
@@ -1838,6 +1826,18 @@ fn routed_nested_collector_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("attachments")
                     .column("name", PublicColumnType::Text)
                     .fk_column("todo_id", "todos"),
+            )
+            .allow_all()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("owner_id", "users")
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
+                            "owner_id",
+                            vec!["claims".to_owned(), "sub".to_owned()],
+                        ),
+                    )),
             ),
     )
 }
@@ -1855,7 +1855,8 @@ fn forward_include_schema() -> JazzSchema {
                     .column("name", PublicColumnType::Text)
                     .nullable_fk_column("profile", "profiles")
                     .array_fk_column("members", "profiles"),
-            ),
+            )
+            .allow_all(),
     )
 }
 
@@ -1870,51 +1871,46 @@ fn required_forward_include_allows_null_scalar_but_requires_every_array_member()
     let null_scalar = row(0xc3);
 
     node.commit_mergeable_settled(
-        MergeableCommit::new("profiles", profile_a, 10).cells(BTreeMap::from([(
-            "name".to_owned(),
-            v("a"),
-        )])),
+        MergeableCommit::new("profiles", profile_a, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("a"))])),
     )
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("profiles", profile_b, 11).cells(BTreeMap::from([(
-            "name".to_owned(),
-            v("b"),
-        ), (
-            "best_friend".to_owned(),
-            Value::Nullable(None),
-        )])),
-    )
+    node.commit_mergeable_settled(MergeableCommit::new("profiles", profile_b, 11).cells(
+        BTreeMap::from([
+            ("name".to_owned(), v("b")),
+            ("best_friend".to_owned(), Value::Nullable(None)),
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("groups", complete, 12).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("groups", complete, 12).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("complete")),
             ("profile".to_owned(), Value::Nullable(None)),
             (
                 "members".to_owned(),
                 Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(profile_b.0)]),
             ),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("groups", partial, 13).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("groups", partial, 13).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("partial")),
             ("profile".to_owned(), Value::Nullable(None)),
             (
                 "members".to_owned(),
                 Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(row(0xff).0)]),
             ),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("groups", null_scalar, 14).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("groups", null_scalar, 14).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("null-scalar")),
             ("profile".to_owned(), Value::Nullable(None)),
             ("members".to_owned(), Value::Array(Vec::new())),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
 
     let shape = Query::from("groups")
@@ -1924,11 +1920,18 @@ fn required_forward_include_allows_null_scalar_but_requires_every_array_member()
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let rows = node
-        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        )
         .unwrap();
 
     assert_eq!(
-        rows.iter().map(CurrentRow::row_uuid).collect::<BTreeSet<_>>(),
+        rows.iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<BTreeSet<_>>(),
         BTreeSet::from([complete, null_scalar])
     );
 }
@@ -1942,41 +1945,44 @@ fn nested_required_include_checks_every_array_member_recursively() {
     let complete = row(0xc1);
     let nested_partial = row(0xc2);
 
-    node.commit_mergeable_settled(
-        MergeableCommit::new("profiles", profile_a, 10).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("profiles", profile_a, 10).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("a")),
             ("best_friend".to_owned(), Value::Nullable(None)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("profiles", profile_b, 11).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("profiles", profile_b, 11).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("b")),
             (
                 "best_friend".to_owned(),
                 Value::Nullable(Some(Box::new(Value::Uuid(row(0xee).0)))),
             ),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("groups", complete, 12).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("groups", complete, 12).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("complete")),
             ("profile".to_owned(), Value::Nullable(None)),
-            ("members".to_owned(), Value::Array(vec![Value::Uuid(profile_a.0)])),
-        ])),
-    )
+            (
+                "members".to_owned(),
+                Value::Array(vec![Value::Uuid(profile_a.0)]),
+            ),
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("groups", nested_partial, 13).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("groups", nested_partial, 13).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("nested-partial")),
             ("profile".to_owned(), Value::Nullable(None)),
             (
                 "members".to_owned(),
                 Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(profile_b.0)]),
             ),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
 
     let shape = Query::from("groups")
@@ -1985,11 +1991,18 @@ fn nested_required_include_checks_every_array_member_recursively() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let rows = node
-        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        )
         .unwrap();
 
     assert_eq!(
-        rows.iter().map(CurrentRow::row_uuid).collect::<BTreeSet<_>>(),
+        rows.iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<BTreeSet<_>>(),
         BTreeSet::from([complete])
     );
 }
@@ -2013,27 +2026,27 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
         )
         .unwrap();
     }
-    node.commit_mergeable_settled(
-        MergeableCommit::new("groups", complete, 12).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("groups", complete, 12).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("complete")),
             ("profile".to_owned(), Value::Nullable(None)),
             (
                 "members".to_owned(),
                 Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(profile_b.0)]),
             ),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("groups", partial, 13).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("groups", partial, 13).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("partial")),
             ("profile".to_owned(), Value::Nullable(None)),
             (
                 "members".to_owned(),
                 Value::Array(vec![Value::Uuid(profile_a.0), Value::Uuid(row(0xee).0)]),
             ),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     node.commit_mergeable_settled(
         MergeableCommit::new("groups", empty, 14).cells(BTreeMap::from([
@@ -2047,14 +2060,18 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
     let shape = Query::from("groups")
         .array_subquery(
             ArraySubquery::new("memberRows", "profiles", "id", "members")
-                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality)
-                ,
+                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality),
         )
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
+        .query_relation_snapshot_for_serving(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        )
         .unwrap();
 
     assert_eq!(
@@ -2110,7 +2127,11 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
             "c-partial",
             vec![Value::Uuid(profile_b.0), Value::Uuid(row(0xeb).0)],
         ),
-        (complete_second, "d-complete", vec![Value::Uuid(profile_b.0)]),
+        (
+            complete_second,
+            "d-complete",
+            vec![Value::Uuid(profile_b.0)],
+        ),
         (complete_third, "e-complete", vec![Value::Uuid(profile_a.0)]),
     ]
     .into_iter()
@@ -2129,8 +2150,7 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
     let shape = Query::from("groups")
         .array_subquery(
             ArraySubquery::new("memberRows", "profiles", "id", "members")
-                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality)
-                ,
+                .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality),
         )
         .order_by("name", crate::query::OrderDirection::Asc)
         .offset(1)
@@ -2139,7 +2159,12 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
+        .query_relation_snapshot_for_serving(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        )
         .unwrap();
 
     assert_eq!(
@@ -2163,14 +2188,13 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
     let todo_b = row(0x12);
 
     node.commit_mergeable_settled(
-        MergeableCommit::new("users", alice, 10).cells(BTreeMap::from([(
-            "name".to_owned(),
-            v("alice"),
-        )])),
+        MergeableCommit::new("users", alice, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("alice"))])),
     )
     .unwrap();
     node.commit_mergeable_settled(
-        MergeableCommit::new("users", bob, 11).cells(BTreeMap::from([("name".to_owned(), v("bob"))])),
+        MergeableCommit::new("users", bob, 11)
+            .cells(BTreeMap::from([("name".to_owned(), v("bob"))])),
     )
     .unwrap();
     node.commit_mergeable_settled(
@@ -2190,13 +2214,23 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
 
     let shape = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ))
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
+        .query_relation_snapshot_for_serving(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        )
         .unwrap();
 
     assert_eq!(snapshot.rows.len(), 1);
@@ -2223,17 +2257,13 @@ fn relation_snapshot_materializes_reverse_array_edges() {
     let comment = row(0xc1);
 
     node.commit_mergeable_settled(
-        MergeableCommit::new("users", alice, 10).cells(BTreeMap::from([(
-            "name".to_owned(),
-            v("alice"),
-        )])),
+        MergeableCommit::new("users", alice, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("alice"))])),
     )
     .unwrap();
     node.commit_mergeable_settled(
-        MergeableCommit::new("users", bob, 11).cells(BTreeMap::from([(
-            "name".to_owned(),
-            v("bob"),
-        )])),
+        MergeableCommit::new("users", bob, 11)
+            .cells(BTreeMap::from([("name".to_owned(), v("bob"))])),
     )
     .unwrap();
     node.commit_mergeable_settled(
@@ -2250,26 +2280,32 @@ fn relation_snapshot_materializes_reverse_array_edges() {
         ])),
     )
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("comments", comment, 14).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("comments", comment, 14).cells(
+        BTreeMap::from([
             ("body".to_owned(), v("nested")),
             ("todo_id".to_owned(), Value::Uuid(todo_a.0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
 
     let shape = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
         .array_subquery(
-            ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
-                .nested(ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")),
+            ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").nested(
+                ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id"),
+            ),
         )
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
+        .query_relation_snapshot_for_serving(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        )
         .unwrap();
 
     assert_eq!(snapshot.rows.len(), 1);
@@ -2302,40 +2338,35 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
     let filtered_todo = row(0x12);
 
     node.commit_mergeable_settled(
-        MergeableCommit::new("users", alice, 10).cells(BTreeMap::from([(
-            "name".to_owned(),
-            v("alice"),
-        )])),
+        MergeableCommit::new("users", alice, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("alice"))])),
     )
     .unwrap();
     node.commit_mergeable_settled(
-        MergeableCommit::new("users", bob, 11).cells(BTreeMap::from([(
-            "name".to_owned(),
-            v("bob"),
-        )])),
+        MergeableCommit::new("users", bob, 11)
+            .cells(BTreeMap::from([("name".to_owned(), v("bob"))])),
     )
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", matching_todo, 12).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("todos", matching_todo, 12).cells(
+        BTreeMap::from([
             ("title".to_owned(), v("keep")),
             ("owner_id".to_owned(), Value::Uuid(alice.0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", filtered_todo, 13).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("todos", filtered_todo, 13).cells(
+        BTreeMap::from([
             ("title".to_owned(), v("drop")),
             ("owner_id".to_owned(), Value::Uuid(bob.0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
 
     let shape = Query::from("users")
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
                 .filter(eq(col("title"), param("wanted")))
-                .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne)
-                ,
+                .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne),
         )
         .validate(&schema)
         .unwrap();
@@ -2347,7 +2378,12 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
         .unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
+        .query_relation_snapshot_for_serving(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        )
         .unwrap();
 
     assert_eq!(
@@ -2383,10 +2419,8 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     install_test_uuid_sub_claim(&mut node, bob);
 
     node.commit_mergeable_settled(
-        MergeableCommit::new("users", parent, 10).cells(BTreeMap::from([(
-            "name".to_owned(),
-            v("parent"),
-        )])),
+        MergeableCommit::new("users", parent, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("parent"))])),
     )
     .unwrap();
     node.commit_mergeable_settled(
@@ -2398,7 +2432,12 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     .unwrap();
 
     let optional_shape = Query::from("users")
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ))
         .validate(&schema)
         .unwrap();
     let optional_binding = optional_shape.bind(BTreeMap::new()).unwrap();
@@ -2424,8 +2463,7 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     let required_shape = Query::from("users")
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
-                .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne)
-                ,
+                .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne),
         )
         .validate(&schema)
         .unwrap();
@@ -2479,12 +2517,12 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         (visible_child, alice, "visible", 12),
         (denied_child, bob, "denied", 13),
     ] {
-        node.commit_mergeable_settled(
-            MergeableCommit::new("todos", child, time).cells(BTreeMap::from([
+        node.commit_mergeable_settled(MergeableCommit::new("todos", child, time).cells(
+            BTreeMap::from([
                 ("title".to_owned(), v(title)),
                 ("owner_id".to_owned(), Value::Uuid(owner.test_uuid())),
-            ])),
-        )
+            ]),
+        ))
         .unwrap();
     }
 
@@ -2494,8 +2532,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
                 .select(["title"])
                 .nested(
                     ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")
-                        .select(["body"])
-                        ,
+                        .select(["body"]),
                 ),
         )
         .validate(&schema)
@@ -2520,7 +2557,11 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     else {
         panic!("collector relation must be an array");
     };
-    assert_eq!(alice_children.len(), 1, "planted authorized child is retained");
+    assert_eq!(
+        alice_children.len(),
+        1,
+        "planted authorized child is retained"
+    );
     let Value::Record(visible_child_tree) = &alice_children[0] else {
         panic!("collector relation member must be a record");
     };
@@ -2550,12 +2591,12 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     );
     let bob_before = bob_tree.raw().to_vec();
 
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", row(0x13), 15).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x13), 15).cells(
+        BTreeMap::from([
             ("title".to_owned(), v("new visible")),
             ("owner_id".to_owned(), Value::Uuid(alice.test_uuid())),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     crate::db::block_on(node.drive_query_runtime()).unwrap();
     let mut changed_root_keys = BTreeSet::new();
@@ -2585,7 +2626,11 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     else {
         panic!("collector relation must be an array");
     };
-    assert_eq!(alice_children.len(), 2, "child change replaces only its parent tree");
+    assert_eq!(
+        alice_children.len(),
+        2,
+        "child change replaces only its parent tree"
+    );
     assert_eq!(
         maintained
             .structured_app_row(bob_parent)
@@ -2616,26 +2661,26 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
             .cells(BTreeMap::from([("name".to_owned(), v("alice"))])),
     )
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("todos", todo_row, 11).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("todos", todo_row, 11).cells(
+        BTreeMap::from([
             ("title".to_owned(), v("owned")),
             ("owner_id".to_owned(), Value::Uuid(alice.test_uuid())),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("comments", comment, 12).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("comments", comment, 12).cells(
+        BTreeMap::from([
             ("body".to_owned(), v("first comment")),
             ("todo_id".to_owned(), Value::Uuid(todo_row.0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("attachments", attachment, 13).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("attachments", attachment, 13).cells(
+        BTreeMap::from([
             ("name".to_owned(), v("first attachment")),
             ("todo_id".to_owned(), Value::Uuid(todo_row.0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
 
     let shape = Query::from("users")
@@ -2648,13 +2693,8 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
                         .select(["body"]),
                 )
                 .nested(
-                    ArraySubquery::new(
-                        "attachmentsViaTodo",
-                        "attachments",
-                        "todo_id",
-                        "id",
-                    )
-                    .select(["name"]),
+                    ArraySubquery::new("attachmentsViaTodo", "attachments", "todo_id", "id")
+                        .select(["name"]),
                 ),
         )
         .validate(&schema)
@@ -2698,17 +2738,21 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
         let Value::Array(children) = todo.get(field).unwrap() else {
             panic!("{field} must be an array");
         };
-        assert_eq!(children.len(), 1, "each sibling array retains its own child");
+        assert_eq!(
+            children.len(),
+            1,
+            "each sibling array retains its own child"
+        );
     }
 
     // A new comment changes only that sibling content, preserving the
     // attachment subtree and the one rendered parent identity.
-    node.commit_mergeable_settled(
-        MergeableCommit::new("comments", row(0x22), 14).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("comments", row(0x22), 14).cells(
+        BTreeMap::from([
             ("body".to_owned(), v("second comment")),
             ("todo_id".to_owned(), Value::Uuid(todo_row.0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     crate::db::block_on(node.drive_query_runtime()).unwrap();
     let mut changed_root_keys = BTreeSet::new();
@@ -2739,7 +2783,11 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
         panic!("attachments must be an array");
     };
     assert_eq!(comments.len(), 2);
-    assert_eq!(attachments.len(), 1, "sibling route grouping remains isolated");
+    assert_eq!(
+        attachments.len(),
+        1,
+        "sibling route grouping remains isolated"
+    );
     node.unsubscribe_groove_subscription(subscription.id());
 }
 
@@ -2747,18 +2795,26 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
 fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
     let (_temp_dir, mut node) = open_node();
     let table = schema().tables[0].clone();
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x41), 10).cells(title_cells("keep")))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x41), 10).cells(title_cells("keep")),
+    )
+    .unwrap();
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x42), 11).cells(title_cells("keep")),
     )
     .unwrap();
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x42), 12).deletion(DeletionEvent::Deleted))
-        .unwrap();
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x43), 13).cells(title_cells("drop")))
-        .unwrap();
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x43), 14).deletion(DeletionEvent::Deleted))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x42), 12).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x43), 13).cells(title_cells("drop")),
+    )
+    .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x43), 14).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
     let shape = Query::from("todos")
         .filter(eq(col("title"), lit("keep")))
         .validate(&schema())
@@ -2790,14 +2846,18 @@ fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
 #[test]
 fn include_deleted_one_shot_read_uses_lowered_param_filters() {
     let (_temp_dir, mut node) = open_node();
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x51), 10).cells(title_cells("match")))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x51), 10).cells(title_cells("match")),
+    )
+    .unwrap();
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x51), 11).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
-    node.commit_mergeable_settled(MergeableCommit::new("todos", row(0x52), 12).cells(title_cells("miss")))
-        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x52), 12).cells(title_cells("miss")),
+    )
+    .unwrap();
     let shape = Query::from("todos")
         .filter(eq(col("title"), param("wanted")))
         .validate(&schema())
@@ -2828,9 +2888,7 @@ fn include_deleted_one_shot_read_uses_lowered_param_filters() {
 fn include_deleted_join_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("issues").column("title", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("issues").column("title", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("issue_tags")
                     .fk_column("issue", "issues")
@@ -2851,14 +2909,16 @@ fn include_deleted_one_shot_read_join_matches_visible_join_rows() {
         )])),
     )
     .unwrap();
-    node.commit_mergeable_settled(MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted))
-        .unwrap();
     node.commit_mergeable_settled(
-        MergeableCommit::new("issue_tags", row(0x62), 12).cells(BTreeMap::from([
+        MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    node.commit_mergeable_settled(MergeableCommit::new("issue_tags", row(0x62), 12).cells(
+        BTreeMap::from([
             ("issue".to_owned(), Value::Uuid(issue.0)),
             ("tag".to_owned(), Value::String("bug".to_owned())),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     let shape = Query::from("issues")
         .join_via("issue_tags", "issue", [eq(col("tag"), lit("bug"))])
@@ -2895,14 +2955,16 @@ fn include_deleted_one_shot_read_join_ignores_deleted_join_rows() {
         )])),
     )
     .unwrap();
-    node.commit_mergeable_settled(MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted))
-        .unwrap();
     node.commit_mergeable_settled(
-        MergeableCommit::new("issue_tags", tag_row, 12).cells(BTreeMap::from([
+        MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    node.commit_mergeable_settled(MergeableCommit::new("issue_tags", tag_row, 12).cells(
+        BTreeMap::from([
             ("issue".to_owned(), Value::Uuid(issue.0)),
             ("tag".to_owned(), Value::String("bug".to_owned())),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     node.commit_mergeable_settled(
         MergeableCommit::new("issue_tags", tag_row, 13).deletion(DeletionEvent::Deleted),
@@ -2931,12 +2993,8 @@ fn include_deleted_one_shot_read_join_ignores_deleted_join_rows() {
 fn include_deleted_reachable_schema() -> JazzSchema {
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text),
-            )
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("team_access")
                     .fk_column("doc", "docs")
@@ -2971,19 +3029,13 @@ fn include_deleted_one_shot_read_reachable_matches_deleted_roots_through_visible
     let schema = include_deleted_reachable_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(9), schema.clone());
     let doc = row(0x73);
-    node.commit_mergeable_settled(
-        MergeableCommit::new("teams", row(0x71), 10).cells(BTreeMap::from([(
-            "name".to_owned(),
-            Value::String("parent".to_owned()),
-        )])),
-    )
+    node.commit_mergeable_settled(MergeableCommit::new("teams", row(0x71), 10).cells(
+        BTreeMap::from([("name".to_owned(), Value::String("parent".to_owned()))]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("teams", row(0x72), 11).cells(BTreeMap::from([(
-            "name".to_owned(),
-            Value::String("member".to_owned()),
-        )])),
-    )
+    node.commit_mergeable_settled(MergeableCommit::new("teams", row(0x72), 11).cells(
+        BTreeMap::from([("name".to_owned(), Value::String("member".to_owned()))]),
+    ))
     .unwrap();
     node.commit_mergeable_settled(
         MergeableCommit::new("docs", doc, 12).cells(BTreeMap::from([(
@@ -2992,21 +3044,23 @@ fn include_deleted_one_shot_read_reachable_matches_deleted_roots_through_visible
         )])),
     )
     .unwrap();
-    node.commit_mergeable_settled(MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted))
-        .unwrap();
     node.commit_mergeable_settled(
-        MergeableCommit::new("team_edges", row(0x74), 14).cells(BTreeMap::from([
-            ("member".to_owned(), Value::Uuid(row(0x72).0)),
-            ("parent".to_owned(), Value::Uuid(row(0x71).0)),
-        ])),
+        MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("team_access", row(0x75), 15).cells(BTreeMap::from([
+    node.commit_mergeable_settled(MergeableCommit::new("team_edges", row(0x74), 14).cells(
+        BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(row(0x72).0)),
+            ("parent".to_owned(), Value::Uuid(row(0x71).0)),
+        ]),
+    ))
+    .unwrap();
+    node.commit_mergeable_settled(MergeableCommit::new("team_access", row(0x75), 15).cells(
+        BTreeMap::from([
             ("doc".to_owned(), Value::Uuid(doc.0)),
             ("team".to_owned(), Value::Uuid(row(0x71).0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     let shape = include_deleted_reachable_shape(&schema);
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -3033,19 +3087,13 @@ fn include_deleted_one_shot_read_reachable_ignores_deleted_edge_rows() {
     let (_temp_dir, mut node) = open_node_with_schema(node(9), schema.clone());
     let doc = row(0x76);
     let edge = row(0x77);
-    node.commit_mergeable_settled(
-        MergeableCommit::new("teams", row(0x71), 10).cells(BTreeMap::from([(
-            "name".to_owned(),
-            Value::String("parent".to_owned()),
-        )])),
-    )
+    node.commit_mergeable_settled(MergeableCommit::new("teams", row(0x71), 10).cells(
+        BTreeMap::from([("name".to_owned(), Value::String("parent".to_owned()))]),
+    ))
     .unwrap();
-    node.commit_mergeable_settled(
-        MergeableCommit::new("teams", row(0x72), 11).cells(BTreeMap::from([(
-            "name".to_owned(),
-            Value::String("member".to_owned()),
-        )])),
-    )
+    node.commit_mergeable_settled(MergeableCommit::new("teams", row(0x72), 11).cells(
+        BTreeMap::from([("name".to_owned(), Value::String("member".to_owned()))]),
+    ))
     .unwrap();
     node.commit_mergeable_settled(
         MergeableCommit::new("docs", doc, 12).cells(BTreeMap::from([(
@@ -3054,23 +3102,27 @@ fn include_deleted_one_shot_read_reachable_ignores_deleted_edge_rows() {
         )])),
     )
     .unwrap();
-    node.commit_mergeable_settled(MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted))
-        .unwrap();
     node.commit_mergeable_settled(
-        MergeableCommit::new("team_edges", edge, 14).cells(BTreeMap::from([
-            ("member".to_owned(), Value::Uuid(row(0x72).0)),
-            ("parent".to_owned(), Value::Uuid(row(0x71).0)),
-        ])),
+        MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
-    node.commit_mergeable_settled(MergeableCommit::new("team_edges", edge, 15).deletion(DeletionEvent::Deleted))
-        .unwrap();
+    node.commit_mergeable_settled(MergeableCommit::new("team_edges", edge, 14).cells(
+        BTreeMap::from([
+            ("member".to_owned(), Value::Uuid(row(0x72).0)),
+            ("parent".to_owned(), Value::Uuid(row(0x71).0)),
+        ]),
+    ))
+    .unwrap();
     node.commit_mergeable_settled(
-        MergeableCommit::new("team_access", row(0x78), 16).cells(BTreeMap::from([
+        MergeableCommit::new("team_edges", edge, 15).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    node.commit_mergeable_settled(MergeableCommit::new("team_access", row(0x78), 16).cells(
+        BTreeMap::from([
             ("doc".to_owned(), Value::Uuid(doc.0)),
             ("team".to_owned(), Value::Uuid(row(0x71).0)),
-        ])),
-    )
+        ]),
+    ))
     .unwrap();
     let shape = include_deleted_reachable_shape(&schema);
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -3172,7 +3224,11 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
         ..
     }) = first
     else {
@@ -3187,7 +3243,11 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&second);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
         ..
     }) = second
     else {
@@ -3233,7 +3293,11 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
         ..
     }) = first
     else {
@@ -3249,7 +3313,11 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
         .unwrap();
     let version_bundles = version_bundles_for_update(&second);
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
+        peer_payload_inventory:
+            crate::protocol::PeerPayloadInventory {
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
+            },
         ..
     }) = second
     else {
@@ -3269,7 +3337,11 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
     let table = &crate::db::doctest_support::schema().tables[0];
 
     let write = db
-        .insert("todos", crate::db::doctest_support::todo_cells("a1", false), Default::default())
+        .insert(
+            "todos",
+            crate::db::doctest_support::todo_cells("a1", false),
+            Default::default(),
+        )
         .unwrap();
     let row_a = write.row_uuid();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -3280,7 +3352,11 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
     );
 
     let write = db
-        .insert("todos", crate::db::doctest_support::todo_cells("b1", false), Default::default())
+        .insert(
+            "todos",
+            crate::db::doctest_support::todo_cells("b1", false),
+            Default::default(),
+        )
         .unwrap();
     let row_b = write.row_uuid();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -3289,7 +3365,7 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
             &crate::db::doctest_support::block_on(
                 db.all(&prepared, crate::db::ReadOpts::default())
             )
-                .unwrap()
+            .unwrap()
         ),
         vec![row_a, row_b]
     );
@@ -3303,7 +3379,12 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
     assert_eq!(db_facade_row_ids(&db.read(&prepared).unwrap()), vec![row_b]);
 
     crate::db::doctest_support::block_on(
-        db.restore("todos", row_a, Some(crate::db::doctest_support::todo_cells("a2", true)), Default::default())
+        db.restore(
+            "todos",
+            row_a,
+            Some(crate::db::doctest_support::todo_cells("a2", true)),
+            Default::default(),
+        )
         .unwrap()
         .wait(DurabilityTier::Local),
     )
@@ -3329,7 +3410,7 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
             &crate::db::doctest_support::block_on(
                 db.all(&prepared, crate::db::ReadOpts::default())
             )
-                .unwrap()
+            .unwrap()
         ),
         vec![row_a]
     );
@@ -3344,7 +3425,11 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
     let table = &crate::db::doctest_support::schema().tables[0];
 
     let write = db
-        .insert("todos", crate::db::doctest_support::todo_cells("a1", false), Default::default())
+        .insert(
+            "todos",
+            crate::db::doctest_support::todo_cells("a1", false),
+            Default::default(),
+        )
         .unwrap();
     let row_a = write.row_uuid();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -3356,7 +3441,11 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
     );
 
     let write = db
-        .insert("todos", crate::db::doctest_support::todo_cells("b1", false), Default::default())
+        .insert(
+            "todos",
+            crate::db::doctest_support::todo_cells("b1", false),
+            Default::default(),
+        )
         .unwrap();
     let row_b = write.row_uuid();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -3375,7 +3464,12 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
     );
 
     let write = db
-        .restore("todos", row_a, Some(crate::db::doctest_support::todo_cells("a2", true)), Default::default())
+        .restore(
+            "todos",
+            row_a,
+            Some(crate::db::doctest_support::todo_cells("a2", true)),
+            Default::default(),
+        )
         .unwrap();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     let rows = db.read(&prepared).unwrap();

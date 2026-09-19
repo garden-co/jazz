@@ -29,12 +29,14 @@ async fn lock_history_conflict_suite() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 fn test_schema() -> jazz::tools::Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("completed", ColumnType::Boolean),
         )
+        .allow_all()
         .build()
 }
 

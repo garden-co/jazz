@@ -2011,7 +2011,7 @@ fn settled_binding_view_root_with_reference_include_sources_rejects_trusted_reop
         .settled_binding_view_key_for_query(&shape, &binding)
         .unwrap()
         .expect("receiver should have a settled binding view after rehydrate");
-    reader.catalogue.current_schema_version_alias = None;
+    reader.catalogue.local_schema_version_alias = None;
     let request = reader
         .current_query_program_request(
             &shape,

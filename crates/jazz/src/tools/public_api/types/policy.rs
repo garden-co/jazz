@@ -88,16 +88,10 @@ impl TablePolicies {
     }
 
     /// Set the DELETE policy (USING only).
-    /// If not set, defaults to UPDATE's USING policy.
+    /// For a table with policies, omitting DELETE grants no delete permission.
     pub fn with_delete(mut self, using: PolicyExpr) -> Self {
         self.delete = OperationPolicy::using(using);
         self
-    }
-
-    /// Get the effective DELETE USING policy.
-    /// Falls back to UPDATE's USING if DELETE has none.
-    pub fn effective_delete_using(&self) -> Option<&PolicyExpr> {
-        self.delete.using.as_ref().or(self.update.using.as_ref())
     }
 
     pub fn has_any_explicit_policy(&self) -> bool {

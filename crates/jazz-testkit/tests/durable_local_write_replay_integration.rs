@@ -11,12 +11,14 @@ use jazz_server::JazzServer;
 use support::{has_row, wait_for_rows};
 
 fn test_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("completed", ColumnType::Boolean),
         )
+        .allow_all()
         .build()
 }
 

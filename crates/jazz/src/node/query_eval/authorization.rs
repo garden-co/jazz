@@ -137,11 +137,9 @@ fn authorization_policy_queries(
     operation: AuthorizationScopeOperation,
 ) -> Vec<JazzQuery> {
     match operation {
-        AuthorizationScopeOperation::Read
-            if table.read_policy.is_none() && access_edge_parent_reference(table).is_none() =>
-        {
-            Vec::new()
-        }
+        // No dependency data can prove an absent read grant. Admission still
+        // evaluates the constant-false read policy; no support scope is needed.
+        AuthorizationScopeOperation::Read if table.read_policy.is_none() => Vec::new(),
         AuthorizationScopeOperation::Read => vec![authorization_query_from_read_policy(table)],
         AuthorizationScopeOperation::Insert => table
             .write_policies
@@ -198,7 +196,9 @@ where
         row_uuid: RowUuid,
         identity: AuthorSubject,
     ) -> Result<bool, Error> {
-        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -522,12 +522,21 @@ where
     ) -> Result<bool, Error> {
         let policy_schema_version = if self
             .catalogue
+            .active_schema
+            .compiled
+            .tables
+            .iter()
+            .any(|known| known == table)
+        {
+            self.catalogue.active_schema.schema
+        } else if self
+            .catalogue
             .schema
             .tables
             .iter()
             .any(|known| known == table)
         {
-            self.catalogue.current_schema_version_id
+            self.catalogue.local_schema_version_id
         } else {
             self.catalogue
                 .catalogue_schemas
@@ -540,7 +549,7 @@ where
                         .any(|known| known == table)
                         .then_some(*schema_version)
                 })
-                .unwrap_or(self.catalogue.current_schema_version_id)
+                .unwrap_or(self.catalogue.local_schema_version_id)
         };
         self.write_policy_query_allows_candidate_for_schema(
             policy_schema_version,
@@ -664,7 +673,9 @@ where
                 }
             }
         }
-        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -1000,7 +1011,9 @@ where
         binding_user_params: BTreeMap<String, ColumnType>,
         binding_claim_params: BTreeMap<String, ProgramClaimParam>,
     ) -> Result<QueryProgramRequest, Error> {
-        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -1158,7 +1171,9 @@ where
         {
             return Ok(request.clone());
         }
-        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if policy_schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self
@@ -1304,7 +1319,7 @@ where
         table: &TableSchema,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, Error> {
-        let schema_version = self.catalogue.current_schema_version_id;
+        let schema_version = self.catalogue.local_schema_version_id;
         self.maintained_view_content_current_with_version_in_schema(table, tier, schema_version)
     }
 
@@ -1399,14 +1414,12 @@ where
         table: &str,
         _operation: AuthorizationScopeOperation,
     ) -> SchemaVersionId {
-        let write_schema = self.catalogue.current_write_schema.schema;
-        let has_operation_policy = self
-            .table_in_schema(table, write_schema)
-            .is_ok_and(|table| table.has_any_policy());
-        if has_operation_policy {
+        let write_schema = self.catalogue.active_schema.schema;
+        let has_policy_table = self.table_in_schema(table, write_schema).is_ok();
+        if has_policy_table {
             write_schema
         } else {
-            self.catalogue.current_schema_version_id
+            self.catalogue.local_schema_version_id
         }
     }
 
@@ -1443,13 +1456,18 @@ where
         // support-query schema from that policy view.
         let policy_schema_version =
             self.authorization_scope_policy_schema_for_action(table_name, operation);
-        let policy_schema = self
-            .catalogue
-            .catalogue_schemas
-            .get(&policy_schema_version)
-            .ok_or(Error::InvalidStoredValue(
-                "authorization policy schema is unknown",
-            ))?;
+        let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue(
+                    "authorization policy schema is unknown",
+                ))?
+                .schema
+        };
         let policies = authorization_policy_queries(
             &self.table_in_schema(table_name, policy_schema_version)?,
             operation,
@@ -1465,7 +1483,7 @@ where
                     policy.clone(),
                     claims,
                     &claim_values,
-                    &policy_schema.schema,
+                    policy_schema,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1612,115 +1630,7 @@ mod authorization_scope_compiler_tests {
     }
 
     #[test]
-    fn actual_compiler_uses_claims_and_access_edge_parent_inheritance() {
-        let schema = public_schema(
-            PublicSchemaBuilder::new()
-                .table(
-                    PublicTableSchemaBuilder::new("resources")
-                        .column("owner", PublicColumnType::Uuid)
-                        .policies(PublicTablePolicies::new().with_select(
-                            PublicPolicyExpr::eq_session(
-                                "owner",
-                                vec!["claims".to_owned(), "user_id".to_owned()],
-                            ),
-                        )),
-                )
-                .table(
-                    PublicTableSchemaBuilder::new("document_access_edges")
-                        .fk_column("resource_id", "resources")
-                        .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
-                ),
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let cfs = schema.column_families();
-        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-        let mut node = NodeState::new(NodeUuid::from_bytes([7; 16]), schema, storage).unwrap();
-        let identity = AuthorSubject::for_test_bytes([8; 16]);
-        node.set_test_provider_claims(
-            identity,
-            BTreeMap::from([(
-                crate::query::provider_claim_key("role"),
-                Value::String("editor".to_owned()),
-            )]),
-        );
-        let first_action = PermissionAdviceAction::Read {
-            table: "document_access_edges".to_owned(),
-            row: RowUuid::from_bytes([1; 16]),
-        };
-        let first = node
-            .authorization_support_scope(identity, &first_action)
-            .unwrap();
-        assert_eq!(first.subscriptions.len(), 1);
-        let raw = node
-            .table("document_access_edges")
-            .unwrap()
-            .read_policy
-            .clone()
-            .unwrap();
-        let raw_compiled = compile_permission_scope_policy(
-            raw,
-            node.session_claims.get(&identity),
-            &default_permission_scope_claim_values(identity),
-            &node.catalogue.schema,
-        )
-        .unwrap();
-        assert_ne!(
-            first.subscriptions[0].0.shape_id(),
-            raw_compiled.0.shape_id(),
-            "canonical access-edge parent inheritance must alter the compiled support"
-        );
-        let second_action = PermissionAdviceAction::Read {
-            table: "document_access_edges".to_owned(),
-            row: RowUuid::from_bytes([2; 16]),
-        };
-        let second = node
-            .authorization_support_scope(identity, &second_action)
-            .unwrap();
-        assert_eq!(
-            first.key, second.key,
-            "same compiled support should coalesce across rows"
-        );
-        assert_ne!(
-            first.operation, second.operation,
-            "row remains an ephemeral evaluation key"
-        );
-        node.set_test_provider_claims(
-            identity,
-            BTreeMap::from([(
-                crate::query::provider_claim_key("role"),
-                Value::String("viewer".to_owned()),
-            )]),
-        );
-        let changed_claims = node
-            .authorization_support_scope(identity, &first_action)
-            .unwrap();
-        assert_ne!(first.key.claims_digest, changed_claims.key.claims_digest);
-
-        let editor_claims = BTreeMap::from([(
-            crate::query::provider_claim_key("role"),
-            Value::String("editor".to_owned()),
-        )]);
-        let viewer_claims = BTreeMap::from([(
-            crate::query::provider_claim_key("role"),
-            Value::String("viewer".to_owned()),
-        )]);
-        let explicit_editor = node
-            .authorization_support_scope_for_session(identity, Some(&editor_claims), &first_action)
-            .unwrap();
-        let explicit_viewer = node
-            .authorization_support_scope_for_session(identity, Some(&viewer_claims), &first_action)
-            .unwrap();
-        assert_ne!(
-            explicit_editor.key, explicit_viewer.key,
-            "same-author support scopes must follow the calling session, not the ambient claim map"
-        );
-        assert_eq!(explicit_viewer.key, changed_claims.key);
-    }
-
-    #[test]
-    fn actual_compiler_selects_write_clauses_and_skips_public_read_support() {
+    fn actual_compiler_selects_write_clauses_and_skips_absent_read_support() {
         let claim_policy = |column: &str| {
             PublicPolicyExpr::eq_session(column, vec!["claims".to_owned(), "user_id".to_owned()])
         };
@@ -1806,7 +1716,7 @@ mod authorization_scope_compiler_tests {
         assert_eq!(delete.subscriptions.len(), 1);
         assert!(
             public.subscriptions.is_empty(),
-            "public read must not create a support subscription"
+            "an absent read grant needs no support subscription"
         );
         assert_ne!(insert.key, update.key);
         assert_ne!(update.key, delete.key);
@@ -1945,12 +1855,9 @@ mod authorization_scope_compiler_tests {
             ),
         })
         .unwrap();
-        node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved_id,
-            },
+        node.activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_id,
         })
         .unwrap();
 
@@ -2065,12 +1972,9 @@ mod authorization_scope_compiler_tests {
             ),
         })
         .unwrap();
-        node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved_id,
-            },
+        node.activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_id,
         })
         .unwrap();
 
@@ -2134,7 +2038,7 @@ mod authorization_scope_compiler_tests {
         );
         let request = node
             .table_read_policy_authorization_request(
-                node.catalogue.current_schema_version_id,
+                node.catalogue.local_schema_version_id,
                 "resources",
                 author,
                 ParamBindingMode::InlineAllReachableSeeds,

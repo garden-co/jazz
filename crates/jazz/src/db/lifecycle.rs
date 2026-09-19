@@ -43,6 +43,10 @@ impl Transport for ObservedTestTransport {
         self.inner.try_recv()
     }
 
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        self.inner.try_recv_result()
+    }
+
     fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
         self.inner.connection_session_context()
     }
@@ -447,9 +451,8 @@ where
     pub(crate) fn trusted_current_catalogue_schema(&self) -> Result<JazzSchema, Error> {
         let node = self.node.node.borrow();
         let pointer = node.current_write_schema()?;
-        node.catalogue_schemas()
-            .get(&pointer.schema)
-            .map(|schema| schema.schema.clone())
+        node.schema_with_active_permissions(pointer.schema)
+            .cloned()
             .ok_or_else(|| Error::new(ErrorCode::Schema, "active catalogue schema is missing"))
     }
 
@@ -476,16 +479,15 @@ where
         {
             let node = self.node.node.borrow();
             let admitted = node
-                .catalogue_schemas()
-                .get(&schema_version_id)
+                .schema_with_active_permissions(schema_version_id)
                 .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
-            if !schema_policy_metadata_matches(&admitted.schema, &schema) {
+            if !schema_policy_metadata_matches(admitted, &schema) {
                 return Err(Error::new(
                     ErrorCode::Schema,
                     "schema view policy metadata conflicts with its admitted structural schema",
                 ));
             }
-            if !schema_index_metadata_matches(&admitted.schema, &schema) {
+            if !schema_index_metadata_matches(admitted, &schema) {
                 return Err(Error::new(
                     ErrorCode::Schema,
                     "schema view index metadata conflicts with its admitted structural schema",
@@ -591,18 +593,12 @@ where
         };
         self.finish_publication_outcome(outcome).await?;
         if bootstrap_current {
-            let outcome = {
-                let mut node = self.node.node.lock().await;
-                node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-                    author: AuthorSubject::SYSTEM,
-                    pointer: CurrentWriteSchema {
-                        revision: 1,
-                        schema: target_id,
-                    },
-                })
-                .await?
-            };
-            self.finish_publication_outcome(outcome).await?;
+            self.node
+                .node
+                .lock()
+                .await
+                .activate_schema(1, schema.clone())
+                .await?;
         }
         Ok(())
     }

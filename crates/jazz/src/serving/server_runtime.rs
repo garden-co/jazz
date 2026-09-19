@@ -1003,20 +1003,36 @@ impl ServerRuntimeHandle {
         result
     }
 
-    /// Compile and publish the permissions source selected by the catalogue
-    /// shell.
-    pub async fn publish_permissions_source(
+    /// Check a compiled selection without changing runtime or durable state.
+    #[doc(hidden)]
+    pub async fn validate_schema_activation(
         &self,
-        schema: crate::tools::Schema,
-        lineage_source: SchemaVersionId,
+        revision: u64,
+        schema: JazzSchema,
+    ) -> Result<(), String> {
+        self.run(move |shell| {
+            shell
+                .validate_schema_activation(revision, schema)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Install the catalogue's active schema and permissions at one authority revision.
+    pub async fn activate_schema(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+        permissions: std::collections::HashMap<
+            crate::tools::public_schema::TableName,
+            crate::tools::public_schema::TablePolicies,
+        >,
     ) -> Result<SchemaVersionId, String> {
         let activity_tx = self.inner.activity_tx.clone();
         let result = self
             .run(move |shell| {
-                let schema =
-                    crate::schema::JazzSchema::new(&schema).map_err(|error| error.to_string())?;
                 shell
-                    .publish_permissions_schema(schema, lineage_source)
+                    .activate_schema(revision, schema, permissions)
                     .map_err(|error| error.to_string())
             })
             .await;
@@ -1353,6 +1369,7 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
     // message itself here: claims and row payloads must not escape through a
     // transport diagnostic.
     match message {
+        SyncMessage::Reserved12(retired) => match *retired {},
         SyncMessage::ChunkRequestBatch(_) => "ChunkRequestBatch",
         SyncMessage::ChunkResponseBatch(_) => "ChunkResponseBatch",
         SyncMessage::ChunkUploadStart(_) => "ChunkUploadStart",
@@ -1369,7 +1386,6 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::PublishSchema { .. } => "PublishSchema",
         SyncMessage::PublishSchemaWithLens { .. } => "PublishSchemaWithLens",
         SyncMessage::PublishLens { .. } => "PublishLens",
-        SyncMessage::SetCurrentWriteSchema { .. } => "SetCurrentWriteSchema",
         SyncMessage::CatalogueAck(_) => "CatalogueAck",
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => "ViewUpdate",
         SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
