@@ -6890,23 +6890,6 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
-    #[derive(Default)]
-    struct TestWireTransport {
-        inbound: VecDeque<Vec<u8>>,
-        outbound: Vec<Vec<u8>>,
-    }
-
-    impl WireTransport for TestWireTransport {
-        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-            self.outbound.push(frame);
-            Ok(())
-        }
-
-        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            self.inbound.pop_front()
-        }
-    }
-
     struct IdleWire;
 
     impl WireTransport for IdleWire {
