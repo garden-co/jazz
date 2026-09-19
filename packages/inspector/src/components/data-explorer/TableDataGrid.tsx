@@ -2602,10 +2602,7 @@ function PlainTableView({
         selectRowRange(args.row, args.rowIdx, event.shiftKey);
       }}
       onCellKeyDown={(args, event) => {
-        if (readOnly) {
-          event.preventGridDefault();
-          return;
-        }
+        if (readOnly) return;
         if (args.mode === "EDIT") {
           return;
         }

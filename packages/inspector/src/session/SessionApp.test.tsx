@@ -30,7 +30,11 @@ vi.mock("jazz-tools/react", () => ({
   JazzClientProvider: ({ children }: PropsWithChildren) => children,
 }));
 vi.mock("../contexts/devtools-context.js", () => ({
-  DevtoolsProvider: ({ children }: PropsWithChildren) => children,
+  DevtoolsProvider: ({ children, readOnly }: PropsWithChildren<{ readOnly?: boolean }>) => (
+    <div data-testid="diagnostic-authority" data-read-only={String(readOnly)}>
+      {children}
+    </div>
+  ),
 }));
 vi.mock("../contexts/standalone-context.js", () => ({
   StandaloneProvider: ({ children }: PropsWithChildren) => children,
@@ -186,5 +190,65 @@ describe("Inspector session lifetime", () => {
     fireEvent.click(screen.getByText("Log out"));
     expect(readSessionConnection(connection.dashboard)?.restore).toBe(false);
     expect(localStorage.getItem("jazz-inspector-session-connection")).not.toContain("ephemeral");
+  });
+  it("logout clears the live client and removes stale metadata when storage writes fail", async () => {
+    const client = setup();
+    render(<SessionApp connection={connection} />);
+    fireEvent.click(screen.getByText("Sign in with dashboard"));
+    await screen.findByText("Protected application rows");
+    const write = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("full", "QuotaExceededError");
+    });
+    try {
+      fireEvent.click(screen.getByText("Log out"));
+      expect(client.shutdown).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText("Protected application rows")).toBeNull();
+      expect(localStorage.getItem("jazz-inspector-session-connection")).toBeNull();
+      expect(readSessionConnection(connection.dashboard)).toBeNull();
+    } finally {
+      write.mockRestore();
+    }
+  });
+  it("storage write failure does not discard a successfully authorized session", async () => {
+    setup();
+    const write = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("blocked", "SecurityError");
+    });
+    try {
+      render(<SessionApp connection={connection} />);
+      fireEvent.click(screen.getByText("Sign in with dashboard"));
+      await screen.findByText("Protected application rows");
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it("propagates only explicit edit grants to the data grid authority", async () => {
+    setup();
+    const view = render(<SessionApp connection={connection} />);
+    fireEvent.click(screen.getByText("Sign in with dashboard"));
+    await screen.findByText("Protected application rows");
+    expect(screen.getByTestId("diagnostic-authority").dataset.readOnly).toBe("true");
+    view.unmount();
+    mock.authorize.mockResolvedValue({
+      ...token(),
+      capabilities: ["inspector:read", "inspector:edit"],
+    });
+    render(<SessionApp connection={connection} />);
+    fireEvent.click(screen.getByText("Sign in with dashboard"));
+    await screen.findByText("Protected application rows");
+    expect(screen.getByTestId("diagnostic-authority").dataset.readOnly).toBe("false");
+  });
+  it("clears the view even if client shutdown throws synchronously", async () => {
+    const client = setup();
+    render(<SessionApp connection={connection} />);
+    fireEvent.click(screen.getByText("Sign in with dashboard"));
+    await screen.findByText("Protected application rows");
+    client.shutdown.mockImplementation(() => {
+      throw new Error("cleanup failed");
+    });
+    fireEvent.click(screen.getByText("Log out"));
+    expect(screen.queryByText("Protected application rows")).toBeNull();
   });
 });

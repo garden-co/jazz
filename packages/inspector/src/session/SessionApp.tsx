@@ -29,6 +29,20 @@ export interface SessionConnection {
 }
 const metadataKey = "jazz-inspector-session-connection";
 
+function persistConnectionMetadata(value: object): void {
+  try {
+    localStorage.setItem(metadataKey, JSON.stringify(value));
+  } catch {
+    // Quota or blocked storage cannot retain authority or make login fail.
+    // Remove stale restorable metadata when replacing it with signed-out state fails.
+    try {
+      localStorage.removeItem(metadataKey);
+    } catch {
+      /* storage unavailable */
+    }
+  }
+}
+
 /** Persist connection metadata only. The trusted dashboard comes from the deployment. */
 export function readSessionConnection(dashboard?: string): SessionConnection | null {
   const fragment = new URLSearchParams(window.location.hash.slice(1));
@@ -43,7 +57,7 @@ export function readSessionConnection(dashboard?: string): SessionConnection | n
       appId,
       ...(handoff ? { handoff, launchCode: launchCode ?? "" } : { dashboard }),
     };
-    if (!handoff) localStorage.setItem(metadataKey, JSON.stringify({ appId, mode: "dashboard" }));
+    if (!handoff) persistConnectionMetadata({ appId, mode: "dashboard" });
     return connection;
   }
   if (dashboard && !window.location.hash) {
@@ -89,7 +103,11 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
   const closeClient = (client: Client | null) => {
     if (client && !closed.current.has(client)) {
       closed.current.add(client);
-      void Promise.resolve(client.shutdown()).catch(() => undefined);
+      try {
+        void Promise.resolve(client.shutdown()).catch(() => undefined);
+      } catch {
+        /* cleanup must still clear authority and the active view */
+      }
     }
   };
   const clear = () => {
@@ -99,14 +117,15 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
     setSession(null);
   };
   const logout = () => {
-    if (auth)
-      localStorage.setItem(
-        metadataKey,
-        JSON.stringify({ appId: connection.appId, mode: "dashboard", signedOut: true }),
-      );
     generation.current++;
-    auth?.logout();
+    try {
+      auth?.logout();
+    } catch {
+      /* local client cleanup must still happen */
+    }
     clear();
+    if (auth)
+      persistConnectionMetadata({ appId: connection.appId, mode: "dashboard", signedOut: true });
     setBusy(false);
     setError(null);
   };
@@ -179,10 +198,7 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
     try {
       const value = await auth.authorize(requested);
       if (current === generation.current) {
-        localStorage.setItem(
-          metadataKey,
-          JSON.stringify({ appId: connection.appId, mode: "dashboard" }),
-        );
+        persistConnectionMetadata({ appId: connection.appId, mode: "dashboard" });
         setSession(value);
       }
     } catch {
