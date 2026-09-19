@@ -955,10 +955,12 @@ impl PeerIoPump {
             .channel_credits())
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn take_canonical_credit_progress(&self) -> bool {
         self.canonical_credit_progress.replace(false)
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn wire_frame_is_auxiliary(&self, frame: &[u8]) -> Result<bool, String> {
         if self.is_disconnected() {
             return Err("auxiliary connection is disconnected".to_owned());

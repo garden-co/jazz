@@ -264,6 +264,7 @@ pub struct WireTransportAdapter<T> {
     canonical_turns: u8,
     terminal_error: Option<TransportError>,
     last_wire_error: Option<WireError>,
+    received_wire_error: bool,
     // Retained only for historical fragment corpus tests, not live admission.
     #[cfg(test)]
     pub(super) reassembler: LogicalMessageReassembler,
@@ -326,6 +327,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
             canonical_turns: 0,
             terminal_error: None,
             last_wire_error: None,
+            received_wire_error: false,
             #[cfg(test)]
             reassembler: LogicalMessageReassembler::default(),
         }
@@ -505,6 +507,9 @@ impl<T: WireTransport> WireTransportAdapter<T> {
         })
     }
 
+    // Terminal diagnostics are best effort: a full physical queue may prevent
+    // delivery, but must not prevent local termination or require an unbounded
+    // error queue. The caller retains the exact typed error locally.
     fn send_wire_error(&mut self, error: &WireError) {
         if let Ok(frame) = crate::wire::encode_frame(&WireFrame::Error(error.clone())) {
             let _ = self.inner.send_frame(frame);
@@ -555,6 +560,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                     None
                 }
                 WireFrame::Error(error) => {
+                    self.received_wire_error = true;
                     self.last_wire_error = Some(error.clone());
                     return Err(TransportError::Failed(format!(
                         "remote wire error: {error:?}"
@@ -634,7 +640,9 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
                             format!("{error:?}"),
                         )
                     });
-                self.send_wire_error(&wire_error);
+                if !self.received_wire_error {
+                    self.send_wire_error(&wire_error);
+                }
                 self.last_wire_error = Some(wire_error);
             }
             self.terminal_error = Some(error.clone());
