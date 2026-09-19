@@ -273,7 +273,7 @@ pub(super) struct ArrangementState {
     overlay: Rc<HashMap<JoinKey, Option<JoinBucket>>>,
     /// One producer-owned transition, shared read-only by all consumers.
     /// Released at commit; never a retained publication snapshot.
-    changes: Rc<JoinIndex>,
+    changes: Option<Rc<JoinIndex>>,
     /// Identity of the last complete immutable input, not a retained payload.
     /// Any content mutation invalidates this proof. A Weak keeps the Arc
     /// allocation identity from being reused without retaining its row vector.
@@ -460,7 +460,11 @@ impl<'a> ArrangementTransition<'a> {
     pub(super) fn at(state: &'a AsOf<ArrangementState, SubTick>, expected: SubTick) -> Self {
         Self {
             current: state.value(),
-            changes: (state.as_of() == Some(expected)).then_some(state.value().changes.as_ref()),
+            changes: if state.as_of() == Some(expected) {
+                state.value().changes.as_deref()
+            } else {
+                None
+            },
             frontier: expected,
         }
     }
@@ -678,7 +682,7 @@ impl ArrangementState {
     /// Callers drop the previous live arrangement before invoking this method,
     /// making both COW maps uniquely owned in the common path.
     pub(super) fn commit_overlay(&mut self) {
-        self.changes = Rc::default();
+        self.changes = None;
         if self.overlay.is_empty() {
             return;
         }
@@ -724,7 +728,7 @@ impl ArrangementState {
         Self {
             index: Rc::new(index),
             overlay: Rc::default(),
-            changes: Rc::default(),
+            changes: None,
             snapshot: Weak::new(),
         }
     }
@@ -774,23 +778,32 @@ impl ArrangementState {
         update_mode: ArrangementUpdateMode,
     ) {
         self.snapshot = Weak::new();
-        self.changes = Rc::new(build_join_delta_index(deltas));
+        // An empty batch still advances the producer's timestamp, but must not
+        // retain the previous transition or allocate an empty shared index.
+        self.changes = (!deltas.is_empty()).then(|| Rc::new(build_join_delta_index(deltas)));
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
-                let mut buckets = HashMap::<JoinKey, JoinBucket>::default();
-                for delta in deltas {
-                    let bucket = buckets
-                        .entry(delta.key.clone())
-                        .or_insert_with(|| self.bucket(&delta.key).cloned().unwrap_or_default());
-                    bucket.add_weight(&delta.delta.record, delta.delta.weight);
+                if deltas.is_empty() {
+                    return;
                 }
+                let index = &self.index;
                 let overlay = Rc::make_mut(&mut self.overlay);
-                for (key, bucket) in buckets {
-                    overlay.insert(key, (!bucket.is_empty()).then_some(bucket));
+                for delta in deltas {
+                    // A present None is an overlay tombstone, not permission
+                    // to resurrect the base. Clone a base bucket only on the
+                    // first touch; an already-owned overlay can mutate in place.
+                    let slot = overlay
+                        .entry(delta.key.clone())
+                        .or_insert_with(|| index.get(&delta.key).cloned());
+                    let bucket = slot.get_or_insert_with(JoinBucket::default);
+                    bucket.add_weight(&delta.delta.record, delta.delta.weight);
+                    if bucket.is_empty() {
+                        *slot = None;
+                    }
                 }
             }
             ArrangementUpdateMode::Replace => {
-                self.index = Rc::clone(&self.changes);
+                self.index = self.changes.clone().unwrap_or_default();
                 self.overlay = Rc::default();
             }
         }
@@ -1967,7 +1980,7 @@ mod tests {
         let original = ArrangementState {
             index: Rc::new(index),
             overlay: Rc::default(),
-            changes: Rc::default(),
+            changes: None,
             snapshot: Weak::new(),
         };
 
@@ -2092,6 +2105,53 @@ mod tests {
     }
     // Internal because snapshot sharing and tombstone/base interaction are
     // private arrangement mechanics, not a separate public query operation.
+    #[test]
+    fn direct_arrangement_overlay_preserves_absence_and_snapshot_isolation() {
+        let key = JoinKey::from_slice(b"key");
+        let record = Bytes::from_static(b"row");
+        let apply = |state: &mut ArrangementState, weights: &[i64], mode| {
+            let deltas = weights
+                .iter()
+                .map(|weight| RecordDelta {
+                    record: record.clone(),
+                    weight: *weight,
+                })
+                .collect::<Vec<_>>();
+            let keyed = deltas
+                .iter()
+                .map(|delta| KeyedRecordDelta {
+                    delta,
+                    key: key.clone(),
+                })
+                .collect::<Vec<_>>();
+            state.apply_update(&keyed, mode);
+        };
+        let mut live = ArrangementState::default();
+        apply(&mut live, &[2], ArrangementUpdateMode::Replace);
+        live.commit_overlay();
+        let original = live.clone();
+        apply(&mut live, &[-2], ArrangementUpdateMode::Accumulate);
+        assert!(live.bucket(&key).is_none());
+        let absent = live.clone();
+        apply(&mut live, &[-1, 4], ArrangementUpdateMode::Accumulate);
+        assert_eq!(live.bucket(&key).unwrap().get(&record), Some(&3));
+        assert_eq!(original.bucket(&key).unwrap().get(&record), Some(&2));
+        assert!(absent.bucket(&key).is_none());
+        apply(&mut live, &[], ArrangementUpdateMode::Accumulate);
+        assert!(
+            live.changes.is_none(),
+            "empty advance must forget the prior delta"
+        );
+        assert_eq!(live.bucket(&key).unwrap().get(&record), Some(&3));
+        live.commit_overlay();
+        assert_eq!(live.bucket(&key).unwrap().get(&record), Some(&3));
+        assert_eq!(original.bucket(&key).unwrap().get(&record), Some(&2));
+        apply(&mut live, &[], ArrangementUpdateMode::Replace);
+        assert!(live.changes.is_none());
+        assert!(live.bucket(&key).is_none());
+    }
+
+    // Internal for the same private signed-bag/COW mechanics above.
     #[test]
     fn bucket_weight_updates_preserve_tombstones_and_shared_snapshots() {
         let record = Bytes::from_static(b"same-row");
