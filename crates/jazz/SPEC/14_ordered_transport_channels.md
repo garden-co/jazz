@@ -58,7 +58,7 @@ session metadata or semantic permission checks.
 | ChunkUploadStart, ChunkUploadNodes, ChunkUploadResult                                                                                           | Transfer keyed by immutable root hash                    | Root-first upload order; referencing writes retain semantic Staged prerequisite        |
 | ChunkRequestBatch, ChunkResponseBatch                                                                                                           | Reserved auxiliary                                       | Immutable storage objects only; independent progress while canonical application waits |
 
-FateUpdate uses the Writes channel with a bilateral canonical barrier: a prior query delivery can introduce the transaction whose fate is being advanced. The receiver requires that transaction to exist; writes-channel FIFO alone cannot preserve this dependency across delivery channels. This conservative ordering can later be narrowed with explicit transaction dependencies.
+FateUpdate conservatively uses the Writes channel with a bilateral canonical barrier. Applying a fate requires the transaction to exist. Direct write acknowledgements refer to an already-authored transaction, but until every cascaded-fate routing path is proven independent of prior deliveries, the transport preserves the existing enqueue order across those deliveries. This is a conservative dependency rule, not a claim that a production sender has been demonstrated to emit an otherwise unsafe sequence. It can be narrowed after that routing proof or with explicit transaction dependencies.
 
 A bilateral barrier drains every earlier canonical logical message before its
 first extent and prevents every later canonical message from starting until it
