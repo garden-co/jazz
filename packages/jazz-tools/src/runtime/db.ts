@@ -23,7 +23,7 @@ import {
   ExclusiveWriteResult,
   WriteResult,
   JazzClient,
-  type AuthUpdate,
+  withTransactionAdmission,
   type MutationErrorEvent,
   WriteHandle,
   setWriteWaitReadiness,
@@ -1117,7 +1117,7 @@ function createTransactionScope<TTransaction extends object>(
 function createTransactionWriteResult<TResult, TKind extends TransactionKind>(
   transaction: Transaction<TKind>,
   value: TResult,
-  txId: TxId,
+  txId: TxId | Promise<TxId>,
   client: JazzClient,
 ): TransactionWriteResult<TResult, TKind> {
   if (transaction.kind === "exclusive") {
@@ -1168,18 +1168,24 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
     }
     throw error;
   }
-  return createTransactionWriteResult(
-    transaction,
-    resolvedValue,
-    await committed.txId,
-    resultClient(),
-  );
+  const txId = committed.txId.catch(async (error) => {
+    try {
+      await transaction.rollback();
+    } catch {
+      // Preserve the deferred commit error, just as for synchronous commit failure.
+    }
+    throw error;
+  });
+  return createTransactionWriteResult(transaction, resolvedValue, txId, resultClient());
 }
 
 /**
  * Groups a set of writes as either a mergeable or exclusive transaction (see {@link TransactionKind}).
  */
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
+  private readonly pendingReads = new Set<Promise<unknown>>();
+  private committing = false;
+
   constructor(
     readonly kind: TKind,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
@@ -1203,6 +1209,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   private requireBinding(operation: string): DbTransactionHandleBinding {
+    if (this.committing) {
+      throw new Error(`DbTransaction.${operation}() cannot run after commit has been requested`);
+    }
     return getDbTxHandleBinding(this, operation);
   }
 
@@ -1224,14 +1233,24 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   commit(): TransactionCommitHandle<TKind> {
     const { ownerClient, openTransactionId } = this.requireBinding("commit");
-    const committed = ownerClient.commitTransaction(openTransactionId);
-    if (this.kind === "exclusive") {
-      return new ExclusiveWriteHandle(
-        committed.txId,
-        ownerClient,
-      ) as TransactionCommitHandle<TKind>;
+    let txId: Promise<TxId>;
+    if (this.pendingReads.size > 0) {
+      txId = Promise.all(this.pendingReads).then(
+        () => ownerClient.commitTransaction(openTransactionId).txId,
+      );
+    } else {
+      txId = ownerClient.commitTransaction(openTransactionId).txId;
     }
-    return committed as TransactionCommitHandle<TKind>;
+    this.committing = true;
+    const finishCommit = () => {
+      this.committing = false;
+    };
+    // Observe completion without delaying application waits on the transaction ID.
+    void txId.then(finishCommit, finishCommit);
+    if (this.kind === "exclusive") {
+      return new ExclusiveWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
+    }
+    return new WriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
   }
 
   /**
@@ -1406,7 +1425,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    *
    * Read data is scoped to this transaction.
    */
-  async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+  all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    const reading = this.readAll(query, options);
+    this.pendingReads.add(reading);
+    const settled = () => this.pendingReads.delete(reading);
+    reading.then(settled, settled);
+    return reading;
+  }
+
+  private async readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     this.bindQuery(query);
     const client = this.resolveClient(query._schema);
     const { openTransactionId, session } = this.requireBinding("query");
@@ -1472,6 +1499,21 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 export type TransactionScope<TKind extends TransactionKind = TransactionKind> = Scoped<
   Transaction<TKind>
 >;
+
+const transactionAdmission = new WeakMap<Db, () => Promise<void>>();
+
+/** @internal The compiler opts in before staging any operations. */
+export function beginDbTransactionAfter(
+  db: Db,
+  prepare: () => Promise<void>,
+): Transaction<"exclusive"> {
+  transactionAdmission.set(db, prepare);
+  try {
+    return db.beginExclusiveTransaction();
+  } finally {
+    transactionAdmission.delete(db);
+  }
+}
 
 /**
  * High-level database interface for typed queries and mutations.
@@ -2385,6 +2427,20 @@ export class Db {
         "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
       );
     }
+    const prerequisite = transactionAdmission.get(this);
+    if (prerequisite && ownerClient)
+      return withTransactionAdmission(
+        ownerClient,
+        prerequisite,
+        () =>
+          new Transaction(
+            kind,
+            (schema) => this.getClient(schema),
+            context?.session,
+            context?.attribution,
+            ownerClient,
+          ),
+      );
     return new Transaction(
       kind,
       (schema) => this.getClient(schema),
