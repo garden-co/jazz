@@ -16,11 +16,7 @@ name = "jazz-ruzstd"
 version = "0.8.3"
 authors = ["Moritz Borcherding <moritz.borcherding@web.de>"]
 build = false
-exclude = [
-    "decodecorpus_files/*",
-    "dict_tests/*",
-    "fuzz_decodecorpus/*",
-]
+exclude = ["decodecorpus_files/*", "dict_tests/*", "fuzz_decodecorpus/*"]
 autolib = false
 autobins = false
 autoexamples = false
@@ -29,31 +25,17 @@ autobenches = false
 description = "A decoder for the zstd compression format"
 homepage = "https://github.com/KillingSpark/zstd-rs"
 readme = "Readme.md"
-keywords = [
-    "zstd",
-    "zstandard",
-    "decompression",
-]
+keywords = ["zstd", "zstandard", "decompression"]
 categories = ["compression"]
 license = "MIT"
 repository = "https://github.com/KillingSpark/zstd-rs"
 
 [features]
-default = [
-    "hash",
-    "std",
-]
-dict_builder = [
-    "std",
-    "dep:fastrand",
-]
+default = ["hash", "std"]
+dict_builder = ["std", "dep:fastrand"]
 fuzz_exports = []
 hash = ["dep:twox-hash"]
-rustc-dep-of-std = [
-    "dep:compiler_builtins",
-    "dep:core",
-    "dep:alloc",
-]
+rustc-dep-of-std = ["dep:compiler_builtins", "dep:core", "dep:alloc"]
 std = []
 
 [lib]
@@ -85,4 +67,5 @@ version = "2.0"
 features = ["xxhash64"]
 optional = true
 default-features = false
+
 

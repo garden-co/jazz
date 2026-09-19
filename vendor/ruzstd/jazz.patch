@@ -1,6 +1,6 @@
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -12,7 +12,7 @@
+@@ -12,15 +12,11 @@
  [package]
  edition = "2018"
  rust-version = "1.87"
@@ -9,15 +9,49 @@
  version = "0.8.3"
  authors = ["Moritz Borcherding <moritz.borcherding@web.de>"]
  build = false
-@@ -37,7 +37,6 @@
+-exclude = [
+-    "decodecorpus_files/*",
+-    "dict_tests/*",
+-    "fuzz_decodecorpus/*",
+-]
++exclude = ["decodecorpus_files/*", "dict_tests/*", "fuzz_decodecorpus/*"]
+ autolib = false
+ autobins = false
+ autoexamples = false
+@@ -29,42 +25,24 @@
+ description = "A decoder for the zstd compression format"
+ homepage = "https://github.com/KillingSpark/zstd-rs"
+ readme = "Readme.md"
+-keywords = [
+-    "zstd",
+-    "zstandard",
+-    "decompression",
+-]
++keywords = ["zstd", "zstandard", "decompression"]
  categories = ["compression"]
  license = "MIT"
  repository = "https://github.com/KillingSpark/zstd-rs"
 -resolver = "3"
  
  [features]
- default = [
-@@ -58,13 +57,10 @@
+-default = [
+-    "hash",
+-    "std",
+-]
+-dict_builder = [
+-    "std",
+-    "dep:fastrand",
+-]
++default = ["hash", "std"]
++dict_builder = ["std", "dep:fastrand"]
+ fuzz_exports = []
+ hash = ["dep:twox-hash"]
+-rustc-dep-of-std = [
+-    "dep:compiler_builtins",
+-    "dep:core",
+-    "dep:alloc",
+-]
++rustc-dep-of-std = ["dep:compiler_builtins", "dep:core", "dep:alloc"]
  std = []
  
  [lib]
@@ -33,13 +67,13 @@
  
  [dependencies.alloc]
  version = "1.0.0"
-@@ -90,12 +86,3 @@
+@@ -90,12 +68,4 @@
  optional = true
  default-features = false
  
 -[dev-dependencies.criterion]
 -version = "0.5"
--
+ 
 -[dev-dependencies.rand]
 -version = "0.8.5"
 -features = ["small_rng"]

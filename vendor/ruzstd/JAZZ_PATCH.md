@@ -38,7 +38,7 @@ An upstream release is therefore not yet a substitute for this patch.
 
 ## Validation
 
-Jazz owns black-box tests in `../../tests/bounded_ruzstd.rs` and `stream.rs`.
+Jazz owns black-box tests in `../../crates/jazz-compression/tests/bounded_ruzstd.rs` and `stream.rs`.
 Run `cargo test -p jazz-compression --no-default-features --features lz4,ruzstd`.
 The tests cover immediate flushed delivery, repeated dictionary use beyond the
 window, fragmented input/output, and rejection before literal/table/match output
@@ -46,3 +46,10 @@ allocation. Upstream corpus test/bench targets are intentionally not copied;
 the library remains no_std and uses upstream decode primitives.
 
 Pristine crates.io archive SHA-256: `a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8`.
+
+Upstreaming/removal follow-up: [Jazz #3172](https://github.com/garden-co/jazz/issues/3172).
+
+The root `vendor/ruzstd` path stays outside workspace member directories so
+Cargo does not discover omitted upstream corpus targets through nested-member
+auto-inclusion (Cargo issue rust-lang/cargo#6745). Jazz-owned wrapper and bounds
+tests remain enabled in `jazz-compression`.
