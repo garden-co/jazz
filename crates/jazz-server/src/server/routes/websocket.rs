@@ -1042,6 +1042,16 @@ async fn handle_ws_connection(
     }
 }
 
+const BOOTSTRAP_DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+// A cancelled socket task must not leave its writer owning the socket or queued catalogue.
+struct BootstrapWriterGuard(tokio::task::AbortHandle);
+impl Drop for BootstrapWriterGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 type BootstrapQueues = (VecDeque<Vec<u8>>, VecDeque<Vec<u8>>);
 
 #[derive(Clone, Default)]
@@ -1098,6 +1108,8 @@ async fn stream_bootstrap_catalogue(
         let _ = stopped_tx.send(());
         result
     });
+    let _writer_guard = BootstrapWriterGuard(writer.abort_handle());
+    let deadline = tokio::time::Instant::now() + BOOTSTRAP_DELIVERY_TIMEOUT;
     let result = async {
         let mut pending = None;
         loop {
@@ -1111,6 +1123,7 @@ async fn stream_bootstrap_catalogue(
             }
             if status == WireFlushStatus::Idle && pending.is_none() { break; }
             tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => return Err("bootstrap delivery timed out".to_owned()),
                 _ = &mut stopped_rx => return Err("bootstrap writer stopped before delivery".to_owned()),
                 permit = sender.reserve(), if pending.is_some() => {
                     permit.map_err(|_| "bootstrap writer stopped")?.send(pending.take().unwrap());
@@ -1683,6 +1696,85 @@ mod tests {
             let _ = socket.close(None).await;
             let _ = server.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_stalled_credit_and_disconnected_peers_release_the_socket() {
+        use jazz::tools::{ColumnDescriptor, RowDescriptor, TableName, Value as PublicValue};
+        let schema = Schema::from([(
+            TableName::new("records"),
+            PublicTableSchema::with_policies(
+                RowDescriptor::new(vec![
+                    ColumnDescriptor::new("label", ColumnType::Text)
+                        .default(PublicValue::Text("x".repeat(2 * 1024 * 1024))),
+                ]),
+                public_table_policies(),
+            ),
+        )]);
+        let server = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(schema)
+            .build()
+            .await
+            .unwrap();
+        let state = server.state.clone();
+        let addr = start_ws_test_server(state.clone()).await;
+        for disconnect in [false, true] {
+            let prelude = serde_json::to_vec(&serde_json::json!({
+                "peer_identity": AuthorSubject::SYSTEM.canonical(),
+                "auth": { "admin_secret": "admin-secret" },
+                "bootstrap_catalogue": true,
+            }))
+            .unwrap();
+            let mut socket = open_negotiated_ws_with_prelude_and_features(
+                addr,
+                &state,
+                prelude,
+                current_wire_features(),
+            )
+            .await;
+            if disconnect {
+                socket.close(None).await.unwrap();
+            }
+            // Read carriers without returning consumption credits. The large
+            // catalogue cannot finish; the server must retire the socket.
+            tokio::time::timeout(BOOTSTRAP_DELIVERY_TIMEOUT + Duration::from_secs(2), async {
+                loop {
+                    match socket.next().await {
+                        None | Some(Err(_)) | Some(Ok(WsMessage::Close(_))) => break,
+                        Some(Ok(_)) => {}
+                    }
+                }
+            })
+            .await
+            .expect("stalled or disconnected bootstrap must release its socket");
+        }
+        let _ = server.shutdown().await;
+    }
+
+    // Cancellation is a task ownership boundary, observable here without a
+    // timing-dependent TCP disconnect race.
+    #[tokio::test]
+    async fn bootstrap_writer_is_cancelled_when_its_owner_is_dropped() {
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let _released = released_tx;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let guard = BootstrapWriterGuard(writer.abort_handle());
+        started_rx.await.unwrap();
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), released_rx)
+            .await
+            .expect("cancelled owner must release its writer resources")
+            .unwrap_err();
+        assert!(writer.await.unwrap_err().is_cancelled());
     }
 
     async fn make_ws_test_state() -> Arc<ServerState> {
