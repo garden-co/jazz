@@ -306,9 +306,10 @@ through `2^64-1` are representable without a JavaScript number conversion. Exact
 one compression bit may be active on an envelope; when both codecs are
 negotiated, an outbound wire-protocol v3 sender selects LZ4 and emits only its bit. A
 receiver rejects an envelope declaring both codecs, a codec change within one
-connection, corrupt compressed bytes, or a decompressed payload exceeding the
-logical-message budget. Compression is applied before fragmentation and removed
-only after complete fragment reassembly; it never changes semantic bytes.
+connection, corrupt compressed bytes, or an encoded payload exceeding `E`
+before fragment admission, or a decompressed payload exceeding `D`.
+Compression is applied before fragmentation and removed only after complete
+fragment reassembly; it never changes semantic bytes.
 
 `WireMessageFragment` is the complete physical-fragment layout in field order:
 `protocol_version`, `features`, `session`, `message_id`, `message_digest`,
@@ -664,12 +665,21 @@ Protocol size limits are enforced at the layer that can recover correctly:
 - An encoded `WireFrame` is capped at 2 MiB before postcard frame decode.
   `WireEnvelope.payload` is one physical fragment, not a semantic-message
   ceiling. Generic fragmentation/reassembly carries an encoded `SyncMessage`
-  of any ordinary database size atomically across bounded frames. Receivers
-  enforce fixed advertised-length, decompressed-output, concurrent-assembly,
-  aggregate staged-byte, 30-second no-progress, and five-minute maximum-age
-  limits as adversarial resource defences. Exact duplicates and rejected
-  extents do not count as progress. Those budgets are transport policy, not
-  query, catalogue, or transaction semantics.
+  within the separate D/E payload budgets atomically across bounded frames.
+- A logical `SyncMessage` has two independent payload budgets. `D =
+MAX_LOGICAL_MESSAGE_BYTES` is the decoded semantic payload ceiling, checked
+  by the sender before compression and by the decoder after decompression.
+  `E = MAX_ENCODED_MESSAGE_BYTES = D + D/10 + 24` is the encoded payload
+  ceiling, checked by the sender after compression and by reassembly against
+  each fragment's advertised `total_len`. Aggregate staged encoded bytes use
+  `MAX_INFLIGHT_ENCODED_MESSAGE_BYTES`; decompressed output and uncompressed
+  semantic queues retain the `D` bound.
+- At `D = 256 MiB`, `E = 295,279,025` bytes, so a 512 KiB fragment extent
+  needs at most 564 extents. The installed LZ4 worst-case bound is
+  `floor(1.1 * D) + 20`, and `compress_prepend_size` adds its four-byte
+  decoded-size prefix. The installed zstd `ZSTD_compressBound(D)` also fits
+  within `E`. The addition/division formula avoids intermediate multiplication
+  overflow on wasm32.
 - A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
   admission limit for the shape-registration request; the connection may
   continue after the rejected request. Server shells may expose this as
@@ -688,10 +698,17 @@ Protocol size limits are enforced at the layer that can recover correctly:
   level and are protocol-admission limits: over-limit input is rejected before
   semantic application (`INV-SYNC-28`).
 
+This is a resource-policy correction within wire-protocol v2. It introduces no
+framing, codec, version, compatibility negotiation, or fallback path. An older
+v2 receiver that still applies `D` to encoded payloads may reject a newly legal
+encoded-edge message whose size is in `(D, E]`; senders do not retry it through
+an alternate codec or framing path.
+
 Outbound websocket batching is byte-budgeted at the physical layer: senders
 split batches across binary messages rather than relying on a count-only batch
-limit. A logical `SyncMessage` is fragmented first, so each encoded `WireFrame`
-fits the wire-frame budget without truncation or semantic-layer chunking.
+limit. A logical `SyncMessage` is fragmented first, so each encoded
+`WireFrame` fits the wire-frame budget without truncation or semantic-layer
+chunking.
 
 **Wire encoding posture (target optimization guidance).** High-rate serial
 transactions (keystroke-grade chains: same author, same row, near-monotone
