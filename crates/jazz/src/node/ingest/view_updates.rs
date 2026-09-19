@@ -795,20 +795,50 @@ where
         {
             self.merge_head_reachability_walks += 1;
         }
+        if start == target {
+            return Ok(true);
+        }
+        if target.time >= start.time {
+            return Ok(false);
+        }
+
+        let key = ContentVersionReachabilityCacheKey {
+            table_id,
+            branch_key: branch_key.clone(),
+            row_uuid,
+            start,
+        };
+        if let Some(reaches) = self.cached_content_version_reachability(&key, target) {
+            return Ok(reaches);
+        }
+
         let mut stack = vec![start];
-        let mut seen = BTreeSet::new();
+        let mut ancestors = FxHashSet::default();
+        let mut complete = true;
+        let mut reaches = false;
         while let Some(tx_id) = stack.pop() {
             if tx_id == target {
-                return Ok(true);
+                reaches = true;
+                // A witness is enough for this query, but the remaining
+                // ancestry was not inspected and must not be cached as a
+                // complete closure.
+                complete = false;
+                break;
             }
-            if !seen.insert(tx_id) {
+            if !ancestors.insert(tx_id) {
                 continue;
+            }
+            #[cfg(any(test, feature = "testing"))]
+            {
+                self.merge_head_reachability_nodes += 1;
             }
             // Reachability is row-local. Preserve the transaction-presence and
             // resident-cache semantics without materializing its sibling rows.
             let Some(tx) = self.query_transaction(tx_id).await? else {
+                complete = false;
                 continue;
             };
+            let mut found_content_version = false;
             if self.query.tx_versions_cache.contains_key(&tx_id) {
                 for version in self
                     .query_versions_for_tx_physical_coordinate(tx_id, table_id, row_uuid)
@@ -817,6 +847,7 @@ where
                     if version.branch_key() == branch_key
                         && version.layer() == VersionLayer::Content
                     {
+                        found_content_version = true;
                         stack.extend(version.parents());
                     }
                 }
@@ -833,10 +864,19 @@ where
                 )
                 .await?
             {
+                found_content_version = true;
                 stack.extend(version.parents());
             }
+            if !found_content_version {
+                // A complete closure requires a witness for every transaction
+                // node. Missing history remains a valid non-cached answer.
+                complete = false;
+            }
         }
-        Ok(false)
+        if complete {
+            self.cache_content_version_reachability(key, ancestors);
+        }
+        Ok(reaches)
     }
 
     async fn content_version_reaches_tx_in_batch(

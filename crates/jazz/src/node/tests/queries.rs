@@ -162,6 +162,45 @@ fn maintained_rows_by_uuid_for_identity(
 }
 
 #[test]
+fn identical_current_subscription_compilation_reuses_program() {
+    let schema = access_path_schema();
+    let (_dir, mut core) = open_node_with_schema(node(0xc4), schema);
+    let shape = Query::from("docs").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    core.reset_query_program_compilations_for_test();
+    let (first_receiver, ..) = core
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Global,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+    core.unsubscribe_groove_subscription(first_receiver.id());
+    let after_first = core.query_program_compilations_for_test();
+    assert!(after_first > 0, "the first subscription must compile its program");
+
+    let (second_receiver, ..) = core
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Global,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+    core.unsubscribe_groove_subscription(second_receiver.id());
+
+    assert_eq!(
+        core.query_program_compilations_for_test(),
+        after_first,
+        "an identical storage-backed subscription should reuse its compiled program"
+    );
+}
+
+#[test]
 fn history_complete_query_derives_membership_from_canonical_rows() {
     let schema = access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
@@ -3499,4 +3538,75 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
 
 fn db_facade_row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
     rows.iter().map(CurrentRow::row_uuid).collect()
+}
+
+// Compilation counts and cache size require this internal seam; results are
+// still asserted through the ordinary maintained subscription output.
+#[test]
+fn cached_subscription_programs_preserve_identity_claims_and_query_inputs() {
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "tenant"));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xd1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xd2), schema);
+    let (first, second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let reader = user(0xd3);
+    let other = user(0xd4);
+    core.set_test_provider_claims(reader, BTreeMap::from([("tenant".to_owned(), Value::Uuid(owner.test_uuid()))]));
+    core.set_test_provider_claims(other, BTreeMap::from([("tenant".to_owned(), Value::Uuid(user(0xb2).test_uuid()))]));
+    let query = Query::from("docs");
+    assert_eq!(maintained_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, reader).0, vec![first]);
+    let compiled = core.query_program_compilations_for_test();
+    assert!(compiled > 0);
+    assert_eq!(maintained_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, reader).0, vec![first]);
+    assert_eq!(core.query_program_compilations_for_test(), compiled, "the isolation checks must start from a genuine cache hit");
+    assert_eq!(maintained_rows_by_uuid_for_identity(&mut core, query.clone(), DurabilityTier::Global, other).0, vec![second]);
+    core.set_test_provider_claims(reader, BTreeMap::from([("tenant".to_owned(), Value::Uuid(user(0xb2).test_uuid()))]));
+    assert_eq!(maintained_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Global, reader).0, vec![second]);
+    for index in 0..40 {
+        let status = if index == 0 { "closed".to_owned() } else { format!("missing-{index}") };
+        let query = Query::from("docs").filter(eq(col("status"), lit(status)));
+        let rows = maintained_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Global, reader).0;
+        assert_eq!(rows, if index == 0 { vec![second] } else { Vec::new() });
+        assert!(core.query.compiled_query_program_cache.len() <= 32);
+    }
+    assert_eq!(core.query.compiled_query_program_cache.len(), 32, "distinct eligible programs must actually exercise the capacity bound");
+    let denied_schema = policy_indexed_access_path_schema(PublicPolicyExpr::False);
+    assert_eq!(denied_schema.version_id(), core.catalogue.active_schema.schema);
+    // Exercise the activation seam directly to inspect retained compiler state;
+    // the Db catalogue test separately covers durable revision publication.
+    core.install_active_schema(ActiveSchema::new(
+        CurrentWriteSchema { revision: 1, schema: denied_schema.version_id() },
+        denied_schema,
+    ).unwrap());
+    assert!(core.query.compiled_query_program_cache.is_empty(), "permission activation must retire programs lowered under the old policy");
+    assert!(maintained_rows_by_uuid_for_identity(&mut core, Query::from("docs"), DurabilityTier::Global, reader).0.is_empty());
+
+}
+
+#[test]
+fn compiled_subscription_cache_excludes_branch_read_views() {
+    let schema = merge_head_branch_schema();
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0xd5), schema);
+    for index in [1, 2] {
+        core.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(index), 10 + u64::from(index))
+                .branch(branch_selector(index))
+                .cells(BTreeMap::from([("title".to_owned(), v("branch row"))])),
+        ).unwrap();
+    }
+    let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    // Branch inputs have a distinct lifetime from storage-backed current
+    // sources. Inspect cache admission as well as the public result members.
+    for index in [1, 2, 1] {
+        let view = crate::protocol::ReadViewSpec::branch_view(branch_selector(index), None);
+        let (receiver, maintained, ..) = core.open_seeded_maintained_subscription_view(
+            &shape, &binding, AuthorSubject::SYSTEM, DurabilityTier::Local, &view,
+        ).unwrap();
+        let rows = maintained.active_result_members().iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .map(|(_, row_uuid, _)| row_uuid).collect::<Vec<_>>();
+        assert_eq!(rows, vec![row(index)]);
+        core.unsubscribe_groove_subscription(receiver.id());
+        assert!(core.query.compiled_query_program_cache.is_empty(), "branch programs must not enter the current-source cache");
+    }
 }

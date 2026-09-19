@@ -419,6 +419,7 @@ where
         self.catalogue.physical_write_plan_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
+        self.query.compiled_query_program_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();

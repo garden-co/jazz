@@ -1214,6 +1214,7 @@ self.database.finish_persistence(persisted)?;
         }
         self.catalogue.active_schema = active;
         self.query.version_storage_sources_cache.clear();
+        self.query.compiled_query_program_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();

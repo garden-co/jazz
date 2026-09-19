@@ -352,6 +352,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
             }
         }
         self.query.query_shape_cache.clear();
+        self.query.compiled_query_program_cache.clear();
         self.query.local_availability_authorities.remove(scope);
         Ok(())
     }
