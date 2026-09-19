@@ -4538,7 +4538,12 @@ impl CurrentRowDescriptorCacheEntry {
             columns: table
                 .columns
                 .iter()
-                .map(|column| (column.name.clone(), column.column_type.clone()))
+                .map(|column| {
+                    (
+                        column.name.clone(),
+                        crate::schema::storage_column_type(column),
+                    )
+                })
                 .collect(),
             descriptor,
         }
@@ -4552,11 +4557,15 @@ impl CurrentRowDescriptorCacheEntry {
                 .iter()
                 .zip(&table.columns)
                 .all(|((name, column_type), column)| {
-                    name == &column.name && column_type == &column.column_type
+                    name == &column.name
+                        && column_type == &crate::schema::storage_column_type(column)
                 })
     }
 }
 
+// Runtime current rows can carry unresolved scalar references during policy
+// evaluation. Retain the schema-derived JSON kind without materializing cells;
+// these descriptors are not persisted history or wire formats.
 fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     records::RecordDescriptor::new_with_fields(
         std::iter::once(records::DescriptorField::new(
@@ -4566,7 +4575,7 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
         .chain(table.columns.iter().map(|column| {
             records::DescriptorField::new(
                 user_column_field(&column.name),
-                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                records::ValueType::Nullable(Box::new(crate::schema::storage_column_type(column))),
             )
             .with_identity(records::FieldIdentity::Name(column.name.clone()))
         }))

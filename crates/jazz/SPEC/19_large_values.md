@@ -168,6 +168,13 @@ An authority evaluates ordinary Jazz read policy for a candidate row/version.
 After success, its view may disclose the row's descriptor. A receiver installs
 that descriptor into Groove; Groove then walks its own storage directly.
 
+Write-policy candidates and their inline query sources retain each column's
+schema-derived large-scalar kind, including JSON, across runtime re-encoding.
+Owner-only predicates do not materialize unrelated large payloads. Crossing the
+inline boundary does not change insert/update authorization or turn a denied
+write into a transport failure; candidate descriptors remain runtime carriers,
+not a new history or wire format.
+
 Read policies that themselves inspect a large value execute at an authority
 whose internal capability may resolve the candidate root for policy evaluation.
 The candidate row/root is not released to the reader until policy succeeds. A
