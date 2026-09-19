@@ -1941,10 +1941,7 @@ impl Database {
         value: &crate::large_values::LargeValueRef,
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
-        if !matches!(
-            value.kind,
-            crate::large_values::LargeValueKind::Json | crate::large_values::LargeValueKind::String
-        ) {
+        if value.kind != crate::large_values::LargeValueKind::Json {
             return Err(crate::ivm::runtime::IvmRuntimeError::from(
                 crate::large_values::Error::InvalidJson,
             )
