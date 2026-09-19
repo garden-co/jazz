@@ -1406,10 +1406,119 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         )
         .unwrap()
         .row_uuid();
+    let error =
+        block_on(db.read_json_pointer("todos", json_row, "title", "/selected/answer")).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Schema);
     assert_eq!(
-        block_on(db.read_json_pointer("todos", json_row, "title", "/selected/answer")).unwrap(),
-        Some(serde_json::json!(42))
+        error.message,
+        "JSON pointer selection requires a JSON column"
     );
+}
+
+#[test]
+fn json_pointer_reads_require_json_columns_and_preserve_literal_semantics() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("body", PublicColumnType::Json { schema: None })
+                .column("text", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0x59, AuthorSubject::SYSTEM, &schema);
+    for padding in [0, groove::large_values::INLINE_VALUE_MAX_BYTES + 32] {
+        let source = format!(
+            r#"[{{"items":["zero","one"],"01":"object key","+1":"signed key"}},"{}"]"#,
+            "p".repeat(padding)
+        );
+        let write = db
+            .insert(
+                "documents",
+                BTreeMap::from([
+                    ("body".to_owned(), Value::String(source.clone())),
+                    ("text".to_owned(), Value::String(source)),
+                ]),
+                Default::default(),
+            )
+            .unwrap();
+        let row = write.row_uuid();
+        for (pointer, expected) in [
+            ("/0/items/0", Some(serde_json::json!("zero"))),
+            ("/0/items/1", Some(serde_json::json!("one"))),
+            ("/0/items/01", None),
+            ("/0/items/+1", None),
+            ("/0/items/-", None),
+            ("/0/01", Some(serde_json::json!("object key"))),
+            ("/0/+1", Some(serde_json::json!("signed key"))),
+        ] {
+            assert_eq!(
+                block_on(db.read_json_pointer("documents", row, "body", pointer)).unwrap(),
+                expected,
+                "{pointer} padding={padding}"
+            );
+        }
+        let error =
+            block_on(db.read_json_pointer("documents", row, "text", "/0/items/1")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Schema);
+        assert_eq!(
+            error.message,
+            "JSON pointer selection requires a JSON column"
+        );
+        db.update(
+            "documents",
+            row,
+            BTreeMap::from([("body".to_owned(), Value::String("null".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(db.read_json_pointer("documents", row, "body", "")).unwrap(),
+            Some(serde_json::Value::Null)
+        );
+    }
+}
+
+#[test]
+fn json_publication_rejects_invalid_insert_and_update_before_pointer_reads() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("body", PublicColumnType::Json { schema: None }),
+        ),
+    );
+    let db = open_db(0x5a, AuthorSubject::SYSTEM, &schema);
+    let row = db
+        .insert(
+            "documents",
+            BTreeMap::from([("body".to_owned(), Value::String("[42]".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    for padding in [0, groove::large_values::INLINE_VALUE_MAX_BYTES + 32] {
+        let invalid = format!("[42,{}", " ".repeat(padding));
+        assert!(
+            db.insert(
+                "documents",
+                BTreeMap::from([("body".to_owned(), Value::String(invalid.clone()))]),
+                Default::default()
+            )
+            .is_err()
+        );
+        assert!(
+            db.update(
+                "documents",
+                row,
+                BTreeMap::from([("body".to_owned(), Value::String(invalid))]),
+                Default::default()
+            )
+            .is_err()
+        );
+        assert_eq!(prepared_read(&db, &db.table("documents")).len(), 1);
+        assert_eq!(
+            block_on(db.read_json_pointer("documents", row, "body", "/0")).unwrap(),
+            Some(serde_json::json!(42))
+        );
+    }
 }
 
 #[test]
@@ -1539,6 +1648,12 @@ fn high_level_large_value_reads_authorize_before_descriptor_lookup() {
     );
     let denied = block_on(db.read_value_range("documents", hidden, "body", 0..8)).unwrap_err();
     assert_eq!(denied.code, ErrorCode::NotObserved);
+    let denied = block_on(db.read_json_pointer("documents", hidden, "body", "/0")).unwrap_err();
+    assert_eq!(
+        denied.code,
+        ErrorCode::NotObserved,
+        "authorization precedes JSON type validation"
+    );
 }
 
 #[test]
