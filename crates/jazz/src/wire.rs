@@ -6,6 +6,7 @@
 //! server shells can adopt the envelope before the full [`crate::protocol::SyncMessage`]
 //! encoder is frozen.
 
+pub mod channel_credit;
 pub mod channels;
 
 use postcard::{take_from_bytes, to_allocvec};
@@ -82,6 +83,25 @@ pub enum WireFrame {
     MessageFragment(WireMessageFragment),
     /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v3.
     Channel(WireChannelEnvelope),
+    /// Receiver-consumption byte grant. Postcard-v1 enum tag 5 within wire v3.
+    ChannelCredit(WireChannelCredit),
+}
+
+/// Uncompressed connection-scoped receiver buffer credit; never authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireChannelCredit {
+    /// Admitted protocol version.
+    pub protocol_version: u16,
+    /// Admitted capability bits.
+    pub features: WireFeatures,
+    /// Immutable admitted session metadata.
+    pub session: Option<WireSession>,
+    /// Credit class (Writes also represents the shared large-value bulk pool).
+    pub class: channels::ChannelClass,
+    /// Contiguous grant sequence in this connection direction.
+    pub sequence: u64,
+    /// Exact returned physical-byte charges, including the tiny-frame floor.
+    pub consumed_bytes: u64,
 }
 
 /// Authenticated metadata around one independently compressed channel extent.
@@ -619,6 +639,9 @@ pub fn validate_frame_for_artifact_corpus(
                 .map_err(|error| format!("semantic payload rejected: {}", error.message))
         }
         WireFrame::Error(_) => Ok(()),
+        WireFrame::ChannelCredit(_) => {
+            Err("credit frames require a persistent admitted endpoint".to_owned())
+        }
         WireFrame::Channel(_) => {
             Err("channel frames require a persistent admitted endpoint".to_owned())
         }

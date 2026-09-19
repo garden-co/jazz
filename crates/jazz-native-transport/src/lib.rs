@@ -274,7 +274,8 @@ impl BoundedOutbound {
         bytes: Vec<u8>,
         after_backpressure_arm: impl FnOnce(),
     ) -> Result<(), TransportError> {
-        let charge = bytes.len().max(1);
+        // A per-frame floor also caps tiny-frame queue cardinality at 512.
+        let charge = bytes.len().max(16 * 1024);
         let reserve = || {
             self.queued_bytes
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {

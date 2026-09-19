@@ -709,6 +709,7 @@ pub struct PeerIoPump {
     auxiliary_endpoint: Option<SharedAuxiliaryEndpoint>,
     wire_reservation_active: Rc<Cell<bool>>,
     wire_outbound_obligation: Rc<RefCell<Option<SyncMessage>>>,
+    canonical_credit_progress: Rc<Cell<bool>>,
 }
 
 /// One exact encoded channel frame retained by the endpoint until handoff.
@@ -716,6 +717,7 @@ pub struct PeerIoPump {
 pub(crate) struct ReservedOutboundWireFrame {
     pump: PeerIoPump,
     frame: Vec<u8>,
+    credit_grant: bool,
 }
 
 impl ReservedOutboundWireFrame {
@@ -724,6 +726,16 @@ impl ReservedOutboundWireFrame {
     }
 
     pub(crate) fn commit(self) {
+        if self.credit_grant {
+            self.pump
+                .channel_credits()
+                .expect("reserved credit has endpoint")
+                .lock()
+                .expect("channel credit lock poisoned")
+                .accept_grant()
+                .expect("reserved credit remains pending until handoff");
+            return;
+        }
         let completed = self
             .pump
             .auxiliary_endpoint
@@ -771,6 +783,7 @@ impl PeerIoPump {
             auxiliary_endpoint,
             wire_reservation_active: Rc::new(Cell::new(false)),
             wire_outbound_obligation: Rc::new(RefCell::new(None)),
+            canonical_credit_progress: Rc::new(Cell::new(false)),
         }
     }
 
@@ -932,6 +945,39 @@ impl PeerIoPump {
         }
     }
 
+    fn channel_credits(&self) -> Result<crate::wire::channel_credit::SharedChannelCredits, String> {
+        Ok(self
+            .auxiliary_endpoint
+            .as_ref()
+            .ok_or_else(|| "auxiliary channel endpoint is unavailable".to_owned())?
+            .lock()
+            .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?
+            .channel_credits())
+    }
+
+    pub(crate) fn take_canonical_credit_progress(&self) -> bool {
+        self.canonical_credit_progress.replace(false)
+    }
+
+    pub(crate) fn wire_frame_is_auxiliary(&self, frame: &[u8]) -> Result<bool, String> {
+        if self.is_disconnected() {
+            return Err("auxiliary connection is disconnected".to_owned());
+        }
+        Ok(
+            match self
+                .wire_inbound_context()?
+                .decode_frame(frame)
+                .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?
+            {
+                crate::wire::WireFrame::ChannelCredit(_) => true,
+                crate::wire::WireFrame::Channel(envelope) => {
+                    envelope.extent.channel == crate::wire::channels::AUXILIARY_CHANNEL
+                }
+                _ => false,
+            },
+        )
+    }
+
     /// Demultiplex one complete wire frame without taking the Jazz node lock.
     /// Auxiliary messages are consumed; canonical and fragmented frames are
     /// returned byte-for-byte for the ordinary semantic transport.
@@ -939,12 +985,24 @@ impl PeerIoPump {
         &self,
         frame: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, String> {
+        if self.is_disconnected() {
+            return Err("auxiliary connection is disconnected".to_owned());
+        }
         let context = self.wire_inbound_context()?;
         let decoded = context
             .decode_frame(&frame)
             .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
-        let crate::wire::WireFrame::Channel(envelope) = decoded else {
-            return Ok(Some(frame));
+        let envelope = match decoded {
+            crate::wire::WireFrame::ChannelCredit(grant) => {
+                self.channel_credits()?
+                    .lock()
+                    .map_err(|_| "channel credit lock poisoned".to_owned())?
+                    .receive_credit(grant)?;
+                self.canonical_credit_progress.set(true);
+                return Ok(None);
+            }
+            crate::wire::WireFrame::Channel(envelope) => envelope,
+            _ => return Ok(Some(frame)),
         };
         if envelope.extent.channel != crate::wire::channels::AUXILIARY_CHANNEL {
             return Ok(Some(frame));
@@ -955,7 +1013,7 @@ impl PeerIoPump {
             .ok_or_else(|| "auxiliary channel endpoint is unavailable".to_owned())?
             .lock()
             .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?
-            .receive(envelope)?;
+            .receive(envelope, frame.len())?;
         if let Some(message) = message {
             self.route_incoming(message)
                 .await
@@ -985,6 +1043,19 @@ impl PeerIoPump {
         if self.is_disconnected() || self.wire_reservation_active.get() {
             return Ok(None);
         }
+        if let Some(frame) = self
+            .channel_credits()?
+            .lock()
+            .map_err(|_| "channel credit lock poisoned".to_owned())?
+            .peek_grant()?
+        {
+            self.wire_reservation_active.set(true);
+            return Ok(Some(ReservedOutboundWireFrame {
+                pump: self.clone(),
+                frame,
+                credit_grant: true,
+            }));
+        }
         let endpoint = self.auxiliary_endpoint.as_ref().ok_or_else(|| {
             "auxiliary wire framing requires a paired wire transport adapter".to_owned()
         })?;
@@ -1010,6 +1081,7 @@ impl PeerIoPump {
         Ok(Some(ReservedOutboundWireFrame {
             pump: self.clone(),
             frame,
+            credit_grant: false,
         }))
     }
 
@@ -1158,13 +1230,23 @@ impl PeerIoPump {
     }
 
     fn has_outbound(&self) -> bool {
-        if self.auxiliary_endpoint.as_ref().is_some_and(|endpoint| {
-            endpoint
-                .lock()
-                .expect("auxiliary endpoint lock poisoned")
-                .has_pending_outbound()
-        }) {
-            return true;
+        if self.is_disconnected() {
+            return false;
+        }
+        if let Some(endpoint) = &self.auxiliary_endpoint {
+            let endpoint = endpoint.lock().expect("auxiliary endpoint lock poisoned");
+            let credits = endpoint.channel_credits();
+            let credits = credits.lock().expect("channel credit lock poisoned");
+            if credits.has_pending_grant() {
+                return true;
+            }
+            if !credits.can_send(crate::wire::channels::ChannelClass::Auxiliary) {
+                return false;
+            }
+            drop(credits);
+            if endpoint.outbound_is_ready() {
+                return true;
+            }
         }
         let state = self.resolver.state.borrow();
         match self.role {
@@ -1204,6 +1286,16 @@ impl Future for PeerIoOutboundReady {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Ok(credits) = self.pump.channel_credits() {
+            if credits
+                .lock()
+                .expect("channel credit lock poisoned")
+                .poll_grant_ready(context)
+                .is_ready()
+            {
+                return Poll::Ready(());
+            }
+        }
         if let Some(endpoint) = &self.pump.auxiliary_endpoint {
             if endpoint
                 .lock()

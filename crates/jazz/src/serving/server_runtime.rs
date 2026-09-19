@@ -1,9 +1,9 @@
 use std::any::Any;
-use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::Poll;
@@ -63,13 +63,86 @@ impl ServerRuntimeActivity {
 
 /// Opaque stream of per-tick outbound frame batches.
 pub struct ServerRuntimeFrameStream {
-    receiver: tokio_mpsc::UnboundedReceiver<Result<Vec<AbiBytes>, String>>,
+    receiver: tokio_mpsc::UnboundedReceiver<(
+        Result<Vec<AbiBytes>, String>,
+        Option<Arc<FrameQueueCredit>>,
+    )>,
 }
 
 impl ServerRuntimeFrameStream {
     /// Receive the next completed tick's outbound frames.
     pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, String>> {
-        self.receiver.recv().await
+        self.receiver.recv().await.map(|(result, _credit)| result)
+    }
+}
+
+// Charging at least 16 KiB per frame bounds both count (512) and bytes
+// (8 MiB), including tiny-frame floods. Credits follow queued work to Drop.
+const FRAME_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+struct FrameQueueCredit {
+    used: Arc<AtomicUsize>,
+    charge: usize,
+}
+impl FrameQueueCredit {
+    fn reserve(used: &Arc<AtomicUsize>, frames: &[AbiBytes]) -> Result<Arc<Self>, String> {
+        let charge = frames
+            .iter()
+            .try_fold(0usize, |sum, frame| {
+                sum.checked_add(frame.len().max(16 * 1024))
+            })
+            .ok_or_else(|| "wire frame queue budget exceeded".to_owned())?
+            .max(16 * 1024);
+        used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current
+                .checked_add(charge)
+                .filter(|next| *next <= FRAME_QUEUE_BUDGET)
+        })
+        .map_err(|_| "wire frame queue backpressure".to_owned())?;
+        Ok(Arc::new(Self {
+            used: Arc::clone(used),
+            charge,
+        }))
+    }
+}
+impl Drop for FrameQueueCredit {
+    fn drop(&mut self) {
+        self.used.fetch_sub(self.charge, Ordering::AcqRel);
+    }
+}
+
+#[derive(Clone)]
+struct FrameStreamSender {
+    sender:
+        tokio_mpsc::UnboundedSender<(Result<Vec<AbiBytes>, String>, Option<Arc<FrameQueueCredit>>)>,
+    used: Arc<AtomicUsize>,
+    failed: Arc<AtomicBool>,
+    tick_queued: Arc<AtomicBool>,
+    persistent: bool,
+}
+impl FrameStreamSender {
+    fn send(&self, result: Result<Vec<AbiBytes>, String>) -> Result<(), ()> {
+        if self.failed.load(Ordering::Acquire) || self.sender.is_closed() {
+            return Err(());
+        }
+        let credit = match &result {
+            Ok(frames) => match FrameQueueCredit::reserve(&self.used, frames) {
+                Ok(credit) => Some(credit),
+                Err(error) => {
+                    if !self.failed.swap(true, Ordering::AcqRel) {
+                        let _ = self.sender.send((Err(error), None));
+                    }
+                    return Err(());
+                }
+            },
+            Err(_) => {
+                self.failed.store(true, Ordering::Release);
+                None
+            }
+        };
+        self.sender.send((result, credit)).map_err(|_| ())
+    }
+    fn is_closed(&self) -> bool {
+        self.failed.load(Ordering::Acquire) || self.sender.is_closed()
     }
 }
 
@@ -122,6 +195,8 @@ struct ServerShellInner {
     join: Mutex<Option<thread::JoinHandle<()>>>,
     shutdown: Mutex<ShutdownState>,
     shutdown_changed: Condvar,
+    ingress_bytes: Mutex<HashMap<ServerSession, Arc<AtomicUsize>>>,
+    wire_streams: Mutex<HashMap<ServerSession, FrameStreamSender>>,
     activity_tx: watch::Sender<u64>,
     io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
 }
@@ -153,6 +228,13 @@ type AsyncServerShellJob =
 enum ServerShellCommand {
     Run(ServerShellJob),
     RunAsync(AsyncServerShellJob),
+    CloseSession(ServerSession),
+    ReceiveFrames {
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+        reply: FrameStreamSender,
+        credit: Arc<FrameQueueCredit>,
+    },
     AttachUpstreamWire {
         transport: Box<dyn WireTransport + Send>,
         transport_terminal: NativeTransportTerminalFuture,
@@ -359,6 +441,156 @@ impl TickScheduler for ServerShellTickScheduler {
     }
 }
 
+struct AuxiliaryIngress {
+    frames: Vec<AbiBytes>,
+    reply: FrameStreamSender,
+    _credit: Arc<FrameQueueCredit>,
+}
+
+type SessionPumps = HashMap<ServerSession, crate::db::PeerIoPump>;
+type AuxiliaryWorkers = HashMap<ServerSession, mpsc::UnboundedSender<AuxiliaryIngress>>;
+
+fn snapshot_session_pumps(shell: &InMemoryServerShell) -> SessionPumps {
+    shell
+        .sessions
+        .iter()
+        .enumerate()
+        .filter_map(|(transport, state)| {
+            state.as_ref().map(|state| {
+                (
+                    ServerSession {
+                        transport,
+                        identity: state.identity,
+                        generation: state.generation,
+                    },
+                    state.auxiliary_pump.clone(),
+                )
+            })
+        })
+        .collect()
+}
+
+// Called by the owner even while a semantic job holds its mutable shell borrow.
+// Only host-admitted session capabilities can select a pump. Canonical jobs
+// remain in the original owner FIFO and validate that capability again on use.
+fn dispatch_ingress(
+    session: ServerSession,
+    frames: Vec<AbiBytes>,
+    reply: FrameStreamSender,
+    credit: Arc<FrameQueueCredit>,
+    pumps: &SessionPumps,
+    workers: &mut AuxiliaryWorkers,
+    spawner: &futures::executor::LocalSpawner,
+    activity_tx: watch::Sender<u64>,
+) -> Option<ServerShellCommand> {
+    let Some(pump) = pumps.get(&session).filter(|pump| !pump.is_disconnected()) else {
+        let _ = reply.send(Err("invalid or retired server session".to_owned()));
+        return None;
+    };
+    if reply.is_closed() {
+        return None;
+    }
+    let mut canonical = Vec::new();
+    let mut auxiliary = Vec::new();
+    for frame in frames {
+        match pump.wire_frame_is_auxiliary(&frame) {
+            Ok(true) => auxiliary.push(frame),
+            Ok(false) => canonical.push(frame),
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return None;
+            }
+        }
+    }
+    if !auxiliary.is_empty() {
+        let worker = workers.entry(session).or_insert_with(|| {
+            let (sender, mut receiver) = mpsc::unbounded::<AuxiliaryIngress>();
+            let pump = pump.clone();
+            let auxiliary_activity = activity_tx.clone();
+            spawner.spawn_local(async move {
+                let mut active_reply: Option<FrameStreamSender> = None;
+                loop {
+                    let output_enabled = active_reply.as_ref().is_some_and(|reply| !reply.is_closed());
+                    let outbound = async {
+                        if output_enabled {
+                            pump.outbound_ready().await;
+                        } else {
+                            futures::future::pending::<()>().await;
+                        }
+                    }.fuse();
+                    let incoming = receiver.next().fuse();
+                    futures::pin_mut!(outbound, incoming);
+                    let work = futures::select! {
+                        work = incoming => match work { Some(work) => work, None => break },
+                        _ = outbound => {
+                            if pump.is_disconnected() { break; }
+                            if let Some(reply) = &active_reply {
+                                if reply.send(pump.take_outbound_wire_frames(32, 4 * 1024 * 1024)).is_err() {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                    if work.reply.is_closed() || pump.is_disconnected() { continue; }
+                    if work.reply.persistent { active_reply = Some(work.reply.clone()); }
+                    for frame in work.frames {
+                        if work.reply.is_closed() || pump.is_disconnected() { break; }
+                        let result = match pump.route_incoming_wire_frame(frame).await {
+                            Ok(None) => pump.take_outbound_wire_frames(32, 4 * 1024 * 1024),
+                            Ok(Some(_)) => Err("canonical frame entered auxiliary worker".to_owned()),
+                            Err(error) => Err(error),
+                        };
+                        if pump.take_canonical_credit_progress() { notify_shell_activity(&auxiliary_activity); }
+                        let failed = result.is_err();
+                        if work.reply.send(result).is_err() || failed { break; }
+                    }
+                }
+            }).expect("owner local executor accepts auxiliary worker");
+            sender
+        });
+        if worker
+            .unbounded_send(AuxiliaryIngress {
+                frames: auxiliary,
+                reply: reply.clone(),
+                _credit: Arc::clone(&credit),
+            })
+            .is_err()
+        {
+            let _ = reply.send(Err("auxiliary worker stopped".to_owned()));
+            return None;
+        }
+    }
+    if canonical.is_empty() {
+        return None;
+    }
+    Some(ServerShellCommand::RunAsync(Box::new(move |shell| {
+        Box::pin(async move {
+            let _credit = credit;
+            for frame in canonical {
+                if reply.is_closed() {
+                    return;
+                }
+                let phase = inbound_frame_phase(&frame);
+                let result = match shell.receive_frames_async(session, [frame]).await {
+                    Err(error) => Err(format!("server receive {phase}: {error}")),
+                    Ok(()) => match shell.tick_async().await {
+                        Err(error) => Err(format!("server tick after {phase}: {error}")),
+                        Ok(()) => shell
+                            .take_frames(session)
+                            .map_err(|error| format!("server drain after {phase}: {error}")),
+                    },
+                };
+                let failed = result.is_err();
+                if reply.send(result).is_err() || failed {
+                    return;
+                }
+                notify_shell_activity(&activity_tx);
+            }
+        })
+    })))
+}
+
 fn run_server_shell_owner(
     mut shell: InMemoryServerShell,
     mut receiver: mpsc::UnboundedReceiver<ServerShellCommand>,
@@ -377,6 +609,7 @@ fn run_server_shell_owner(
     let spawner = executor.spawner();
     executor.run_until(async move {
         let mut pending = VecDeque::new();
+        let mut workers = AuxiliaryWorkers::new();
         loop {
             let command = match pending.pop_front() {
                 Some(command) => command,
@@ -385,7 +618,31 @@ fn run_server_shell_owner(
                     None => return,
                 },
             };
+            let pumps = snapshot_session_pumps(&shell);
+            workers.retain(|session, _| pumps.contains_key(session));
             match command {
+                ServerShellCommand::ReceiveFrames {
+                    session,
+                    frames,
+                    reply,
+                    credit,
+                } => {
+                    if let Some(command) = dispatch_ingress(
+                        session,
+                        frames,
+                        reply,
+                        credit,
+                        &pumps,
+                        &mut workers,
+                        &spawner,
+                        scheduler.activity_tx.clone(),
+                    ) {
+                        pending.push_front(command);
+                    }
+                }
+                ServerShellCommand::CloseSession(session) => {
+                    let _ = shell.close_session(session);
+                }
                 ServerShellCommand::Run(job) => job(&mut shell),
                 ServerShellCommand::RunAsync(job) => {
                     let mut operation = job(&mut shell);
@@ -402,6 +659,37 @@ fn run_server_shell_owner(
                                 drop(shell);
                                 let _ = stopped.send(());
                                 return;
+                            }
+                            futures::future::Either::Right((
+                                Some(ServerShellCommand::ReceiveFrames {
+                                    session,
+                                    frames,
+                                    reply,
+                                    credit,
+                                }),
+                                _,
+                            )) => {
+                                if let Some(command) = dispatch_ingress(
+                                    session,
+                                    frames,
+                                    reply,
+                                    credit,
+                                    &pumps,
+                                    &mut workers,
+                                    &spawner,
+                                    scheduler.activity_tx.clone(),
+                                ) {
+                                    pending.push_back(command);
+                                }
+                            }
+                            futures::future::Either::Right((
+                                Some(ServerShellCommand::CloseSession(session)),
+                                _,
+                            )) => {
+                                if let Some(pump) = pumps.get(&session) {
+                                    pump.disconnect();
+                                }
+                                pending.push_back(ServerShellCommand::CloseSession(session));
                             }
                             futures::future::Either::Right((Some(command), _)) => {
                                 pending.push_back(command);
@@ -525,7 +813,11 @@ async fn drive_upstream_wire(
                             .push_back(canonical);
                         staged_semantic_input = true;
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        if io.pump.take_canonical_credit_progress() {
+                            scheduler.schedule_tick(TickUrgency::Immediate);
+                        }
+                    }
                     Err(error) => {
                         return ServerUpstreamTerminalReason::ProtocolFailed(error);
                     }
@@ -700,6 +992,8 @@ impl ServerRuntimeHandle {
                 join: Mutex::new(Some(join)),
                 shutdown: Mutex::new(ShutdownState::Running),
                 shutdown_changed: Condvar::new(),
+                ingress_bytes: Mutex::new(HashMap::new()),
+                wire_streams: Mutex::new(HashMap::new()),
                 activity_tx,
                 io_wakers,
             }),
@@ -764,6 +1058,8 @@ impl ServerRuntimeHandle {
                 join: Mutex::new(Some(join)),
                 shutdown: Mutex::new(ShutdownState::Running),
                 shutdown_changed: Condvar::new(),
+                ingress_bytes: Mutex::new(HashMap::new()),
+                wire_streams: Mutex::new(HashMap::new()),
                 activity_tx,
                 io_wakers,
             }),
@@ -950,6 +1246,8 @@ impl ServerRuntimeHandle {
                 join: Mutex::new(Some(join)),
                 shutdown: Mutex::new(ShutdownState::Running),
                 shutdown_changed: Condvar::new(),
+                ingress_bytes: Mutex::new(HashMap::new()),
+                wire_streams: Mutex::new(HashMap::new()),
                 activity_tx,
                 io_wakers,
             }),
@@ -1061,32 +1359,120 @@ impl ServerRuntimeHandle {
         session: ServerSession,
         frames: Vec<AbiBytes>,
     ) -> Result<ServerRuntimeFrameStream, String> {
+        let credit = self.reserve_session_ingress(session, &frames)?;
+        let (sender, receiver) = tokio_mpsc::unbounded_channel();
+        self.send(ServerShellCommand::ReceiveFrames {
+            session,
+            frames,
+            credit,
+            reply: FrameStreamSender {
+                sender,
+                used: Arc::new(AtomicUsize::new(0)),
+                failed: Arc::new(AtomicBool::new(false)),
+                tick_queued: Arc::new(AtomicBool::new(false)),
+                persistent: false,
+            },
+        })?;
+        Ok(ServerRuntimeFrameStream { receiver })
+    }
+
+    fn reserve_session_ingress(
+        &self,
+        session: ServerSession,
+        frames: &[AbiBytes],
+    ) -> Result<Arc<FrameQueueCredit>, String> {
+        let used = self
+            .inner
+            .ingress_bytes
+            .lock()
+            .map_err(|_| "ingress budget lock poisoned")?
+            .entry(session)
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
+        FrameQueueCredit::reserve(&used, frames)
+    }
+
+    /// Open one bounded, ordered output stream for a host-owned socket session.
+    /// All canonical ticks and lock-independent auxiliary replies share this
+    /// FIFO; a pending semantic reply cannot prevent receiving later wire input.
+    pub fn open_wire_stream(
+        &self,
+        session: ServerSession,
+    ) -> Result<ServerRuntimeFrameStream, String> {
+        let mut streams = self
+            .inner
+            .wire_streams
+            .lock()
+            .map_err(|_| "wire stream lock poisoned")?;
+        if streams.contains_key(&session) {
+            return Err("session already has a wire stream".to_owned());
+        }
+        let (sender, receiver) = tokio_mpsc::unbounded_channel();
+        streams.insert(
+            session,
+            FrameStreamSender {
+                sender,
+                used: Arc::new(AtomicUsize::new(0)),
+                failed: Arc::new(AtomicBool::new(false)),
+                tick_queued: Arc::new(AtomicBool::new(false)),
+                persistent: true,
+            },
+        );
+        Ok(ServerRuntimeFrameStream { receiver })
+    }
+
+    fn wire_stream_sender(&self, session: ServerSession) -> Result<FrameStreamSender, String> {
+        self.inner
+            .wire_streams
+            .lock()
+            .map_err(|_| "wire stream lock poisoned")?
+            .get(&session)
+            .cloned()
+            .ok_or_else(|| "session has no wire stream".to_owned())
+    }
+
+    /// Stage bounded input while the socket continues polling its output stream.
+    pub fn receive_wire_frames(
+        &self,
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+    ) -> Result<(), String> {
+        let credit = self.reserve_session_ingress(session, &frames)?;
+        self.send(ServerShellCommand::ReceiveFrames {
+            session,
+            frames,
+            credit,
+            reply: self.wire_stream_sender(session)?,
+        })
+    }
+
+    /// Coalesce host activity into one semantic tick whose output shares the
+    /// session FIFO with ingress replies. This never waits for the node lock.
+    pub fn request_wire_tick(&self, session: ServerSession) -> Result<(), String> {
+        let reply = self.wire_stream_sender(session)?;
+        if reply.tick_queued.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         let activity_tx = self.inner.activity_tx.clone();
-        let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
         self.send(ServerShellCommand::RunAsync(Box::new(move |shell| {
             Box::pin(async move {
-                for frame in frames {
-                    let phase = inbound_frame_phase(&frame);
-                    let result = match shell.receive_frames_async(session, [frame]).await {
-                        Err(error) => Err(format!("server receive {phase}: {error}")),
-                        Ok(()) => match shell.tick_async().await {
-                            Err(error) => Err(format!("server tick after {phase}: {error}")),
-                            Ok(()) => shell
-                                .take_frames(session)
-                                .map_err(|error| format!("server drain after {phase}: {error}")),
-                        },
-                    };
-                    let keep_streaming = result.is_ok();
-                    if outbound_tx.send(result).is_err() || !keep_streaming {
-                        return;
-                    }
+                reply.tick_queued.store(false, Ordering::Release);
+                if reply.is_closed() {
+                    return;
+                }
+                let result = match shell.tick_async().await {
+                    Ok(()) => shell
+                        .take_frames(session)
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty());
+                let _ = reply.send(result);
+                if made_progress {
                     notify_shell_activity(&activity_tx);
                 }
             })
-        })))?;
-        Ok(ServerRuntimeFrameStream {
-            receiver: outbound_rx,
-        })
+        })))
     }
 
     /// Tick the runtime once and return pending frames for one session.
@@ -1196,9 +1582,13 @@ impl ServerRuntimeHandle {
 
     /// Close a semantic session without exposing runtime storage or peer state.
     pub fn close(&self, session: ServerSession) {
-        let _ = self.send(ServerShellCommand::Run(Box::new(move |shell| {
-            let _ = shell.close_session(session);
-        })));
+        if let Ok(mut streams) = self.inner.wire_streams.lock() {
+            streams.remove(&session);
+        }
+        if let Ok(mut budgets) = self.inner.ingress_bytes.lock() {
+            budgets.remove(&session);
+        }
+        let _ = self.send(ServerShellCommand::CloseSession(session));
     }
 
     /// Retire the job sender, then wait until the owner has dropped the shell
@@ -1363,6 +1753,7 @@ fn inbound_frame_phase(frame: &[u8]) -> String {
             WireFrame::Error(_) => "wire error".to_owned(),
             WireFrame::MessageFragment(_) => "wire message fragment".to_owned(),
             WireFrame::Channel(_) => "wire channel extent".to_owned(),
+            WireFrame::ChannelCredit(_) => "wire channel credit".to_owned(),
             WireFrame::Message(_) => unreachable!("message handled above"),
         };
     };
@@ -2025,6 +2416,8 @@ mod tests {
             join: Mutex::new(None),
             shutdown: Mutex::new(ShutdownState::Running),
             shutdown_changed: Condvar::new(),
+            ingress_bytes: Mutex::new(HashMap::new()),
+            wire_streams: Mutex::new(HashMap::new()),
             activity_tx,
             io_wakers: Arc::new(Mutex::new(Vec::new())),
         });

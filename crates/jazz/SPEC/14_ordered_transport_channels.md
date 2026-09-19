@@ -2,87 +2,143 @@
 
 ## Overview
 
-Wire v3's channel carrier separates control, query requests, independent query
-or authorization-intent deliveries, the initial single authored-write FIFO,
-and independent immutable large-value transfers. Each logical channel is
-reliable and ordered. There is no implied order across logical channels.
-An ordered WebSocket multiplexes bounded frames today; a future QUIC adapter
-may map the same channel contract to reliable streams.
-
-This chapter specifies the channel primitives. Activation requires the adapter
-and every server pump to use the same persistent endpoint before auxiliary and
-canonical traffic are separated. Merely decoding a frame is not an application
-acknowledgement. The existing message adapter remains active until that
-integration is complete.
+Wire v3 separates control, query requests, independent query or authorization
+intent deliveries, the initial single authored-write FIFO, and independent
+immutable large-value transfers. Each channel is reliable and ordered. There
+is no implied order across channels. The ordered WebSocket carrier multiplexes
+bounded channel frames; a future QUIC adapter can map the same logical channels
+to reliable streams. This is the mandatory current-v3 transport contract,
+not an optional fallback to independent per-message compression.
 
 ## Details
 
+### Channel identity, ownership and compression
+
+An admitted connection direction owns 64 slots: control 0, requests 1, writes 2,
+dynamic deliveries/transfers 3–62, and immutable auxiliary chunk traffic 63.
+Generation and contiguous frame sequence are scoped to that connection and
+direction. Reusing a completely drained dynamic slot explicitly increments its
+generation and starts sequence zero with a new codec. A stale generation,
+sequence gap, duplicate compressed extent, or reset over an incomplete message
+fails closed.
+Incomplete messages retain the 30-second idle and five-minute absolute bounds.
+Timeout releases partial storage and terminates the connection: skipping
+compressed bytes and continuing is forbidden. This slice cancels subscriptions
+semantically while draining ordered bytes; it does not add mid-message reset. Reconnect discards every prior generation and codec.
+
+Each channel owns an independent streaming codec in each direction. LZ4 uses
+linked 64 KiB blocks; zstd uses a 64 KiB window. Flushing an extent preserves
+history across logical messages. The decoder is bounded and incremental; it
+never retains and replays the complete connection history. A decode-only browser
+advertises its codec support and emits uncompressed channel bytes when it cannot
+encode that negotiated codec. It does not substitute per-message codecs.
+
+The auxiliary endpoint is shared by adapter and lock-independent I/O pump. Once
+a pump takes ownership, it is the only physical auxiliary writer. A reservation
+retains exact encoded bytes and the original semantic obligation until the last
+extent is physically accepted. Dropping a reservation never re-encodes a message
+against advanced codec state. No endpoint mutex is held across an awaited chunk
+read. Auxiliary frames must decode to ChunkRequestBatch or ChunkResponseBatch;
+using their channel to carry canonical state fails before auxiliary dispatch.
+Channels, resets and credits confer no authorization and never replace admitted
+session metadata or semantic permission checks.
+
+### Routing and dependency table
+
+| Messages                                                                                                                                        | Channel                                                  | Dependency                                                                             |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| SessionClaims, PublishSchema, PublishSchemaWithLens, PublishLens, CatalogueAck, CatalogueSnapshot                                               | Control                                                  | Bilateral global canonical barrier                                                     |
+| RegisterShape, Subscribe, Unsubscribe, AuthorizationScopeSubscribe                                                                              | Requests                                                 | One FIFO preserves registration-before-subscription and request cancellation order     |
+| FetchRowVersions, PermissionAdviceRequest, AuthorizationScopeIntent, CurrentRowsRequest, CurrentRowsCancel                                      | Requests                                                 | Request FIFO; connection/request identities remain semantic correlation                |
+| CommitUnit, FateUpdate, AuthorityPublication                                                                                                    | Writes                                                   | One FIFO; authority publication cannot overtake its member commits                     |
+| ViewUpdate, SubscribeRejected, AuthorizationScopeReceipt                                                                                        | Delivery keyed by complete SubscriptionKey               | View precedes its scope receipt                                                        |
+| AuthorizationScopeView, AuthorizationScopeAggregateReceipt, AuthorizationScopeUnavailable, AuthorizationScopeDecision, PermissionAdviceResponse | Delivery keyed by intent/request id                      | All clause views precede aggregate proof                                               |
+| CurrentRowsReceipt                                                                                                                              | Delivery keyed by request id in a separate key namespace | Existing authority/session validation remains mandatory                                |
+| RowVersionPayloads                                                                                                                              | Shared repair delivery                                   | No invented per-query ownership for a response lacking request id                      |
+| ChunkUploadStart, ChunkUploadNodes, ChunkUploadResult                                                                                           | Transfer keyed by immutable root hash                    | Root-first upload order; referencing writes retain semantic Staged prerequisite        |
+| ChunkRequestBatch, ChunkResponseBatch                                                                                                           | Reserved auxiliary                                       | Immutable storage objects only; independent progress while canonical application waits |
+
+A bilateral barrier drains every earlier canonical logical message before its
+first extent and prevents every later canonical message from starting until it
+completes. The ordered carrier delivers those complete messages into the existing
+single canonical consumer FIFO. A consumer may stage messages before applying
+them, but may not reorder that FIFO: deferred catalogue activation stays at its
+front. This preserves semantic application order without mislabeling decode as
+an application acknowledgement. Immutable auxiliary reads remain independent so
+a blocked semantic operation can obtain the chunks needed to complete.
+
 ### Resource and scheduling contract
 
-Each admitted connection direction owns at most 64 channel slots, independent
-codec contexts and contiguous frame sequences. Slot zero is reserved for
-control. An encoder receives at most 65,536 decoded bytes per turn, then flushes
-its persistent stream without ending it. A physical frame carries at most
-72,153 encoded bytes (65,536 + floor(65,536/10) + 64). The total queued semantic
-allocation is capped at `MAX_LOGICAL_MESSAGE_BYTES` plus one MiB of reserved
-control capacity. Ordinary channels cannot consume that reserve. Each channel
-is capped at `MAX_LOGICAL_MESSAGE_BYTES`, and the connection at 1,024 queued
-messages, including tiny messages. Eight queue slots are also reserved for control. Staging a partial upload must not compress
-or allocate every remaining frame eagerly.
+One codec turn receives at most 65,536 decoded bytes and emits at most 72,153
+encoded payload bytes. The scheduler retains the semantic allocation once,
+shrinking caller Vec spare capacity by storing a boxed slice. It compresses only
+the selected extent and retains at most one canonical encoded extent through
+physical backpressure. A large upload is not eagerly compressed into all its
+future frames.
 
-A scheduling round gives control eight frame turns, requests four, delivery
-and writes two each, and large-value transfers one. Every nonempty eligible
-channel receives its finite allocation before the next round. A retained frame
-rejected by the lower transport remains exactly the selected frame, even if
-higher-priority traffic arrives. Compression state cannot be rolled back or
-advanced again on retry. Admission into another channel is allowed while that
-frame awaits acceptance, within byte and message-count budgets.
+Queued bulk payloads are bounded by `MAX_LOGICAL_MESSAGE_BYTES` (D). The aggregate
+budget adds 8 MiB for bounded interactive traffic and 1 MiB reserved for control.
+Each channel is bounded by D; at most 1,024 messages are queued, with eight count
+slots reserved for control. Receiver declared-message reservations are bounded
+by the same aggregate ceiling before accumulation.
 
-### Semantic dependencies
+Scheduling weights apply to classes, then round-robin among channels within a
+class. Each finite round assigns control eight frames, requests four, delivery
+two, writes two, large values one and auxiliary one. A newly admitted request
+therefore does not wait behind a full round for every busy bulk channel. A class
+without receiver credit is excluded before selecting or advancing a codec.
+Actual lower-transport backpressure retains the exact selected encoded extent.
 
-RegisterShape and Subscribe share the request FIFO. Authored writes initially
-share one FIFO. A delivery's ViewUpdate and matching AuthorizationScopeReceipt
-share a channel. All AuthorizationScopeView clauses and their AggregateReceipt
-share the intent's channel. A channel never supplies authority: authenticated
-connection/session admission and semantic authorization remain mandatory.
+A semantic send accepts ownership once admitted even when its first physical
+extent encounters backpressure. A bounded output turn reports Idle, MoreReady,
+or Backpressured. Peer ticks schedule another cooperative turn only for
+MoreReady. A lone large send continues progressing; a blocked lower queue waits
+for its writable/credit wake instead of spinning.
 
-CatalogueSnapshot, catalogue publication and SessionClaims transitions require
-conservative barriers. A carrier barrier drains every earlier logical message
-before it begins and excludes every later message until it is carried. The
-semantic dispatch host must additionally apply the barrier before dispatching
-later dependent traffic. In particular, a new claims message must not overtake
-previously queued writes. Immutable auxiliary chunks may progress outside the
-semantic application barrier, using the same channel-aware framing endpoint;
-they cannot mutate claims or confer row visibility.
+### Receiver-consumption credit
 
-Reset retires one channel generation and its codec. A receiver rejects bytes
-from retired generations or a gap/duplicate in the contiguous sequence; it must
-never skip compressed bytes and continue decoding. Slot reuse requires an
-explicit generation transition. Reconnect creates fresh connection-scoped
-channel state. Semantic cancellation still uses its subscription/request
-identity and cannot cancel a different generation or connection.
+Ordered carrier completion alone does not bound raw canonical frames queued
+behind a suspended semantic operation. Mandatory receiver credits bound that
+queue while allowing auxiliary traffic to pass independently.
 
-### Explicit v3 byte contract
+Each frame costs `max(encoded_frame_bytes, 16 KiB)`, including metadata. Initial
+windows are control 256 KiB, requests 512 KiB, delivery 1 MiB, shared writes/large
+values 4 MiB, and auxiliary 1 MiB: 6.75 MiB total, below the 8 MiB / 512-frame
+raw binding guard. The floor bounds tiny-frame count as well as bytes. Query,
+control and auxiliary windows cannot be consumed by a bulk upload.
 
-Channel metadata uses postcard-v1 with declaration-order fields: channel slot
-(u16), generation (u64), frame sequence (u64), class (enum), first (bool), last
-(bool), first-extent semantic message size (u32), exact decoded extent size
-(u32), payload (length-prefixed byte sequence). Unsigned integers and enum tags
-use postcard's unsigned LEB128, booleans are exactly 0 or 1. The class tags are
-control 0, requests 1, delivery 2, writes 3, and large value 4. No native-width
-integers occur in the encoding. The outer wire-v3 frame supplies framing/version
-admission; this is not an independent magic-header protocol.
+The sender charges exactly once on lower-queue acceptance. The receiver returns
+credit only after popping the raw physical frame, not merely reading it into a
+paused canonical queue and not after semantic application. Grants bypass the
+semantic lock, are uncompressed, and retain exact bytes through backpressure.
+Every grant validates admitted session metadata, a contiguous connection-scoped
+grant sequence, checked arithmetic and an amount no greater than outstanding
+charges. Reconnect creates fresh balances and sequence numbers. Credits are
+buffer receipts, not authorization or durability receipts.
 
-A complete encoded extent is capped before postcard decode. Unknown tags,
-truncation, trailing bytes, out-of-range channel identifiers and decoded sizes
-are rejected. A decoded extent is nonempty and at most 65,536 bytes. First-extent
-message size is nonzero and at most `MAX_LOGICAL_MESSAGE_BYTES`. Admission
-separately reserves aggregate incomplete storage before accumulating decoded
-extents. Negotiated compression and authenticated connection context do not
-change when a frame names a channel.
+### Explicit v3 postcard byte contract
 
-The byte corpus is pinned by
-`wire::channels::tests::channel_frame_has_explicit_byte_contract_and_rejects_declared_size_bombs`.
+The outer `WireFrame` is encoded with postcard-v1. Channel is appended enum tag
+4 and ChannelCredit tag 5; prior tags remain corpus/handshake identities, not an
+alternate live message transport. A Channel envelope encodes protocol version
+(u16), features (u64), optional WireSession, then the channel extent. The extent's
+field order is slot (u16), generation (u64), sequence (u64), class enum, first
+(bool), last (bool), semantic message size (u32), decoded extent size (u32), and
+length-prefixed payload bytes. The first extent carries a nonzero semantic size;
+continuations carry zero. Unsigned integers and enum tags use unsigned LEB128;
+booleans are exactly 0 or 1. There are no native-width wire integers.
+
+Class tags are control 0, requests 1, delivery 2, writes 3, large value 4 and
+auxiliary 5. Credit fields are protocol version (u16), features (u64), optional
+WireSession, class, grant sequence (u64), and consumed byte charges (u64). A
+shared bulk grant canonically names the Writes class.
+
+Physical size is checked before postcard decode. Exact decode rejects trailing
+bytes, unknown tags and malformed encodings. Endpoint admission additionally
+validates declared decoded sizes, slot/class consistency, session metadata,
+generation and sequence before codec state or semantic dispatch. Byte contracts
+are pinned by the channel and credit fixture tests in `wire::channels::tests`
+and `wire::channel_credit::tests`.
 
 ## Open Questions
 

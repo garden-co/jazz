@@ -82,6 +82,9 @@ impl ChannelFrame {
         if usize::from(self.channel) >= MAX_CHANNELS {
             return Err("channel slot exceeds connection limit".into());
         }
+        if (self.channel == AUXILIARY_CHANNEL) != (self.class == ChannelClass::Auxiliary) {
+            return Err("auxiliary class must use reserved auxiliary channel".into());
+        }
         if (self.channel == CONTROL_CHANNEL) != (self.class == ChannelClass::Control) {
             return Err("control class must use the reserved channel".into());
         }
@@ -197,6 +200,7 @@ impl ChannelScheduler {
     ) -> Result<(), String> {
         if usize::from(channel) >= MAX_CHANNELS
             || (channel == CONTROL_CHANNEL) != (class == ChannelClass::Control)
+            || (channel == AUXILIARY_CHANNEL) != (class == ChannelClass::Auxiliary)
         {
             return Err("invalid channel slot or class".into());
         }
@@ -259,6 +263,14 @@ impl ChannelScheduler {
     /// Return the same selection until it is accepted, including first-frame
     /// backpressure. Newly admitted traffic participates at the next boundary.
     pub fn next_chunk(&mut self) -> Option<ScheduledChunk<'_>> {
+        self.next_chunk_where(|_| true)
+    }
+
+    /// Select only classes with receive credit, before advancing any codec.
+    pub fn next_chunk_where(
+        &mut self,
+        has_credit: impl Fn(ChannelClass) -> bool,
+    ) -> Option<ScheduledChunk<'_>> {
         if self.selected.is_none() {
             let barrier = self
                 .channels
@@ -274,9 +286,10 @@ impl ChannelScheduler {
                 .map(|m| m.ordinal)
                 .min()?;
             let eligible = |c: &OutboundChannel| {
-                c.messages.front().is_some_and(|m| {
-                    barrier.is_none_or(|b| m.ordinal < b || (m.ordinal == b && oldest == b))
-                })
+                has_credit(c.class)
+                    && c.messages.front().is_some_and(|m| {
+                        barrier.is_none_or(|b| m.ordinal < b || (m.ordinal == b && oldest == b))
+                    })
             };
             // Weight classes, then round-robin within each class: a newly
             // admitted request waits at most one finite 18-frame class round,
@@ -516,6 +529,80 @@ mod tests {
         }
         assert_eq!(order, [3, 3, 0, 1]);
         assert_eq!(scheduler.queued_bytes(), 0);
+    }
+
+    #[test]
+    fn late_request_has_bounded_latency_with_many_busy_bulk_channels() {
+        let mut scheduler = ChannelScheduler::default();
+        for slot in 3..AUXILIARY_CHANNEL {
+            scheduler
+                .enqueue(
+                    slot,
+                    0,
+                    ChannelClass::LargeValue,
+                    vec![1; CHANNEL_CHUNK_BYTES * 2],
+                    false,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            scheduler.next_chunk().unwrap().class,
+            ChannelClass::LargeValue
+        );
+        scheduler.accepted().unwrap();
+        scheduler
+            .enqueue(1, 0, ChannelClass::Requests, vec![2], false)
+            .unwrap();
+        let mut turns = 0;
+        loop {
+            let request = scheduler.next_chunk().unwrap().channel == 1;
+            scheduler.accepted().unwrap();
+            turns += 1;
+            if request {
+                break;
+            }
+        }
+        assert!(turns <= 18, "new request waited {turns} frames");
+    }
+
+    #[test]
+    fn credit_blocked_bulk_is_skipped_before_selecting_a_codec_extent() {
+        let mut scheduler = ChannelScheduler::default();
+        scheduler
+            .enqueue(
+                3,
+                0,
+                ChannelClass::LargeValue,
+                vec![1; CHANNEL_CHUNK_BYTES * 2],
+                false,
+            )
+            .unwrap();
+        scheduler
+            .enqueue(1, 0, ChannelClass::Requests, vec![2], false)
+            .unwrap();
+        let selected = scheduler
+            .next_chunk_where(|class| class != ChannelClass::LargeValue)
+            .unwrap();
+        assert_eq!(selected.channel, 1);
+        scheduler.accepted().unwrap();
+        assert!(scheduler.next_chunk_where(|_| false).is_none());
+        assert_eq!(scheduler.queued_messages(), 1);
+    }
+
+    #[test]
+    fn spare_vec_capacity_is_not_retained_outside_the_byte_accounting() {
+        let mut scheduler = ChannelScheduler::default();
+        let mut payload = Vec::with_capacity(1024 * 1024);
+        payload.push(1);
+        scheduler
+            .enqueue(1, 0, ChannelClass::Requests, payload, false)
+            .unwrap();
+        let allocation = &scheduler.channels[&1].messages[0].bytes;
+        assert_eq!(
+            std::mem::size_of_val(allocation.as_ref()),
+            scheduler.queued_bytes()
+        );
+        assert_eq!(scheduler.queued_bytes(), 1);
     }
 
     #[test]

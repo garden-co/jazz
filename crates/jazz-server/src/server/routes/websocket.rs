@@ -15,7 +15,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
-use futures::SinkExt as _;
+use futures::{SinkExt as _, StreamExt as _};
 use jazz::db::{CommitUnitTrust, ConnectionSessionContext};
 use jazz::groove::records::Value as CoreValue;
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -899,175 +899,158 @@ async fn handle_ws_connection(
         core_server_shell.close(session);
         return;
     }
-    if let Err(error) = drain_ws_outbound(&mut socket, &core_server_shell, session).await {
-        send_ws_error(
-            &mut socket,
-            WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-        )
+    let mut output = match core_server_shell.open_wire_stream(session) {
+        Ok(output) => output,
+        Err(error) => {
+            send_ws_error(
+                &mut socket,
+                WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
+            )
+            .await;
+            core_server_shell.close(session);
+            return;
+        }
+    };
+    let (mut socket_writer, mut socket_reader) = socket.split();
+    // One writer owns each partially sent carrier until completion. Four
+    // bounded pump batches cap the queue while the reader remains independent
+    // of a slow sink and can receive credit or chunks needed by a pending tick.
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<Message>>(4);
+    let (writer_stopped, mut writer_terminal) = tokio::sync::oneshot::channel();
+    let mut writer = tokio::spawn(async move {
+        let result = async {
+            while let Some(batch) = writer_rx.recv().await {
+                for message in batch {
+                    socket_writer.send(message).await?;
+                }
+            }
+            socket_writer.close().await
+        }
         .await;
-        core_server_shell.close(session);
-        let _ = socket.close().await;
-        return;
-    }
+        let _ = writer_stopped.send(result);
+    });
+    let _ = core_server_shell.request_wire_tick(session);
 
     'connection: loop {
         tokio::select! {
+            _ = &mut writer_terminal => break,
             _ = async {
                 if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
                 else if account_identity.is_some() {
-                    // Edges have no local registry watch. Recheck idle sessions,
-                    // as well as every inbound/outbound operation, without an
-                    // admission cache that could outlive revocation.
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 } else { std::future::pending::<()>().await; }
             } => {
                 if let Err(error) = account_still_admitted(&state, account_identity).await {
-                    send_ws_error(&mut socket, error.into_wire()).await;
-                    let _ = socket.close().await;
+                    queue_ws_error(&writer_tx, error.into_wire());
                     break;
                 }
             }
             eviction = admission_registration.evict_rx.recv() => {
                 if eviction.is_some() {
-                    send_ws_error(
-                        &mut socket,
-                        WireError::new(
-                            WireErrorCode::Backpressure,
-                            WireRetry::Later,
-                            "websocket peer_identity connection cap exceeded",
-                        ),
-                    )
-                    .await;
-                    close_ws_for_policy(&mut socket, "websocket connection cap exceeded").await;
+                    queue_ws_error(&writer_tx, WireError::new(
+                        WireErrorCode::Backpressure, WireRetry::Later,
+                        "websocket peer_identity connection cap exceeded",
+                    ));
+                    let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
+                        code: close_code::POLICY, reason: "websocket connection cap exceeded".into(),
+                    }))]);
                 }
                 break;
             }
             changed = shutdown_rx.changed() => {
                 if changed.is_ok() && state.shutdown.is_shutting_down() {
-                    close_ws_for_shutdown(&mut socket).await;
+                    let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
+                        code: close_code::RESTART, reason: "server shutting down".into(),
+                    }))]);
                     break;
                 }
             }
-            msg = socket.recv() => match msg {
+            outgoing = async {
+                let permit = writer_tx.reserve().await.ok()?;
+                let result = output.recv().await?;
+                Some((permit, result))
+            } => {
+                let Some((permit, outgoing)) = outgoing else { break };
+                let outgoing = match outgoing {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        drop(permit);
+                        queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                        break;
+                    }
+                };
+                if let Err(error) = account_still_admitted(&state, account_identity).await {
+                    drop(permit);
+                    queue_ws_error(&writer_tx, error.into_wire());
+                    break;
+                }
+                match encode_ws_frame_batches(&outgoing) {
+                    Ok(batches) => {
+                        permit.send(batches.into_iter().map(|bytes| Message::Binary(bytes.into())).collect());
+                    }
+                    Err(error) => {
+                        drop(permit);
+                        queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Internal, WireRetry::Never, error.to_string()));
+                        break;
+                    }
+                }
+            }
+            msg = socket_reader.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
                     if let Err(error) = account_still_admitted(&state, account_identity).await {
-                        send_ws_error(&mut socket, error.into_wire()).await;
-                        let _ = socket.close().await;
+                        queue_ws_error(&writer_tx, error.into_wire());
                         break;
                     }
                     let frames = match decode_ws_encoded_frame_batch(&bytes) {
                         Ok(frames) => frames,
                         Err(_) => {
-                            send_ws_error(
-                                &mut socket,
-                                WireError::new(
-                                    WireErrorCode::MalformedFrame,
-                                    WireRetry::Never,
-                                    "failed to decode websocket frame batch",
-                                ),
-                            )
-                            .await;
+                            queue_ws_error(&writer_tx, WireError::new(
+                                WireErrorCode::MalformedFrame, WireRetry::Never,
+                                "failed to decode websocket frame batch",
+                            ));
                             break;
                         }
                     };
-                    // The shell owns a synchronous database, so one tick is the
-                    // smallest ordering-preserving unit at which its newly
-                    // durable responses can be observed. Do not hold those
-                    // responses behind the rest of this WebSocket message: a
-                    // large import can otherwise delay an already-global
-                    // FateUpdate until every later commit has been ingested.
-                    let mut outbound = match core_server_shell.receive_tick_stream(session, frames) {
-                        Ok(outbound) => outbound,
-                        Err(error) => {
-                            send_ws_error(
-                                &mut socket,
-                                WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-                            )
-                            .await;
-                            break 'connection;
-                        }
-                    };
-                    while let Some(outbound) = outbound.recv().await {
-                        let outbound = match outbound {
-                            Ok(frames) => frames,
-                            Err(error) => {
-                                send_ws_error(
-                                    &mut socket,
-                                    WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-                                )
-                                .await;
-                                break 'connection;
-                            }
-                        };
-                        if let Err(error) = account_still_admitted(&state, account_identity).await {
-                            send_ws_error(&mut socket, error.into_wire()).await;
-                        let _ = socket.close().await;
-                            break 'connection;
-                        }
-                        if !outbound.is_empty()
-                            && let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await
-                        {
-                            send_ws_error(
-                                &mut socket,
-                                WireError::new(
-                                    WireErrorCode::Internal,
-                                    WireRetry::Later,
-                                    error.to_string(),
-                                ),
-                            )
-                            .await;
-                            break 'connection;
-                        }
+                    if let Err(error) = core_server_shell.receive_wire_frames(session, frames) {
+                        queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                        break 'connection;
                     }
                 }
-                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(Message::Ping(payload))) => {
-                    if socket.send(Message::Pong(payload)).await.is_err() {
-                        break;
-                    }
+                    if writer_tx.try_send(vec![Message::Pong(payload)]).is_err() { break; }
                 }
                 _ => {}
             },
             changed = activity_rx.changed() => {
-                if let Err(error) = account_still_admitted(&state, account_identity).await {
-                    send_ws_error(&mut socket, error.into_wire()).await;
-                    let _ = socket.close().await;
-                    break;
-                }
-                if changed.is_err() {
-                    break;
-                }
-                if let Err(error) =
-                    drain_ws_outbound(&mut socket, &core_server_shell, session).await
-                {
-                    send_ws_error(
-                        &mut socket,
-                        WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-                    )
-                    .await;
-                    break;
-                }
+                if changed.is_err() || core_server_shell.request_wire_tick(session).is_err() { break; }
             }
         }
     }
 
     core_server_shell.close(session);
-    let _ = socket.close().await;
+    drop(output);
+    drop(writer_tx);
+    if tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+        let _ = writer.await;
+    }
 }
 
-async fn drain_ws_outbound(
-    socket: &mut WebSocket,
-    core_server_shell: &crate::server::ServerRuntimeHandle,
-    session: jazz::serving::ServerSession,
-) -> Result<(), String> {
-    let outbound = core_server_shell.tick_take(session).await?;
-    if outbound.is_empty() {
-        return Ok(());
+fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
+    if let Ok(frame) = encode_frame(&WireFrame::Error(error))
+        && let Ok(batches) = encode_ws_frame_batches(&[frame])
+    {
+        let _ = writer.try_send(
+            batches
+                .into_iter()
+                .map(|bytes| Message::Binary(bytes.into()))
+                .collect(),
+        );
     }
-    send_ws_encoded_frames(socket, &outbound)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(())
 }
 
 fn decode_single_ws_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
@@ -1148,15 +1131,6 @@ async fn close_ws_for_shutdown(socket: &mut WebSocket) {
         .send(Message::Close(Some(CloseFrame {
             code: close_code::RESTART,
             reason: "server shutting down".into(),
-        })))
-        .await;
-}
-
-async fn close_ws_for_policy(socket: &mut WebSocket, reason: &'static str) {
-    let _ = socket
-        .send(Message::Close(Some(CloseFrame {
-            code: close_code::POLICY,
-            reason: reason.into(),
         })))
         .await;
 }

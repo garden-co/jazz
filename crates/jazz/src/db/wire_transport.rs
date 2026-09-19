@@ -308,16 +308,18 @@ impl<T: WireTransport> WireTransportAdapter<T> {
         permits_delegated_sessions: bool,
     ) -> Self {
         let context = WireInboundContext::new(protocol_version, features, session);
+        let endpoint = super::channel_endpoint::ChannelEndpoint::new(context.clone())
+            .expect("valid channel context");
+        let mut auxiliary =
+            super::AuxiliaryChannelEndpoint::new(context.clone()).expect("valid auxiliary context");
+        auxiliary.set_channel_credits(endpoint.channel_credits());
         Self {
             inner,
             inbound_context: context.clone(),
             session_context,
             permits_delegated_sessions,
-            endpoint: super::channel_endpoint::ChannelEndpoint::new(context.clone())
-                .expect("valid channel context"),
-            auxiliary: std::sync::Arc::new(std::sync::Mutex::new(
-                super::AuxiliaryChannelEndpoint::new(context).expect("valid auxiliary context"),
-            )),
+            endpoint,
+            auxiliary: std::sync::Arc::new(std::sync::Mutex::new(auxiliary)),
             routes: BTreeMap::new(),
             terminal_error: None,
             #[cfg(test)]
@@ -332,6 +334,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
     #[cfg(test)]
     pub(super) fn set_reassembly_elapsed_for_test(&mut self, elapsed_ms: u64) {
         self.reassembler.expire(elapsed_ms);
+        self.endpoint.set_elapsed_for_test(elapsed_ms);
     }
 
     fn route(
@@ -370,6 +373,32 @@ impl<T: WireTransport> WireTransportAdapter<T> {
             return Err(error.clone());
         }
         for _ in 0..turns {
+            let pump_owned = self
+                .auxiliary
+                .lock()
+                .map_err(|_| TransportError::Failed("auxiliary mutex poisoned".into()))?
+                .pump_owned();
+            if !pump_owned {
+                let credits = self.endpoint.channel_credits();
+                let mut credits = credits
+                    .lock()
+                    .map_err(|_| TransportError::Failed("credit mutex poisoned".into()))?;
+                if let Some(grant) = credits.peek_grant().map_err(TransportError::Failed)? {
+                    match self.inner.send_frame(grant) {
+                        Ok(()) => {
+                            credits.accept_grant().map_err(TransportError::Failed)?;
+                            continue;
+                        }
+                        Err(TransportError::Backpressure) => {
+                            return Ok(WireFlushStatus::Backpressured);
+                        }
+                        Err(error) => {
+                            self.terminal_error = Some(error.clone());
+                            return Err(error);
+                        }
+                    }
+                }
+            }
             let canonical = self
                 .endpoint
                 .peek_outbound()
@@ -392,10 +421,20 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                     TransportError::Failed("auxiliary channel mutex poisoned".into())
                 })?;
                 if aux.pump_owned() {
-                    return Ok(WireFlushStatus::Idle);
+                    return Ok(if self.endpoint.has_pending() {
+                        WireFlushStatus::Backpressured
+                    } else {
+                        WireFlushStatus::Idle
+                    });
                 }
                 let Some(frame) = aux.peek_outbound().map_err(TransportError::Failed)? else {
-                    return Ok(WireFlushStatus::Idle);
+                    return Ok(
+                        if self.endpoint.has_pending() || aux.has_pending_outbound() {
+                            WireFlushStatus::Backpressured
+                        } else {
+                            WireFlushStatus::Idle
+                        },
+                    );
                 };
                 match self.inner.send_frame(frame) {
                     Ok(()) => {
@@ -455,13 +494,22 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                         .map_err(|_| {
                             TransportError::Failed("auxiliary channel mutex poisoned".into())
                         })?
-                        .receive(frame)
+                        .receive(frame, bytes.len())
                         .map_err(TransportError::Failed)?
                 }
                 WireFrame::Channel(frame) => self
                     .endpoint
-                    .receive(frame)
+                    .receive(frame, bytes.len())
                     .map_err(TransportError::Failed)?,
+                WireFrame::ChannelCredit(grant) => {
+                    self.endpoint
+                        .channel_credits()
+                        .lock()
+                        .map_err(|_| TransportError::Failed("credit mutex poisoned".into()))?
+                        .receive_credit(grant)
+                        .map_err(TransportError::Failed)?;
+                    None
+                }
                 WireFrame::Error(error) => {
                     return Err(TransportError::Failed(format!(
                         "remote wire error: {error:?}"
@@ -474,9 +522,11 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                 }
             };
             if message.is_some() {
+                let _ = self.flush_turn(1)?;
                 return Ok(message);
             }
         }
+        let _ = self.flush_turn(1)?;
         Ok(None)
     }
 }

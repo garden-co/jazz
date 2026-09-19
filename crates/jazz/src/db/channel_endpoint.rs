@@ -3,9 +3,14 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+use crate::protocol_limits::{
+    MAX_ENCODED_MESSAGE_BYTES, MAX_FRAGMENT_REASSEMBLY_AGE_MS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
+};
 use jazz_compression::stream::{Codec, StreamDecoder, StreamEncoder};
+use web_time::Instant;
 
 use crate::protocol::SyncMessage;
+use crate::wire::channel_credit::{ChannelCredits, SharedChannelCredits};
 use crate::wire::channels::{
     AUXILIARY_CHANNEL, ChannelClass, ChannelFrame, ChannelScheduler, MAX_CHANNEL_BUFFER_BYTES,
     MAX_CHANNEL_FRAME_PAYLOAD, MAX_CHANNELS,
@@ -36,12 +41,16 @@ struct InboundChannel {
     active_features: u64,
     decoder: Option<StreamDecoder>,
     message_len: usize,
+    encoded_len: usize,
+    started: Option<Instant>,
+    progressed: Option<Instant>,
     payload: Vec<u8>,
 }
 
 /// Persistent state for a connection direction's bounded channel set.
 pub(super) struct ChannelEndpoint {
     context: WireInboundContext,
+    credits: SharedChannelCredits,
     scheduler: ChannelScheduler,
     encoders: BTreeMap<u16, (u64, Option<StreamEncoder>)>,
     inbound: BTreeMap<u16, InboundChannel>,
@@ -49,6 +58,7 @@ pub(super) struct ChannelEndpoint {
     reserved: usize,
     pending: Option<Vec<u8>>,
     pending_last: bool,
+    pending_class: ChannelClass,
     failed: Option<String>,
 }
 
@@ -64,6 +74,7 @@ impl ChannelEndpoint {
         let outbound_features =
             (features & !(FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD)) | selected;
         Ok(Self {
+            credits: Arc::new(Mutex::new(ChannelCredits::new(context.clone()))),
             context,
             scheduler: ChannelScheduler::default(),
             encoders: BTreeMap::new(),
@@ -72,8 +83,40 @@ impl ChannelEndpoint {
             reserved: 0,
             pending: None,
             pending_last: false,
+            pending_class: ChannelClass::Control,
             failed: None,
         })
+    }
+
+    fn expire(&mut self) -> Result<(), String> {
+        let expired = self.inbound.values().any(|state| {
+            state.started.is_some_and(|at| {
+                at.elapsed().as_millis() >= u128::from(MAX_FRAGMENT_REASSEMBLY_AGE_MS)
+            }) || state.progressed.is_some_and(|at| {
+                at.elapsed().as_millis() >= u128::from(MAX_FRAGMENT_REASSEMBLY_IDLE_MS)
+            })
+        });
+        if expired {
+            self.inbound.clear();
+            self.reserved = 0;
+            let error = "incomplete channel message expired; reconnect required".to_owned();
+            self.failed = Some(error.clone());
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_elapsed_for_test(&mut self, elapsed_ms: u64) {
+        let at = Instant::now() - std::time::Duration::from_millis(elapsed_ms);
+        for state in self
+            .inbound
+            .values_mut()
+            .filter(|state| state.message_len != 0)
+        {
+            state.started = Some(at);
+            state.progressed = Some(at);
+        }
     }
 
     pub(super) fn enqueue(
@@ -84,6 +127,7 @@ impl ChannelEndpoint {
         message: &SyncMessage,
         barrier: bool,
     ) -> Result<(), TransportError> {
+        self.expire().map_err(TransportError::Failed)?;
         if let Some(error) = &self.failed {
             return Err(TransportError::Failed(error.clone()));
         }
@@ -102,6 +146,10 @@ impl ChannelEndpoint {
             })
     }
 
+    pub(super) fn channel_credits(&self) -> SharedChannelCredits {
+        Arc::clone(&self.credits)
+    }
+
     pub(super) fn is_idle(&self, channel: u16) -> bool {
         self.scheduler.is_idle(channel)
     }
@@ -115,15 +163,24 @@ impl ChannelEndpoint {
     }
 
     pub(super) fn peek_outbound(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.expire()?;
         if let Some(error) = &self.failed {
             return Err(error.clone());
         }
         if let Some(frame) = &self.pending {
             return Ok(Some(frame.clone()));
         }
-        let Some(chunk) = self.scheduler.next_chunk() else {
+        let credits = self
+            .credits
+            .lock()
+            .map_err(|_| "channel credits mutex poisoned")?;
+        let Some(chunk) = self
+            .scheduler
+            .next_chunk_where(|class| credits.can_send(class))
+        else {
             return Ok(None);
         };
+        drop(credits);
         let codec = codec(self.outbound_features)?;
         if let std::collections::btree_map::Entry::Vacant(entry) =
             self.encoders.entry(chunk.channel)
@@ -174,6 +231,7 @@ impl ChannelEndpoint {
         };
         extent.validate()?;
         self.pending_last = extent.last;
+        self.pending_class = extent.class;
         let frame = encode_frame(&WireFrame::Channel(WireChannelEnvelope {
             protocol_version: self.context.expected_protocol_version(),
             features: self.outbound_features,
@@ -189,6 +247,10 @@ impl ChannelEndpoint {
         if self.pending.is_none() {
             return Err("no encoded channel frame to accept".into());
         }
+        self.credits
+            .lock()
+            .map_err(|_| "channel credits mutex poisoned")?
+            .charge(self.pending_class, self.pending.as_ref().unwrap().len())?;
         self.scheduler.accepted()?;
         self.pending = None;
         Ok(self.pending_last)
@@ -197,12 +259,20 @@ impl ChannelEndpoint {
     pub(super) fn receive(
         &mut self,
         frame: WireChannelEnvelope,
+        encoded_len: usize,
     ) -> Result<Option<SyncMessage>, String> {
+        self.expire()?;
         if let Some(error) = &self.failed {
             return Err(error.clone());
         }
+        self.credits
+            .lock()
+            .map_err(|_| "channel credits mutex poisoned")?
+            .consumed(frame.extent.class, encoded_len)?;
         let result = self.receive_inner(frame);
         if let Err(error) = &result {
+            self.inbound.clear();
+            self.reserved = 0;
             self.failed = Some(error.clone());
         }
         result
@@ -249,6 +319,9 @@ impl ChannelEndpoint {
                     active_features,
                     decoder: selected.map(StreamDecoder::new).transpose()?,
                     message_len: 0,
+                    encoded_len: 0,
+                    started: None,
+                    progressed: None,
                     payload: Vec::new(),
                 },
             );
@@ -270,8 +343,17 @@ impl ChannelEndpoint {
             }
             self.reserved += size;
             state.message_len = size;
+            state.started = Some(Instant::now());
+            state.encoded_len = 0;
         } else if state.message_len == 0 {
             return Err("channel continuation has no message".into());
+        }
+        state.encoded_len = state
+            .encoded_len
+            .checked_add(extent.payload.len())
+            .ok_or("channel encoded length overflow")?;
+        if state.encoded_len > MAX_ENCODED_MESSAGE_BYTES {
+            return Err("channel encoded message exceeds size limit".into());
         }
         let expected = extent.decoded_len as usize;
         if state.payload.len() + expected > state.message_len {
@@ -309,6 +391,7 @@ impl ChannelEndpoint {
             .try_reserve_exact(bytes.len())
             .map_err(|_| "channel reassembly allocation failed".to_owned())?;
         state.payload.extend_from_slice(&bytes);
+        state.progressed = Some(Instant::now());
         state.sequence = state
             .sequence
             .checked_add(1)
@@ -324,6 +407,9 @@ impl ChannelEndpoint {
         }
         self.reserved -= state.message_len;
         state.message_len = 0;
+        state.started = None;
+        state.progressed = None;
+        state.encoded_len = 0;
         let payload = std::mem::take(&mut state.payload);
         let message =
             decode_sync_message_for_features(&payload, self.context.negotiated_features())
@@ -383,6 +469,23 @@ impl AuxiliaryChannelEndpoint {
             waker: None,
         })
     }
+    /// Share canonical and auxiliary physical windows for this admitted link.
+    pub fn set_channel_credits(&mut self, credits: SharedChannelCredits) {
+        self.endpoint.credits = credits;
+    }
+    /// The lock-independent pump uses these balances and pending credit grants.
+    pub fn channel_credits(&self) -> SharedChannelCredits {
+        self.endpoint.channel_credits()
+    }
+    /// Distinguish queued output from output eligible under receiver credit.
+    pub fn outbound_is_ready(&self) -> bool {
+        self.has_pending_outbound()
+            && self
+                .endpoint
+                .credits
+                .lock()
+                .is_ok_and(|credits| credits.can_send(ChannelClass::Auxiliary))
+    }
     /// Transfer physical output ownership to the independently driven pump.
     pub fn set_pump_owned(&mut self) {
         self.pump_owned = true;
@@ -432,20 +535,27 @@ impl AuxiliaryChannelEndpoint {
     }
     /// Register a lock-independent readiness wake for newly admitted output.
     pub fn poll_outbound_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        if self.has_pending_outbound() {
+        if self.outbound_is_ready() {
             Poll::Ready(())
         } else {
             self.waker = Some(cx.waker().clone());
+            if let Ok(mut credits) = self.endpoint.credits.lock() {
+                credits.register_waker(cx);
+            }
             Poll::Pending
         }
     }
     /// Admit only reserved-slot auxiliary extents, without acquiring a node lock.
-    pub fn receive(&mut self, frame: WireChannelEnvelope) -> Result<Option<SyncMessage>, String> {
+    pub fn receive(
+        &mut self,
+        frame: WireChannelEnvelope,
+        encoded_len: usize,
+    ) -> Result<Option<SyncMessage>, String> {
         if frame.extent.channel != AUXILIARY_CHANNEL
             || frame.extent.class != ChannelClass::Auxiliary
         {
             return Err("non-auxiliary frame attempted auxiliary bypass".into());
         }
-        self.endpoint.receive(frame)
+        self.endpoint.receive(frame, encoded_len)
     }
 }
