@@ -87,12 +87,9 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 2,
-            schema: evolved_payload.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 2,
+        schema: evolved_payload.id,
     })
     .unwrap();
     assert_eq!(core.current_write_schema().unwrap().revision, 2);
@@ -101,29 +98,16 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
         evolved_payload.id
     );
 
-    let stale = core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: base.version_id(),
-        },
+    let stale = core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: base.version_id(),
     });
-    assert!(matches!(
-        stale.unwrap().as_slice(),
-        [SyncMessage::CatalogueAck(crate::protocol::CatalogueAck {
-            revision: Some(1),
-            applied: false,
-            ..
-        })]
-    ));
+    assert!(stale.is_err());
     assert_eq!(core.current_write_schema().unwrap().revision, 2);
 
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 3,
-            schema: base.version_id(),
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 3,
+        schema: base.version_id(),
     })
     .unwrap();
     assert_eq!(core.current_write_schema().unwrap().revision, 3);
@@ -159,12 +143,9 @@ fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 4,
-            schema: evolved_payload.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 4,
+        schema: evolved_payload.id,
     })
     .unwrap();
     let physical_mapping = core.catalogue.physical_mappings[&evolved_payload.id].clone();
@@ -276,12 +257,9 @@ fn publishing_schema_registers_new_physical_tables_live() {
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
     assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_payload.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
     })
     .unwrap();
     assert!(core.database.primary_key_scan_raw(&history, &[]).is_ok());
@@ -312,12 +290,9 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_payload.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
     })
     .unwrap();
     assert!(core.table_in_schema("notes", evolved_payload.id).is_ok());
@@ -418,12 +393,9 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_payload.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
     })
     .unwrap();
     let tx_id = core

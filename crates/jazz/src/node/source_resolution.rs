@@ -28,7 +28,7 @@ where
         let Some(base) = base else {
             return Ok(None);
         };
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let schema = self
             .catalogue
             .catalogue_schemas
@@ -311,7 +311,7 @@ where
         base: Option<&BranchViewBase>,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let schema = self
             .catalogue
             .catalogue_schemas
@@ -613,7 +613,7 @@ where
         read_schema_version: SchemaVersionId,
         tier: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if read_schema_version == self.catalogue.current_schema_version_id {
+        if read_schema_version == self.catalogue.local_schema_version_id {
             return self.current_rows(table, tier).await;
         }
         let read_table = self.table_in_schema(table, read_schema_version)?;
@@ -909,19 +909,11 @@ where
         if source == target {
             return Ok(Some(table.to_owned()));
         }
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Forward, table)?
-        {
-            let forward_table = apply_compiled_lens_path(&path, cells);
-            return Ok(Some(forward_table));
+        if let Some(path) = self.compiled_lens_path(source, target, table)? {
+            let translated_table = apply_compiled_lens_path(&path, cells);
+            return Ok(Some(translated_table));
         }
 
-        if let Some(path) =
-            self.compiled_lens_path(source, target, LensPathDirection::Reverse, table)?
-        {
-            let reverse_table = apply_compiled_lens_path(&path, cells);
-            return Ok(Some(reverse_table));
-        }
         Ok(None)
     }
 }

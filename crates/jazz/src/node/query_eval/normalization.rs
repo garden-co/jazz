@@ -2559,6 +2559,12 @@ fn normalize_inherited_parent_policy(
                 &parent_inheritance_path,
             )?
         };
+    } else if !matches!(inherits.operation, crate::query::InheritsOperation::Update)
+        || parent_table.write_policies.update_check.is_none()
+    {
+        // Inheritance needs an explicit parent operation. A CHECK-only
+        // UPDATE still declares UPDATE and has no old-row predicate to prove.
+        return Ok(normalize_false_policy_branch(nodes, child_current, prefix));
     }
     let join_node = RowSetNodeId(format!("{prefix}:join"));
     let membership = NormalizedPredicateExpr::Compare {
@@ -2823,7 +2829,9 @@ where
         shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> Result<NormalizedRowSetShape, Error> {
-        let schema = if shape.schema_version() == self.catalogue.current_schema_version_id {
+        let schema = if shape.schema_version() == self.catalogue.active_schema.schema {
+            &self.catalogue.active_schema.compiled
+        } else if shape.schema_version() == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             &self

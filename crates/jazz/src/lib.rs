@@ -264,6 +264,11 @@ pub(crate) mod legacy_test_future {
             &mut self,
             message: SyncMessage,
         ) -> Result<Vec<SyncMessage>, Error>;
+        /// Activate the permissions declared by an admitted fixture schema.
+        fn activate_catalogue_schema_settled(
+            &mut self,
+            pointer: crate::protocol::CurrentWriteSchema,
+        ) -> Result<(), Error>;
         fn apply_trusted_catalogue_message_settled(
             &mut self,
             message: SyncMessage,
@@ -394,6 +399,21 @@ pub(crate) mod legacy_test_future {
                 let outcome = self.apply_sync_message(message).await?;
                 self.persist_and_settle_outcome(outcome).await
             })
+        }
+
+        fn activate_catalogue_schema_settled(
+            &mut self,
+            pointer: crate::protocol::CurrentWriteSchema,
+        ) -> Result<(), Error> {
+            let schema = self
+                .catalogue_schemas()
+                .get(&pointer.schema)
+                .ok_or(Error::InvalidCatalogueUpdate(
+                    "fixture schema is not admitted",
+                ))?
+                .schema
+                .clone();
+            crate::db::block_on(self.activate_schema(pointer.revision, schema))
         }
 
         fn apply_trusted_catalogue_message_settled(

@@ -31,7 +31,11 @@ describe("offline persistent schema bootstrap", () => {
           backendSecret: randomUUID(),
           allowLocalFirstAuth: true,
         };
-        let server = await startLocalJazzServer({ ...settings, schema: oldApp });
+        let server = await startLocalJazzServer({
+          ...settings,
+          schema: oldApp,
+          permissions: oldPermissions,
+        });
         type Session = Awaited<ReturnType<typeof createJazzSession>>;
         const sessions = new Set<Session>();
         let readerSecret: string | undefined;
@@ -44,6 +48,7 @@ describe("offline persistent schema bootstrap", () => {
             appId: settings.appId,
             serverUrl: server.url,
             app: clientApp,
+            permissions: clientApp === newApp ? newPermissions : oldPermissions,
             driver: { type: "persistent", dataPath: join(directory, name) },
             initial: asReader ? "local-first" : { backendSecret: settings.backendSecret },
           });

@@ -174,12 +174,9 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: a2.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: a2.id,
     })
     .unwrap();
 
@@ -227,14 +224,15 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
         case(b.id, 1),
     ];
     assert_eq!(physical_cases, expected);
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 2,
-            schema: b.id,
-        },
-    })
-    .unwrap();
+    // Move through the common ancestor: each activation follows a complete lens path.
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 2,
+        schema: base.version_id(),
+    }).unwrap();
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 3,
+        schema: b.id,
+    }).unwrap();
     let b_row = row(0x7b);
     core.commit_mergeable_settled(
         MergeableCommit::new("items", b_row, 4).cells(BTreeMap::from([
@@ -334,12 +332,9 @@ fn direct_payload_enum_append_activates_and_recovers() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let published_payload =
@@ -424,12 +419,9 @@ fn incompatible_scalar_enum_epoch_activates_and_recovers() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let target_column =
@@ -577,12 +569,9 @@ fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let payload =
@@ -675,12 +664,9 @@ fn nested_scalar_enum_unknown_case_omits_only_that_row() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let unknown = row(0x78);
@@ -758,12 +744,9 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let payload =
@@ -846,12 +829,9 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
 
@@ -1045,12 +1025,9 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let payload =
@@ -1129,12 +1106,9 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let closed = row(0x75);
@@ -1283,12 +1257,9 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let item = row(0x77);
@@ -1408,12 +1379,9 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
 
@@ -1483,12 +1451,9 @@ fn old_enum_winner_projection_refreshes_after_later_registry_append() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: middle.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: middle.id,
     })
     .unwrap();
 
@@ -1517,12 +1482,9 @@ fn old_enum_winner_projection_refreshes_after_later_registry_append() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 2,
-            schema: latest.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 2,
+        schema: latest.id,
     })
     .unwrap();
     core.commit_mergeable_settled(
@@ -1566,12 +1528,9 @@ fn old_enum_index_read_uses_global_index_before_post_winner_omission() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     accept_global(
@@ -1644,12 +1603,9 @@ fn enum_projection_requirement_none_allows_unused_relation_enum() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let state = row(0x79);
@@ -1733,12 +1689,9 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: a_evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: a_evolved.id,
     })
     .unwrap();
     core.commit_mergeable_settled(MergeableCommit::new("items", row(0x73), 2).cells(
@@ -1779,12 +1732,9 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 2,
-            schema: b_evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 2,
+        schema: b_evolved.id,
     })
     .unwrap();
     core.commit_mergeable_settled(MergeableCommit::new("items", row(0x74), 3).cells(

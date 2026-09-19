@@ -70,12 +70,9 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: renamed.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: renamed.id,
     })
     .unwrap();
 
@@ -191,12 +188,9 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: renamed.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: renamed.id,
     })
     .unwrap();
     core.commit_mergeable_settled(
@@ -337,17 +331,14 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
         Vec::<String>::new(),
     )
     .expect("publish rename");
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: renamed.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: renamed.id,
     })
     .expect("activate v2 tasks");
     // Match a v2 receiver: its ambient application schema no longer names
     // the authored v1 `todos` literal carried by the late authority bundle.
-    core.catalogue.current_schema_version_id = renamed.id;
+    core.catalogue.local_schema_version_id = renamed.id;
     core.catalogue.schema = renamed_schema;
 
     let new_delete = core
@@ -594,12 +585,9 @@ fn old_schema_exclusive_cas_follows_renamed_table_physical_registers() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: renamed.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: renamed.id,
     })
     .unwrap();
 

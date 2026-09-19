@@ -10,7 +10,7 @@ import { withNativeRelayFixture } from "./fixture.js";
 const app = schema.defineApp({ notes: schema.table({ title: schema.string() }, {}) });
 
 it("rejects disconnect without a native upstream and leaves local reads usable", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     await expect(db.disconnect()).rejects.toThrow("requires a configured serverUrl");
     const row = await db.insert(app.notes, { title: "still local" }).wait({ tier: "local" });
@@ -19,7 +19,7 @@ it("rejects disconnect without a native upstream and leaves local reads usable",
 });
 
 it("disconnects before any query and reconnects using only native credentials", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
@@ -41,7 +41,8 @@ it("disconnects before any query and reconnects using only native credentials", 
       permissions,
     });
     await withNativeRelayFixture(
-      { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
+      app,
+      permissions,
       async (fixture) => {
         const db = await fixture.createDb();
         const nativeStatus = () => {

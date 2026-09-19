@@ -409,7 +409,6 @@ pub(crate) fn is_catalogue_mutation(message: &SyncMessage) -> bool {
             | SyncMessage::PublishSchema { .. }
             | SyncMessage::PublishSchemaWithLens { .. }
             | SyncMessage::PublishLens { .. }
-            | SyncMessage::SetCurrentWriteSchema { .. }
     )
 }
 
@@ -473,14 +472,12 @@ pub(super) enum LensPathDirection {
 struct LensPathCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
-    direction: LensPathDirection,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct CompiledLensCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
-    direction: LensPathDirection,
     table: String,
 }
 
@@ -646,9 +643,9 @@ struct LargeValueIngressState {
 #[derive(Clone, Debug)]
 struct SchemaCatalogue {
     /// Schema version used for the node's base/local API schema.
-    current_schema_version_id: SchemaVersionId,
-    /// Compact alias for `current_schema_version_id` once recovered or allocated.
-    current_schema_version_alias: Option<SchemaVersionAlias>,
+    local_schema_version_id: SchemaVersionId,
+    /// Compact alias for `local_schema_version_id` once recovered or allocated.
+    local_schema_version_alias: Option<SchemaVersionAlias>,
     /// Base schema supplied when the node was opened.
     schema: JazzSchema,
     /// Mapping from schema version IDs to compact on-disk aliases.
@@ -667,14 +664,12 @@ struct SchemaCatalogue {
     active_lineages_by_target: BTreeMap<SchemaVersionId, StagedSchemaLineage>,
     /// Highest contiguously activated schema catalogue position.
     active_catalogue_seq: u64,
-    /// Durable write-pointer updates waiting for their schema to become Active.
-    pending_write_pointers: BTreeMap<u64, CurrentWriteSchema>,
     /// Next database-local physical table id.
     next_physical_table_id: u64,
     /// Next database-local physical column id.
     next_physical_column_id: u64,
-    /// Shortest migration-lens paths by schema pair and traversal direction.
-    lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<MigrationLensId>>>,
+    /// Shortest migration-lens paths by schema pair, with a direction for each step.
+    lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<(MigrationLensId, LensPathDirection)>>>,
     /// Table-specific, already-validated lens programs used by hot read/write paths.
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
     /// Immutable lowering plans reused by authored-to-physical row writes.
@@ -686,7 +681,97 @@ struct SchemaCatalogue {
         >,
     >,
     /// Schema version currently used for newly authored writes.
-    current_write_schema: CurrentWriteSchema,
+    active_schema: ActiveSchema,
+}
+
+/// One authority selection: structural schema, permissions, and revision.
+/// `compiled` is a derived authorization view, never a catalogue schema entry.
+/// The legacy wire pointer is retained only at protocol compatibility boundaries.
+#[derive(Clone, Debug, PartialEq)]
+struct ActiveSchema {
+    schema: SchemaVersionId,
+    revision: u64,
+    compiled: JazzSchema,
+}
+
+impl ActiveSchema {
+    /// Project the unified selection into the unchanged legacy wire envelope.
+    fn wire_pointer(&self) -> CurrentWriteSchema {
+        CurrentWriteSchema {
+            revision: self.revision,
+            schema: self.schema,
+        }
+    }
+
+    // Policy expressions are lowered against the selected structural schema.
+    // Equal predicates on a different source still require rebuilding live graphs.
+    // Equal absent and literal allow/deny clauses can retain the runtime during
+    // history-only growth when their unpartitioned physical row source is stable.
+    // A revision-only update is also a true authorization no-op.
+    fn same_authorization_source(
+        &self,
+        other: &Self,
+        source_mapping: Option<&SchemaPhysicalMapping>,
+        other_mapping: Option<&SchemaPhysicalMapping>,
+    ) -> bool {
+        self.same_permissions(other)
+            && (self.schema == other.schema
+                || self.compiled.tables.iter().zip(&other.compiled.tables).all(
+                    |(table, other_table)| {
+                        // Even constant policies read a physical row source. A
+                        // replacement table or branch partition changes that source.
+                        if !table.branch_by.is_empty() || !other_table.branch_by.is_empty() {
+                            return false;
+                        }
+                        let Some((source, target)) = source_mapping
+                            .and_then(|mapping| mapping.tables.get(&table.name))
+                            .zip(other_mapping.and_then(|mapping| mapping.tables.get(&table.name)))
+                        else {
+                            return false;
+                        };
+                        if source.table_id != target.table_id {
+                            return false;
+                        }
+                        let allow = crate::query::Query::from(table.name.as_str());
+                        let deny = allow
+                            .clone()
+                            .filter(crate::query::Predicate::Any(Vec::new()));
+                        table
+                            .read_policy
+                            .iter()
+                            .chain(table.write_policies.iter().map(|(_, policy)| policy))
+                            // Compare the complete query, rather than just filters:
+                            // joins, inherited policies and other clauses must not
+                            // accidentally qualify as schema-independent.
+                            .all(|policy| policy == &allow || policy == &deny)
+                    },
+                ))
+    }
+
+    fn same_permissions(&self, other: &Self) -> bool {
+        self.compiled
+            .tables
+            .iter()
+            .map(|table| (&table.name, &table.read_policy, &table.write_policies))
+            .eq(other
+                .compiled
+                .tables
+                .iter()
+                .map(|table| (&table.name, &table.read_policy, &table.write_policies)))
+    }
+
+    fn new(pointer: CurrentWriteSchema, compiled: JazzSchema) -> Result<Self, Error> {
+        if compiled.version_id() != pointer.schema {
+            return Err(Error::InvalidCatalogueUpdate(
+                "active schema permissions target mismatch",
+            ));
+        }
+        Ok(Self {
+            schema: pointer.schema,
+            revision: pointer.revision,
+            compiled,
+        })
+    }
 }
 
 /// Readiness of a dynamically catalogued node.
@@ -2764,11 +2849,11 @@ struct CatalogueOpenState {
     pending_lineages: BTreeMap<u64, PendingSchemaLineage>,
     active_lineages_by_target: BTreeMap<SchemaVersionId, StagedSchemaLineage>,
     active_catalogue_seq: u64,
-    pending_write_pointers: BTreeMap<u64, CurrentWriteSchema>,
     next_physical_table_id: u64,
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
     catalogue_bootstrap_marker: bool,
+    recovered_active_schema: Option<ActiveSchema>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

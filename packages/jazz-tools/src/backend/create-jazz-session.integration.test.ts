@@ -95,6 +95,7 @@ describe("Node shared backend session", () => {
           appId,
           serverUrl: server.url,
           app,
+          permissions,
           driver: { type: "memory" },
           initial: { backendSecret: "incorrect-service-secret" },
         }),

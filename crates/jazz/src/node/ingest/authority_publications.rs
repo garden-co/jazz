@@ -20,7 +20,7 @@ where
         let mut pending = vec![tx_id];
         for (table, branch, row) in rows {
             let table_id = self
-                .physical_table_id_for_schema(self.catalogue.current_write_schema.schema, &table)?;
+                .physical_table_id_for_schema(self.catalogue.active_schema.schema, &table)?;
             for head in self.merge_head_tx_ids(table_id, &branch, row).await? {
                 let state = self
                     .query_transaction(head)

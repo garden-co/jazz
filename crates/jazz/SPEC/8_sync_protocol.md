@@ -151,15 +151,22 @@ the Rust receipt rejects noncanonical payloads, and TypeScript independently
 encodes the corpus and rejects malformed relation input. It is compatibility
 evidence, not a migration input.
 
-**Experiment, 2026-09-13 — the sole wire protocol is v2 (#2913 / #2954).** `ViewUpdate` carries
+**Deployment boundary, 2026-09-18 — the sole wire protocol is v3.** `ViewUpdate` carries
 settled version payloads only through `version_carriers`; the transitional
 duplicate `version_bundles` field is absent. Every endpoint advertises exactly
-wire-protocol v2 and requires every peer Hello to advertise exactly
-`min_protocol_version=2, max_protocol_version=2`; v1 and ranges such as `0..=2`,
-`1..=2`, and `2..=15` reject before payload decoding. There are no compatibility
+wire-protocol v3 and requires every peer Hello to advertise exactly
+`min_protocol_version=3, max_protocol_version=3`; v1, v2, and ranges such as `0..=3`,
+`2..=3`, and `3..=15` reject before payload decoding. There are no compatibility
 aliases, migration paths, or old wire decoders. `VersionBundle` remains the semantic unit produced when a
 carrier is expanded and remains the direct payload of `RowVersionPayloads`
 repair responses.
+
+Wire v3 introduces deployment-aware catalogue policy snapshot semantics: an old
+Core can emit a policy-only snapshot at the same write revision that v3 receivers
+reject. Therefore v2 peers fail the Hello handshake rather than reaching that
+semantic mismatch. Clients and Edge/Core servers must upgrade together. Existing
+message discriminants remain fixed, including retired tag 12; this wire boundary
+does not change storage formats or remove legacy storage upgrade paths.
 
 Transaction and row-version authors use the native record
 `{account: UUID, identity: {issuer: String, subject: String}}`. System authors
@@ -169,8 +176,8 @@ Accountless reader sessions remain distinct from non-null row authors. Large sca
 internal enum/record encoding rather than the former private tagged/postcard
 payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
 milliseconds; the packed HLC is internal ordering state and is not protocol
-data. The wire-v2 golden fixture set is the only supported message layout.
-Wire-protocol v2 is independent of other formats that are also labelled v1,
+data. The wire-v3 golden fixture set is the only supported message layout.
+Wire-protocol v3 is independent of other formats that are also labelled v1,
 including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
 `MigrationLens` payloads in that fixture set are
 their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
@@ -199,7 +206,7 @@ evaluate policy. `SYSTEM` is never a relay transport identity or delegated
 subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
 there is no old-shape decoder or compatibility path.
 
-### 8.1.1 Frozen wire-protocol v2 byte contract
+### 8.1.1 Frozen wire-protocol v3 byte contract
 
 `WireFrame` and its `WireEnvelope.payload` are each **one complete postcard
 value**. A conformant decoder MUST reject a valid prefix followed by any
@@ -229,21 +236,23 @@ endpoint byte as a suffix is malformed framing, not version compatibility. A
 length other than exactly `16` MUST be rejected even when the declared byte
 sequence and the remaining Hello fields are otherwise well formed.
 
-Postcard enum ordinals are wire data. The wire-protocol v2 baseline freezes these permanent
+Postcard enum ordinals are wire data. The wire-protocol v3 baseline freezes these permanent
 discriminants (decimal):
 
-| enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WireFrame`     | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `WirePeerRole`  | `Client=0`, `Core=1`, `Edge=2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `SyncMessage`   | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `SetCurrentWriteSchema=12`, `CatalogueAck=13`, `ViewUpdate=14`, `FetchRowVersions=15`, `RowVersionPayloads=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29`, `AuthorityPublication=30` |
+| enum            | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WireFrame`     | `Hello=0`, `Message=1`, `Error=2`, `MessageFragment=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `WirePeerRole`  | `Client=0`, `Core=1`, `Edge=2`, `Relay=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `WireErrorCode` | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `WireRetry`     | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `SyncMessage`   | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `reserved=12`, `CatalogueAck=13`, `ViewUpdate=14`, `FetchRowVersions=15`, `RowVersionPayloads=16`, `CatalogueSnapshot=17`, `PermissionAdviceRequest=18`, `PermissionAdviceResponse=19`, `AuthorizationScopeSubscribe=20`, `AuthorizationScopeReceipt=21`, `AuthorizationScopeIntent=22`, `AuthorizationScopeView=23`, `AuthorizationScopeAggregateReceipt=24`, `AuthorizationScopeUnavailable=25`, `AuthorizationScopeDecision=26`, `ChunkUploadStart=27`, `ChunkUploadNodes=28`, `ChunkUploadResult=29`, `AuthorityPublication=30` |
+
+Tag 12 is retired and MUST reject decoding; it has no constructible message.
 
 Future variants MUST append after these values; existing variants, fields, and
 their field order MUST NOT be reordered, inserted before, reused, or decoded
 through a migration path. A new optional semantic variant additionally needs a
-new negotiated feature bit. Wire-protocol v2 intentionally provides neither
+new negotiated feature bit. Wire-protocol v3 intentionally provides neither
 old-version decoding nor migration.
 
 `AuthorityPublication` has the postcard field order `tx_id`, `commits`. `tx_id`
@@ -295,7 +304,7 @@ its accepted mask is converted to a narrower runtime type. The feature mask
 and authority epoch remain `bigint` through wire decoding, so canonical values
 through `2^64-1` are representable without a JavaScript number conversion. Exactly
 one compression bit may be active on an envelope; when both codecs are
-negotiated, an outbound wire-protocol v2 sender selects LZ4 and emits only its bit. A
+negotiated, an outbound wire-protocol v3 sender selects LZ4 and emits only its bit. A
 receiver rejects an envelope declaring both codecs, a codec change within one
 connection, corrupt compressed bytes, or a decompressed payload exceeding the
 logical-message budget. Compression is applied before fragmentation and removed
@@ -323,7 +332,7 @@ new durable storage encoding or compatibility fallback.
 inline/indirect records. Rust checks exact bytes, decoded values, roundtrips,
 and rejection of the old descriptor before storage.
 
-The wire-protocol v2 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
+The wire-protocol v3 frozen corpora are `crates/jazz/fixtures/wire_message_frames.json` and
 `crates/jazz/fixtures/wire_hello_frames.json`:
 Rust independently decodes every hard-coded frame, re-encodes the semantic
 value to the exact same payload and frame bytes, and TypeScript independently
@@ -369,16 +378,16 @@ acceptance/rejection, auth expiry, and unsupported-feature diagnostics through
 
 The message variants and their payloads are:
 
-| message                                                                            | direction      | payload                                                                                                                |
-| ---------------------------------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `CommitUnit`                                                                       | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                    |
-| `FateUpdate`                                                                       | down           | `{ tx_id, fate, global_time: Option<GlobalTime>, durability: Option<DurabilityTier> }`                                 |
-| `RegisterShape`                                                                    | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                              |
-| `Subscribe`                                                                        | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                      |
-| `SubscribeRejected`                                                                | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                     |
-| `Unsubscribe`                                                                      | up             | `{ subscription: SubscriptionKey }`                                                                                    |
-| `ViewUpdate`                                                                       | down           | `{ subscription, settled_through, authorization_progress, version_carriers, peer_payload_inventory, supporting_rows }` |
-| `PublishSchemaWithLens` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                 |
+| message                                                  | direction      | payload                                                                                                                |
+| -------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `CommitUnit`                                             | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                    |
+| `FateUpdate`                                             | down           | `{ tx_id, fate, global_time: Option<GlobalTime>, durability: Option<DurabilityTier> }`                                 |
+| `RegisterShape`                                          | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                              |
+| `Subscribe`                                              | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                      |
+| `SubscribeRejected`                                      | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                     |
+| `Unsubscribe`                                            | up             | `{ subscription: SubscriptionKey }`                                                                                    |
+| `ViewUpdate`                                             | down           | `{ subscription, settled_through, authorization_progress, version_carriers, peer_payload_inventory, supporting_rows }` |
+| `PublishSchemaWithLens` / `PublishLens` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                 |
 
 A `VersionCarrier` in `ViewUpdate.version_carriers` is either one owned
 `VersionBundle` or a packed run that expands to the same bundle sequence. A
@@ -729,7 +738,7 @@ narrower one remains an open design question below.
 ### 8.10 Catalogue lane
 
 Catalogue messages (`PublishSchemaWithLens`, `PublishLens`,
-`SetCurrentWriteSchema`, `CatalogueAck`) share this protocol lane; their
+`CatalogueAck`) share this protocol lane; their
 semantics are chapter 10.
 
 _Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
@@ -1105,7 +1114,7 @@ selected scope's deletion witnesses and changes only with its source receipt.
 ### Mandatory current-row availability messages
 
 `CurrentRowsRequest`, `CurrentRowsReceipt`, and `CurrentRowsCancel` are mandatory
-wire-protocol v2 semantic messages. They require no optional feature bit and use
+wire-protocol v3 semantic messages. They require no optional feature bit and use
 the existing named postcard control codec and native `VersionCarrier` encoding;
 the byte corpus pins all three variants. Ordinary version validation and
 authenticated link admission still apply. No compatibility with peers lacking
@@ -1120,7 +1129,7 @@ current-row availability contract for authorization and receipt validation.
 - `Snapshot { revision: [u8;16], rows: Vec<SupportingRow> }`.
 - `Delta { predecessor: [u8;16], revision: [u8;16], adds: Vec<SupportingRow>, removes: Vec<SupportingRow> }`.
 
-The named semantic encoding is postcard in the version-2 WireEnvelope. Enum
+The named semantic encoding is postcard in the version-3 WireEnvelope. Enum
 discriminants are respectively 0 and 1, followed by fields in declaration order.
 Revisions are exactly 16 raw array bytes (no length prefix). Vectors use postcard
 lengths and the existing exact SupportingRow field encoding. Populated snapshots

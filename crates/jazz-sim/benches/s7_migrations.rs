@@ -11,14 +11,13 @@ use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
-use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens,
-};
+use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
+use jazz::tools::test_support::AllowAll;
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
 use jazz_sim::fixture::{apply_sync_message_settled, settle_outcome};
@@ -140,17 +139,7 @@ fn publish_chain(
         .unwrap();
         settle_outcome(core, outcome).unwrap();
     }
-    let outcome = jazz::db::block_on(core.apply_trusted_catalogue_message(
-        SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 4,
-                schema: schemas[3].version_id(),
-            },
-        },
-    ))
-    .unwrap();
-    settle_outcome(core, outcome).unwrap();
+    jazz::db::block_on(core.activate_schema_for_test(4, schemas[3].clone())).unwrap();
 }
 
 fn rows_for_schema(
@@ -445,7 +434,8 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
     let v1 = compile_public_schema(
         SchemaBuilder::new()
             .table(PublicTableSchema::builder("todos").column("title", PublicColumnType::Text))
-            .build(),
+            .build()
+            .allow_all(),
     );
     let v2 = compile_public_schema(
         SchemaBuilder::new()
@@ -454,12 +444,14 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     .column("title", PublicColumnType::Text)
                     .column("body", PublicColumnType::Text),
             )
-            .build(),
+            .build()
+            .allow_all(),
     );
     let v3 = compile_public_schema(
         SchemaBuilder::new()
             .table(PublicTableSchema::builder("todos").column("name", PublicColumnType::Text))
-            .build(),
+            .build()
+            .allow_all(),
     );
     let v4 = compile_public_schema(
         SchemaBuilder::new()
@@ -468,7 +460,8 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
                     .column("name", PublicColumnType::Text)
                     .column("search_name", PublicColumnType::Text),
             )
-            .build(),
+            .build()
+            .allow_all(),
     );
     let lenses = vec![
         MigrationLens::new(

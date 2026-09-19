@@ -622,17 +622,13 @@ fn convert_table(
         "policies.update.using",
         table.policies.update.using.as_ref(),
     )?;
-    let delete_using = if table.policies.delete.using.is_some() {
-        convert_optional_policy(
-            schema,
-            table,
-            name,
-            "policies.delete.using",
-            table.policies.delete.using.as_ref(),
-        )?
-    } else {
-        update_using.clone()
-    };
+    let delete_using = convert_optional_policy(
+        schema,
+        table,
+        name,
+        "policies.delete.using",
+        table.policies.delete.using.as_ref(),
+    )?;
     converted.write_policies = WritePolicies {
         insert_check: convert_optional_policy(
             schema,
@@ -1457,7 +1453,7 @@ fn source_operation_policy(table: &TableSchema, operation: Operation) -> Option<
             .update
             .with_check
             .as_ref()),
-        Operation::Delete => table.policies.effective_delete_using(),
+        Operation::Delete => table.policies.delete.using.as_ref(),
     }
 }
 
@@ -5573,7 +5569,7 @@ mod tests {
     }
 
     #[test]
-    fn compiles_update_using_as_the_default_delete_policy() {
+    fn delete_inheritance_requires_an_explicit_parent_delete_policy() {
         let owner_policy = PolicyExpr::Cmp {
             column: "owner_id".to_owned(),
             op: CmpOp::Eq,
@@ -5598,30 +5594,12 @@ mod tests {
             )
             .build();
 
-        let converted = convert_public_schema(&schema).unwrap();
-        let documents = converted
-            .tables
-            .iter()
-            .find(|table| table.name == "documents")
-            .unwrap();
+        let error = convert_public_schema(&schema)
+            .expect_err("UPDATE must not supply an inherited DELETE grant");
+        assert_eq!(error.path, "$.attachments.policies.insert.with_check");
         assert_eq!(
-            documents.write_policies.delete_using, documents.write_policies.update_using,
-            "DELETE must inherit UPDATE USING when no explicit DELETE USING is declared"
-        );
-        let attachments = converted
-            .tables
-            .iter()
-            .find(|table| table.name == "attachments")
-            .unwrap();
-        assert_eq!(
-            attachments
-                .write_policies
-                .insert_check
-                .as_ref()
-                .unwrap()
-                .inherits[0]
-                .operation,
-            InheritsOperation::Delete
+            error.message,
+            "INHERITS via_column 'document_id' references table 'documents' without a Delete policy"
         );
     }
 
