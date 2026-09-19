@@ -1029,6 +1029,13 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_incomplete_receive_timeout_for_test(&mut self, timeout_ms: u64) {
+        self.transport
+            .set_incomplete_receive_timeout_for_test(timeout_ms);
+    }
+
     pub(super) fn take_released_outbox_tx_ids(&mut self) -> Vec<TxId> {
         std::mem::take(&mut self.released_outbox_tx_ids)
     }

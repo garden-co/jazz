@@ -1619,6 +1619,24 @@ impl InMemoryServerShell {
     /// chunk reads before this future resumes.
     pub async fn tick_async(&mut self) -> ShellResult<()> {
         let stats = self.db.tick_stats_async().await?;
+        let retired = self
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(transport, state)| {
+                state
+                    .as_ref()
+                    .filter(|state| state.auxiliary_pump.is_disconnected())
+                    .map(|state| ServerSession {
+                        transport,
+                        identity: state.identity,
+                        generation: state.generation,
+                    })
+            })
+            .collect::<Vec<_>>();
+        for session in retired {
+            self.close_session(session)?;
+        }
         self.metrics.ticks += 1;
         let stats = ShellTickStats {
             inbound: 0,

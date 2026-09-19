@@ -1554,6 +1554,50 @@ fn partial_channel_expiry_requires_reconnect() {
     assert!(receiver.try_recv_result().is_err());
 }
 
+/// A standalone adapter owns auxiliary deadlines too; no binding pump is
+/// required to expose the deadline and retire its expired partial receive.
+#[test]
+fn standalone_auxiliary_partial_exposes_deadline_and_flush_expires_it() {
+    use crate::wire::channels::{AUXILIARY_CHANNEL, ChannelClass, ChannelFrame};
+    let (mut sender, receiver) = byte_duplex_raw();
+    let mut receiver = WireTransportAdapter::current(receiver);
+    receiver
+        .shared_auxiliary_endpoint()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .set_incomplete_receive_timeout_for_test(10);
+    sender
+        .send_frame(
+            encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+                protocol_version: WIRE_PROTOCOL_VERSION,
+                features: crate::wire::FEATURE_NONE,
+                session: None,
+                extent: ChannelFrame {
+                    channel: AUXILIARY_CHANNEL,
+                    generation: 0,
+                    sequence: 0,
+                    class: ChannelClass::Auxiliary,
+                    first: true,
+                    last: false,
+                    message_len: 2,
+                    decoded_len: 1,
+                    payload: vec![0],
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(receiver.try_recv_result().unwrap().is_none());
+    let remaining = receiver
+        .incomplete_receive_timeout_ms()
+        .expect("auxiliary partial arms host timer");
+    std::thread::sleep(std::time::Duration::from_millis(remaining + 1));
+    assert!(receiver.poll_flush().is_err());
+    assert!(receiver.has_terminal_failure());
+    assert!(receiver.incomplete_receive_timeout_ms().is_none());
+}
+
 /// Mallory sends a valid zstd stream dominated by empty raw blocks. Bob must
 /// charge encoded bytes cumulatively even though each extent yields one byte.
 /// This preserves #3027's independent encoded cap on the live channel path.

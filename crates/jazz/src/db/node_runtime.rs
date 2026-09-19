@@ -3326,19 +3326,35 @@ where
         // its initial view can suspend on cold storage, while later inbound
         // commit frames and their local fates must still get a turn.
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
-        let connections = self.connections.borrow().clone();
-        for connection in &connections {
-            let mut connection = connection.lock().await;
+        let mut connections = self.connections.borrow().clone();
+        let mut retired = Vec::new();
+        for handle in &connections {
+            let mut connection = handle.lock().await;
             // `PeerConnection::tick` contains the subscriber admission state
             // machine. Keep that future off the enclosing Db tick frame so a
             // normal host/test thread cannot accumulate it across connection
             // passes.
-            let next = Box::pin(connection.tick()).await?;
+            let next = match Box::pin(connection.tick()).await {
+                Ok(next) => next,
+                Err(_) if connection.transport.has_terminal_failure() => {
+                    connection.auxiliary_pump.disconnect();
+                    drop(connection);
+                    retired.push(Rc::clone(handle));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
             remote_sync_applied |= next.remote_sync_applied > 0;
         }
+        for connection in &retired {
+            self.detach_connection_async(connection).await?;
+        }
+        connections
+            .retain(|connection| !retired.iter().any(|failed| Rc::ptr_eq(connection, failed)));
+        retired.clear();
         let subscriber_state_changed =
             self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before;
         if remote_sync_applied || subscriber_state_changed {
@@ -3360,8 +3376,18 @@ where
                         connection.mark_subscriber_dirty() || subscriber_state_changed
                     };
                     if should_tick {
-                        let mut connection = connection.lock().await;
-                        let next = Box::pin(connection.tick()).await?;
+                        let handle = connection;
+                        let mut connection = handle.lock().await;
+                        let next = match Box::pin(connection.tick()).await {
+                            Ok(next) => next,
+                            Err(_) if connection.transport.has_terminal_failure() => {
+                                connection.auxiliary_pump.disconnect();
+                                drop(connection);
+                                retired.push(Rc::clone(handle));
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
                         released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
                         stats.subscription_events += next.subscription_events;
                         stats.remote_sync_applied += next.remote_sync_applied;
@@ -3369,6 +3395,11 @@ where
                 }
             }
         }
+        for connection in &retired {
+            self.detach_connection_async(connection).await?;
+        }
+        connections
+            .retain(|connection| !retired.iter().any(|failed| Rc::ptr_eq(connection, failed)));
         Box::pin(self.reconcile_scalar_query_inputs()).await?;
         if let Some(budget) = self.edge_cache_budget.get() {
             let mut pins = crate::peer::PeerEvictionPins::default();
@@ -5384,11 +5415,21 @@ pub trait Transport {
     fn poll_flush(&mut self) -> Result<super::WireFlushStatus, TransportError> {
         Ok(super::WireFlushStatus::Idle)
     }
+    /// Whether the byte connection has entered an unrecoverable transport state.
+    /// Runtime owners retire only this peer; database/storage errors remain errors.
+    fn has_terminal_failure(&self) -> bool {
+        false
+    }
+
     /// Remaining time until an incomplete receive must be serviced, even if
     /// the remote peer sends no further bytes. Hosts use a real delayed wake.
     fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
         None
     }
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    fn set_incomplete_receive_timeout_for_test(&mut self, _timeout_ms: u64) {}
+
     /// Persistent fixed auxiliary channel shared with a lock-independent pump.
     #[doc(hidden)]
     fn shared_auxiliary_endpoint(&self) -> Option<super::SharedAuxiliaryEndpoint> {

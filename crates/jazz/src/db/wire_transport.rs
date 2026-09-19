@@ -384,6 +384,11 @@ impl<T: WireTransport> WireTransportAdapter<T> {
             return Err(error.clone());
         }
         self.endpoint.expire().map_err(TransportError::Failed)?;
+        self.auxiliary
+            .lock()
+            .map_err(|_| TransportError::Failed("auxiliary mutex poisoned".into()))?
+            .expire_incomplete_receive()
+            .map_err(TransportError::Failed)?;
         for _ in 0..turns {
             let pump_owned = self
                 .auxiliary
@@ -661,10 +666,32 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
         result
     }
     fn poll_flush(&mut self) -> Result<WireFlushStatus, TransportError> {
-        self.flush_turn(8)
+        let result = self.flush_turn(8);
+        if let Err(error) = &result {
+            self.terminal_error = Some(error.clone());
+        }
+        result
+    }
+    #[cfg(any(test, feature = "testing"))]
+    fn set_incomplete_receive_timeout_for_test(&mut self, timeout_ms: u64) {
+        self.endpoint
+            .set_incomplete_receive_timeout_for_test(timeout_ms);
+    }
+
+    fn has_terminal_failure(&self) -> bool {
+        self.terminal_error.is_some()
     }
     fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
-        self.endpoint.incomplete_receive_timeout_ms()
+        let auxiliary = self
+            .auxiliary
+            .lock()
+            .ok()
+            .and_then(|endpoint| endpoint.incomplete_receive_timeout_ms());
+        self.endpoint
+            .incomplete_receive_timeout_ms()
+            .into_iter()
+            .chain(auxiliary)
+            .min()
     }
     fn shared_auxiliary_endpoint(&self) -> Option<super::SharedAuxiliaryEndpoint> {
         Some(std::sync::Arc::clone(&self.auxiliary))

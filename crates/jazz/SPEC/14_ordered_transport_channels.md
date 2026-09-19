@@ -153,3 +153,13 @@ and `wire::channel_credit::tests`.
 ## Open Questions
 
 None.
+
+## Open questions
+
+A future QUIC/WebTransport adapter can preserve these database semantics with
+reliable FIFO delivery per logical channel, but it is not a drop-in carrier
+replacement. Current bilateral barriers also rely on the ordered WebSocket
+carrier. Independent transport streams will need explicit cross-channel
+barrier dependencies or watermarks and receiver enforcement before applying
+later messages. Connection-global credit grant sequence can remain on an
+ordered control stream. This change does not implement that future adapter.

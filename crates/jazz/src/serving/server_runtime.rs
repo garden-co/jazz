@@ -2644,6 +2644,169 @@ mod tests {
         runtime.shutdown().await.unwrap();
     }
 
+    // Exercise the actual timer and persistent output stream: no inbound frame
+    // or explicit tick is allowed to rescue an expired canonical receiver.
+    #[tokio::test]
+    async fn canonical_expiry_closes_only_failed_session_and_healthy_query_progresses() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let shape = Query::from("todos").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: ReadViewKey::default(),
+        };
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let mut sessions = Vec::new();
+        for byte in [94, 95] {
+            sessions.push(
+                runtime
+                    .open_with_session_context(
+                        AuthorSubject::for_test_bytes([byte; 16]),
+                        BTreeMap::new(),
+                        CommitUnitTrust::TrustedAdmin,
+                        crate::wire::FEATURE_NONE,
+                        None,
+                        crate::serving::ServerLinkAdmission::OrdinarySession,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let failed = sessions[0];
+        let healthy = sessions[1];
+        runtime
+            .run_async(move |shell| {
+                Box::pin(async move {
+                    let state = shell.sessions[failed.transport].as_ref().unwrap();
+                    match &state.connection {
+                        super::super::ShellPeerConnection::Memory(connection)
+                        | super::super::ShellPeerConnection::Durable(connection) => {
+                            connection
+                                .lock()
+                                .await
+                                .set_incomplete_receive_timeout_for_test(20);
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let mut failed_stream = runtime.open_wire_stream(failed).unwrap();
+        let mut activity = runtime.subscribe_activity();
+        let partial = encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+            protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+            features: crate::wire::FEATURE_NONE,
+            session: None,
+            extent: crate::wire::channels::ChannelFrame {
+                channel: 1,
+                generation: 0,
+                sequence: 0,
+                class: crate::wire::channels::ChannelClass::Requests,
+                first: true,
+                last: false,
+                message_len: 2,
+                decoded_len: 1,
+                payload: vec![0],
+            },
+        }))
+        .unwrap();
+        runtime.receive_wire_frames(failed, vec![partial]).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let result = tokio::select! {
+                    result = failed_stream.recv() => result,
+                    result = activity.changed() => {
+                        result.unwrap();
+                        runtime.request_wire_tick(failed).unwrap();
+                        continue;
+                    }
+                };
+                match result {
+                    Some(Err(_)) | None => break,
+                    Some(Ok(frames)) => assert!(frames.iter().all(|bytes| matches!(
+                        crate::wire::decode_frame(bytes).unwrap(),
+                        WireFrame::ChannelCredit(_) | WireFrame::Channel(_)
+                    ))),
+                }
+            }
+        })
+        .await
+        .expect("timer alone must retire the failed persistent output stream");
+        let mut healthy_stream = runtime.open_wire_stream(healthy).unwrap();
+        let requests = [
+            SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: crate::protocol::ShapeAst::from_validated(&shape),
+                opts: crate::protocol::RegisterShapeOptions::default(),
+            },
+            SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(sequence, message)| {
+            let payload = encode_sync_message(&message).unwrap();
+            encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+                protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+                features: crate::wire::FEATURE_NONE,
+                session: None,
+                extent: crate::wire::channels::ChannelFrame {
+                    channel: 1,
+                    generation: 0,
+                    sequence: sequence as u64,
+                    class: crate::wire::channels::ChannelClass::Requests,
+                    first: true,
+                    last: true,
+                    message_len: payload.len() as u32,
+                    decoded_len: payload.len() as u32,
+                    payload,
+                },
+            }))
+            .unwrap()
+        })
+        .collect();
+        runtime.receive_wire_frames(healthy, requests).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frames = tokio::select! {
+                    result = healthy_stream.recv() => result.expect("healthy stream remains open").unwrap(),
+                    result = activity.changed() => {
+                        result.unwrap();
+                        runtime.request_wire_tick(healthy).unwrap();
+                        continue;
+                    }
+                };
+                for bytes in frames {
+                    if let WireFrame::Channel(frame) = crate::wire::decode_frame(&bytes).unwrap() {
+                        assert!(frame.extent.first && frame.extent.last);
+                        if let SyncMessage::ViewUpdate(update) =
+                            crate::wire::decode_sync_message(&frame.extent.payload).unwrap()
+                        {
+                            assert_eq!(update.subscription, subscription);
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("unrelated session query must publish after peer expiry");
+        runtime.shutdown().await.unwrap();
+    }
+
     // The owner suspension is an internal scheduling seam: real admitted
     // session bytes must expire without another frame or a semantic tick.
     #[tokio::test]
