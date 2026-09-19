@@ -1041,6 +1041,22 @@ impl TickEvaluator<'_> {
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
         let operator = graph_node.descriptor.operator.clone();
         let inputs = graph_node.descriptor.inputs.clone();
+        if matches!(operator, OpType::Recursive(_)) {
+            // The recursive operator owns its seed/step scopes. Their local
+            // indexes must not be looked up using this caller's scope. Its
+            // completed hydration is the proof that those child scopes are
+            // ready; stale or suspended recursion still needs rebuilding.
+            let key = self.operator_key(node)?;
+            let generation = self.input_generation(node);
+            return Ok(matches!(
+                self.operator_states.get(&key),
+                Some(OperatorState::Recursive(state))
+                    if state.as_of() == Some(Tick(self.current_tick))
+                        && !state.value().has_pending_hydration()
+                        && state.value().step_arrangements_hydrated()
+                        && state.value().hydrated_input_generation() == Some(generation)
+            ));
+        }
         if matches!(operator, OpType::Arrange(_)) && self.arrangement_needs_index(node) {
             let key = ArrangementKey {
                 scope: self.operator_scope(node)?,

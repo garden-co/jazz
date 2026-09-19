@@ -142,6 +142,68 @@ impl PageStore for YieldingPageStore {
 
 struct YieldOnce(bool);
 
+/// A maintained parent must validate a recursive child at its own scope
+/// boundary. Replaying the child's ArgBy indexes in the parent scope makes
+/// shared downstream paths repeatedly recompute an already hydrated closure.
+#[futures_test::test]
+async fn recursive_hydration_reuses_scoped_state_across_shared_parents() {
+    let storage = MemoryStorage::new(&["edges"]).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
+    database.set_auto_direct_family_enabled(false);
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 1, 1, 2);
+    insert_edge(&mut batch, 2, 2, 3);
+    database.commit_batch(batch).await.unwrap();
+
+    let pairs = GraphBuilder::table("edges").project(["src", "dst"]);
+    let frontier = GraphBuilder::frontier_source(
+        "frontier",
+        RecordDescriptor::new([("src", ColumnType::U64), ("dst", ColumnType::U64)]),
+    );
+    let step = GraphBuilder::join(
+        frontier,
+        GraphBuilder::table("edges").project(["src", "dst"]),
+        ["dst"],
+        ["src"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    let step = GraphBuilder::arg_max_by(step, ["src"], ["dst"]);
+    let mut graph = GraphBuilder::recursive(pairs, step, "frontier", 16);
+    for _ in 0..6 {
+        graph = GraphBuilder::join(graph.clone(), graph, ["src", "dst"], ["src", "dst"])
+            .project_fields([
+                ProjectField::renamed("left.src", "src"),
+                ProjectField::renamed("left.dst", "dst"),
+            ]);
+    }
+    let graph = GraphBuilder::arg_max_by(graph, ["src"], ["dst"]);
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
+    let mut rows = subscription.recv().unwrap().to_values().unwrap();
+    rows.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        rows,
+        vec![
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+        ]
+    );
+    let stats = database.runtime_stats();
+    assert!(
+        stats.hydration_memo_computes <= 8 * stats.hydration_memo_distinct_computed_nodes as u64,
+        "shared recursive hydration must not replay each ancestor path: {stats:?}",
+    );
+
+    let mut batch = database.open_batch();
+    insert_edge(&mut batch, 3, 5, 6);
+    database.commit_batch(batch).await.unwrap();
+    let mut changes = subscription.recv().unwrap().to_values().unwrap();
+    changes.sort_by_key(|(values, weight)| (format!("{values:?}"), *weight));
+    assert_eq!(changes, vec![(vec![Value::U64(5), Value::U64(6)], 1),]);
+}
+
 impl Future for YieldOnce {
     type Output = ();
 
