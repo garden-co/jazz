@@ -24,22 +24,26 @@ use support::{
 use tempfile::TempDir;
 
 fn todo_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("done", ColumnType::Boolean),
         )
+        .allow_all()
         .build()
 }
 
 fn ranked_todo_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("rank", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 

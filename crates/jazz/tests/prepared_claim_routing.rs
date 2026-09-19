@@ -1223,7 +1223,7 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         )
         .expect("authority authors v1-to-v2 lineage");
     block_on(db.publish_schema_with_lens(1, publication)).expect("publish v1-to-v2 lineage");
-    block_on(db.set_current_write_schema(CurrentWriteSchema {
+    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
     }))
@@ -1349,7 +1349,7 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
         )
         .expect("authority authors v1-to-v2 lineage");
     block_on(db.publish_schema_with_lens(1, publication)).expect("publish v1-to-v2 lineage");
-    block_on(db.set_current_write_schema(CurrentWriteSchema {
+    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
     }))
@@ -1497,7 +1497,7 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
         )
         .expect("authority authors v1-to-v2 lineage");
     block_on(db.publish_schema_with_lens(1, publication)).expect("publish v2 with lineage lens");
-    block_on(db.set_current_write_schema(CurrentWriteSchema {
+    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
     }))

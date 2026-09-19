@@ -29,16 +29,7 @@ struct PermissionsHeadResponse {
 pub fn allow_all_permissions(schema: &Schema) -> Vec<(TableName, TablePolicies)> {
     schema
         .keys()
-        .map(|table_name| {
-            (
-                *table_name,
-                TablePolicies::new()
-                    .with_select(PolicyExpr::True)
-                    .with_insert(PolicyExpr::True)
-                    .with_update(Some(PolicyExpr::True), PolicyExpr::True)
-                    .with_delete(PolicyExpr::True),
-            )
-        })
+        .map(|table_name| (*table_name, jazz::tools::test_support::allow_all_policies()))
         .collect()
 }
 

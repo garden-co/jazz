@@ -13,7 +13,7 @@ pub mod public_schema;
 pub mod public_schema_convert;
 pub mod schema_lens;
 pub mod sync;
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 pub mod transaction;
 

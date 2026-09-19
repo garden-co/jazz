@@ -384,7 +384,7 @@ fn local_unavailable_inputs_follow_cold_current_edge_receivers() {
         .find(|current| current.row_uuid() == row(1))
         .unwrap();
     let alias = node
-        .ensure_schema_version_alias(node.catalogue.current_schema_version_id)
+        .ensure_schema_version_alias(node.catalogue.local_schema_version_id)
         .unwrap();
     // Internal setup supplies one synthetic admitted covered input. Receipt
     // verification is intentionally outside this source primitive's scope.
@@ -727,12 +727,9 @@ fn local_availability_receipts_follow_global_table_through_schema_rename() {
         publication: Box::new(publication),
     })
     .unwrap();
-    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: payload.id,
-        },
+    node.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: payload.id,
     })
     .unwrap();
     assert_eq!(

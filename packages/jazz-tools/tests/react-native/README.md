@@ -19,7 +19,7 @@ It does not silently skip unsupported APIs. Local reads may validly be empty
 before relay delivery; assertions wait for concrete rows/subscription markers.
 Mobile device acceptance remains a separate test surface.
 
-Use `withNativeRelayFixture(app, async fixture => { ... })` for public API tests.
+Use `withNativeRelayFixture(app, permissions, async fixture => { ... })` for public API tests.
 `app` comes from `schema.defineApp`; `fixture.createDb()` makes another RN root
 on the same real relay and tracks its shutdown. The helper attempts all cleanup
 steps and preserves both test and cleanup failures. `createNativeRelayFixture`

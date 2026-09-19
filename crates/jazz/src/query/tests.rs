@@ -1,12 +1,40 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use groove::records::{EnumCase, EnumSchema, RecordDescriptor, ValueType};
+    use groove::records::{
+        EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ValueType,
+    };
     use groove::schema::{ColumnSchema, ColumnType};
     use crate::tools::public_schema::{
-        ColumnType as PublicColumnType, SchemaBuilder as PublicSchemaBuilder,
+        ColumnDescriptor as PublicColumnDescriptor, ColumnType as PublicColumnType,
+        EnumCaseDescriptor, SchemaBuilder as PublicSchemaBuilder,
         TableSchemaBuilder as PublicTableSchemaBuilder,
     };
+
+    fn payload_enum_schema() -> JazzSchema {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("events").column(
+                    "event",
+                    PublicColumnType::EnumPayload {
+                        cases: vec![EnumCaseDescriptor {
+                            name: "message".to_owned(),
+                            fields: vec![PublicColumnDescriptor::new(
+                                "level",
+                                PublicColumnType::Integer,
+                            )],
+                        }],
+                    },
+                ),
+            )
+            .build();
+        JazzSchema::new(&source).expect("payload enum public schema compiles")
+    }
+
+    fn payload_enum_literal() -> Value {
+        let payload = RecordDescriptor::new([("level", ValueType::I32)]);
+        Value::Enum(EnumValue::create(0, payload, &[Value::I32(2)]).unwrap())
+    }
 
     fn schema() -> RuntimeSchema {
         RuntimeSchema::new([
@@ -60,6 +88,80 @@ mod tests {
         assert_eq!(validated.params()["user"], ColumnType::Uuid);
         assert_eq!(validated.params()["tag"], ColumnType::Uuid);
         assert!(!validated.canonical_bytes().is_empty());
+    }
+
+    #[test]
+    fn payload_enum_literal_validation_returns_query_error() {
+        let error = Query::from("events")
+            .filter(eq(lit(payload_enum_literal()), lit(payload_enum_literal())))
+            .validate(&payload_enum_schema())
+            .expect_err("payload enum literals must be rejected as query operands");
+
+        assert_eq!(error, QueryError::OperandTypeMismatch);
+    }
+
+    #[test]
+    fn nested_payload_enum_literals_return_query_errors() {
+        let schema = payload_enum_schema();
+        let cases = [
+            (
+                "tuple",
+                Value::Tuple(vec![payload_enum_literal()]),
+                Value::Tuple(vec![Value::I32(2)]),
+            ),
+            (
+                "array",
+                Value::Array(vec![payload_enum_literal()]),
+                Value::Array(vec![Value::I32(2)]),
+            ),
+            (
+                "nullable",
+                Value::Nullable(Some(Box::new(payload_enum_literal()))),
+                Value::Nullable(Some(Box::new(Value::I32(2)))),
+            ),
+        ];
+
+        for (kind, value, comparable) in cases {
+            let error = Query::from("events")
+                .filter(eq(lit(value), lit(comparable)))
+                .validate(&schema)
+                .unwrap_err();
+            assert_eq!(
+                error,
+                QueryError::OperandTypeMismatch,
+                "nested {kind} payload enum literals must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn record_literal_validation_remains_supported() {
+        let descriptor = RecordDescriptor::new([("level", ValueType::I32)]);
+        let record = Value::Record(OwnedRecord::new(
+            descriptor.create(&[Value::I32(2)]).unwrap(),
+            descriptor,
+        ));
+
+        Query::from("issues")
+            .filter(eq(lit(record.clone()), lit(record)))
+            .validate_runtime(&schema())
+            .expect("record literals remain valid query operands");
+    }
+
+    #[test]
+    fn bound_payload_enum_value_returns_param_type_mismatch() {
+        let validated = Query::from("events")
+            .filter(eq(col("event"), param("event")))
+            .validate(&payload_enum_schema())
+            .expect("payload enum column parameter shape is valid");
+        let error = validated
+            .bind(BTreeMap::from([("event".to_owned(), payload_enum_literal())]))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            QueryError::ParamTypeMismatch { ref param, .. } if param == "event"
+        ));
     }
 
     #[test]

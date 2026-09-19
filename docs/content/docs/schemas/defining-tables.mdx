@@ -18,8 +18,7 @@ app-root/
     └── 20260331-add-description-aaa-bbb.ts
 ```
 
-`schema.ts` is the source of truth for your data model. `permissions.ts` is optional and must be a
-separate file. The `migrations/` directory holds reviewed migration stubs — see
+`schema.ts` is the source of truth for your data model. `permissions.ts` contains authorization policies over your tables. The `migrations/` directory holds reviewed migration stubs — see
 [Migrations](/docs/schemas/migrations) for the full workflow.
 
 ## Table definitions
@@ -86,7 +85,7 @@ UUID column; forward declarations retain the same underlying column reference me
 
 <SchemaSetup />
 
-When you change your schema on a shared app, create and push a migration. See [Migrations](/docs/schemas/migrations) for details.
+When you change your schema on a shared app, prepare any required migration and run `jazz-tools deploy <appId>`. See [Migrations](/docs/schemas/migrations) for details.
 
 If you need to clear local browser data after a schema change, see [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
 

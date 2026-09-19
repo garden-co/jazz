@@ -80,7 +80,7 @@ where
         let current = self
             .catalogue
             .physical_mappings
-            .get(&self.catalogue.current_schema_version_id)
+            .get(&self.catalogue.local_schema_version_id)
             .and_then(|mapping| mapping.tables.get(table))
             .map(|mapping| mapping.table_id);
         if let Some(id) = current {
@@ -113,7 +113,7 @@ where
         let current = self
             .catalogue
             .physical_mappings
-            .get(&self.catalogue.current_schema_version_id)
+            .get(&self.catalogue.local_schema_version_id)
             .and_then(|mapping| {
                 mapping
                     .tables
@@ -158,7 +158,7 @@ where
         let current = self
             .catalogue
             .physical_mappings
-            .get(&self.catalogue.current_schema_version_id)
+            .get(&self.catalogue.local_schema_version_id)
             .and_then(|mapping| mapping.tables.get(table))
             .and_then(|mapping| mapping.columns.get(column))
             .copied();
@@ -197,7 +197,7 @@ where
         let current = self
             .catalogue
             .physical_mappings
-            .get(&self.catalogue.current_schema_version_id)
+            .get(&self.catalogue.local_schema_version_id)
             .and_then(|mapping| mapping.tables.get(table))
             .and_then(|mapping| {
                 mapping

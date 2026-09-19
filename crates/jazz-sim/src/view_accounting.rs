@@ -8,6 +8,7 @@ use jazz::tx::Transaction;
 /// Estimate row-delivery bytes carried by a sync message.
 pub fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
+        SyncMessage::Reserved12(retired) => match *retired {},
         SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_carriers,
             peer_payload_inventory,
@@ -48,7 +49,6 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         | SyncMessage::PublishSchema { .. }
         | SyncMessage::PublishSchemaWithLens { .. }
         | SyncMessage::PublishLens { .. }
-        | SyncMessage::SetCurrentWriteSchema { .. }
         | SyncMessage::CatalogueAck(_)
         | SyncMessage::SessionClaims { .. }
         | SyncMessage::SubscribeRejected { .. }
@@ -70,6 +70,7 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
 /// Estimate the irreducible row-version payload bytes carried by a sync message.
 pub fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
+        SyncMessage::Reserved12(retired) => match *retired {},
         SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_carriers, ..
         }) => version_carriers_bytes_floor(version_carriers),
