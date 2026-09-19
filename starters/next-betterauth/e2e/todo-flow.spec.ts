@@ -81,7 +81,7 @@ test("todo persistence across sign-up→logout→login", async ({ page }) => {
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });
 
-test("transport loss keeps an optimistic delete pending", async ({ page }) => {
+test("transport loss preserves a locally saved delete", async ({ page }) => {
   const runId = Date.now();
   const credentials = {
     name: "Delete Failure User",
@@ -92,8 +92,7 @@ test("transport loss keeps an optimistic delete pending", async ({ page }) => {
   let blockDelete = false;
   let droppedDeleteFrame = false;
 
-  // Dropping this mutation's Jazz transport exercises the public edge-wait
-  // failure seam without importing private wire codecs or changing production setup.
+  // Drop this mutation's transport while the starter waits only for local persistence.
   await page.context().routeWebSocket("**", (socket) => {
     const server = socket.connectToServer();
     socket.onMessage((message) => {
@@ -118,5 +117,7 @@ test("transport loss keeps an optimistic delete pending", async ({ page }) => {
   await expect(status).not.toContainText("Delete failed", { timeout: TIMEOUT });
   expect(droppedDeleteFrame).toBe(true);
   await expect(status).not.toContainText("Deleted");
-  await expect(status).not.toContainText("Saved locally");
+  await expect(status).not.toContainText("Deleting…");
+  blockDelete = false;
+  await expect(page.getByText(todo, { exact: true })).not.toBeVisible();
 });

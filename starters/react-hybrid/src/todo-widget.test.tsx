@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 
 type Todo = { id: string; title: string; done: boolean };
-type MutationErrorEvent = { transaction: { transactionId: string } };
+type MutationErrorEvent = { reason: string; transaction: { transactionId: string } };
 type DeleteWrite = {
   txId: Promise<string>;
   wait: (options?: { tier: "local" | "edge" }) => Promise<void>;
@@ -165,7 +165,7 @@ it("keeps a delete failure visible while another delete starts", async () => {
     await act(async () => root.unmount());
   }
 });
-it("keeps a locally durable delete optimistic when edge confirmation loses transport", async () => {
+it("completes local delete progress while edge confirmation is unavailable and reports late rejection", async () => {
   const todo = { id: "todo-transport", title: "Keep this deletion", done: false };
   const edgeFailure = new Error("transport unavailable");
   const { container, root } = await mountTodos(
@@ -193,13 +193,14 @@ it("keeps a locally durable delete optimistic when edge confirmation loses trans
     expect(container.querySelector<HTMLElement>("[role='status']")!.textContent).not.toContain(
       "Delete failed",
     );
+    expect(container.querySelector("[role='status']")!.textContent).not.toContain("Deleting…");
     for (const listener of fixture.mutationErrorListeners) {
-      listener({ transaction: { transactionId: "tx-transport" } });
+      listener({ reason: "delete denied", transaction: { transactionId: "tx-transport" } });
     }
     await flushAsyncWork();
     expect(container.querySelector("li")).toBeNull();
     expect(container.querySelector<HTMLElement>("[role='status']")!.textContent).toContain(
-      "Delete failed",
+      "A change was rejected: delete denied",
     );
   } finally {
     await act(async () => root.unmount());
@@ -231,5 +232,93 @@ it("shows a delete failure after an optimistic removal is rejected", async () =>
     expect(status.textContent).not.toContain("Saved locally");
   } finally {
     await act(async () => root.unmount());
+  }
+});
+
+it("preserves a late mutation rejection through unrelated delete success and unsubscribes", async () => {
+  const todo = { id: "other", title: "Other task", done: false };
+  const { container, root } = await mount(todo, {
+    txId: Promise.resolve("other-tx"),
+    wait: () => Promise.resolve(),
+  });
+  const listeners = [...fixture.mutationErrorListeners];
+  try {
+    await act(async () => {
+      for (const listener of listeners)
+        listener({ reason: "permission denied", transaction: { transactionId: "unrelated-tx" } });
+    });
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>("button[aria-label='Delete']")!.click(),
+    );
+    expect(container.querySelector("[role='status']")!.textContent).toBe(
+      "A change was rejected: permission denied",
+    );
+  } finally {
+    await act(async () => root.unmount());
+  }
+  for (const listener of listeners)
+    expect(fixture.mutationErrorListeners.has(listener)).toBe(false);
+});
+
+it("does not let an older same-row attempt replace a retry failure", async () => {
+  const todo = { id: "retry", title: "Retry task", done: false };
+  const old = deferred<void>();
+  const retry = deferred<void>();
+  const writes = new Map([[todo.id, { txId: Promise.resolve("old"), wait: () => old.promise }]]);
+  const { container, root } = await mountTodos([todo], writes, false);
+  try {
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>("button[aria-label='Delete']")!.click(),
+    );
+    // A subscription restores the row before the older local waiter completes.
+    await act(async () => {
+      fixture.todos = [todo];
+      fixture.refresh();
+    });
+    writes.set(todo.id, { txId: Promise.resolve("retry"), wait: () => retry.promise });
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>("button[aria-label='Delete']")!.click(),
+    );
+    old.reject(new Error("old failure"));
+    await flushAsyncWork();
+    expect(container.querySelector("[role='status']")!.textContent).toBe("Deleting…");
+    retry.reject(new Error("retry failure"));
+    await flushAsyncWork();
+    expect(container.querySelector("[role='status']")!.textContent).toBe(
+      "Delete failed: Retry task",
+    );
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("ignores old local completions after the database lifecycle changes", async () => {
+  const todo = { id: "old-lifecycle", title: "Old task", done: false };
+  const old = deferred<void>();
+  const { container, root } = await mountTodos(
+    [todo],
+    new Map([[todo.id, { txId: Promise.resolve("old"), wait: () => old.promise }]]),
+    false,
+  );
+  const originalDb = fixture.db;
+  const oldListeners = [...fixture.mutationErrorListeners];
+  try {
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>("button[aria-label='Delete']")!.click(),
+    );
+    await act(async () => {
+      fixture.db = { ...originalDb };
+      fixture.refresh();
+    });
+    old.reject(new Error("old local failure"));
+    await act(async () => {
+      for (const listener of oldListeners)
+        listener({ reason: "stale", transaction: { transactionId: "old" } });
+    });
+    await flushAsyncWork();
+    expect(container.querySelector("[role='status']")!.textContent).toBe("Ready to save locally");
+  } finally {
+    await act(async () => root.unmount());
+    fixture.db = originalDb;
   }
 });

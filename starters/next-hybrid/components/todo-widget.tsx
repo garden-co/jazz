@@ -1,18 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { PersistedWriteRejectedError, type WriteHandle } from "jazz-tools";
 import { useDb, useAll } from "jazz-tools/react";
 import { app } from "@/schema";
 
-type DeleteWriteHandle = WriteHandle;
-type DeleteOperation = {
-  todoId: string;
-  title: string;
-  lifecycle: number;
-  transactionId: string;
-  write: DeleteWriteHandle;
-};
+type DeleteOperation = { lifecycle: number };
 
 export function TodoWidget() {
   const db = useDb();
@@ -25,6 +17,7 @@ export function TodoWidget() {
   const deleteLifecycle = useRef(0);
   const pendingDeletes = useRef(new Map<string, DeleteOperation>());
   const deleteFailures = useRef(new Map<string, string>());
+  const [mutationError, setMutationError] = useState<string | null>(null);
 
   function renderDeleteStatus() {
     const failure = deleteFailures.current.values().next().value as string | undefined;
@@ -36,15 +29,12 @@ export function TodoWidget() {
     pendingDeletes.current.clear();
     deleteFailures.current.clear();
     setDeleteStatus(null);
+    setMutationError(null);
+    // Local durability does not imply server acceptance. Jazz restores rejected
+    // writes and reports later authority failures here, including adds/updates.
     const unsubscribe = db.onMutationError((event) => {
       if (deleteLifecycle.current !== lifecycle) return;
-      for (const operation of pendingDeletes.current.values()) {
-        if (operation.transactionId !== event.transaction.transactionId) continue;
-        pendingDeletes.current.delete(operation.todoId);
-        deleteFailures.current.set(operation.todoId, `Delete failed: ${operation.title}`);
-        renderDeleteStatus();
-        break;
-      }
+      setMutationError(`A change was rejected: ${event.reason}`);
     });
     return () => {
       unsubscribe();
@@ -88,58 +78,28 @@ export function TodoWidget() {
   }
 
   async function remove(todoId: string, title: string) {
-    const lifecycle = deleteLifecycle.current;
-    deleteFailures.current.delete(todoId);
-    const retainedFailure = deleteFailures.current.values().next().value as string | undefined;
-    setDeleteStatus(retainedFailure ?? "Deleting…");
-
-    let write: DeleteWriteHandle;
-    try {
-      write = db.delete(app.todos, todoId);
-    } catch {
-      if (deleteLifecycle.current === lifecycle) {
-        deleteFailures.current.set(todoId, `Delete failed: ${title}`);
-        renderDeleteStatus();
-      }
-      return;
-    }
-
-    let transactionId: string;
-    try {
-      transactionId = await write.txId;
-    } catch {
-      if (deleteLifecycle.current === lifecycle) {
-        deleteFailures.current.set(todoId, `Delete failed: ${title}`);
-        renderDeleteStatus();
-      }
-      return;
-    }
-
-    if (deleteLifecycle.current !== lifecycle) return;
-    const operation: DeleteOperation = { todoId, title, lifecycle, transactionId, write };
+    const operation: DeleteOperation = { lifecycle: deleteLifecycle.current };
+    // Register before starting the write so an older completion cannot settle a retry.
     pendingDeletes.current.set(todoId, operation);
-    let waitingForLocal = true;
+    deleteFailures.current.delete(todoId);
+    renderDeleteStatus();
     try {
+      const write = db.delete(app.todos, todoId);
+      // The starter reports local persistence; remote sync proceeds independently.
       await write.wait({ tier: "local" });
-      waitingForLocal = false;
-      await write.wait({ tier: "edge" });
+    } catch {
       if (
         deleteLifecycle.current === operation.lifecycle &&
-        pendingDeletes.current.get(operation.todoId) === operation
+        pendingDeletes.current.get(todoId) === operation
       ) {
-        pendingDeletes.current.delete(operation.todoId);
-        renderDeleteStatus();
+        deleteFailures.current.set(todoId, `Delete failed: ${title}`);
       }
-    } catch (error) {
+    } finally {
       if (
-        deleteLifecycle.current !== operation.lifecycle ||
-        pendingDeletes.current.get(operation.todoId) !== operation
+        deleteLifecycle.current === operation.lifecycle &&
+        pendingDeletes.current.get(todoId) === operation
       ) {
-        return;
-      }
-      if (waitingForLocal || error instanceof PersistedWriteRejectedError) {
-        pendingDeletes.current.delete(operation.todoId);
-        deleteFailures.current.set(operation.todoId, `Delete failed: ${operation.title}`);
+        pendingDeletes.current.delete(todoId);
         renderDeleteStatus();
       }
     }
@@ -153,7 +113,7 @@ export function TodoWidget() {
         <button type="submit">Add</button>
       </form>
       <p role="status" aria-live="polite">
-        {deleteStatus ?? localSaveState}
+        {mutationError ?? deleteStatus ?? localSaveState}
       </p>
       <ul>
         {todos.map((t) => (
