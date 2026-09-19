@@ -1763,6 +1763,10 @@ mod tests {
         .await
         .expect("ordinary backend is authenticated, but has no prior-edge-admission proof");
         assert_eq!(backend.trust, CommitUnitTrust::TrustedBackend);
+        assert_eq!(
+            ws_link_admission(&backend, 0, 1).unwrap(),
+            ServerLinkAdmission::OrdinarySession
+        );
     }
 
     #[tokio::test]
@@ -3363,6 +3367,54 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // Admission precedes context creation, so a forged authority claim is
+    // observable as an authentication error on the raw public wire.
+    #[tokio::test]
+    async fn system_claim_without_valid_admin_cannot_open_public_websocket() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        for (case, auth) in [
+            ("no credential", serde_json::json!({})),
+            (
+                "wrong admin secret",
+                serde_json::json!({ "admin_secret": "wrong-admin-secret" }),
+            ),
+        ] {
+            let prelude = serde_json::json!({
+                "peer_identity": AuthorSubject::SYSTEM.canonical(),
+                "auth": auth,
+            })
+            .to_string()
+            .into_bytes();
+            let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+                .await
+                .expect("connect");
+            ws.send(WsMessage::Binary(prelude.into()))
+                .await
+                .expect("send forged SYSTEM claim");
+            let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("admission resolves")
+                .expect("response")
+                .expect("wire response");
+            let WsMessage::Binary(bytes) = response else {
+                panic!("expected admission error for {case}")
+            };
+            let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("frame batch");
+            assert_eq!(frames.len(), 1, "{case}");
+            assert!(
+                matches!(
+                    decode_frame(&frames[0]).expect("error frame"),
+                    WireFrame::Error(WireError {
+                        code: WireErrorCode::AuthFailed,
+                        ..
+                    })
+                ),
+                "asserting SYSTEM with {case} must fail authentication"
+            );
+        }
     }
 
     // Internal route-boundary guard: WebSocket message boundaries are not
