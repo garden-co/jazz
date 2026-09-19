@@ -5384,6 +5384,11 @@ pub trait Transport {
     fn poll_flush(&mut self) -> Result<super::WireFlushStatus, TransportError> {
         Ok(super::WireFlushStatus::Idle)
     }
+    /// Remaining time until an incomplete receive must be serviced, even if
+    /// the remote peer sends no further bytes. Hosts use a real delayed wake.
+    fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+        None
+    }
     /// Persistent fixed auxiliary channel shared with a lock-independent pump.
     #[doc(hidden)]
     fn shared_auxiliary_endpoint(&self) -> Option<super::SharedAuxiliaryEndpoint> {

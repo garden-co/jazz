@@ -1975,6 +1975,13 @@ where
                 Err(error) => result = Err(transport_error(error)),
             }
         }
+        if result.is_ok() {
+            if let Some(delay_ms) = self.transport.incomplete_receive_timeout_ms() {
+                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                    scheduler.schedule_tick_after(delay_ms);
+                }
+            }
+        }
         if let Err(error) = &result {
             if matches!(self.link, ConnectionLink::Upstream(_)) {
                 finish_open_schema_connection(

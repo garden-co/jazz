@@ -61,6 +61,8 @@ pub(super) struct ChannelEndpoint {
     pending_class: ChannelClass,
     failed: Option<String>,
     last_wire_error: Option<WireError>,
+    idle_timeout_ms: u64,
+    age_timeout_ms: u64,
 }
 
 impl ChannelEndpoint {
@@ -87,6 +89,8 @@ impl ChannelEndpoint {
             pending_class: ChannelClass::Control,
             failed: None,
             last_wire_error: None,
+            idle_timeout_ms: MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
+            age_timeout_ms: MAX_FRAGMENT_REASSEMBLY_AGE_MS,
         })
     }
 
@@ -98,13 +102,33 @@ impl ChannelEndpoint {
         self.last_wire_error.clone()
     }
 
-    fn expire(&mut self) -> Result<(), String> {
-        let expired = self.inbound.values().any(|state| {
-            state.started.is_some_and(|at| {
-                at.elapsed().as_millis() >= u128::from(MAX_FRAGMENT_REASSEMBLY_AGE_MS)
-            }) || state.progressed.is_some_and(|at| {
-                at.elapsed().as_millis() >= u128::from(MAX_FRAGMENT_REASSEMBLY_IDLE_MS)
+    pub(super) fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+        self.inbound
+            .values()
+            .flat_map(|state| {
+                [
+                    (state.started, self.age_timeout_ms),
+                    (state.progressed, self.idle_timeout_ms),
+                ]
             })
+            .filter_map(|(started, limit)| {
+                started.map(|at| {
+                    let remaining =
+                        std::time::Duration::from_millis(limit).saturating_sub(at.elapsed());
+                    u64::try_from(remaining.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX)
+                })
+            })
+            .min()
+    }
+
+    pub(super) fn expire(&mut self) -> Result<(), String> {
+        let expired = self.inbound.values().any(|state| {
+            state
+                .started
+                .is_some_and(|at| at.elapsed().as_millis() >= u128::from(self.age_timeout_ms))
+                || state
+                    .progressed
+                    .is_some_and(|at| at.elapsed().as_millis() >= u128::from(self.idle_timeout_ms))
         });
         if expired {
             self.inbound.clear();
@@ -495,6 +519,20 @@ impl AuxiliaryChannelEndpoint {
     }
     pub(super) fn last_wire_error(&self) -> Option<WireError> {
         self.endpoint.last_wire_error()
+    }
+    /// Remaining time until the earliest incomplete receive expires.
+    pub fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+        self.endpoint.incomplete_receive_timeout_ms()
+    }
+    /// Fail and release incomplete receive buffers once their deadline passes.
+    pub fn expire_incomplete_receive(&mut self) -> Result<(), String> {
+        self.endpoint.expire()
+    }
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_incomplete_receive_timeout_for_test(&mut self, timeout_ms: u64) {
+        self.endpoint.idle_timeout_ms = timeout_ms;
+        self.endpoint.age_timeout_ms = timeout_ms;
     }
     /// Share canonical and auxiliary physical windows for this admitted link.
     pub fn set_channel_credits(&mut self, credits: SharedChannelCredits) {

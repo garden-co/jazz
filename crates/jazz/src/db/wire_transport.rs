@@ -376,6 +376,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
         if let Some(error) = &self.terminal_error {
             return Err(error.clone());
         }
+        self.endpoint.expire().map_err(TransportError::Failed)?;
         for _ in 0..turns {
             let pump_owned = self
                 .auxiliary
@@ -654,6 +655,9 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
     }
     fn poll_flush(&mut self) -> Result<WireFlushStatus, TransportError> {
         self.flush_turn(8)
+    }
+    fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+        self.endpoint.incomplete_receive_timeout_ms()
     }
     fn shared_auxiliary_endpoint(&self) -> Option<super::SharedAuxiliaryEndpoint> {
         Some(std::sync::Arc::clone(&self.auxiliary))

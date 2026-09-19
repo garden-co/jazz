@@ -806,6 +806,36 @@ impl PeerIoPump {
         }
     }
 
+    /// Remaining delay for the independent auxiliary receive deadline.
+    pub fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+        self.auxiliary_endpoint
+            .as_ref()?
+            .lock()
+            .ok()?
+            .incomplete_receive_timeout_ms()
+    }
+
+    /// Service an auxiliary receive deadline without entering the semantic node.
+    pub fn expire_incomplete_receive(&self) -> Result<(), String> {
+        self.auxiliary_endpoint
+            .as_ref()
+            .ok_or_else(|| "auxiliary endpoint unavailable".to_owned())?
+            .lock()
+            .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?
+            .expire_incomplete_receive()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_incomplete_receive_timeout_for_test(&self, timeout_ms: u64) {
+        if let Some(endpoint) = &self.auxiliary_endpoint {
+            endpoint
+                .lock()
+                .expect("auxiliary endpoint lock poisoned")
+                .set_incomplete_receive_timeout_for_test(timeout_ms);
+        }
+    }
+
     fn wire_inbound_context(&self) -> Result<&crate::wire::WireInboundContext, String> {
         self.wire_inbound_context.as_deref().ok_or_else(|| {
             "auxiliary wire framing requires a paired wire transport adapter".to_owned()
