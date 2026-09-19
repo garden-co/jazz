@@ -136,3 +136,10 @@ change the binary sync-message encoding or its wire3 version. The server chooses
 a distinct Inspector ingest mode; the client never receives ordinary trusted
 backend/authority admission. The operator claim supplies accountability/cap
 partitioning, not application-account impersonation.
+
+Expiry also bounds the authenticated pre-Hello wait and queued runtime admission.
+A cancelled runtime-open response owns cleanup until its caller accepts the
+session, preventing timed-out upgrades from leaking server sessions. A frame
+accepted before expiry may finish its durable transaction; expiry is not a
+rollback mechanism. Dropping the outbound stream stops later frames in that
+already-queued batch and suppresses all subsequent protected output.

@@ -314,6 +314,20 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     Box::pin(async move {
+        // Inspector has one fixed SYSTEM author, including on a partial Edge
+        // whose local-receiver branch precedes terminal Core policy admission.
+        // Validate before any branch can persist or forward an authored unit.
+        if let CommitUnitTrust::Inspector { edit } = ingest_context.trust
+            && let SyncMessage::CommitUnit { tx, .. } = &message
+            && (!edit
+                || ingest_context.identity != AuthorSubject::SYSTEM
+                || !admitted_provenance_matches(ingest_context.identity, tx.made_by))
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "Inspector commit provenance does not match its admitted authority",
+            ));
+        }
         if let SyncMessage::CommitUnit { versions, .. } = &message
             && matches!(peer.role(), PeerRole::ClientLink { .. })
         {

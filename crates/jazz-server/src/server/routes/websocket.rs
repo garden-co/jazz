@@ -687,7 +687,16 @@ async fn handle_ws_connection(
         ),
     );
 
-    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
+    let read_hello = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state);
+    let first = if let Some((_, deadline)) = inspector_deadline {
+        tokio::time::timeout_at(deadline, read_hello)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        read_hello.await
+    };
+    let Some(first) = first else {
         return;
     };
 
@@ -856,17 +865,23 @@ async fn handle_ws_connection(
                 return;
             }
         };
-    let session = match core_server_shell
-        .open_with_session_context(
-            admission.identity,
-            admission.claims,
-            admission.trust,
-            negotiated.features,
-            session_context,
-            link_admission,
-        )
-        .await
-    {
+    let open_session = core_server_shell.open_with_session_context(
+        admission.identity,
+        admission.claims,
+        admission.trust,
+        negotiated.features,
+        session_context,
+        link_admission,
+    );
+    let opened = if let Some((_, deadline)) = inspector_deadline {
+        match tokio::time::timeout_at(deadline, open_session).await {
+            Ok(result) => result,
+            Err(_) => return,
+        }
+    } else {
+        open_session.await
+    };
+    let session = match opened {
         Ok(session) => session,
         Err(error) => {
             send_ws_error(
@@ -4378,6 +4393,88 @@ mod tests {
             })
             .await
             .unwrap_or_else(|_| panic!("Inspector must reject {label}"));
+        }
+    }
+    #[tokio::test]
+    async fn inspector_expiry_closes_connection_before_wire_hello() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let token = inspector_test_token(addr, &state, false, 2).await;
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id)).await.unwrap();
+        ws.send(WsMessage::Binary(inspector_test_prelude(&token).into()))
+            .await
+            .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(3), ws.next())
+            .await
+            .expect("Inspector lifetime also bounds the pre-Hello handshake");
+        assert!(
+            !matches!(closed, Some(Ok(WsMessage::Binary(_)))),
+            "no authorized data after expiry"
+        );
+    }
+    // Public server runtime admission rejects forged durable authors before either Core or dynamic Edge can persist them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspector_edit_binds_provenance_on_core_and_dynamic_edge() {
+        for edge in [false, true] {
+            let builder = ServerBuilder::new(AppId::random())
+                .with_auth_config(AuthConfig {
+                    admin_secret: Some("admin-secret".into()),
+                    ..Default::default()
+                })
+                .with_storage(StorageBackend::InMemory)
+                .with_schema(Schema::new())
+                .with_core_server_shell_schema(ws_public_schema_convert());
+            let server = builder.build().await.unwrap();
+            let runtime = server.state.runtime_for_client().unwrap();
+            let runtime = if edge {
+                let snapshot = runtime.trusted_catalogue_snapshot_for_test().await.unwrap();
+                jazz::serving::ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
+                    jazz::serving::StorageConfig::InMemory,
+                    None,
+                    None,
+                    snapshot,
+                )
+                .unwrap()
+            } else {
+                runtime
+            };
+            let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+            let session = runtime
+                .open_with_session_context(
+                    AuthorSubject::SYSTEM,
+                    BTreeMap::new(),
+                    CommitUnitTrust::Inspector { edit: true },
+                    features,
+                    None,
+                    ServerLinkAdmission::OrdinarySession,
+                )
+                .await
+                .unwrap();
+            let client = TestClient::new_with_identity(
+                ws_public_schema_convert(),
+                0xe3,
+                0xe300,
+                AuthorSubject::for_test_bytes([0xe4; 16]),
+            )
+            .await;
+            client.write_todo("forged Inspector author");
+            let frames = client.tick_take();
+            assert!(!frames.is_empty());
+            let mut responses = runtime.receive_tick_stream(session, frames).unwrap();
+            let mut rejection = None;
+            while let Some(response) = responses.recv().await {
+                if let Err(error) = response {
+                    rejection = Some(error);
+                    break;
+                }
+            }
+            runtime.close(session);
+            assert!(
+                rejection
+                    .as_ref()
+                    .is_some_and(|error| error.contains("provenance")),
+                "edge={edge}: Inspector must reject forged durable author, observed {rejection:?}"
+            );
         }
     }
 }
