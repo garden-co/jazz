@@ -6,7 +6,7 @@ on:
   # when its base is another feature branch.
   pull_request:
   push:
-    branches: [main]
+    branches: [main, release]
 
 concurrency:
   # For pushes, this lets concurrent runs happen, so each push gets a result.
@@ -35,15 +35,17 @@ jobs:
       sccache-write: false
 
   trusted:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     permissions:
       contents: read
       id-token: write
       packages: read
     uses: ./.github/workflows/ci-suite.yml
     with:
-      trusted-cache: true
-      sccache-write: ${{ github.event_name == 'push' }}
+      # Release branch OIDC trust has not been enabled in the external cache roles.
+      # Keep ordinary GitHub caches without attempting credentialed cross-ref reads.
+      trusted-cache: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
+      sccache-write: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     secrets: inherit
 
   # Preserve the branch-protection check name while the implementation jobs

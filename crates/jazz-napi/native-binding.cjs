@@ -28,9 +28,32 @@ try {
     module.exports = { nativeBinding, expectedNativeArtifactFingerprint };
   }
 } catch (error) {
-  throw new Error(
-    "Jazz NAPI artifact is missing. In this monorepo run pnpm --filter jazz-napi build:debug; " +
-      "for an installed package reinstall matching Jazz package versions. " +
-      `(${error.message})`,
-  );
+  // napi-rs chains failed platform candidates through `cause`; its outer
+  // message alone can describe an incompatible installed binary as missing.
+  const causes = [];
+  const seen = new Set();
+  for (let cause = error; cause && !seen.has(cause); cause = cause.cause) {
+    seen.add(cause);
+    causes.push(cause);
+  }
+  // Exclude only napi-rs's generic summary, not uncoded candidate errors:
+  // a package version mismatch is uncoded and must not become "missing".
+  const candidates =
+    causes.length > 1 && error.message?.startsWith("Cannot find native binding.")
+      ? causes.slice(1)
+      : causes;
+  const incompatible = candidates.find((cause) => cause.code === "ERR_DLOPEN_FAILED");
+  const failure =
+    incompatible ||
+    candidates.find((cause) => cause.code !== "MODULE_NOT_FOUND") ||
+    candidates[candidates.length - 1];
+  const missing = candidates.every((cause) => cause.code === "MODULE_NOT_FOUND");
+  const message = incompatible
+    ? "Jazz NAPI binary was found but could not be loaded. Check that the installed binary is compatible with this operating system, architecture, and system libraries. "
+    : missing
+      ? "Jazz NAPI artifact is missing. In this monorepo run pnpm --filter jazz-napi build:debug; for an installed package reinstall matching Jazz package versions. "
+      : "Jazz NAPI artifact could not be loaded. ";
+  const diagnostic = new Error(message + `(${failure?.message || error})`, { cause: error });
+  if (failure?.code) diagnostic.code = failure.code;
+  throw diagnostic;
 }

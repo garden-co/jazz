@@ -93,10 +93,20 @@ describe("NativeRuntimeAdapter policy source encoding", () => {
   it("encodes authored inherited permissions identically to their source form", () => {
     const baseSchema: WasmSchema = {
       resources: {
+        relations: {
+          entriesViaResource: {
+            kind: "reverse" as const,
+            table: "entries",
+            relation: "resourceRelation",
+          },
+        },
         columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
         policies: { select: { using: { type: "True" } } },
       },
       entries: {
+        relations: {
+          resourceRelation: { kind: "forward" as const, table: "resources", column: "resource" },
+        },
         columns: [
           {
             name: "resource",
@@ -113,10 +123,20 @@ describe("NativeRuntimeAdapter policy source encoding", () => {
       entries: { _rowType: {} as never, where: (_input: unknown) => undefined },
     };
     const permissions = definePermissions(app, ({ policy, allowedTo }) => {
+      policy.resources.allowRead.always();
       policy.entries.allowRead.where(allowedTo.read("resource"));
     });
     const authored: WasmSchema = {
       ...baseSchema,
+      resources: {
+        ...baseSchema.resources,
+        policies: {
+          select: { using: { type: "True" } },
+          insert: {},
+          update: {},
+          delete: {},
+        },
+      },
       entries: {
         ...baseSchema.entries,
         policies: {

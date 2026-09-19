@@ -132,6 +132,11 @@ describe("transformRows", () => {
 
   const relationSchema: WasmSchema = {
     users: {
+      relations: {
+        manager: { kind: "forward" as const, table: "users", column: "manager_id" },
+        usersViaManager: { kind: "reverse" as const, table: "users", relation: "manager" },
+        todosViaOwner: { kind: "reverse" as const, table: "todos", relation: "owner" },
+      },
       columns: [
         { name: "name", column_type: { type: "Text" }, nullable: false },
         {
@@ -143,6 +148,7 @@ describe("transformRows", () => {
       ],
     },
     todos: {
+      relations: { owner: { kind: "forward" as const, table: "users", column: "owner_id" } },
       columns: [
         { name: "title", column_type: { type: "Text" }, nullable: false },
         { name: "owner_id", column_type: { type: "Uuid" }, nullable: false, references: "users" },

@@ -140,9 +140,10 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
     let staged_rows = transaction
         .query(
             Query::from("notes").select(["title", "$createdBy", "$updatedBy"]),
-            None,
+            jazz::tools::ReadTier::LocalFirst,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("transaction reads retain the explicit session author");
     assert_eq!(
         staged_rows[0].1,
@@ -179,11 +180,11 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
 
 async fn create_note_with_backend_attribution(
     backend: &JazzClient,
-    attributed_user_id: &str,
+    attributed_author: &str,
     title: &str,
 ) -> ObjectId {
     let write_context = WriteContext {
-        attribution: Some(attributed_user_id.to_string()),
+        attribution: Some(attributed_author.to_string()),
         ..Default::default()
     };
     let (note_id, _, transaction_id) = backend
@@ -278,16 +279,30 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
         ]
     );
 
-    let denied_update = bob.update(alice_note, vec![("title".to_string(), "bob edit".into())]);
-    assert!(
-        denied_update.is_err(),
-        "bob should not be able to update alice's row under $createdBy policy"
-    );
-    let denied_delete = bob.delete(alice_note);
-    assert!(
-        denied_delete.is_err(),
-        "bob should not be able to delete alice's row under $createdBy policy"
-    );
+    for operation in ["update", "delete"] {
+        let result = match operation {
+            "update" => bob.update(
+                "notes",
+                alice_note,
+                vec![("title".to_string(), "bob edit".into())],
+            ),
+            "delete" => bob.delete("notes", alice_note),
+            _ => unreachable!(),
+        };
+        if let Ok(transaction_id) = result {
+            let error = bob
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation has a transaction"),
+                    jazz::tools::DurabilityTier::EdgeServer,
+                )
+                .await
+                .expect_err("Bob must not mutate Alice's note");
+            assert!(
+                error.to_string().contains("authorization_denied"),
+                "{error}"
+            );
+        }
+    }
 
     let alice_rows = wait_for_rows(
         &alice,
@@ -414,20 +429,19 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution_inne
     server.shutdown().await;
 }
 
-/// Verifies that `$createdBy = "jazz:system"` can be used as an explicit
-/// allowlist branch when ordinary users should read server-generated rows.
+/// Verifies that the system issuer in structured `$createdBy` metadata can
+/// explicitly allow ordinary users to read server-generated rows.
 ///
 /// Actors: a backend client writes one system-authored row without a session,
 /// and `alice` writes one user-authored row through her session.
 ///
 /// ```text
-/// backend client ─create(no session)──► server ──$createdBy = jazz:system
+/// backend client ─create(no session)──► server ──system issuer + originating node
 /// alice client ──create(as alice)─────► server ──$createdBy = alice
 /// alice query ────────────────────────► sees system row + alice row
 /// bob query ──────────────────────────► sees only system row
 /// ```
 #[tokio::test]
-#[ignore = "#1758: server schema conversion rejects `$createdBy = \"jazz:system\"` with OperandTypeMismatch"]
 async fn created_by_policies_can_allow_reads_from_system_author() {
     tokio::task::LocalSet::new()
         .run_until(created_by_policies_can_allow_reads_from_system_author_inner())
@@ -436,7 +450,7 @@ async fn created_by_policies_can_allow_reads_from_system_author() {
 
 async fn created_by_policies_can_allow_reads_from_system_author_inner() {
     let created_by_policy = pe::eq("$createdBy", pe::session("user"));
-    let system_author_policy = pe::eq("$createdBy", "jazz:system");
+    let system_author_policy = pe::eq("$createdBy.identity.issuer", "urn:jazz:system");
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
@@ -460,7 +474,30 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
         .expect("start test server");
     let (alice, alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
     let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
-    let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
+    let backend_node = uuid::Uuid::new_v4();
+    let backend = connect_ready_client(
+        &server,
+        &schema,
+        &backend_node.to_string(),
+        "notes",
+        READY_TIMEOUT,
+    )
+    .await;
+    let system_author = Value::Row {
+        id: None,
+        values: vec![
+            Value::Uuid(ObjectId::from_uuid(
+                jazz::account_registry::SYSTEM_ACCOUNT_ID.0,
+            )),
+            Value::Row {
+                id: None,
+                values: vec![
+                    Value::Text("urn:jazz:system".into()),
+                    Value::Text(backend_node.to_string()),
+                ],
+            },
+        ],
+    };
 
     let system_note = create_note_without_session(&backend, "server-generated").await;
     let alice_note = create_note_as(&alice, "alice note").await;
@@ -494,7 +531,7 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
         .expect("system-authored row should be visible");
     assert_eq!(
         system_owned.1,
-        vec![Value::from("server-generated"), "jazz:system".into()]
+        vec![Value::from("server-generated"), system_author.clone()]
     );
 
     let bob_rows = wait_for_rows(
@@ -506,7 +543,7 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
     .await;
     assert_eq!(
         bob_rows[0].1,
-        vec![Value::from("server-generated"), "jazz:system".into()]
+        vec![Value::from("server-generated"), system_author]
     );
 
     backend.shutdown().await.expect("shutdown backend");
@@ -527,7 +564,6 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
 /// bob query ──────────────────────────────────► sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "#1758: trusted backend attribution is ignored by the Rust client, so an INSERT policy of never is rejected with authorization_denied"]
 async fn created_by_policies_allow_backend_attribution_to_specific_user() {
     tokio::task::LocalSet::new()
         .run_until(created_by_policies_allow_backend_attribution_to_specific_user_inner())
@@ -554,12 +590,42 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() 
         .start()
         .await
         .expect("start test server");
-    let (alice, _alice_author) = connect_author(&server, &schema, super::ALICE_ID).await;
+    let (alice_context, alice) = jazz_testkit::TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id(super::ALICE_ID)
+        .as_user()
+        .ready_on("notes", READY_TIMEOUT)
+        .connect_with_context()
+        .await;
+    let alice_account = alice_context.account_id.expect("enrolled Alice account");
+    let alice_author = structured_author(super::ALICE_ID, Some(alice_account));
+    let mut alice_session = Session::new("urn:jazz:test", super::ALICE_ID);
+    alice_session.account_id = Some(alice_account);
+    let attribution = alice_session
+        .author_subject()
+        .expect("Alice author")
+        .canonical()
+        .to_owned();
     let (bob, _bob_author) = connect_author(&server, &schema, super::BOB_ID).await;
     let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
 
+    let error = bob
+        .with_write_context(WriteContext {
+            attribution: Some(attribution.to_owned()),
+            ..Default::default()
+        })
+        .insert("notes", note_input("forged attribution"))
+        .expect_err("ordinary users cannot attribute writes to Alice");
+    assert!(
+        error
+            .to_string()
+            .contains("attribution requires a trusted serving node"),
+        "{error}"
+    );
+
     let attributed_note =
-        create_note_with_backend_attribution(&backend, super::ALICE_ID, "backend for alice").await;
+        create_note_with_backend_attribution(&backend, &attribution, "backend for alice").await;
     let query = Query::from("notes").select(["title", "$createdBy", "$updatedBy"]);
 
     let alice_rows = wait_for_rows(
@@ -571,7 +637,11 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() 
     .await;
     assert_eq!(
         alice_rows[0].1,
-        provenance_values("backend for alice", super::ALICE_ID, super::ALICE_ID)
+        vec![
+            "backend for alice".into(),
+            alice_author.clone(),
+            alice_author
+        ]
     );
 
     let bob_rows = wait_for_rows(
@@ -587,6 +657,117 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
+}
+
+/// Attribution survives transaction staging and commit without replacing
+/// backend authorization, even when every user mutation policy denies writes.
+#[tokio::test]
+async fn backend_attribution_survives_transactions_and_later_mutations() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(make_notes_schema(
+                    "notes",
+                    permissions(|p| {
+                        p.allow_read().always();
+                        p.allow_insert().never();
+                        p.allow_update().never();
+                        p.allow_delete().never();
+                    }),
+                ))
+                .build();
+            let server = JazzServer::builder()
+                .with_schema(schema.clone())
+                .start()
+                .await
+                .expect("start test server");
+            let (context, alice) = jazz_testkit::TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id(super::ALICE_ID)
+                .as_user()
+                .ready_on("notes", READY_TIMEOUT)
+                .connect_with_context()
+                .await;
+            let account = context.account_id.expect("enrolled account");
+            let author = structured_author(super::ALICE_ID, Some(account));
+            let mut session = Session::new("urn:jazz:test", super::ALICE_ID);
+            session.account_id = Some(account);
+            let backend =
+                connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
+            let attributed = backend.with_write_context(WriteContext {
+                attribution: Some(session.author_subject().unwrap().canonical().to_owned()),
+                ..Default::default()
+            });
+            let transaction = attributed
+                .begin_transaction()
+                .expect("begin attributed transaction");
+            let (id, _, _) = transaction
+                .insert("notes", note_input("staged"))
+                .expect("stage insert");
+            let query = Query::from("notes").select(["title", "$createdBy", "$updatedBy"]);
+            let staged = transaction
+                .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
+                .await
+                .map(jazz::tools::test_support::ordinary_rows)
+                .expect("read staged attribution");
+            assert_eq!(
+                staged[0].1,
+                vec!["staged".into(), author.clone(), author.clone()]
+            );
+            wait_for_edge_txs(
+                &backend,
+                &[transaction.commit().expect("commit attribution")],
+            )
+            .await;
+            let update = attributed
+                .update("notes", id, vec![("title".into(), "updated".into())])
+                .expect("attributed update")
+                .unwrap();
+            wait_for_edge_txs(&backend, &[update]).await;
+            let updated = wait_for_rows(
+                &alice,
+                query.clone(),
+                "Alice sees attributed update",
+                |rows| {
+                    (rows.len() == 1 && rows[0].1[0] == Value::Text("updated".into()))
+                        .then_some(rows)
+                },
+            )
+            .await;
+            assert_eq!(
+                updated[0].1,
+                vec!["updated".into(), author.clone(), author.clone()]
+            );
+            let upsert = attributed
+                .upsert("notes", *id.uuid(), note_input("upserted"))
+                .expect("attributed upsert");
+            wait_for_edge_txs(&backend, &[upsert.expect("upsert transaction")]).await;
+            let rows = wait_for_rows(&alice, query, "Alice sees attributed mutations", |rows| {
+                (rows.len() == 1 && rows[0].1[0] == Value::Text("upserted".into())).then_some(rows)
+            })
+            .await;
+            assert_eq!(rows[0].1, vec!["upserted".into(), author.clone(), author]);
+            wait_for_edge_txs(
+                &backend,
+                &[attributed
+                    .delete("notes", id)
+                    .expect("attributed delete")
+                    .unwrap()],
+            )
+            .await;
+            wait_for_rows(
+                &alice,
+                Query::from("notes"),
+                "attributed delete settles",
+                |rows| rows.is_empty().then_some(()),
+            )
+            .await;
+            backend.shutdown().await.expect("shutdown backend");
+            alice.shutdown().await.expect("shutdown Alice");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 /// Verifies that a `$updatedBy` select policy moves visibility to the latest
@@ -681,6 +862,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
 
     let bob_update = bob
         .update(
+            "notes",
             note_id,
             vec![
                 ("title".to_string(), "revised by bob".into()),
@@ -819,4 +1001,68 @@ async fn provenance_columns_expose_user_principals_and_insert_timestamps_inner()
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
+}
+
+/// A backend explicitly acting as Alice must enforce her read permissions
+/// before merging updates, both ordinarily and inside a transaction.
+/// Its underlying SYSTEM identity must not grant access to Bob's hidden note.
+#[tokio::test]
+async fn backend_session_updates_enforce_local_read_permissions() {
+    tokio::task::LocalSet::new()
+        .run_until(backend_session_updates_enforce_local_read_permissions_inner())
+        .await;
+}
+
+async fn backend_session_updates_enforce_local_read_permissions_inner() {
+    let owner_policy = pe::eq("owner", pe::session(vec!["claims", "sub"]));
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .column("owner", ColumnType::Text)
+                .policies(permissions(|p| {
+                    p.allow_read().where_(owner_policy.clone());
+                    p.allow_insert().always();
+                    p.allow_update()
+                        .where_old(owner_policy.clone())
+                        .where_new(owner_policy);
+                })),
+        )
+        .build();
+    let backend = JazzClient::test_client(schema).await;
+    let (note_id, _, _) = backend
+        .insert(
+            "notes",
+            jazz::row_input!("title" => "Bob's note", "owner" => super::BOB_ID),
+        )
+        .expect("backend creates Bob's note");
+    let mut session = Session::new("urn:jazz:test", super::ALICE_ID);
+    session.account_id = Some(jazz::account_registry::AccountId(uuid::Uuid::from_u128(
+        0xa11ce,
+    )));
+    let alice = backend.for_session(session);
+    let patch = vec![("title".to_owned(), Value::Text("Alice's edit".to_owned()))];
+    let error = alice
+        .update("notes", note_id, patch.clone())
+        .expect_err("explicit Alice session cannot merge Bob's hidden note");
+    assert!(error.to_string().contains("read policy denied"), "{error}");
+    let transaction = alice.begin_transaction().expect("begin Alice transaction");
+    let error = transaction
+        .update("notes", note_id, patch)
+        .expect_err("transaction retains explicit Alice session permissions");
+    assert!(error.to_string().contains("read policy denied"), "{error}");
+    transaction.rollback().expect("rollback Alice transaction");
+    let rows = backend
+        .query(
+            Query::from("notes").select(["title"]),
+            jazz::tools::ReadTier::LocalFirst,
+        )
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("backend reads unchanged note");
+    assert_eq!(
+        rows,
+        vec![(note_id, vec![Value::Text("Bob's note".to_owned())])]
+    );
+    backend.shutdown().await.expect("shutdown backend");
 }

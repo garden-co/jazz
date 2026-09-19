@@ -95,6 +95,7 @@ export const ciPartitions = Object.freeze({
     command("CI workflow contracts", "pnpm", ["test:ci-workflow"]),
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
+    command("SPEC issue links", "node", ["dev/gates/spec-open-questions.mjs"]),
     command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
   ]),
   "rust-workspace": Object.freeze([

@@ -1,5 +1,9 @@
 import { createRequire } from "node:module";
 import { onTestFinished } from "vitest";
+import {
+  mergePermissionsIntoWasmSchema,
+  type CompiledPermissionsMap,
+} from "../../schema-permissions.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import type { Runtime } from "../client.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
@@ -52,8 +56,33 @@ export async function loadNapiModule(): Promise<NapiModule> {
   return napiModulePromise;
 }
 
+type NativeRuntimeArgs = ConstructorParameters<typeof NativeRuntimeAdapter>;
+
+/** Construct the native representation inside the fixture boundary. */
+export function createNapiRuntimeFixture(
+  Runtime: NativeRuntimeArgs[0],
+  schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
+  node: Uint8Array,
+  author: Uint8Array,
+  sourceId: number,
+  historyComplete: boolean,
+  options?: NativeRuntimeArgs[6],
+): NativeRuntimeAdapter {
+  return new NativeRuntimeAdapter(
+    Runtime,
+    mergePermissionsIntoWasmSchema(schema, permissions),
+    node,
+    author,
+    sourceId,
+    historyComplete,
+    options,
+  );
+}
+
 export async function createNapiNativeRuntimeAdapter(
   schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
   opts?: {
     appId?: string;
     env?: string;
@@ -64,12 +93,13 @@ export async function createNapiNativeRuntimeAdapter(
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const peerId = opts?.peerId ?? "default";
-  const runtime = new NativeRuntimeAdapter(
+  const runtime = createNapiRuntimeFixture(
     {
       openMemory: (schemaBytes, configBytes) =>
         NapiDb.openMemory(schemaBytes, configBytes) as never,
     },
     schema,
+    permissions,
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
     testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,
@@ -82,6 +112,7 @@ export async function createNapiNativeRuntimeAdapter(
 
 export async function createPersistentNapiNativeRuntimeAdapter(
   schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
   dataPath: string,
   opts?: {
     appId?: string;
@@ -93,7 +124,7 @@ export async function createPersistentNapiNativeRuntimeAdapter(
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const peerId = opts?.peerId ?? "default";
-  const runtime = new NativeRuntimeAdapter(
+  const runtime = createNapiRuntimeFixture(
     {
       openMemory: (schemaBytes, configBytes) =>
         NapiDb.openMemory(schemaBytes, configBytes) as never,
@@ -101,6 +132,7 @@ export async function createPersistentNapiNativeRuntimeAdapter(
         NapiDb.openPersistent(path, schemaBytes, configBytes) as never,
     },
     schema,
+    permissions,
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
     testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,

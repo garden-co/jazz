@@ -251,6 +251,15 @@ const app = {
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
   wasmSchema: {
     todos: {
+      relations: {
+        project: { kind: "forward" as const, table: "projects", column: "projectId" },
+        todoSharesViaTodo: { kind: "reverse" as const, table: "todoShares", relation: "todo" },
+        resource_access_edgesViaResource: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "resourceRelation",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Text" }, nullable: false },
@@ -265,12 +274,16 @@ const app = {
       ],
     },
     projects: {
+      relations: {
+        todosViaProject: { kind: "reverse" as const, table: "todos", relation: "project" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Text" }, nullable: false },
       ],
     },
     todoShares: {
+      relations: { todo: { kind: "forward" as const, table: "todos", column: "todoId" } },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -284,6 +297,28 @@ const app = {
       ],
     },
     teams: {
+      relations: {
+        user_team_edgesViaTeam: {
+          kind: "reverse" as const,
+          table: "user_team_edges",
+          relation: "teamRelation",
+        },
+        team_team_edgesViaChild_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "child_teamRelation",
+        },
+        team_team_edgesViaParent_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "parent_teamRelation",
+        },
+        resource_access_edgesViaTeam: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "teamRelation",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "kind", column_type: { type: "Text" }, nullable: false },
@@ -291,6 +326,7 @@ const app = {
       ],
     },
     user_team_edges: {
+      relations: { teamRelation: { kind: "forward" as const, table: "teams", column: "team" } },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "user_id", column_type: { type: "Text" }, nullable: false },
@@ -304,6 +340,10 @@ const app = {
       ],
     },
     team_team_edges: {
+      relations: {
+        child_teamRelation: { kind: "forward" as const, table: "teams", column: "child_team" },
+        parent_teamRelation: { kind: "forward" as const, table: "teams", column: "parent_team" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -321,6 +361,10 @@ const app = {
       ],
     },
     resource_access_edges: {
+      relations: {
+        teamRelation: { kind: "forward" as const, table: "teams", column: "team" },
+        resourceRelation: { kind: "forward" as const, table: "todos", column: "resource" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -356,6 +400,7 @@ const documentApp = {
   projects: new ProjectQueryBuilder(),
   wasmSchema: {
     documents: {
+      relations: { project: { kind: "forward" as const, table: "projects", column: "projectId" } },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "type", column_type: { type: "Text" }, nullable: false },
@@ -369,6 +414,9 @@ const documentApp = {
       ],
     },
     projects: {
+      relations: {
+        documentsViaProject: { kind: "reverse" as const, table: "documents", relation: "project" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Uuid" }, nullable: false },
@@ -383,9 +431,25 @@ const socialApp = {
   friendships: new FriendshipQueryBuilder(),
   wasmSchema: {
     profiles: {
+      relations: {
+        peopleViaProfile: { kind: "reverse" as const, table: "people", relation: "profile" },
+      },
       columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
     },
     people: {
+      relations: {
+        profile: { kind: "forward" as const, table: "profiles", column: "profileId" },
+        friendshipsViaPersonA: {
+          kind: "reverse" as const,
+          table: "friendships",
+          relation: "personA",
+        },
+        friendshipsViaPersonB: {
+          kind: "reverse" as const,
+          table: "friendships",
+          relation: "personB",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -397,6 +461,10 @@ const socialApp = {
       ],
     },
     friendships: {
+      relations: {
+        personA: { kind: "forward" as const, table: "people", column: "personAId" },
+        personB: { kind: "forward" as const, table: "people", column: "personBId" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -427,20 +495,6 @@ const creatorCondition = {
 };
 
 describe("permissions DSL", () => {
-  it("rejects duplicate generated relation names while compiling the schema", () => {
-    expect(() =>
-      s.defineApp({
-        users: s.table({ name: s.string() }),
-        todos: s.table({
-          ownerId: s.ref("users"),
-          owner_id: s.ref("users"),
-        }),
-      }),
-    ).toThrow(
-      /Generated relation name "owner" is ambiguous on table "todos".*"todos.ownerId".*"todos.owner_id"/,
-    );
-  });
-
   it("rejects an unbranded policy expression on a table without a type column", () => {
     // Simulate plain JavaScript or an outdated structurally typed helper bypassing the type brand.
     const unbrandedExpression = { type: "True" };
@@ -1326,7 +1380,7 @@ describe("permissions DSL", () => {
         const reachableTeams = policy.teams.gather({
           start: { kind: "individual" },
           step: ({ current }) =>
-            policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+            policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         });
         return [
           policy.todos.allowRead.where(
@@ -1418,7 +1472,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 0,
       });
 
@@ -1462,7 +1516,7 @@ describe("permissions DSL", () => {
       const reachableTeams = policy.teams.gather({
         start: { type: "True" } as Record<string, unknown>,
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
 
@@ -1483,7 +1537,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
 
@@ -1515,7 +1569,9 @@ describe("permissions DSL", () => {
   it("lowers hop relation plans to relation IR join + project", () => {
     let relation: PermissionRelation | undefined;
     definePermissions(app, ({ policy }) => {
-      relation = policy.team_team_edges.where({ child_team: "team-a" }).hopTo("parent_team");
+      relation = policy.team_team_edges
+        .where({ child_team: "team-a" })
+        .hopTo("parent_teamRelation");
       return [];
     });
     if (!relation) {
@@ -1561,7 +1617,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       relation = reachableTeams.hopTo("resource_access_edgesViaTeam").where({
@@ -1663,10 +1719,10 @@ describe("permissions DSL", () => {
     definePermissions(app, ({ policy }) => {
       const directParents = policy.team_team_edges
         .where({ child_team: "team-a" })
-        .hopTo("parent_team");
+        .hopTo("parent_teamRelation");
       relation = directParents.gather({
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       return [];
@@ -1699,13 +1755,13 @@ describe("permissions DSL", () => {
     definePermissions(app, ({ policy, session }) => {
       const directParents = policy.team_team_edges
         .where({ child_team: session.claims["sub"] })
-        .hopTo("parent_team");
+        .hopTo("parent_teamRelation");
       relation = policy.teams.gather({
         start: directParents,
         step: ({ current }) =>
           policy.team_team_edges
             .where({ child_team: current, administrator: false })
-            .hopTo("parent_team"),
+            .hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       return [];
@@ -1745,16 +1801,16 @@ describe("permissions DSL", () => {
     definePermissions(app, ({ policy }) => {
       const directParents = policy.team_team_edges
         .where({ child_team: "team-a" })
-        .hopTo("parent_team");
+        .hopTo("parent_teamRelation");
       const adminReachableTeams = policy.teams.gather({
         start: { kind: "individual" },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       relation = policy.union([directParents, adminReachableTeams]).gather({
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       return [];
@@ -1783,7 +1839,7 @@ describe("permissions DSL", () => {
       relation = policy.teams.gather({
         start: { "team_team_edges.child_team": "team-a" },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       return [];
@@ -1968,7 +2024,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
 
@@ -2002,7 +2058,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
 
@@ -2057,7 +2113,8 @@ describe("permissions DSL", () => {
       definePermissions(app, ({ policy }) => {
         const reachableTeams = policy.teams.gather({
           start: { kind: "individual" },
-          step: () => policy.team_team_edges.where({ child_team: "literal" }).hopTo("parent_team"),
+          step: () =>
+            policy.team_team_edges.where({ child_team: "literal" }).hopTo("parent_teamRelation"),
         });
         return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
       }),
@@ -2068,7 +2125,7 @@ describe("permissions DSL", () => {
         const reachableTeams = policy.teams.gather({
           start: { "team_team_edges.id": session.claims["sub"] },
           step: ({ current }) =>
-            policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+            policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         });
         return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
       }),

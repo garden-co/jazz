@@ -1,5 +1,18 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.55
+
+### Patch Changes
+
+- 5245e76: Move subscription result buffering into the Rust core and remove redundant TypeScript query preparation and row caches. Preserve scoped relation reads and wait for complete recursive query results before publishing them. Direct binding consumers must adapt to removal of the Rust–TypeScript `prepareQuery` API.
+
+  [PR #2717](https://github.com/garden-co/jazz/pull/2717).
+
+- 060083d: Split React Native binaries into exact-version iOS and Android payload dependencies, retaining all supported architectures while keeping each npm upload below the package budget.
+- Updated dependencies [060083d]
+  - jazz-rn-ios@2.0.0-alpha.55
+  - jazz-rn-android@2.0.0-alpha.55
+
 ## 2.0.0-alpha.54
 
 ### Patch Changes

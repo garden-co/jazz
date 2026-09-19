@@ -5,13 +5,25 @@ import { deploy } from "../../src/dev/catalogue.js";
 import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
 
 const app = s.defineApp({
-  parents: s.table({
-    name: s.string(),
-    state: s.enum("draft", "open", "closed"),
-    summaryId: s.ref("summaries").optional(),
-  }),
-  summaries: s.table({ metadata: s.json() }),
-  children: s.table({ parentId: s.ref("parents"), metadata: s.json() }),
+  parents: s.table(
+    {
+      name: s.string(),
+      state: s.enum("draft", "open", "closed"),
+      summaryId: s.uuid().optional(),
+    },
+    {
+      summary: s.rel("summaries", "summaryId"),
+      childrenViaParent: s.reverse("children", "parent"),
+    },
+  ),
+  summaries: s.table(
+    { metadata: s.json() },
+    { parentsViaSummary: s.reverse("parents", "summary") },
+  ),
+  children: s.table(
+    { parentId: s.uuid(), metadata: s.json() },
+    { parent: s.rel("parents", "parentId") },
+  ),
 });
 
 it("reads JSON forward and reverse includes offline before and after persistent reopen", async () => {

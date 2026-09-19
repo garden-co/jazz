@@ -1010,37 +1010,13 @@ where
                     SourceGap::HistoricalStorageCut,
                 ));
             }
-            let needs_settle_position = request
-                .requirements
-                .metadata
-                .contains(&SourceMetadataRequirement::SettlePosition);
-            let mut metadata = BTreeMap::new();
-            if needs_settle_position {
-                metadata.insert(
-                    SourceMetadataRequirement::SettlePosition,
-                    SourceMetadataFields::SettlePosition {
-                        settle_position_field: "settle_position".to_owned(),
-                    },
-                );
-            }
-            let descriptor = current_row_descriptor_with_hidden_source_fields(&table, &metadata);
-            let base = self
+            let CurrentSourceGraph {
+                graph: base,
+                descriptor,
+                metadata,
+            } = self
                 .projected_historical_source_graph(request, &table, position)
                 .await?;
-            let base = if needs_settle_position {
-                base.project_fields(
-                    current_row_fields(&table)
-                        .into_iter()
-                        .map(ProjectField::named)
-                        .chain([ProjectField::null_typed(
-                            "settle_position",
-                            ValueType::Nullable(Box::new(ValueType::U64)),
-                        )])
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                base
-            };
             let graph = match &authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -2517,7 +2493,7 @@ where
         let register_table = self
             .node
             .physical_register_table_for_schema(
-                self.node.catalogue.current_schema_version_id,
+                self.node.catalogue.local_schema_version_id,
                 &table.name,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
@@ -2570,31 +2546,47 @@ where
         request: &SourceRequest,
         table: &TableSchema,
         position: GlobalTime,
-    ) -> Result<GraphBuilder, SourceResolutionError> {
-        if self.can_use_bounded_historical_source(&request.source.table) {
+    ) -> Result<CurrentSourceGraph, SourceResolutionError> {
+        let rows = if self.can_use_bounded_historical_source(&request.source.table) {
             self.node
                 .query_engine_read_metrics
                 .source_global_time_range_scans += 1;
-            let rows = self
-                .node
+            self.node
                 .bounded_historical_current_rows(&request.source.table, position)
                 .await
-                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-            return inline_current_graph(table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut));
-        }
-        self.node.query_engine_read_metrics.source_full_scans += 1;
-        let rows = self
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?
+        } else {
+            self.node.query_engine_read_metrics.source_full_scans += 1;
+            self.node
+                .projected_historical_current_rows(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    position,
+                )
+                .await
+                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?
+        };
+        let schema_version_alias = self
             .node
-            .projected_historical_current_rows(
-                &request.source.table,
-                self.read_view.read_schema,
-                position,
-            )
+            .ensure_schema_version_alias(self.read_view.read_schema)
             .await
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
-        inline_current_graph(table, rows)
-            .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))
+        // Historical rows must satisfy the same metadata contract as current
+        // and snapshot sources. Build their descriptor and declarations with
+        // the graph so version identity survives schema projection.
+        let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+            table,
+            rows,
+            schema_version_alias,
+            "historical",
+            &request.requirements,
+        )
+        .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+        Ok(CurrentSourceGraph {
+            graph,
+            descriptor,
+            metadata,
+        })
     }
 
     pub(crate) async fn projected_maintained_visible_current_source_graph(
@@ -3072,7 +3064,7 @@ where
     }
 
     pub(crate) fn can_use_bounded_historical_source(&self, table: &str) -> bool {
-        if self.read_view.read_schema != self.node.catalogue.current_schema_version_id {
+        if self.read_view.read_schema != self.node.catalogue.local_schema_version_id {
             return false;
         }
         self.node
@@ -4052,13 +4044,15 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
     branch_columns_nonnullable: bool,
     include_deletion_marker: bool,
 ) -> RecordDescriptor {
+    // Inline policy candidates may still contain indirect scalars. Preserve
+    // their semantic kind through this second encoding into query sources.
     let mut fields = std::iter::once(records::DescriptorField::new("row_uuid", ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
             let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
             {
-                column.column_type.clone()
+                current_row_column_type(column)
             } else {
-                ValueType::Nullable(Box::new(column.column_type.clone()))
+                ValueType::Nullable(Box::new(current_row_column_type(column)))
             };
             current_row_column_field(column, value_type)
         }))

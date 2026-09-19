@@ -207,14 +207,14 @@ export async function readTodoEditMetadata(db: Db, author: RowAuthor, updatedSin
 
 // #region reading-reverse-relation-ts
 export async function readProjectsWithTodos(db: Db) {
-  return db.all(app.projects.include({ todosViaProject: app.todos.where({ done: false }) }));
+  return db.all(app.projects.include({ todos: app.todos.where({ done: false }) }));
 }
 // #endregion reading-reverse-relation-ts
 
 // #region reading-require-includes-ts
 const requiredReferences = s.defineApp({
-  customers: s.table({ name: s.string() }),
-  orders: s.table({ customerId: s.ref("customers") }),
+  customers: s.table({ name: s.string() }, { orders: s.reverse("orders", "customer") }),
+  orders: s.table({ customerId: s.uuid() }, { customer: s.rel("customers", "customerId") }),
 });
 
 export async function readOrdersWithRequiredCustomer(db: Db) {

@@ -11,8 +11,9 @@ use jazz_testkit::{TestingClient, wait_for_edge_txs};
 
 async fn query_documents_as_alice(client: &JazzClient) -> HashSet<ObjectId> {
     client
-        .query(Query::from("documents"), None)
+        .query(Query::from("documents"), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents as alice")
         .into_iter()
         .map(|(id, _)| id)

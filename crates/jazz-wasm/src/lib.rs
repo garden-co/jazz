@@ -4468,7 +4468,7 @@ mod dynamic_schema_view_tests {
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn wasm_claim_ingress_omits_recursive_json_but_keeps_scalar_prototype_names() {
+    fn wasm_claim_ingress_preserves_nested_json_and_scalar_prototype_names() {
         let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
         let claims = claims_from_js(
             author,
@@ -4482,8 +4482,8 @@ mod dynamic_schema_view_tests {
         )
         .expect("recursive metadata must not reject WASM admission");
 
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("profile")));
-        assert!(!claims.contains_key(&jazz::query::provider_claim_key("mixed")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("profile")));
+        assert!(claims.contains_key(&jazz::query::provider_claim_key("mixed")));
         assert_eq!(
             claims.get(&jazz::query::provider_claim_key("__proto__")),
             Some(&Value::String("safe".to_owned()))

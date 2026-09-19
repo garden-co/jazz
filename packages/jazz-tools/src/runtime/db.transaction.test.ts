@@ -7,38 +7,50 @@ import { localAccountConfig } from "./testing/account-fixtures.js";
 import { createDb } from "./testing/create-internal-db.js";
 
 const todoSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 type TodoSchema = s.Schema<typeof todoSchema>;
 const app: s.App<TodoSchema> = s.defineApp(todoSchema);
 
 const otherTodoSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    note: s.string().default(""),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      note: s.string().default(""),
+    },
+    {},
+  ),
 };
 type OtherTodoSchema = s.Schema<typeof otherTodoSchema>;
 const otherApp: s.App<OtherTodoSchema> = s.defineApp(otherTodoSchema);
 
 const taggedTodoSchema = {
-  tagged_todos: s.table({
-    title: s.string(),
-    tags: s.array(s.string()).default([]),
-  }),
+  tagged_todos: s.table(
+    {
+      title: s.string(),
+      tags: s.array(s.string()).default([]),
+    },
+    {},
+  ),
 };
 type TaggedTodoSchema = s.Schema<typeof taggedTodoSchema>;
 const taggedApp: s.App<TaggedTodoSchema> = s.defineApp(taggedTodoSchema);
 
 const defaultsTodoSchema = {
-  defaults_todos: s.table({
-    title: s.string().default("default title"),
-    done: s.boolean().default(false),
-  }),
+  defaults_todos: s.table(
+    {
+      title: s.string().default("default title"),
+      done: s.boolean().default(false),
+    },
+    {},
+  ),
 };
 type DefaultsTodoSchema = s.Schema<typeof defaultsTodoSchema>;
 const defaultsApp: s.App<DefaultsTodoSchema> = s.defineApp(defaultsTodoSchema);

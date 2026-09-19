@@ -26,7 +26,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     wait_for_query(
         client,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         timeout,
         "EdgeServer query readiness",
         |_| Some(()),
@@ -61,8 +61,9 @@ where
         }
 
         let rows = client
-            .query(query.clone(), None)
+            .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
             .await
+            .map(jazz::tools::test_support::ordinary_rows)
             .unwrap_or_else(|error| panic!("local query after subscription event failed: {error}"));
         if predicate(&rows) {
             return rows;
@@ -120,6 +121,7 @@ async fn fresh_client_resolves_object_with_deep_update_history_impl() {
     for revision in 1..=DEEP_HISTORY_UPDATES {
         writer
             .update(
+                "todos",
                 todo_id,
                 vec![(
                     "title".to_string(),
@@ -132,7 +134,7 @@ async fn fresh_client_resolves_object_with_deep_update_history_impl() {
     let writer_rows = wait_for_query(
         &writer,
         jazz::query::Query::from("todos"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         format!("writer sees final title {final_title}"),
         |rows| {
@@ -155,7 +157,7 @@ async fn fresh_client_resolves_object_with_deep_update_history_impl() {
     let fresh_rows = wait_for_query(
         &fresh_client,
         jazz::query::Query::from("todos"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         format!("fresh client sees final title {final_title}"),
         |rows| {
@@ -343,7 +345,7 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_
     wait_for_query(
         &client_b,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "client b sees inserted todo before update",
         |rows| rows.iter().any(|(id, _)| *id == todo_id).then_some(()),
@@ -352,6 +354,7 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_
 
     let transaction_id = client_a
         .update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
@@ -369,7 +372,7 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_
     let rows_after_update = wait_for_query(
         &client_b,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "client b sees updated todo",
         |rows| {
@@ -424,14 +427,16 @@ async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
     wait_for_query(
         &client_b,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "client b sees inserted todo before delete",
         |rows| rows.iter().any(|(id, _)| *id == todo_id).then_some(()),
     )
     .await;
 
-    let transaction_id = client_a.delete(todo_id).expect("delete todo from client a");
+    let transaction_id = client_a
+        .delete("todos", todo_id)
+        .expect("delete todo from client a");
     support::wait_for_edge_txs(
         &client_a,
         &[transaction_id.expect("ordinary mutation commits immediately")],
@@ -441,7 +446,7 @@ async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
     let rows_after_delete = wait_for_query(
         &client_b,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "client b no longer sees deleted todo",
         |rows| rows.iter().all(|(id, _)| *id != todo_id).then_some(rows),
@@ -502,7 +507,7 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
             let rows = wait_for_query(
                 &client,
                 jazz::query::Query::from("todos"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(25),
                 "query returns row created with external id",
                 |rows| {
@@ -621,7 +626,7 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata_impl() {
     let updated_rows = wait_for_query(
         &client,
         provenance_query,
-        Some(DurabilityTier::Local),
+        jazz::tools::ReadTier::LocalFirst,
         Duration::from_secs(25),
         "updated provenance query returns row",
         |rows| (rows.len() == 1 && rows[0].0.uuid() == &external_id).then_some(rows),
@@ -700,7 +705,7 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row_impl() {
     let rows = wait_for_query(
         &client,
         jazz::query::Query::from("todos"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "query returns updated row from upsert",
         |rows| {
@@ -770,7 +775,7 @@ async fn jazz_tools_cli_two_different_users_sync_values_impl() {
     let rows_on_bob = wait_for_query(
         &client_bob,
         jazz::query::Query::from("todos"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "todos count 1",
         |rows| (rows.len() == 1).then_some(rows),
@@ -780,6 +785,7 @@ async fn jazz_tools_cli_two_different_users_sync_values_impl() {
 
     client_bob
         .update(
+            "todos",
             shared_todo_id,
             vec![("completed".to_string(), Value::Boolean(true))],
         )
@@ -788,7 +794,7 @@ async fn jazz_tools_cli_two_different_users_sync_values_impl() {
     let _ = wait_for_query(
         &client_alice,
         jazz::query::Query::from("todos"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "todo completed=true",
         |rows| {
@@ -820,7 +826,7 @@ async fn jazz_tools_cli_two_different_users_sync_values_impl() {
     let rows_on_alice = wait_for_query(
         &client_alice,
         jazz::query::Query::from("todos"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         format!("titles {:?}", expected_titles),
         |rows| {

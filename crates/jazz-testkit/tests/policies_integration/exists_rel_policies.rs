@@ -119,7 +119,7 @@ async fn local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inn
             wait_for_query(
                 &alice,
                 Query::from(table),
-                Some(jazz::tools::DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "policy evidence stays private",
                 |rows| rows.is_empty().then_some(()),
@@ -206,6 +206,7 @@ async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
 
     let bob_transaction = bob
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("bob update".into()))],
         )
@@ -220,6 +221,7 @@ async fn local_update_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
 
     let alice_transaction = alice
         .update(
+            "protected",
             protected,
             vec![("data".into(), Value::Text("alice update".into()))],
         )
@@ -307,7 +309,7 @@ async fn local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non
         Query::from("admins")
             .filter(eq(col("id"), lit(*admin_id.uuid())))
             .select(["user_id"]),
-        Some(jazz::tools::DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(5),
         "Alice admin row becomes visible",
         |rows| (rows == [(admin_id, vec![Value::Text(super::ALICE_ID.into())])]).then_some(()),
@@ -323,13 +325,14 @@ async fn local_select_with_reverse_exists_rel_policy_allows_admin_and_denies_non
     )
     .await;
     let bob_rows = bob
-        .query_with_read_tier(
+        .query(
             Query::from("admins")
                 .filter(eq(col("id"), lit(*admin_id.uuid())))
                 .select(["user_id"]),
             jazz::tools::ReadTier::Remote,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query admins as Bob");
     assert!(bob_rows.is_empty(), "Bob should not see Alice's admin row");
 
@@ -438,26 +441,28 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that EXISTS_REL scans require an explicit SELECT policy on the
-/// scanned table under enforcing mode.
+/// An uncorrelated EXISTS_REL insert policy may use private admin grants.
+/// Alice's insert settles, Bob's is rejected, and neither can read the grant.
 #[tokio::test]
-#[ignore = "#1759: schema conversion requires ExistsRel policies to include an outer-row equality"]
-async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table() {
+async fn uncorrelated_exists_rel_insert_uses_private_grants() {
     tokio::task::LocalSet::new()
-        .run_until(
-            local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table_inner(),
-        )
+        .run_until(uncorrelated_exists_rel_insert_uses_private_grants_inner())
         .await;
 }
 
-async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table_inner() {
+async fn uncorrelated_exists_rel_insert_uses_private_grants_inner() {
     let projects_policies = permissions(|p| {
+        p.allow_read().always();
         p.allow_insert().where_(pe::exists(
             pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
         ));
     });
     let schema = SchemaBuilder::new()
-        .table(TableSchema::builder("admins").column("user_id", ColumnType::Text))
+        .table(
+            TableSchema::builder("admins")
+                .column("user_id", ColumnType::Text)
+                .policies(permissions(|p| p.allow_read().never())),
+        )
         .table(
             TableSchema::builder("projects")
                 .column("name", ColumnType::Text)
@@ -467,7 +472,7 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
     let server = JazzServer::start_with_schema(schema.clone())
         .await
         .expect("start test server");
-    let client = connect_ready_client(
+    let backend = connect_ready_client(
         &server,
         &schema,
         "exists-rel-admin",
@@ -475,20 +480,86 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
         Duration::from_secs(30),
     )
     .await;
-
-    client
+    let (_, _, grant_tx) = backend
         .insert("admins", crate::row_input!("user_id" => super::ALICE_ID))
-        .expect("seed admin row");
+        .expect("seed private admin grant");
+    jazz_testkit::wait_for_edge_txs(&backend, &[grant_tx.expect("grant transaction")]).await;
 
-    let err = client
-        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        super::ALICE_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        super::BOB_ID,
+        "projects",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let (_, _, bob_tx) = bob
+        .insert("projects", crate::row_input!("name" => "bob project"))
+        .expect("stage Bob's optimistic insert");
+    let rejection = bob
+        .wait_for_transaction(
+            bob_tx.expect("Bob transaction"),
+            jazz::tools::DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect_err("server must reject Bob without a matching grant");
+    assert_transaction_policy_denied(rejection);
+    let (_, _, alice_tx) = alice
         .insert("projects", crate::row_input!("name" => "alice project"))
-        .expect_err(
-            "enforcing mode should deny EXISTS_REL scans when the scanned table lacks an explicit SELECT policy",
-        );
-    assert_client_policy_denied(err, "projects", Operation::Insert);
+        .expect("stage Alice's insert");
+    alice
+        .wait_for_transaction(
+            alice_tx.expect("Alice transaction"),
+            jazz::tools::DurabilityTier::EdgeServer,
+        )
+        .await
+        .expect("private grant authorizes Alice's insert");
 
-    client.shutdown().await.expect("shutdown client");
+    let projects = wait_for_query(
+        &backend,
+        Query::from("projects").select(["name"]),
+        jazz::tools::ReadTier::Remote,
+        Duration::from_secs(5),
+        "only Alice's project is accepted",
+        Some,
+    )
+    .await;
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].1, vec![Value::Text("alice project".into())]);
+
+    for reader in [&alice, &bob] {
+        for tier in [
+            jazz::tools::ReadTier::LocalFirst,
+            jazz::tools::ReadTier::Remote,
+        ] {
+            let grants = wait_for_query(
+                reader,
+                Query::from("admins"),
+                tier,
+                Duration::from_secs(5),
+                "supporting admin grants stay private",
+                Some,
+            )
+            .await;
+            assert!(
+                grants.is_empty(),
+                "policy evaluation must not expose admin grants"
+            );
+        }
+    }
+
+    alice.shutdown().await.expect("shutdown Alice");
+    bob.shutdown().await.expect("shutdown Bob");
+    backend.shutdown().await.expect("shutdown backend");
     server.shutdown().await;
 }
 
@@ -677,7 +748,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
     .await;
 
     let bob_transaction = bob
-        .delete(protected)
+        .delete("protected", protected)
         .expect("non-admin delete should be accepted optimistically")
         .expect("non-admin delete should be pending server policy evaluation");
     assert!(
@@ -688,7 +759,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
     );
 
     let alice_transaction = alice
-        .delete(protected)
+        .delete("protected", protected)
         .expect("admin delete should be accepted optimistically");
     if let Some(transaction) = alice_transaction {
         alice
@@ -697,7 +768,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
             .expect("admin delete should be allowed");
     }
     let second_delete = alice
-        .delete(protected)
+        .delete("protected", protected)
         .expect_err("deleted row should not be deleted again");
     assert!(format!("{second_delete:?}").contains("row already deleted"));
 
@@ -729,7 +800,6 @@ async fn uncorrelated_exists_select_tracks_private_grants() {
 async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyExpr) {
     tokio::task::LocalSet::new()
         .run_until(async {
-            use jazz::tools::DurabilityTier;
             use jazz_testkit::{
                 connect_ready_user, has_added_id, has_removed, wait_for_edge_txs, wait_for_query,
                 wait_for_subscription_update,
@@ -785,7 +855,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "empty grant table denies SELECT",
                 |rows| rows.is_empty().then_some(()),
@@ -809,7 +879,7 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "duplicate grants produce one row",
                 |rows| (rows == [(row, vec![Value::Text("secret".into())])]).then_some(()),
@@ -818,18 +888,18 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &bob,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "Alice's grant does not authorize Bob",
                 |rows| rows.is_empty().then_some(()),
             )
             .await;
-            let tx = admin.delete(grant1).unwrap();
+            let tx = admin.delete("grants", grant1).unwrap();
             wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "second grant keeps access",
                 |rows| (rows.len() == 1).then_some(()),
@@ -838,19 +908,19 @@ async fn uncorrelated_select_tracks_private_grants(policy: jazz::tools::PolicyEx
             wait_for_query(
                 &alice,
                 Query::from("grants"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "private grant rows stay hidden",
                 |rows| rows.is_empty().then_some(()),
             )
             .await;
             log.clear();
-            let tx = admin.delete(grant2).unwrap();
+            let tx = admin.delete("grants", grant2).unwrap();
             wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
             wait_for_query(
                 &alice,
                 query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 Duration::from_secs(5),
                 "no remaining grants denies SELECT",
                 |rows| rows.is_empty().then_some(()),

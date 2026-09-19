@@ -551,7 +551,7 @@ pub async fn wait_for_edge_query_ready(client: &JazzClient, table: &str, timeout
     wait_for_query(
         client,
         Query::from(table),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         timeout,
         format!("EdgeServer query readiness for {table}"),
         |_| Some(()),
@@ -593,7 +593,7 @@ where
     wait_for_query(
         client,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         DEFAULT_ROWS_TIMEOUT,
         description,
         check_rows,

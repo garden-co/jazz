@@ -124,7 +124,7 @@ async fn cold_old_schema_id_query_reads_new_array_column_row() {
             support::wait_for_edge_txs(&bob, &[tx.expect("insert transaction")]).await;
             let rows = tokio::time::timeout(
                 Duration::from_secs(10),
-                alice.query_with_read_tier(
+                alice.query(
                     Query::from("todos").filter(jazz::query::eq(
                         jazz::query::col("id"),
                         jazz::query::lit(*row_id.uuid()),
@@ -135,6 +135,7 @@ async fn cold_old_schema_id_query_reads_new_array_column_row() {
             .await
             .expect("old-schema ID query settles")
             .expect("old-schema ID query succeeds");
+            let rows = jazz::tools::test_support::ordinary_rows(rows);
             assert_eq!(
                 rows,
                 vec![(
@@ -839,7 +840,7 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
     let rows = wait_for_query(
         &alice,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "peer edge serves the row written after catalogue replication",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -945,7 +946,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
     let rows = wait_for_query(
         &alice_v2,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "restarted edge serves row written with replayed v2 schema",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -1051,8 +1052,9 @@ async fn persistent_dynamic_edge_reopens_catalogue_for_trusted_client_while_regi
     // Local evaluation proves the cached catalogue was installed. A fresh
     // EdgeServer query would require upstream coverage while core is offline.
     let rows = first_client
-        .query_with_read_tier(Query::from("users"), jazz::tools::ReadTier::LocalFirst)
+        .query(Query::from("users"), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query persisted catalogue locally");
     assert!(rows.is_empty());
 
@@ -1195,12 +1197,14 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         "both edge queries become empty after retightening",
         || async {
             let alice_rows = alice
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .ok()?;
             let bob_rows = bob
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .ok()?;
             (alice_rows.is_empty() && bob_rows.is_empty()).then_some(())
         },
@@ -1380,7 +1384,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
             Duration::from_secs(3),
             reader.query(
                 jazz::query::Query::from("users"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
             ),
         )
         .await
@@ -1417,7 +1421,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
     let rows_after_permissions = wait_for_query(
         &reader,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "reader sees row after permissions head publish",
         |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
@@ -1487,7 +1491,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     assert!(
         tokio::time::timeout(
             Duration::from_secs(3),
-            observer.query(query.clone(), Some(DurabilityTier::EdgeServer)),
+            observer.query(query.clone(), jazz::tools::ReadTier::Remote),
         )
         .await
         .is_err(),
@@ -1507,7 +1511,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     let rows_after_publish = wait_for_query(
         &observer,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "pre-permissions user write stays hidden after permissions publish",
         |rows| rows.is_empty().then_some(rows),
@@ -1527,7 +1531,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     let rows_after_create = wait_for_query(
         &observer,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "observer sees accepted row after permissions publish",
         |rows| {
@@ -1546,6 +1550,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
 
     let transaction_id = writer
         .update(
+            "users",
             accepted_row_id,
             vec![(
                 "name".to_string(),
@@ -1562,7 +1567,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     let rows_after_update = wait_for_query(
         &observer,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "observer sees update after permissions publish",
         |rows| {
@@ -1576,7 +1581,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     assert_eq!(rows_after_update.len(), 1);
 
     let transaction_id = writer
-        .delete(accepted_row_id)
+        .delete("users", accepted_row_id)
         .expect("delete should succeed once permissions exist");
     support::wait_for_edge_txs(
         &writer,
@@ -1587,7 +1592,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     let rows_after_delete = wait_for_query(
         &observer,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "observer sees delete after permissions publish",
         |rows| rows.is_empty().then_some(rows),
@@ -1634,7 +1639,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
     assert!(
         tokio::time::timeout(
             Duration::from_secs(3),
-            observer.query(query.clone(), Some(DurabilityTier::EdgeServer)),
+            observer.query(query.clone(), jazz::tools::ReadTier::Remote),
         )
         .await
         .is_err(),
@@ -1662,7 +1667,7 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
     let observer_rows = wait_for_query(
         &observer,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "observer sees only post-timeout allowed row",
         |rows| (rows.len() == 1 && rows[0].0 == allowed_row_id).then_some(rows),
@@ -1766,7 +1771,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     let rows_after_retighten = wait_for_query(
         &reader,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "reader query after tighter permissions head",
         Some,
@@ -1854,7 +1859,7 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
     let bob_rows = wait_for_query(
         &bob,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob sees alice's user with email column",
         |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
@@ -1941,8 +1946,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         .await
         .expect("connect bob with unpublished draft schema");
     let query = jazz::query::Query::from("users");
-    let mut pending_query =
-        Box::pin(bob.query_with_read_tier(query.clone(), jazz::tools::ReadTier::Remote));
+    let mut pending_query = Box::pin(bob.query(query.clone(), jazz::tools::ReadTier::Remote));
     assert!(
         tokio::time::timeout(Duration::from_millis(250), pending_query.as_mut())
             .await
@@ -1955,7 +1959,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         pre_lens_attempts += 1;
         let attempt = tokio::time::timeout(
             Duration::from_millis(250),
-            bob.query(query.clone(), Some(DurabilityTier::EdgeServer)),
+            bob.query(query.clone(), jazz::tools::ReadTier::Remote),
         )
         .await;
         assert!(
@@ -1974,14 +1978,14 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         .expect("catalogue activation wakes the existing query")
         .expect("the pending query was not permanently rejected");
     assert_eq!(resumed_rows.len(), 1);
-    assert_eq!(resumed_rows[0].0, row_id);
+    assert_eq!(resumed_rows[0].key, row_id);
     drop(pending_query);
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob sees Alice's row after atomic v1-to-v2 migration publication",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -2094,7 +2098,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     let rows = wait_for_query(
         &charlie,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "charlie sees all rows transformed to v3",
         |rows| {
@@ -2219,7 +2223,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
     let rows = wait_for_query(
         &bob,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob sees alice row through chained column renames",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -2302,7 +2306,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     let rows = wait_for_query(
         &alice,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "alice sees bob row through chained column renames",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -2381,7 +2385,7 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     let rows = wait_for_query(
         &bob,
         jazz::query::Query::from("people"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob sees alice row through table rename",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -2493,7 +2497,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     let rows = wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob query sees subscription row through table rename",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -2616,7 +2620,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     let rows = wait_for_query(
         &alice,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "alice query sees new-table row through table rename",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
@@ -2697,6 +2701,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
 
     let transaction_id = bob
         .update(
+            "people",
             row_id,
             vec![
                 (
@@ -2719,7 +2724,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     let rows_after_update = wait_for_query(
         &bob,
         jazz::query::Query::from("people"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob sees copied row on renamed table after update",
         |rows| {
@@ -2736,7 +2741,9 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     .await;
     assert_eq!(rows_after_update.len(), 1);
 
-    let transaction_id = bob.delete(row_id).expect("bob deletes renamed row");
+    let transaction_id = bob
+        .delete("people", row_id)
+        .expect("bob deletes renamed row");
     support::wait_for_edge_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
@@ -2746,7 +2753,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     let rows_after_delete = wait_for_query(
         &bob,
         jazz::query::Query::from("people"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob sees renamed row deleted",
         |rows| rows.is_empty().then_some(rows),
@@ -2836,7 +2843,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     let rows = wait_for_query_results(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob join sees v1 post author through table rename",
         |rows| (rows.len() == 1).then_some(rows),
@@ -2949,7 +2956,7 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     let rows = wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob array include sees v1 posts through table rename",
         |rows| (rows.len() == 1 && rows[0].0 == author_row_id).then_some(rows),
@@ -3085,7 +3092,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
     let bob_rows = wait_for_query_results(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob sees joined row after provenance lens applies current permissions",
         |rows| (rows.len() == 2).then_some(rows),
@@ -3113,6 +3120,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
 
     let transaction_id = bob
         .update(
+            "posts",
             second_post_id,
             vec![("viewer_name".to_owned(), Value::Text(test_user_id("alice")))],
         )
@@ -3126,7 +3134,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
     let retained_bob_rows = wait_for_query_results(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "Bob retains only the lens-transformed joined occurrence",
         |rows| (rows.len() == 1).then_some(rows),
@@ -3137,7 +3145,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
     let alice_rows = wait_for_query_results(
         &alice,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(3),
         "Alice remains denied the lens-transformed joined occurrence",
         Some,
@@ -3272,7 +3280,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     let rows = wait_for_query(
         &carol,
         jazz::query::Query::from("members"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "carol sees every schema version projected to members",
         |rows| {
@@ -3384,7 +3392,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     let rows = wait_for_query(
         &bob,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "v3 users query only sees rows from the re-added table lineage",
         |rows| {
@@ -3468,7 +3476,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
     wait_for_query(
         &bob,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob's v2 user settled at edge",
         |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
@@ -3487,7 +3495,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
     let alice_rows = wait_for_query(
         &alice,
         jazz::query::Query::from("users"),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "alice sees bob's user without email column",
         |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
@@ -3562,7 +3570,7 @@ async fn keeps_authorization_through_v1_head_impl() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "alice row settled before v1 permissions publish",
         |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
@@ -3597,7 +3605,7 @@ async fn keeps_authorization_through_v1_head_impl() {
     let bob_rows = wait_for_query(
         &bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
         "bob sees alice row through v1 authorization schema",
         |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),

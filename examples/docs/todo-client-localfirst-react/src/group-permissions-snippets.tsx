@@ -3,19 +3,31 @@ import { useAll, useDb } from "jazz-tools/react";
 
 // #region group-schema
 const schema = {
-  workspaces: s.table({
-    name: s.string(),
-  }),
-  workspaceMembers: s.table({
-    workspaceId: s.ref("workspaces"),
-    user_id: s.uuid(),
-    role: s.enum("reader", "writer", "contributor", "admin"),
-  }),
-  documents: s.table({
-    title: s.string(),
-    content: s.string(),
-    workspaceId: s.ref("workspaces"),
-  }),
+  workspaces: s.table(
+    {
+      name: s.string(),
+    },
+    {
+      members: s.reverse("workspaceMembers", "workspace"),
+      documents: s.reverse("documents", "workspace"),
+    },
+  ),
+  workspaceMembers: s.table(
+    {
+      workspaceId: s.uuid(),
+      user_id: s.uuid(),
+      role: s.enum("reader", "writer", "contributor", "admin"),
+    },
+    { workspace: s.rel("workspaces", "workspaceId") },
+  ),
+  documents: s.table(
+    {
+      title: s.string(),
+      content: s.string(),
+      workspaceId: s.uuid(),
+    },
+    { workspace: s.rel("workspaces", "workspaceId") },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;

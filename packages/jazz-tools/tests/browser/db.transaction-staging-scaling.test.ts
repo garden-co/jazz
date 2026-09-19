@@ -5,7 +5,7 @@ import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { createBrowserTestDb } from "./account-fixtures.js";
 
 const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }),
+  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
 });
 
 describe("exact local transaction write merging", () => {

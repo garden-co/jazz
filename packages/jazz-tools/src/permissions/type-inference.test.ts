@@ -114,6 +114,14 @@ const app = {
   resource_access_edges: new ResourceGrantQueryBuilder(),
   wasmSchema: {
     todos: {
+      relations: {
+        project: { kind: "forward" as const, table: "projects", column: "projectId" },
+        resource_access_edgesViaResource: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "resourceRelation",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Text" }, nullable: false },
@@ -127,12 +135,32 @@ const app = {
       ],
     },
     projects: {
+      relations: {
+        todosViaProject: { kind: "reverse" as const, table: "todos", relation: "project" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Text" }, nullable: false },
       ],
     },
     teams: {
+      relations: {
+        team_team_edgesViaChild_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "child_teamRelation",
+        },
+        team_team_edgesViaParent_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "parent_teamRelation",
+        },
+        resource_access_edgesViaTeam: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "teamRelation",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "kind", column_type: { type: "Text" }, nullable: false },
@@ -140,6 +168,10 @@ const app = {
       ],
     },
     team_team_edges: {
+      relations: {
+        child_teamRelation: { kind: "forward" as const, table: "teams", column: "child_team" },
+        parent_teamRelation: { kind: "forward" as const, table: "teams", column: "parent_team" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -157,6 +189,10 @@ const app = {
       ],
     },
     resource_access_edges: {
+      relations: {
+        teamRelation: { kind: "forward" as const, table: "teams", column: "team" },
+        resourceRelation: { kind: "forward" as const, table: "todos", column: "resource" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -196,7 +232,7 @@ describe("permissions type inference", () => {
       const reachableTeams = policy.teams.gather({
         start: { kind: "individual", identity_key: session.claims["sub"] },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
       });
 
       function hasViewerGrant(resource: unknown) {

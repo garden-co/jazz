@@ -33,7 +33,7 @@ use crate::legacy_test_future::{
 };
 use crate::protocol::{
     AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
-    CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp, PeerPayloadInventory,
+    KnownStateCompleteness, KnownStateDeclaration, LensOp, PeerPayloadInventory,
     PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, RowVersionRef,
     ShapeAst, SnapshotRef, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
     VersionBundle, VersionBundleScope, VersionCarrier,
@@ -144,6 +144,7 @@ mod mutations;
 mod node_runtime;
 mod peer_connection;
 mod reads;
+mod reference_metadata_migration;
 mod subscriptions;
 mod support;
 mod transactions;

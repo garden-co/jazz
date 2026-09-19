@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
@@ -443,4 +444,49 @@ test("storage compatibility executes the historical browser file and propagates 
     "browser storage compatibility corpus",
   ]);
   assert.equal(workflowModel.jobs["test-storage-compat"]["timeout-minutes"], 30);
+});
+
+test("CI lint enforces SPEC issue links and propagates an unlinked question failure", async (t) => {
+  const lint = planFor({ partition: "lint" });
+  const assertValidator = (commands) => {
+    assert.deepEqual(
+      commands.filter(({ label }) => label === "SPEC issue links"),
+      [
+        {
+          label: "SPEC issue links",
+          executable: "node",
+          args: ["dev/gates/spec-open-questions.mjs"],
+        },
+      ],
+      "lint must execute the SPEC issue-link validator exactly once",
+    );
+  };
+  assertValidator(lint);
+  assertCiSuiteUsesOnlySharedCorrectnessPartitions(workflowModel);
+  assert.throws(
+    () => assertValidator(lint.filter(({ label }) => label !== "SPEC issue links")),
+    /must execute the SPEC issue-link validator/,
+  );
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-spec-links-contract-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const relative of ["dev/gates", "crates/jazz/SPEC", "crates/groove/SPEC"])
+    fs.mkdirSync(path.join(directory, relative), { recursive: true });
+  fs.copyFileSync(
+    path.join(root, "dev/gates/spec-open-questions.mjs"),
+    path.join(directory, "dev/gates/spec-open-questions.mjs"),
+  );
+  const spec = path.join(directory, "crates/jazz/SPEC/fixture.md");
+  const executeValidator = async (item) => {
+    if (item.label !== "SPEC issue links") return;
+    const result = spawnSync(item.executable, item.args, { cwd: directory, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  fs.writeFileSync(spec, "🔶 [#1](https://github.com/garden-co/jazz/issues/1) — linked.\n");
+  await runPlan(lint, executeValidator);
+  fs.writeFileSync(spec, "🔶 An unresolved question without an issue.\n");
+  await assert.rejects(
+    runPlan(lint, executeValidator),
+    /unresolved question lacks a GitHub issue link/,
+  );
 });

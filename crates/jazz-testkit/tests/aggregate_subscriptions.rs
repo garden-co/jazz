@@ -1,3 +1,4 @@
+use jazz::tools::test_support::AllowAll;
 use jazz_testkit as support;
 
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ fn metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -33,6 +35,7 @@ fn count_named_metrics_schema() -> Schema {
                 .column("count", ColumnType::Text)
                 .column("score", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -44,6 +47,7 @@ fn mixed_metrics_schema() -> Schema {
                 .column("score", ColumnType::Integer)
                 .column("high", ColumnType::BigInt),
         )
+        .allow_all()
         .build()
 }
 
@@ -54,6 +58,7 @@ fn nullable_metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .nullable_column("score", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -64,6 +69,7 @@ fn bigint_metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::BigInt),
         )
+        .allow_all()
         .build()
 }
 
@@ -74,6 +80,7 @@ fn double_metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::Double),
         )
+        .allow_all()
         .build()
 }
 
@@ -84,6 +91,7 @@ fn counter_schema(count_type: ColumnType) -> Schema {
                 .column("name", ColumnType::Text)
                 .column("count", count_type),
         )
+        .allow_all()
         .build();
     let table = schema
         .get_mut(&TableName::new("counters"))
@@ -142,8 +150,9 @@ async fn wait_for_values(
     let last_actual;
     loop {
         let mut actual = client
-            .query(query.clone(), None)
+            .query(query.clone(), jazz::tools::ReadTier::LocalFirst)
             .await
+            .map(jazz::tools::test_support::ordinary_rows)
             .unwrap_or_else(|err| panic!("{label}: query failed: {err}"))
             .into_iter()
             .map(|(_, values)| values)
@@ -437,7 +446,7 @@ async fn wait_for_one_shot_values(
     wait_for_query(
         client,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         label,
         |rows| {
@@ -663,7 +672,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 )
                 .await;
 
-            let delete_tx = writer.delete(b1).expect("delete b1 and empty b");
+            let delete_tx = writer.delete("metrics", b1).expect("delete b1 and empty b");
             support::wait_for_edge_txs(
                 &writer,
                 &[delete_tx.expect("ordinary mutation commits immediately")],
@@ -687,7 +696,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 )
                 .await;
 
-            let tx = writer.delete(a1).expect("delete a1");
+            let tx = writer.delete("metrics", a1).expect("delete a1");
             support::wait_for_edge_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
@@ -996,7 +1005,9 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                 )
                 .await;
 
-            let tx = writer.delete(rows[2]).expect("delete gone group");
+            let tx = writer
+                .delete("metrics", rows[2])
+                .expect("delete gone group");
             support::wait_for_edge_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
@@ -1116,7 +1127,9 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 )
                 .await;
 
-            let tx = writer.delete(first).expect("delete first metric");
+            let tx = writer
+                .delete("metrics", first)
+                .expect("delete first metric");
             support::wait_for_edge_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
@@ -1129,7 +1142,9 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 )
                 .await;
 
-            let tx = writer.delete(second).expect("delete second metric");
+            let tx = writer
+                .delete("metrics", second)
+                .expect("delete second metric");
             support::wait_for_edge_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
@@ -1232,7 +1247,9 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
             assert_eq!(visible_avg, max, "AVG must equal f64::MAX exactly");
 
             let first_delete_delivery = avg_stream.delivered_deltas + 1;
-            let tx = writer.delete(first).expect("delete first maximum metric");
+            let tx = writer
+                .delete("metrics", first)
+                .expect("delete first maximum metric");
             support::wait_for_edge_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
@@ -1247,7 +1264,9 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
                 .await;
 
             let last_delete_delivery = avg_stream.delivered_deltas + 1;
-            let tx = writer.delete(second).expect("delete second maximum metric");
+            let tx = writer
+                .delete("metrics", second)
+                .expect("delete second maximum metric");
             support::wait_for_edge_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
@@ -1609,7 +1628,7 @@ async fn integer_min_max_and_order_by_remain_signed() {
                 jazz::query::Query::from("metrics")
                     .select(["bucket", "score"])
                     .order_by("score", OrderDirection::Asc),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "integer order_by stays signed",
                 |rows| {
@@ -1786,7 +1805,7 @@ async fn integer_counter_columns_merge_signed_public_values() {
             wait_for_query(
                 &bob,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "bob sees counter base",
                 |rows| {
@@ -1802,10 +1821,18 @@ async fn integer_counter_columns_merge_signed_public_values() {
             .await;
 
             let alice_tx = alice
-                .update(counter_id, vec![("count".to_owned(), Value::Integer(3))])
+                .update(
+                    "counters",
+                    counter_id,
+                    vec![("count".to_owned(), Value::Integer(3))],
+                )
                 .expect("alice updates counter");
             let bob_tx = bob
-                .update(counter_id, vec![("count".to_owned(), Value::Integer(5))])
+                .update(
+                    "counters",
+                    counter_id,
+                    vec![("count".to_owned(), Value::Integer(5))],
+                )
                 .expect("bob updates counter");
             support::wait_for_edge_txs(
                 &alice,
@@ -1821,7 +1848,7 @@ async fn integer_counter_columns_merge_signed_public_values() {
             wait_for_query(
                 &alice,
                 query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "signed integer counter deltas merge",
                 |rows| {
@@ -1875,7 +1902,7 @@ async fn bigint_counter_columns_merge_signed_public_values() {
             wait_for_query(
                 &bob,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "bob sees bigint counter base",
                 |rows| {
@@ -1892,12 +1919,14 @@ async fn bigint_counter_columns_merge_signed_public_values() {
 
             let alice_tx = alice
                 .update(
+                    "counters",
                     counter_id,
                     vec![("count".to_owned(), Value::BigInt(base + 3))],
                 )
                 .expect("alice updates counter");
             let bob_tx = bob
                 .update(
+                    "counters",
                     counter_id,
                     vec![("count".to_owned(), Value::BigInt(base + 5))],
                 )
@@ -1916,7 +1945,7 @@ async fn bigint_counter_columns_merge_signed_public_values() {
             wait_for_query(
                 &alice,
                 query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "signed bigint counter deltas merge",
                 |rows| {
@@ -2014,7 +2043,9 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             )
             .await;
 
-            let tx = admin.delete(admin_row).expect("delete admin row");
+            let tx = admin
+                .delete("metrics", admin_row)
+                .expect("delete admin row");
             support::wait_for_edge_txs(
                 &admin,
                 &[tx.expect("ordinary mutation commits immediately")],

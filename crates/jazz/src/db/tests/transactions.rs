@@ -537,7 +537,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         .unwrap();
     owner.publish_schema_with_lens(2, publication).unwrap();
     owner
-        .set_current_write_schema(CurrentWriteSchema {
+        .activate_catalogue_schema_for_test(CurrentWriteSchema {
             revision: 2,
             schema: renamed.id,
         })
@@ -2253,7 +2253,9 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
 /// re-authorized as bob, while the handle commit consumes that bound identity.
 #[test]
 fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    use crate::tools::test_support::AllowAll;
+    let schema = doctest_support::schema().allow_all();
+    let db = open_db(0x11, AuthorSubject::for_test_bytes([0xa1; 16]), &schema);
     let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let open = OpenTransactionId::new();

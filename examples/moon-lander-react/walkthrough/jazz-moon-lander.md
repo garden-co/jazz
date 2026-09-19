@@ -73,7 +73,7 @@ const schema = {
     landerFuelLevel: s.int(),
     landerSpawnX: s.int(),
     thrusting: s.boolean(),
-  }),
+  }, {  }),
 ```
 
 </div>
@@ -86,12 +86,12 @@ const schema = {
     spawnedAtSeconds: s.int(),
     collected: s.boolean(),
     collectedBy: s.string(),
-  }),
+  }, {}),
   chat_messages: s.table({
     playerId: s.string(),
     message: s.string(),
     sentAtSeconds: s.int(),
-  }),
+  }, {}),
 };
 ```
 

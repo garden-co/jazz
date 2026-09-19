@@ -250,7 +250,7 @@ describe("client session resolution", () => {
     expect(arrayAudience?.claims.aud).toEqual(["jazz-web", "jazz-mobile"]);
   });
 
-  it("keeps complete public JWT metadata out of the delegated policy corpus", () => {
+  it("preserves nested provider claims while excluding registered JWT metadata from policy claims", () => {
     const state = resolveClientSessionStateSync({
       appId: "app-jwt-public-policy-split",
       jwtToken: makeJwt({
@@ -276,17 +276,17 @@ describe("client session resolution", () => {
       profile: { handler_only: true },
     });
 
-    // The browser relay instead delegates exactly the non-recursive provider
+    // The browser relay delegates exactly the nested provider
     // corpus that native admission reconstructs from the verified JWT.
     expect(state.internalSession?.claims).toEqual({
       role: "editor",
       team_ids: ["team-a", "team-b"],
+      profile: { handler_only: true },
     });
     expect(state.internalSession?.claims).not.toHaveProperty("iss");
     expect(state.internalSession?.claims).not.toHaveProperty("sub");
     expect(state.internalSession?.claims).not.toHaveProperty("aud");
     expect(state.internalSession?.claims).not.toHaveProperty("exp");
-    expect(state.internalSession?.claims).not.toHaveProperty("profile");
 
     // Worker handoff copies only the Session's policy corpus. The complete
     // handler presentation payload is identity-local and cannot accidentally
@@ -297,7 +297,7 @@ describe("client session resolution", () => {
     expect({ ...internal }.claims).toEqual(internal.claims);
   });
 
-  it("preserves prototype-named flat claims as own data properties through public cloning", () => {
+  it("preserves prototype-named claims as own data properties through public cloning", () => {
     // JSON payloads cannot contain symbols or accessors, but they can contain
     // every string key, including names with legacy Object.prototype behavior.
     const payload = JSON.parse(
@@ -313,11 +313,13 @@ describe("client session resolution", () => {
     )!;
 
     expect(Object.getPrototypeOf(internal.claims)).toBeNull();
-    expect(Object.keys(internal.claims)).toEqual(["constructor", "role"]);
-    expect(Object.hasOwn(internal.claims, "__proto__")).toBe(false);
+    expect(Object.keys(internal.claims)).toEqual(["__proto__", "constructor", "prototype", "role"]);
+    expect(Object.hasOwn(internal.claims, "__proto__")).toBe(true);
+    expect(internal.claims.__proto__).toEqual({ polluted: true });
     expect(Object.hasOwn(internal.claims, "constructor")).toBe(true);
     expect(internal.claims.constructor).toBe("app-constructor");
-    expect(Object.hasOwn(internal.claims, "prototype")).toBe(false);
+    expect(Object.hasOwn(internal.claims, "prototype")).toBe(true);
+    expect(internal.claims.prototype).toEqual({ version: 1 });
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
 
     // Public publication clones and freezes the claim dictionary, while the

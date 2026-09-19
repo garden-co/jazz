@@ -1,6 +1,6 @@
 {
   "name": "jazz-napi",
-  "version": "2.0.0-alpha.54",
+  "version": "2.0.0-alpha.55",
   "description": "Native Node.js bindings for Jazz runtime",
   "license": "MIT",
   "repository": {
@@ -51,6 +51,7 @@
     "packageName": "@garden-co/jazz-napi",
     "targets": [
       "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
       "x86_64-pc-windows-msvc",
       "x86_64-apple-darwin",
       "aarch64-apple-darwin"

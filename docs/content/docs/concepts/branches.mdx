@@ -31,10 +31,13 @@ import { schema as s } from "jazz-tools";
 
 const schema = {
   documents: s
-    .table({
-      branch: s.string(),
-      title: s.string(),
-    })
+    .table(
+      {
+        branch: s.string(),
+        title: s.string(),
+      },
+      {},
+    )
     .branchBy("branch"),
 };
 
@@ -74,18 +77,28 @@ branch needs queryable metadata, model it as an ordinary row and make the branch
 
 ```ts title="schema.ts"
 const schema = {
-  branches: s.table({
-    workspace_id: s.uuid(),
-    name: s.string(),
-    base_branch_id: s.ref("branches").optional(),
-    base_snapshot_ref: s.json().optional(),
-    status: s.enum(["open", "approved", "archived"]),
-  }),
+  branches: s.table(
+    {
+      workspace_id: s.uuid(),
+      name: s.string(),
+      base_branch_id: s.uuid().optional(),
+      base_snapshot_ref: s.json().optional(),
+      status: s.enum(["open", "approved", "archived"]),
+    },
+    {
+      baseBranch: s.rel("branches", "base_branch_id"),
+      derivedBranches: s.reverse("branches", "baseBranch"),
+      documents: s.reverse("documents", "branch"),
+    },
+  ),
   documents: s
-    .table({
-      branch_id: s.ref("branches"),
-      title: s.string(),
-    })
+    .table(
+      {
+        branch_id: s.uuid(),
+        title: s.string(),
+      },
+      { branch: s.rel("branches", "branch_id") },
+    )
     .branchBy("branch_id"),
 };
 ```
@@ -131,11 +144,14 @@ them with the array form:
 ```ts
 const schema = {
   documents: s
-    .table({
-      workspace_id: s.ref("workspaces"),
-      branch_id: s.ref("branches"),
-      title: s.string(),
-    })
+    .table(
+      {
+        workspace_id: s.uuid(),
+        branch_id: s.uuid(),
+        title: s.string(),
+      },
+      { workspace: s.rel("workspaces", "workspace_id"), branch: s.rel("branches", "branch_id") },
+    )
     .branchBy(["workspace_id", "branch_id"]),
 };
 ```

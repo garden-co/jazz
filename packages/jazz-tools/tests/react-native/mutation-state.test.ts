@@ -11,12 +11,12 @@ import {
 
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({ documents: schema.table({ title: schema.string() }) });
+const app = schema.defineApp({ documents: schema.table({ title: schema.string() }, {}) });
 
 // writeState is the existing low-level NativeDb contract; public WriteHandle
 // exposes waits, so this receipt intentionally uses the real binding adapter.
 it("reads live native fate/durability and retires closed write state", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const commands = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
     const native = new NativeForegroundDb(
       fixture.nativeHost.openAttached(fixture.capability),
@@ -47,7 +47,7 @@ it("reads live native fate/durability and retires closed write state", async () 
 });
 
 it("delivers unwaited authority rejection once and leaves waited rejection with its waiter", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
@@ -68,7 +68,8 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
       permissions,
     });
     await withNativeRelayFixture(
-      { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
+      app,
+      permissions,
       async (fixture) => {
         const db = await fixture.createDb();
         const errors = vi.fn();
@@ -112,7 +113,7 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
 }, 30_000);
 
 it("closes an unfinished large upload without publication or late mutation callbacks", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const observer = await fixture.createDb();
     const commands = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
     const native = new NativeForegroundDb(
@@ -147,7 +148,7 @@ it("closes an unfinished large upload without publication or late mutation callb
 it.each(["finish", "abort"] as const)(
   "keeps an upload retryable when %s admission reaches native capacity",
   async (terminal) => {
-    await withNativeRelayFixture(app, async (fixture) => {
+    await withNativeRelayFixture(app, {}, async (fixture) => {
       const commands = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
       const runtime = fixture.nativeHost.openAttached(fixture.capability);
       const native = new NativeForegroundDb(runtime, commands);

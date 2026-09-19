@@ -103,7 +103,7 @@ run_gate cargo-check-jazz-sim-benches cargo check -p jazz-sim --benches
 run_gate ts-wire-codec dev/gates/ts-wire-codec.sh
 run_gate spec-open-questions node dev/gates/spec-open-questions.mjs
 run_gate ignored-tests node dev/gates/ignored-tests.mjs
-run_gate m3-maintained-one-shot env JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle
+run_gate m3-maintained-one-shot env JAZZ_SEED_COUNT=300 dev/t --exact node::tests::harness::m3_maintained_one_shot_differential_oracle -- --ignored
 run_gate incremental-delivery-canary cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact
 
 if [[ -n "$only" ]] && ((ran_count == 0)); then

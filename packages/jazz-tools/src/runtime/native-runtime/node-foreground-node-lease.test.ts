@@ -18,7 +18,7 @@ import { createBrowserAuthSessionKey } from "../browser-worker-config.js";
 const roots: string[] = [];
 let restoreCwd: (() => void) | undefined;
 const publicRuntimeEntry = new URL("../../../dist/index.js", import.meta.url).href;
-const memoryApp = s.defineApp({ notes: s.table({ title: s.string() }) });
+const memoryApp = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
 
 afterEach(async () => {
   restoreCwd?.();

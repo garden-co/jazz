@@ -11,10 +11,30 @@ import {
   loadedHarnessNapiFingerprint,
   patchInstalledJazzNapi,
   runStarter,
-  loadStarterSchema,
+  loadStarterArtifacts,
 } from "./run-starter.js";
 
-import { getStarterConfig } from "./starters.js";
+import { getStarterConfig, KNOWN_STARTERS } from "./starters.js";
+
+test("production admission origin matches each starter's Playwright server", () => {
+  for (const starter of KNOWN_STARTERS) {
+    const config = getStarterConfig(starter);
+    const source = fs.readFileSync(
+      path.resolve(import.meta.dirname, "../../../starters", starter, "playwright.config.ts"),
+      "utf8",
+    );
+    // The first URL is the production BASE_URL (before the dev alternative).
+    const productionOrigin = source.match(
+      /const BASE_URL = (?:PROD \? )?"(http:\/\/localhost:\d+)"/,
+    )?.[1];
+    assert.ok(productionOrigin, `${starter}: production BASE_URL must be explicit`);
+    assert.equal(
+      config.appOrigin,
+      productionOrigin,
+      `${starter}: admission JWKS must reach the production server`,
+    );
+  }
+});
 
 function missingTarballDir(): string {
   return path.join(os.tmpdir(), `create-jazz-e2e-missing-${randomUUID()}`);
@@ -224,12 +244,12 @@ test("cleanup removes a harness-created temporary work directory", async (t) => 
 test("loads separate starter permissions and retains account ownership predicates", async () => {
   const repoRoot = path.resolve(import.meta.dirname, "../../..");
   for (const starter of ["ts-hybrid", "sveltekit-hybrid"] as const) {
-    const loaded = await loadStarterSchema(
+    const loaded = await loadStarterArtifacts(
       path.join(repoRoot, "starters", starter),
       getStarterConfig(starter),
     );
-    assert.ok(loaded && !(loaded instanceof Uint8Array));
-    const policies = loaded.todos?.policies;
+    assert.ok(loaded.schema.todos);
+    const policies = loaded.permissions.todos;
     assert.ok(policies, `${starter} must publish its separate permissions module`);
     for (const operation of ["select", "update", "delete"] as const) {
       assert.match(JSON.stringify(policies[operation]), /\$createdBy.account/);

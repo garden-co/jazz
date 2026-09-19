@@ -162,13 +162,16 @@ pub(crate) struct ClosurePathSegment {
 /// One join-side contribution payload rooted at the app result rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct JoinContribution {
+    /// Nested contributors are restricted to their already-admitted parent
+    /// rows. None anchors the contribution at the visible query root.
+    pub(crate) parent: Option<SourceId>,
     /// Stable contribution name for diagnostics/sinks.
     pub(crate) id: String,
     /// Source occurrence for the contributing join rows.
     pub(crate) source: SourceId,
     /// Normalized relation node that proves payload rows contribute to visible roots.
     pub(crate) input: RowSetNodeId,
-    /// Predicate between visible root rows and the contribution relation.
+    /// Predicate between admitted parent (or visible root) rows and this relation.
     pub(crate) membership: PredicateExpr,
 }
 

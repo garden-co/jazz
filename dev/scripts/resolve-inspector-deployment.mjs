@@ -23,7 +23,7 @@ function requireEnv(env) {
 }
 
 export function buildDeploymentsUrl(env) {
-  const branch = env.VERCEL_DEPLOY_BRANCH || "main";
+  const branch = env.VERCEL_DEPLOY_BRANCH || "release";
   const params = new URLSearchParams({
     projectId: env.VERCEL_PROJECT_ID,
     target: "production",
@@ -155,7 +155,7 @@ export async function resolveInspectorDeployment({
     }
 
     log(
-      `No staged inspector production deployment on ${env.VERCEL_DEPLOY_BRANCH || "main"} yet (${attempt}/${attempts}).`,
+      `No staged inspector production deployment on ${env.VERCEL_DEPLOY_BRANCH || "release"} yet (${attempt}/${attempts}).`,
     );
 
     if (lastDeployments.length > 0) {
@@ -170,7 +170,7 @@ export async function resolveInspectorDeployment({
     }
   }
 
-  const branch = env.VERCEL_DEPLOY_BRANCH || "main";
+  const branch = env.VERCEL_DEPLOY_BRANCH || "release";
   throw new Error(
     [
       `No staged inspector production deployment found on ${branch}.`,

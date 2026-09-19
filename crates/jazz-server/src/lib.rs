@@ -255,12 +255,17 @@ fn spawn_sigterm_shutdown_task(
     shutdown: ShutdownController,
 ) -> Result<JoinHandle<()>, std::io::Error> {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     Ok(tokio::spawn(async move {
-        if sigterm.recv().await.is_some() {
+        let signal_name = tokio::select! {
+            result = sigterm.recv() => result.map(|_| "SIGTERM"),
+            result = sigint.recv() => result.map(|_| "SIGINT"),
+        };
+        if let Some(signal_name) = signal_name {
             if shutdown.request_shutdown() {
-                info!("Received SIGTERM; starting controlled shutdown");
+                info!("Received {signal_name}; starting controlled shutdown");
             } else {
-                info!("Received SIGTERM; controlled shutdown is already in progress");
+                info!("Received {signal_name}; controlled shutdown is already in progress");
             }
         }
     }))

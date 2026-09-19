@@ -456,7 +456,8 @@ fn table_policies_are_default(policies: &TablePolicies) -> bool {
 impl TableSchema {
     /// Create a new table schema with no explicit policies.
     ///
-    /// Missing-policy behavior depends on the active row policy mode.
+    /// Serving authorities deny user reads and writes without an explicit grant.
+    /// Optimistic local staging does not imply authority acceptance.
     pub fn new(columns: RowDescriptor) -> Self {
         Self {
             columns,
@@ -644,6 +645,20 @@ impl TableSchemaBuilder {
 #[derive(Debug, Clone, Default)]
 pub struct SchemaBuilder {
     tables: Vec<TableSchemaBuilder>,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl crate::tools::test_support::AllowAll for SchemaBuilder {
+    /// Grant all operations on tables already added to this builder.
+    /// Call after adding the tables; replaces their existing policies.
+    fn allow_all(mut self) -> Self {
+        self.tables = self
+            .tables
+            .into_iter()
+            .map(|table| table.allow_all())
+            .collect();
+        self
+    }
 }
 
 impl SchemaBuilder {

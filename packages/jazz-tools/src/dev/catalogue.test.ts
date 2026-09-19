@@ -38,7 +38,7 @@ const schema = {
   todos: s.table({
     title: s.string(),
     ownerId: s.string(),
-  }),
+  }, {  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -61,9 +61,9 @@ describe("dev catalogue API exports", () => {
   it("exports catalogue operations from jazz-tools/dev", async () => {
     const dev = await import("./index.js");
 
-    expect(typeof dev.pushSchema).toBe("function");
-    expect(typeof dev.pushPermissions).toBe("function");
-    expect(typeof dev.pushMigration).toBe("function");
+    expect(dev).not.toHaveProperty("pushSchema");
+    expect(dev).not.toHaveProperty("pushPermissions");
+    expect(dev).not.toHaveProperty("pushMigration");
     expect(typeof dev.deploy).toBe("function");
   });
 
@@ -81,27 +81,47 @@ describe("dev catalogue API exports", () => {
 describe("dev catalogue runtime schema identity", () => {
   it("opens a NativeRuntimeAdapter for representative public schema shapes", async () => {
     const schema = {
-      users: s.table({
-        name: s.string(),
-      }),
-      files: s.table({
-        ownerId: s.ref("users"),
-        contents: s.bytes().default(new Uint8Array([0, 1, 127, 255])),
-        mediaType: s.enum("image/png", "text/plain").default("text/plain"),
-        tags: s.array(s.string()).default(["draft", "review"]),
-      }),
+      users: s.table(
+        {
+          name: s.string(),
+        },
+        {
+          filesViaOwner: s.reverse("files", "owner"),
+          commentsViaAuthor: s.reverse("comments", "author"),
+        },
+      ),
+      files: s.table(
+        {
+          ownerId: s.uuid(),
+          contents: s.bytes().default(new Uint8Array([0, 1, 127, 255])),
+          mediaType: s.enum("image/png", "text/plain").default("text/plain"),
+          tags: s.array(s.string()).default(["draft", "review"]),
+        },
+        {
+          owner: s.rel("users", "ownerId"),
+          commentsViaFile: s.reverse("comments", "file"),
+          commentsViaAttachments: s.reverse("comments", "attachments"),
+        },
+      ),
       comments: s
-        .table({
-          fileId: s.ref("files"),
-          authorId: s.ref("users").optional().default(null),
-          body: s.string(),
-          attachmentIds: s.array(s.ref("files")).default([]),
-          status: s.enum("open", "resolved").default("open"),
-        })
+        .table(
+          {
+            fileId: s.uuid(),
+            authorId: s.uuid().optional().default(null),
+            body: s.string(),
+            attachmentIds: s.array(s.uuid()).default([]),
+            status: s.enum("open", "resolved").default("open"),
+          },
+          {
+            file: s.rel("files", "fileId"),
+            author: s.rel("users", "authorId"),
+            attachments: s.rel("files", "attachmentIds"),
+          },
+        )
         .indexOnly(["fileId", "status"]),
     };
     const app = s.defineApp(schema);
-    await createNapiNativeRuntimeAdapter(app.wasmSchema);
+    await createNapiNativeRuntimeAdapter(app.wasmSchema, {});
 
     expect(serializeRuntimeSchema(app.wasmSchema)).toContain("__jazzRuntimeSchema");
   });
@@ -203,68 +223,16 @@ describe("dev catalogue push behavior", () => {
     });
   });
 
-  it("deploy returns schema-only status when permissions.ts is missing", async () => {
+  it("deploy rejects missing permissions before contacting the server", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), schemaSource());
-
-    const storedHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    const storedSchema = s.defineApp({
-      todos: s.table({
-        title: s.string(),
-        ownerId: s.string(),
-      }),
-    }).wasmSchema;
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-          return new Response(JSON.stringify({ hashes: [storedHash] }), { status: 200 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/schema/${storedHash}`)) {
-          return new Response(
-            JSON.stringify({ schema: { tables: storedSchema }, publishedAt: 0 }),
-            {
-              status: 200,
-            },
-          );
-        }
-        if (input.includes(`/admin/permissions`) || input.endsWith(`/admin/schemas`)) {
-          throw new Error("deploy() should not publish when schema is already stored.");
-        }
-        throw new Error(`Unexpected fetch: ${input}`);
-      }),
-    );
-
-    const events: unknown[] = [];
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
     const { deploy } = await import("./catalogue-project.js");
-    const result = await deploy({
-      appId: APP_ID,
-      serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      schemaDir: root,
-      onEvent: (event) => events.push(event),
-    });
-
-    expect(result).toEqual({
-      schema: {
-        hash: storedHash,
-        schemaFile: join(root, "schema.ts"),
-        status: "already-stored",
-      },
-      warnings: [
-        'Warning: table "todos" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.',
-      ],
-    });
-    expect(events).toContainEqual({
-      type: "schema-skipped",
-      hash: storedHash,
-      reason: "already-stored",
-    });
-    expect(events).toContainEqual({
-      type: "permissions-skipped",
-      reason: "missing-permissions-file",
-    });
+    await expect(
+      deploy({ appId: APP_ID, serverUrl: SERVER_URL, adminSecret: ADMIN_SECRET, schemaDir: root }),
+    ).rejects.toThrow("Create a permissions.ts file");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("deploy reports an already-connected migration when retargeting connected schemas", async () => {
@@ -275,10 +243,13 @@ describe("dev catalogue push behavior", () => {
     const previousSchemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const nextSchemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const storedSchema = s.defineApp({
-      todos: s.table({
-        title: s.string(),
-        ownerId: s.string(),
-      }),
+      todos: s.table(
+        {
+          title: s.string(),
+          ownerId: s.string(),
+        },
+        {},
+      ),
     }).wasmSchema;
     const previousHead = {
       schemaHash: previousSchemaHash,
@@ -363,16 +334,22 @@ describe("dev catalogue push behavior", () => {
     const toHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     const objectId = "55555555-5555-5555-5555-555555555555";
     const fromSchema = s.defineApp({
-      todos: s.table({
-        title: s.string(),
-        done: s.boolean(),
-      }),
+      todos: s.table(
+        {
+          title: s.string(),
+          done: s.boolean(),
+        },
+        {},
+      ),
     }).wasmSchema;
     const toSchema = s.defineApp({
-      todos: s.table({
-        done: s.boolean(),
-        title: s.string(),
-      }),
+      todos: s.table(
+        {
+          done: s.boolean(),
+          title: s.string(),
+        },
+        {},
+      ),
     }).wasmSchema;
 
     let migrationBody: any;
@@ -428,14 +405,20 @@ describe("dev catalogue push behavior", () => {
     await mkdir(migrationsDir, { recursive: true });
 
     const fromSchema = {
-      users: s.table({
-        email: s.string(),
-      }),
+      users: s.table(
+        {
+          email: s.string(),
+        },
+        {},
+      ),
     };
     const toSchema = {
-      users: s.table({
-        email_address: s.string(),
-      }),
+      users: s.table(
+        {
+          email_address: s.string(),
+        },
+        {},
+      ),
     };
     const { computeSchemaHash } = await import("./catalogue.js");
     const fromHash = await computeSchemaHash(s.defineApp(fromSchema).wasmSchema);
@@ -457,12 +440,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -606,14 +589,20 @@ export default s.defineMigration({
       await mkdir(migrationsDir, { recursive: true });
 
       const fromSchema = {
-        users: s.table({
-          email: s.string(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
       };
       const toSchema = {
-        users: s.table({
-          email_address: s.string(),
-        }),
+        users: s.table(
+          {
+            email_address: s.string(),
+          },
+          {},
+        ),
       };
       const { computeSchemaHash } = await import("./catalogue.js");
       const fromWasmSchema = s.defineApp(fromSchema).wasmSchema;
@@ -639,12 +628,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: ${fromColumn},
-    }),
+    }, {}),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {}),
   },
 });
 `,
@@ -703,14 +692,20 @@ export default s.defineMigration({
     await mkdir(migrationsDir, { recursive: true });
 
     const fromSchema = {
-      users: s.table({
-        email: s.string(),
-      }),
+      users: s.table(
+        {
+          email: s.string(),
+        },
+        {},
+      ),
     };
     const toSchema = {
-      users: s.table({
-        email_address: s.string(),
-      }),
+      users: s.table(
+        {
+          email_address: s.string(),
+        },
+        {},
+      ),
     };
     const { computeSchemaHash } = await import("./catalogue.js");
     const fromWasmSchema = s.defineApp(fromSchema).wasmSchema;
@@ -733,12 +728,12 @@ export default s.defineMigration({
   from: {
     users: s.table({
       email: s.string(),
-    }),
+    }, {  }),
   },
   to: {
     users: s.table({
       email_address: s.string(),
-    }),
+    }, {  }),
   },
 });
 `,
@@ -934,71 +929,27 @@ export default s.defineMigration({
     expect(Object.keys(permissionsBody.permissions)).toContain("todos");
   });
 
-  it("deploy skips permissions publishing when permissions.ts is missing", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), schemaSource());
-
-    let schemaBody: any;
-    const fetchCalls: string[] = [];
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        fetchCalls.push(input);
-        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-          return new Response(JSON.stringify({ hashes: [] }), { status: 200 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
-          schemaBody = JSON.parse(String(init?.body));
-          return new Response(
-            JSON.stringify({
-              objectId: SCHEMA_OBJECT_ID,
-              hash: SCHEMA_HASH,
-            }),
-            { status: 201 },
-          );
-        }
-        throw new Error(`Unexpected fetch: ${input}`);
+  it("deploy rejects omitted in-code permissions before contacting the server", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { deploy } = await import("./catalogue.js");
+    await expect(
+      // @ts-expect-error Exercise JavaScript callers that omit the required bundle.
+      deploy({
+        appId: APP_ID,
+        serverUrl: SERVER_URL,
+        adminSecret: ADMIN_SECRET,
+        schema: s.defineApp({ todos: s.table({ title: s.string() }, {}) }),
       }),
-    );
-
-    const events: unknown[] = [];
-    const { deploy } = await import("./catalogue-project.js");
-    const result = await deploy({
-      appId: APP_ID,
-      serverUrl: SERVER_URL,
-      adminSecret: ADMIN_SECRET,
-      schemaDir: root,
-      onEvent: (event) => events.push(event),
-    });
-
-    expect(result.schema).toEqual({
-      hash: SCHEMA_HASH,
-      schemaFile: join(root, "schema.ts"),
-      status: "published",
-      objectId: SCHEMA_OBJECT_ID,
-    });
-    expect(schemaBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
-      "title",
-      "ownerId",
-    ]);
-    expect(fetchCalls).toEqual([
-      `${SERVER_URL}/apps/${APP_ID}/schemas`,
-      `${SERVER_URL}/apps/${APP_ID}/admin/schemas`,
-    ]);
-    expect(events).toContainEqual({ type: "schema-loaded", schemaFile: join(root, "schema.ts") });
-    expect(events).toContainEqual({
-      type: "schema-published",
-      hash: SCHEMA_HASH,
-      objectId: SCHEMA_OBJECT_ID,
-    });
-    expect(events).toContainEqual({
-      type: "permissions-skipped",
-      reason: "missing-permissions-file",
-    });
+    ).rejects.toThrow("explicit permissions bundle");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("deploy publishes permissions when permissions.ts exists", async () => {
+    const { computeSchemaHash } = await import("./catalogue.js");
+    const SCHEMA_HASH = await computeSchemaHash(
+      s.defineApp({ todos: s.table({ title: s.string(), ownerId: s.string() }, {}) }).wasmSchema,
+    );
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), schemaSource());
     await writeFile(join(root, "permissions.ts"), permissionsSource());
@@ -1074,8 +1025,8 @@ export default s.defineMigration({
     expect(Object.keys(permissionsBody.permissions)).toContain("todos");
     expect(fetchCalls).toEqual([
       `${SERVER_URL}/apps/${APP_ID}/schemas`,
-      `${SERVER_URL}/apps/${APP_ID}/admin/schemas`,
       `${SERVER_URL}/apps/${APP_ID}/admin/permissions/head`,
+      `${SERVER_URL}/apps/${APP_ID}/admin/schemas`,
       `${SERVER_URL}/apps/${APP_ID}/admin/permissions`,
     ]);
   });

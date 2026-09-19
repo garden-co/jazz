@@ -488,8 +488,8 @@ fn jwt_error(error: jsonwebtoken::errors::Error) -> AuthAdmissionError {
 
 /// Convert flat verified JWT metadata into scalar policy values. RFC 7519
 /// registered transport/security fields are excluded because admission supplies
-/// verified identity separately. Objects remain available to application
-/// handlers as session metadata but are not representable in core policies.
+/// verified identity separately. Objects retain their nested fields for
+/// policy evaluation.
 pub fn jwt_json_claims_to_policy_claims(
     extra: BTreeMap<String, serde_json::Value>,
 ) -> Result<BTreeMap<String, Value>, AuthAdmissionError> {
@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn jwt_claim_admission_preserves_exact_integers_and_ignores_oidc_metadata() {
+    fn jwt_claim_admission_preserves_exact_integers_and_nested_provider_fields() {
         let claims = jwt_json_claims_to_policy_claims(BTreeMap::from([
             ("positive".to_owned(), serde_json::json!(7)),
             ("negative".to_owned(), serde_json::json!(-7)),
@@ -660,18 +660,22 @@ mod tests {
             serde_json::json!({ "department": "engineering" }),
         )]))
         .unwrap();
-        assert!(
-            claims.is_empty(),
-            "unrepresentable OIDC metadata stays ignored"
+        assert_eq!(
+            claims["https://issuer.example/profile"],
+            Value::Tuple(vec![Value::Tuple(vec![
+                Value::String("department".into()),
+                Value::String("engineering".into()),
+            ])]),
         );
         let claims = jwt_json_claims_to_policy_claims(BTreeMap::from([(
             "claims".to_owned(),
             serde_json::json!({ "profile": { "department": "engineering" } }),
         )]))
         .unwrap();
+        assert_eq!(claims.len(), 1);
         assert!(
-            claims.is_empty(),
-            "a top-level claims object is ordinary unsupported object metadata, never a second flattening path"
+            claims.contains_key("claims"),
+            "a field named claims remains an ordinary nested object, never a second flattening path"
         );
     }
 }

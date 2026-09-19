@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use jazz::tools::public_schema::PolicyExpr;
 use jazz::tools::public_schema::TablePolicies;
-use jazz::tools::{ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value};
+use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{TestingClient, wait_for_query};
@@ -107,7 +107,7 @@ async fn ephemeral_claims_merged_into_session_impl() {
     wait_for_query(
         &alice,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "alice sees room with matching join_code",
         |rows| rows.iter().any(|(id, _)| *id == room_id).then_some(()),
@@ -125,8 +125,9 @@ async fn ephemeral_claims_merged_into_session_impl() {
         .await;
 
     let bob_rows = bob
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("bob queries rooms");
 
     assert!(
@@ -145,8 +146,9 @@ async fn ephemeral_claims_merged_into_session_impl() {
         .await;
 
     let carol_rows = carol
-        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("carol queries rooms");
 
     assert!(

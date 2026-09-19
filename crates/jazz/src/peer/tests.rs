@@ -195,7 +195,9 @@ fn pending_current_maintained_rehydrate_reuses_the_existing_runtime() {
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let maintained_id =
         maintained_subscription_id(&peer, subscription).expect("maintained runtime is installed");
-    let rehydrate_attempts = peer.maintained_subscription_view_metrics().rehydrate_attempts;
+    let rehydrate_attempts = peer
+        .maintained_subscription_view_metrics()
+        .rehydrate_attempts;
 
     peer.publication_states
         .get_mut(&subscription)
@@ -230,7 +232,8 @@ fn pending_current_maintained_rehydrate_reuses_the_existing_runtime() {
         "a current-runtime pending receiver is not replaced"
     );
     assert_eq!(
-        peer.maintained_subscription_view_metrics().rehydrate_attempts,
+        peer.maintained_subscription_view_metrics()
+            .rehydrate_attempts,
         rehydrate_attempts,
         "draining a pending receiver is not a new rehydrate"
     );
@@ -602,7 +605,8 @@ fn client_fast_cursor_requires_retained_matching_authorization_progress() {
 
 #[test]
 fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x91));
+    use crate::tools::test_support::AllowAll;
+    let (_dir, mut core) = open_node_with_schema(node(0x91), schema().allow_all());
     let live = row(0x31);
     let live_tx = core
         .commit_mergeable_settled(
@@ -610,7 +614,9 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
         )
         .unwrap();
     accept_global(&mut core, live_tx, 1);
-    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let shape = Query::from("todos")
+        .validate(&schema().allow_all())
+        .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let subscription = subscription_key(&shape, &binding);
     let known = |position, authorization_progress| {
@@ -684,7 +690,8 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
 
 #[test]
 fn duplicate_structured_query_authorization_mismatch_forces_reset() {
-    let (_dir, mut core) = open_node_with_uuid(node(0x92));
+    use crate::tools::test_support::AllowAll;
+    let (_dir, mut core) = open_node_with_schema(node(0x92), schema().allow_all());
     for (index, title) in ["one", "two"].into_iter().enumerate() {
         let tx = core
             .commit_mergeable_settled(
@@ -696,7 +703,7 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
     }
     let shape = Query::from("todos")
         .aggregate([Aggregate::count()])
-        .validate(&schema())
+        .validate(&schema().allow_all())
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let canonical = subscription_key(&shape, &binding);

@@ -82,7 +82,7 @@ void [oldVueProps, currentVueProps, currentSolidProps];
 
 // Positive consumers prevent unrelated module/type-resolution failures from hiding
 // accidental rejection of the supported Jazz 2 schema, query and React interfaces.
-const app = s.defineApp({ todos: s.table({ title: s.string(), done: s.boolean() }) });
+const app = s.defineApp({ todos: s.table({ title: s.string(), done: s.boolean() }, {}) });
 declare const db: Db;
 db.insert(app.todos, { title: "Jazz 2", done: false });
 const todo: s.RowOf<typeof app.todos> = { id: "todo", title: "Jazz 2", done: false };

@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use jazz::query::Query;
 use jazz::tools::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId,
-    RowDescriptor, Schema, TableName, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, JazzClient, ObjectId, RowDescriptor, Schema,
+    TableName, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, wait_for, wait_for_query};
@@ -25,6 +25,7 @@ async fn lock_gset_suite() -> tokio::sync::MutexGuard<'static, ()> {
 
 /// `docs` table with a `tags` array column that merges as a grow-only set.
 fn gset_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     let tags = ColumnDescriptor::new(
         "tags",
         ColumnType::Array {
@@ -36,7 +37,7 @@ fn gset_schema() -> Schema {
         ColumnDescriptor::new("name", ColumnType::Text),
         tags,
     ]));
-    Schema::from([(TableName::new("docs"), docs)])
+    Schema::from([(TableName::new("docs"), docs)]).allow_all()
 }
 
 fn doc_values(name: &str, tags: &[&str]) -> HashMap<String, Value> {
@@ -76,7 +77,7 @@ async fn merge_concurrently(
     second_value: Value,
 ) {
     let first_tx = first
-        .update(doc_id, vec![(column.to_string(), first_value)])
+        .update("docs", doc_id, vec![(column.to_string(), first_value)])
         .expect("first replica writes");
     support::wait_for_edge_txs(
         first,
@@ -85,7 +86,7 @@ async fn merge_concurrently(
     .await;
 
     let second_tx = second
-        .update(doc_id, vec![(column.to_string(), second_value)])
+        .update("docs", doc_id, vec![(column.to_string(), second_value)])
         .expect("second replica writes");
     support::wait_for_edge_txs(
         second,
@@ -108,12 +109,14 @@ async fn assert_converges<T>(
 {
     wait_for(QUERY_TIMEOUT, description, || async {
         let a_rows = a
-            .query(query.clone(), Some(DurabilityTier::EdgeServer))
+            .query(query.clone(), jazz::tools::ReadTier::Remote)
             .await
+            .map(jazz::tools::test_support::ordinary_rows)
             .ok()?;
         let b_rows = b
-            .query(query.clone(), Some(DurabilityTier::EdgeServer))
+            .query(query.clone(), jazz::tools::ReadTier::Remote)
             .await
+            .map(jazz::tools::test_support::ordinary_rows)
             .ok()?;
         let a_val = a_rows
             .iter()
@@ -169,7 +172,7 @@ async fn concurrent_writes_converge_to_sorted_union_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees both docs",
         |rows| (rows.len() == 2).then_some(()),
@@ -268,7 +271,7 @@ async fn concurrent_writes_never_remove_a_shared_element_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees both docs",
         |rows| (rows.len() == 2).then_some(()),
@@ -367,7 +370,7 @@ async fn same_elements_in_different_orders_converge_to_one_canonical_order_impl(
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees order doc",
         |rows| (rows.len() == 1).then_some(()),
@@ -439,7 +442,7 @@ async fn duplicate_insertions_are_idempotent_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees idempotent doc",
         |rows| (rows.len() == 1).then_some(()),
@@ -497,7 +500,7 @@ async fn later_writes_cannot_remove_existing_elements_impl() {
         .insert("docs", doc_values("no-remove", &["keep"]))
         .expect("alice creates doc");
     let remove_tx = alice
-        .update(doc_id, vec![("tags".to_string(), tags_value(&[]))])
+        .update("docs", doc_id, vec![("tags".to_string(), tags_value(&[]))])
         .expect("attempted removal writes a version");
     support::wait_for_edge_txs(
         &alice,
@@ -509,7 +512,7 @@ async fn later_writes_cannot_remove_existing_elements_impl() {
     wait_for_query(
         &alice,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "a later empty write cannot remove the existing element",
         |rows| {
@@ -564,7 +567,7 @@ async fn empty_and_non_empty_sets_union_in_both_propagation_orders_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees both empty-set docs",
         |rows| (rows.len() == 2).then_some(()),
@@ -620,6 +623,7 @@ async fn empty_and_non_empty_sets_union_in_both_propagation_orders_impl() {
 
 /// `docs` table with a `scores` float-array column merging as a grow-only set.
 fn gset_float_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     let scores = ColumnDescriptor::new(
         "scores",
         ColumnType::Array {
@@ -631,7 +635,7 @@ fn gset_float_schema() -> Schema {
         ColumnDescriptor::new("name", ColumnType::Text),
         scores,
     ]));
-    Schema::from([(TableName::new("docs"), docs)])
+    Schema::from([(TableName::new("docs"), docs)]).allow_all()
 }
 
 fn score_doc_values(name: &str, scores: &[f64]) -> HashMap<String, Value> {
@@ -704,7 +708,7 @@ async fn distinct_float_representations_converge_deterministically_impl() {
     wait_for_query(
         &bob,
         query.clone(),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "bob sees both docs",
         |rows| (rows.len() == 2).then_some(()),

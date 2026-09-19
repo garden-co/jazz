@@ -19,6 +19,12 @@ const originalBackendSecret = process.env.BACKEND_SECRET;
 function deployed(hash = "abc123def4567890") {
   return {
     schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    permissions: {
+      schemaHash: hash,
+      permissionsFile: "permissions.ts",
+      previousHead: null,
+      head: null,
+    },
     warnings: [],
   };
 }
@@ -103,6 +109,7 @@ describe("jazzSvelteKit", () => {
     const root = await tempRoots.create("jazz-sveltekit-test-");
     await mkdir(join(root, "src", "lib"), { recursive: true });
     await writeFile(join(root, "src", "lib", "schema.ts"), todoSchema());
+    await writeFile(join(root, "src", "lib", "permissions.ts"), "export default {};\n");
 
     const plugin = jazzSvelteKit({
       server: { port, adminSecret: "sveltekit-test-admin" },
@@ -208,6 +215,7 @@ describe("jazzSvelteKit", () => {
     await mkdir(join(root, "src", "lib"), { recursive: true });
     await mkdir(sharedEnvDir, { recursive: true });
     await writeFile(join(root, "src", "lib", "schema.ts"), todoSchema());
+    await writeFile(join(root, "src", "lib", "permissions.ts"), "export default {};\n");
     await writeFile(
       join(sharedEnvDir, ".env.production.local"),
       [
@@ -245,6 +253,7 @@ describe("jazzSvelteKit", () => {
     const root = await tempRoots.create("jazz-sveltekit-env-file-disabled-test-");
     await mkdir(join(root, "src", "lib"), { recursive: true });
     await writeFile(join(root, "src", "lib", "schema.ts"), todoSchema());
+    await writeFile(join(root, "src", "lib", "permissions.ts"), "export default {};\n");
     await writeFile(
       join(root, ".env"),
       [
@@ -478,6 +487,7 @@ describe("jazzSvelteKit", () => {
     const root = await tempRoots.create("jazz-sveltekit-fallback-");
     await mkdir(join(root, "src", "lib"), { recursive: true });
     await writeFile(join(root, "src", "lib", "schema.ts"), todoSchema());
+    await writeFile(join(root, "src", "lib", "permissions.ts"), "export default {};\n");
 
     const plugin = jazzSvelteKit({ server: { port } });
     const viteServer = makeViteServer("serve", root);

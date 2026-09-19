@@ -28,12 +28,18 @@ impl FailTransactionReadMemoryStorage {
     }
 
     fn fail_after_transaction_reads(&self, successful_reads: usize) {
-        self.fail_after_transaction_reads.set(Some(successful_reads));
+        self.fail_after_transaction_reads
+            .set(Some(successful_reads));
     }
 }
 
 impl OrderedKvStorage for FailTransactionReadMemoryStorage {
-    fn get(&self, cf: String, key: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>> {
+    fn get(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>>
+    {
         if key
             .windows("jazz_transactions".len())
             .any(|window| window == b"jazz_transactions")
@@ -41,18 +47,33 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
         {
             if remaining == 0 {
                 self.fail_after_transaction_reads.set(None);
-                return Box::pin(async { Err(groove::storage::Error::InvalidStorageLayout("injected transaction read failure".to_owned())) });
+                return Box::pin(async {
+                    Err(groove::storage::Error::InvalidStorageLayout(
+                        "injected transaction read failure".to_owned(),
+                    ))
+                });
             }
             self.fail_after_transaction_reads.set(Some(remaining - 1));
         }
         self.inner.get(cf, key)
     }
 
-    fn put_if_absent(&self, cf: String, key: Vec<u8>, value: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>> {
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>>
+    {
         self.inner.put_if_absent(cf, key, value)
     }
 
-    fn compare_and_delete(&self, cf: String, key: Vec<u8>, expected: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
         self.inner.compare_and_delete(cf, key, expected)
     }
 
@@ -65,15 +86,28 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
         self.inner.set(cf, key, value)
     }
 
-    fn delete(&self, cf: String, key: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
+    fn delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.delete(cf, key)
     }
 
-    fn scan(&self, request: groove::storage::ScanRequest) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+    fn scan(
+        &self,
+        request: groove::storage::ScanRequest,
+    ) -> groove::storage::StorageFuture<
+        '_,
+        Result<groove::storage::StorageScan<'_>, groove::storage::Error>,
+    > {
         self.inner.scan(request)
     }
 
-    fn write_many(&self, operations: Vec<groove::storage::OwnedWriteOperation>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
+    fn write_many(
+        &self,
+        operations: Vec<groove::storage::OwnedWriteOperation>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.write_many(operations)
     }
 
@@ -83,40 +117,48 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
 }
 
 impl ReopenableStorage for FailTransactionReadMemoryStorage {
-    fn reopen(self, column_families: Vec<String>) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
+    fn reopen(
+        self,
+        column_families: Vec<String>,
+    ) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
         Box::pin(async move {
-            let Self { inner, fail_after_transaction_reads } = self;
-            Ok(Self { inner: inner.reopen(column_families).await?, fail_after_transaction_reads })
+            let Self {
+                inner,
+                fail_after_transaction_reads,
+            } = self;
+            Ok(Self {
+                inner: inner.reopen(column_families).await?,
+                fail_after_transaction_reads,
+            })
         })
     }
 }
 
-/// Pending local versions are materialized before self-finalization.  Their
+/// Pending local versions are materialized before self-finalization. Their
 /// presence must not turn a new row into an update and thereby let an update
 /// policy stand in for a missing or rejecting INSERT policy.
 #[test]
 fn local_authority_keeps_insert_and_update_policies_distinct() {
     let update_policy = || {
         PublicTablePolicies::new()
+            .with_select(PublicPolicyExpr::True)
             .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
     };
     let schema_for = |insert_policy: Option<PublicPolicyExpr>| {
-        let policies = insert_policy.map_or_else(update_policy, |insert| {
-            update_policy().with_insert(insert)
-        });
-        build_public_test_schema(PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("title", PublicColumnType::Text)
-                .column("owner", PublicColumnType::Uuid)
-                .policies(policies),
-        ))
+        let policies =
+            insert_policy.map_or_else(update_policy, |insert| update_policy().with_insert(insert));
+        build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(policies),
+            ),
+        )
     };
     let author = user(0xa1);
 
-    for (label, insert_policy) in [
-        ("omitted", None),
-        ("false", Some(PublicPolicyExpr::False)),
-    ] {
+    for (label, insert_policy) in [("omitted", None), ("false", Some(PublicPolicyExpr::False))] {
         let schema = schema_for(insert_policy);
         let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
         let tx_id = core
@@ -127,14 +169,17 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
             )
             .unwrap();
         core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
-        assert!(matches!(
-            core.transaction_state_settled(tx_id),
-            Some((
-                Fate::Rejected(RejectionReason::AuthorizationDenied),
-                None,
-                DurabilityTier::Local
-            ))
-        ), "{label} INSERT policy must deny a new local row");
+        assert!(
+            matches!(
+                core.transaction_state_settled(tx_id),
+                Some((
+                    Fate::Rejected(RejectionReason::AuthorizationDenied),
+                    None,
+                    DurabilityTier::Local
+                ))
+            ),
+            "{label} INSERT policy must deny a new local row"
+        );
     }
 
     let schema = schema_for(None);
@@ -152,10 +197,13 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
         )
         .unwrap();
     core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
-    assert!(matches!(
-        core.transaction_state_settled(tx_id),
-        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
-    ), "declared UPDATE policy must still permit an existing row");
+    assert!(
+        matches!(
+            core.transaction_state_settled(tx_id),
+            Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+        ),
+        "declared UPDATE policy must still permit an existing row"
+    );
 
     let schema = schema_for(None);
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
@@ -177,32 +225,39 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
         open_tx,
         "todos",
         coalesced_row,
-        BTreeMap::from([("title".to_owned(), Value::String("patched insert".to_owned()))]),
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("patched insert".to_owned()),
+        )]),
         Some(26),
     ))
     .unwrap();
-    let tx_id = core
-        .commit_mergeable_open_settled(open_tx, || 27)
-        .unwrap();
+    let tx_id = core.commit_mergeable_open_settled(open_tx, || 27).unwrap();
     core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
-    assert!(matches!(
-        core.transaction_state_settled(tx_id),
-        Some((
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-            None,
-            DurabilityTier::Local
-        ))
-    ), "coalesced insert-then-update must remain an INSERT for policy purposes");
+    assert!(
+        matches!(
+            core.transaction_state_settled(tx_id),
+            Some((
+                Fate::Rejected(RejectionReason::AuthorizationDenied),
+                None,
+                DurabilityTier::Local
+            ))
+        ),
+        "coalesced insert-then-update must remain an INSERT for policy purposes"
+    );
 
     let pending_update_denied = PublicTablePolicies::new()
+        .with_select(PublicPolicyExpr::True)
         .with_insert(PublicPolicyExpr::True)
         .with_update(Some(PublicPolicyExpr::False), PublicPolicyExpr::False);
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("owner", PublicColumnType::Uuid)
-            .policies(pending_update_denied),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(pending_update_denied),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let pending_row = row(0x93);
     let first = core
@@ -219,19 +274,26 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
                 .cells(owner_cells(author, "second pending update")),
         )
         .unwrap();
-    core.finalize_local_mergeable_commit_settled(second).unwrap();
-    assert!(matches!(
-        core.transaction_state_settled(second),
-        Some((
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-            None,
-            DurabilityTier::Local
-        ))
-    ), "a newer pending row must classify against the older pending insert");
-    assert!(matches!(
-        core.transaction_state_settled(first),
-        Some((Fate::Pending, None, DurabilityTier::Local))
-    ), "the predecessor remains independently pending");
+    core.finalize_local_mergeable_commit_settled(second)
+        .unwrap();
+    assert!(
+        matches!(
+            core.transaction_state_settled(second),
+            Some((
+                Fate::Rejected(RejectionReason::AuthorizationDenied),
+                None,
+                DurabilityTier::Local
+            ))
+        ),
+        "a newer pending row must classify against the older pending insert"
+    );
+    assert!(
+        matches!(
+            core.transaction_state_settled(first),
+            Some((Fate::Pending, None, DurabilityTier::Local))
+        ),
+        "the predecessor remains independently pending"
+    );
 }
 
 /// INV-RLS-24 moves read-for-write authorization only for mergeable staging.
@@ -243,16 +305,18 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
 /// the common authority helper, before exclusive conflict validation runs.
 #[test]
 fn authority_read_for_write_check_is_mergeable_only() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .policies(
-                PublicTablePolicies::new()
-                    .with_select(PublicPolicyExpr::False)
-                    .with_insert(PublicPolicyExpr::True)
-                    .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
-            ),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::False)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                ),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let target = row(0x95);
     let base = accept_global(
@@ -273,11 +337,7 @@ fn authority_read_for_write_check_is_mergeable_only() {
                 )])),
         )
         .unwrap();
-    let SyncMessage::CommitUnit {
-        mut tx,
-        versions,
-    } = unit
-    else {
+    let SyncMessage::CommitUnit { mut tx, versions } = unit else {
         panic!("commit helper must emit one commit unit");
     };
     tx.kind = TxKind::Exclusive;
@@ -296,27 +356,30 @@ fn authority_read_for_write_check_is_mergeable_only() {
 fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
     let created_at_ms = 1_777_777_777_777;
     let updated_at_ms = created_at_ms + 1;
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .policies(
-                PublicTablePolicies::new()
-                    .with_insert(PublicPolicyExpr::eq_literal(
-                        "$createdAt",
-                        PublicValue::Timestamp(created_at_ms),
-                    ))
-                    .with_update(
-                        Some(PublicPolicyExpr::eq_literal(
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::eq_literal(
                             "$createdAt",
                             PublicValue::Timestamp(created_at_ms),
-                        )),
-                        PublicPolicyExpr::eq_literal(
-                            "$updatedAt",
-                            PublicValue::Timestamp(updated_at_ms),
+                        ))
+                        .with_update(
+                            Some(PublicPolicyExpr::eq_literal(
+                                "$createdAt",
+                                PublicValue::Timestamp(created_at_ms),
+                            )),
+                            PublicPolicyExpr::eq_literal(
+                                "$updatedAt",
+                                PublicValue::Timestamp(updated_at_ms),
+                            ),
                         ),
-                    ),
-            ),
-    ));
+                ),
+        ),
+    );
     let (_core_dir, mut core) = open_node_with_schema(node(0x9a), schema);
     let author = user(0xa1);
     let row_uuid = row(0x9a);
@@ -328,7 +391,8 @@ fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
                 .cells(title_cells("created")),
         )
         .unwrap();
-    core.finalize_local_mergeable_commit_settled(insert).unwrap();
+    core.finalize_local_mergeable_commit_settled(insert)
+        .unwrap();
     assert!(matches!(
         core.transaction_state_settled(insert),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
@@ -342,7 +406,8 @@ fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
                 .cells(title_cells("updated")),
         )
         .unwrap();
-    core.finalize_local_mergeable_commit_settled(update).unwrap();
+    core.finalize_local_mergeable_commit_settled(update)
+        .unwrap();
     assert!(matches!(
         core.transaction_state_settled(update),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
@@ -351,15 +416,17 @@ fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
 
 #[test]
 fn local_insert_policy_classification_survives_finalization_retry() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("owner", PublicColumnType::Uuid)
-            .policies(
-                PublicTablePolicies::new()
-                    .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
-            ),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                ),
+        ),
+    );
     let column_families = schema.column_families();
     let column_family_refs = column_families
         .iter()
@@ -377,25 +444,29 @@ fn local_insert_policy_classification_survives_finalization_retry() {
         .unwrap();
 
     storage.fail_after_transaction_reads(2);
-    assert!(core
-        .finalize_local_mergeable_commit_settled(tx_id)
-        .expect_err("injected finalization failure")
-        .to_string()
-        .contains("injected transaction read failure"));
+    assert!(
+        core.finalize_local_mergeable_commit_settled(tx_id)
+            .expect_err("injected finalization failure")
+            .to_string()
+            .contains("injected transaction read failure")
+    );
     assert!(matches!(
         core.transaction_state_settled(tx_id),
         Some((Fate::Pending, None, DurabilityTier::Local))
     ));
 
     core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
-    assert!(matches!(
-        core.transaction_state_settled(tx_id),
-        Some((
-            Fate::Rejected(RejectionReason::AuthorizationDenied),
-            None,
-            DurabilityTier::Local
-        ))
-    ), "retry must reapply INSERT policy, not reinterpret the candidate as an update");
+    assert!(
+        matches!(
+            core.transaction_state_settled(tx_id),
+            Some((
+                Fate::Rejected(RejectionReason::AuthorizationDenied),
+                None,
+                DurabilityTier::Local
+            ))
+        ),
+        "retry must reapply INSERT policy, not reinterpret the candidate as an update"
+    );
 }
 
 #[test]
@@ -429,13 +500,22 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
     // its transaction provenance before `ingest_rejected_transaction` retries
     // that lookup to persist the rejection.
     storage.fail_after_transaction_reads(2);
-    let error = core.finalize_local_mergeable_commit_settled(tx_id).unwrap_err();
-    assert!(error.to_string().contains("injected transaction read failure"));
+    let error = core
+        .finalize_local_mergeable_commit_settled(tx_id)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected transaction read failure")
+    );
     let pending_state = core.transaction_state_settled(tx_id);
-    assert!(matches!(
-        pending_state,
-        Some((Fate::Pending, None, DurabilityTier::Local))
-    ), "failed finalization must leave the transaction pending, got {pending_state:?}");
+    assert!(
+        matches!(
+            pending_state,
+            Some((Fate::Pending, None, DurabilityTier::Local))
+        ),
+        "failed finalization must leave the transaction pending, got {pending_state:?}"
+    );
 
     core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
 
@@ -449,10 +529,11 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
             DurabilityTier::Local
         ))
     ));
-    assert!(core
-        .current_rows("todos", DurabilityTier::Local)
-        .unwrap()
-        .is_empty());
+    assert!(
+        core.current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -481,13 +562,22 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
     // The first six transaction reads are part of validation and acceptance;
     // The seventh after Accepted persists.
     storage.fail_after_transaction_reads(6);
-    let error = core.finalize_local_mergeable_commit_settled(tx_id).unwrap_err();
-    assert!(error.to_string().contains("injected transaction read failure"));
+    let error = core
+        .finalize_local_mergeable_commit_settled(tx_id)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected transaction read failure")
+    );
     let terminal_state = core.transaction_state_settled(tx_id);
-    assert!(matches!(
-        terminal_state,
-        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
-    ), "checkpoint failure must follow persisted acceptance, got {terminal_state:?}");
+    assert!(
+        matches!(
+            terminal_state,
+            Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+        ),
+        "checkpoint failure must follow persisted acceptance, got {terminal_state:?}"
+    );
 
     // This internal assertion is necessary because local_permission_subjects is
     // deliberately local-only and has no user-visible API. A terminal transaction
@@ -511,7 +601,11 @@ fn write_policy_rejection_cleans_up_client() {
         )
         .unwrap();
 
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -532,15 +626,17 @@ fn write_policy_rejection_cleans_up_client() {
 
 #[test]
 fn session_owner_string_uuid_write_policy_accepts_matching_author() {
-    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("title", PublicColumnType::Text)
-            .column("owner_id", PublicColumnType::Text)
-            .policies(
-                public_write_policies(public_claim_eq("owner_id", "user_id"))
-                    .with_select(PublicPolicyExpr::True),
-            ),
-    ));
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner_id", PublicColumnType::Text)
+                .policies(
+                    public_write_policies(public_claim_eq("owner_id", "user_id"))
+                        .with_select(PublicPolicyExpr::True),
+                ),
+        ),
+    );
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
@@ -557,12 +653,19 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
                 .made_by(author)
                 .cells(BTreeMap::from([
                     ("title".to_owned(), Value::String("owned".to_owned())),
-                    ("owner_id".to_owned(), Value::String(author.test_uuid().to_string())),
+                    (
+                        "owner_id".to_owned(),
+                        Value::String(author.test_uuid().to_string()),
+                    ),
                 ])),
         )
         .unwrap();
 
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -582,7 +685,10 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
             row_uuid,
             BTreeMap::from([
                 ("title".to_owned(), Value::String("owned".to_owned())),
-                ("owner_id".to_owned(), Value::String(author.test_uuid().to_string())),
+                (
+                    "owner_id".to_owned(),
+                    Value::String(author.test_uuid().to_string())
+                ),
             ]),
         )]
     );
@@ -705,8 +811,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
                     .column("body", PublicColumnType::Text)
                     .column("owner_id", PublicColumnType::Text)
                     .policies(
-                        public_all_policies()
-                            .with_select(public_claim_eq("owner_id", "user_id")),
+                        public_all_policies().with_select(public_claim_eq("owner_id", "user_id")),
                     ),
             ),
     );
@@ -725,7 +830,10 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
                 .made_by(alice)
                 .cells(BTreeMap::from([
                     ("body".to_owned(), v("alice private")),
-                    ("owner_id".to_owned(), Value::String(alice.test_uuid().to_string())),
+                    (
+                        "owner_id".to_owned(),
+                        Value::String(alice.test_uuid().to_string()),
+                    ),
                 ])),
         ])
         .unwrap();
@@ -747,7 +855,8 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads, ..
+                complete_tx_payloads,
+                ..
             },
         ..
     }) = &update
@@ -821,7 +930,8 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
         version_carriers,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
-                complete_tx_payloads: complete_tx_payload_refs, ..
+                complete_tx_payloads: complete_tx_payload_refs,
+                ..
             },
         ..
     }) = &update
@@ -1038,7 +1148,9 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         canonical_view_update_rows(&revoked_update),
         Vec::<ResultRowEntry>::new()
     );
-    invited_reader.apply_sync_message_settled(revoked_update).unwrap();
+    invited_reader
+        .apply_sync_message_settled(revoked_update)
+        .unwrap();
     assert!(
         invited_reader
             .subscription_current_rows("canvases", DurabilityTier::Global)
@@ -1109,8 +1221,7 @@ fn nested_correlated_exists_insert_policy_rejects_cross_canvas_candidates() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
-                PublicTableSchemaBuilder::new("canvases")
-                    .column("title", PublicColumnType::Text),
+                PublicTableSchemaBuilder::new("canvases").column("title", PublicColumnType::Text),
             )
             .table(PublicTableSchemaBuilder::new("layers").fk_column("canvas_id", "canvases"))
             .table(
@@ -1275,18 +1386,14 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
-                PublicTableSchemaBuilder::new("workspaces")
-                    .column("name", PublicColumnType::Text),
+                PublicTableSchemaBuilder::new("workspaces").column("name", PublicColumnType::Text),
             )
             .table(
                 PublicTableSchemaBuilder::new("members")
                     .fk_column("workspace", "workspaces")
                     .column("subject", PublicColumnType::Uuid),
             )
-            .table(
-                PublicTableSchemaBuilder::new("blocks")
-                    .fk_column("workspace", "workspaces"),
-            )
+            .table(PublicTableSchemaBuilder::new("blocks").fk_column("workspace", "workspaces"))
             .table(
                 PublicTableSchemaBuilder::new("tasks")
                     .fk_column("workspace", "workspaces")
@@ -1345,7 +1452,10 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             BTreeMap::from([("workspace".to_owned(), Value::Uuid(workspace_b.0))]),
         ),
     ] {
-        accept_global(&mut core, MergeableCommit::new(table, row_uuid, time).cells(cells));
+        accept_global(
+            &mut core,
+            MergeableCommit::new(table, row_uuid, time).cells(cells),
+        );
     }
     core.set_test_provider_claims(
         owner,
@@ -1359,11 +1469,15 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
                 .cells(BTreeMap::from([
                     ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
                     ("block".to_owned(), Value::Uuid(block_a.0)),
-                    ("title".to_owned(), Value::String("same workspace".to_owned())),
+                    (
+                        "title".to_owned(),
+                        Value::String("same workspace".to_owned()),
+                    ),
                 ])),
         )
         .unwrap();
-    core.finalize_local_mergeable_commit_settled(accepted).unwrap();
+    core.finalize_local_mergeable_commit_settled(accepted)
+        .unwrap();
     assert!(matches!(
         core.transaction_state_settled(accepted),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
@@ -1376,14 +1490,22 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
                 .cells(BTreeMap::from([
                     ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
                     ("block".to_owned(), Value::Uuid(block_b.0)),
-                    ("title".to_owned(), Value::String("cross workspace".to_owned())),
+                    (
+                        "title".to_owned(),
+                        Value::String("cross workspace".to_owned()),
+                    ),
                 ])),
         )
         .unwrap();
-    core.finalize_local_mergeable_commit_settled(denied_insert).unwrap();
+    core.finalize_local_mergeable_commit_settled(denied_insert)
+        .unwrap();
     assert!(matches!(
         core.transaction_state_settled(denied_insert),
-        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+        Some((
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            None,
+            DurabilityTier::Local
+        ))
     ));
 
     let denied_update = core
@@ -1393,14 +1515,22 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
                 .cells(BTreeMap::from([
                     ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
                     ("block".to_owned(), Value::Uuid(block_b.0)),
-                    ("title".to_owned(), Value::String("foreign replacement".to_owned())),
+                    (
+                        "title".to_owned(),
+                        Value::String("foreign replacement".to_owned()),
+                    ),
                 ])),
         )
         .unwrap();
-    core.finalize_local_mergeable_commit_settled(denied_update).unwrap();
+    core.finalize_local_mergeable_commit_settled(denied_update)
+        .unwrap();
     assert!(matches!(
         core.transaction_state_settled(denied_update),
-        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+        Some((
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            None,
+            DurabilityTier::Local
+        ))
     ));
 
     // DELETE evaluates the persisted old row through USING, rather than a
@@ -1469,9 +1599,7 @@ fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
                 .fk_column("workspace", "workspaces")
                 .column("subject", PublicColumnType::Uuid),
         )
-        .table(
-            PublicTableSchemaBuilder::new("blocks").fk_column("workspace", "workspaces"),
-        )
+        .table(PublicTableSchemaBuilder::new("blocks").fk_column("workspace", "workspaces"))
         .table(
             PublicTableSchemaBuilder::new("tasks")
                 .fk_column("workspace", "workspaces")
@@ -1481,9 +1609,11 @@ fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
         .build();
     let error = crate::schema::JazzSchema::new(&public)
         .expect_err("mismatched nested correlation must fail closed");
-    assert!(error
-        .to_string()
-        .contains("nested outer correlation must use its join key"));
+    assert!(
+        error
+            .to_string()
+            .contains("nested outer correlation must use its join key")
+    );
 }
 
 #[test]
@@ -1666,15 +1796,9 @@ fn exists_rel_fails_closed_for_outer_correlation_beyond_one_nested_join() {
     };
     let public = PublicSchemaBuilder::new()
         .table(PublicTableSchemaBuilder::new("workspaces"))
-        .table(
-            PublicTableSchemaBuilder::new("blocks").fk_column("workspace", "workspaces"),
-        )
-        .table(
-            PublicTableSchemaBuilder::new("members").fk_column("workspace", "workspaces"),
-        )
-        .table(
-            PublicTableSchemaBuilder::new("grants").fk_column("workspace", "workspaces"),
-        )
+        .table(PublicTableSchemaBuilder::new("blocks").fk_column("workspace", "workspaces"))
+        .table(PublicTableSchemaBuilder::new("members").fk_column("workspace", "workspaces"))
+        .table(PublicTableSchemaBuilder::new("grants").fk_column("workspace", "workspaces"))
         .table(
             PublicTableSchemaBuilder::new("tasks")
                 .fk_column("workspace", "workspaces")
@@ -1684,9 +1808,11 @@ fn exists_rel_fails_closed_for_outer_correlation_beyond_one_nested_join() {
         .build();
     let error = crate::schema::JazzSchema::new(&public)
         .expect_err("deep outer correlation must fail closed until its scope is retained");
-    assert!(error
-        .to_string()
-        .contains("does not yet support outer correlations beyond one nested join"));
+    assert!(
+        error
+            .to_string()
+            .contains("does not yet support outer correlations beyond one nested join")
+    );
 }
 
 #[test]
@@ -1718,12 +1844,7 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
                 public_literal_eq("role", PublicValue::Text("admin".to_owned())),
             ],
         ),
-        public_outer_exists(
-            "artists",
-            "id",
-            "artist",
-            [same_outer_organization()],
-        ),
+        public_outer_exists("artists", "id", "artist", [same_outer_organization()]),
     ]);
     let assignment_insert_policy = PublicPolicyExpr::And(vec![
         PublicPolicyExpr::Inherits {
@@ -1798,7 +1919,10 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
     accept_global(
         &mut core,
         MergeableCommit::new("memberships", foreign_membership, 4).cells(BTreeMap::from([
-            ("organization".to_owned(), Value::Uuid(foreign_organization.0)),
+            (
+                "organization".to_owned(),
+                Value::Uuid(foreign_organization.0),
+            ),
             ("user".to_owned(), Value::Uuid(outsider.test_uuid())),
             ("role".to_owned(), Value::String("admin".to_owned())),
         ])),
@@ -1834,7 +1958,8 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
                 ])),
         )
         .unwrap();
-    core.finalize_local_mergeable_commit_settled(accepted).unwrap();
+    core.finalize_local_mergeable_commit_settled(accepted)
+        .unwrap();
     assert!(matches!(
         core.transaction_state_settled(accepted),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
@@ -1851,7 +1976,8 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
                 ])),
         )
         .unwrap();
-    core.finalize_local_mergeable_commit_settled(denied).unwrap();
+    core.finalize_local_mergeable_commit_settled(denied)
+        .unwrap();
     assert!(matches!(
         core.transaction_state_settled(denied),
         Some((
@@ -1925,7 +2051,11 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
                 ])),
         )
         .unwrap();
-    let [public_fate] = core.apply_sync_message_settled(public_tx.1).unwrap().try_into().unwrap();
+    let [public_fate] = core
+        .apply_sync_message_settled(public_tx.1)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         public_fate,
         SyncMessage::FateUpdate {
@@ -2055,10 +2185,15 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
         &mut core,
         MergeableCommit::new("chatMembers", membership, 12).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(private_chat.0)),
-            ("userId".to_owned(), Value::String(member.test_uuid().to_string())),
+            (
+                "userId".to_owned(),
+                Value::String(member.test_uuid().to_string()),
+            ),
         ])),
     );
-    let shape = Query::from("chats").validate(&core.catalogue.schema).unwrap();
+    let shape = Query::from("chats")
+        .validate(&core.catalogue.schema)
+        .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     assert_eq!(
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, member)

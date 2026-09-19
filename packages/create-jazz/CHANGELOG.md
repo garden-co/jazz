@@ -1,5 +1,12 @@
 # create-jazz
 
+## 2.0.0-alpha.55
+
+### Patch Changes
+
+- d545098: Enforce an eight-character minimum password in the SvelteKit Better Auth starter.
+- fc43839: Return the Next.js Better Auth starter to the sign-in route after logout and keep its cookie integration plugin last.
+
 ## 2.0.0-alpha.54
 
 ### Patch Changes

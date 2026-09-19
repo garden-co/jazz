@@ -24,13 +24,16 @@ import { schema as s } from "jazz-tools";
 type Priority = "low" | "medium" | "high";
 
 const schema = {
-  tasks: s.table({
-    title: s.string(),
-    priority: s.int().transform<Priority>({
-      from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
-      to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
-    }),
-  }),
+  tasks: s.table(
+    {
+      title: s.string(),
+      priority: s.int().transform<Priority>({
+        from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
+        to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
+      }),
+    },
+    {},
+  ),
 };
 ```
 

@@ -1,3 +1,4 @@
+import { rel, reverse } from "./relationships.js";
 import { col, allowExternalProvenanceName } from "./dsl.js";
 import { defineMigration, renameTableFrom } from "./migrations.js";
 import { definePermissions } from "./permissions/index.js";
@@ -19,6 +20,8 @@ import type {
 } from "./typed-app.js";
 
 type RuntimeSchemaNamespace = typeof col & {
+  rel: typeof rel;
+  reverse: typeof reverse;
   table: typeof defineTable;
   defineSchema: typeof defineSchema;
   defineApp: typeof defineApp;
@@ -31,6 +34,8 @@ type RuntimeSchemaNamespace = typeof col & {
 
 /** Schema builders shared by every public binding, including React Native. */
 export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
+  rel,
+  reverse,
   table: defineTable,
   defineSchema,
   defineApp,

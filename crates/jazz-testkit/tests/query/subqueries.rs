@@ -26,6 +26,7 @@ macro_rules! local_tokio_test {
 }
 
 fn subquery_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(TableSchema::builder("users").column("name", ColumnType::Text))
         .table(
@@ -50,6 +51,7 @@ fn subquery_schema() -> Schema {
                 .column("name", ColumnType::Text)
                 .array_fk_column("parts", "file_parts"),
         )
+        .allow_all()
         .build()
 }
 
@@ -1139,6 +1141,7 @@ async fn array_subquery_reverse_uuid_array_membership_updates_when_array_changes
     clients
         .alice
         .update(
+            "files",
             file_id,
             vec![("parts".to_string(), Value::Array(vec![Value::Uuid(part_b)]))],
         )
@@ -1210,15 +1213,15 @@ async fn array_fk_subscription_preserves_occurrences_through_updates_and_reorder
             added.row.get("part_rows").is_some_and(|value| included_part_labels(value) == ["B", "A", "B"]))
     }).await;
 
-    for (id, fields, expected) in [
-        (b, vec![("label".to_owned(), Value::Text("B2".to_owned()))], vec!["B2", "A", "B2"]),
-        (file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(a), Value::Uuid(b), Value::Uuid(b)]))], vec!["A", "B2", "B2"]),
-        (file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(b), Value::Uuid(a)]))], vec!["B2", "A"]),
-        (file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(b), Value::Uuid(b), Value::Uuid(a)]))], vec!["B2", "B2", "A"]),
-        (file, vec![("parts".to_owned(), Value::Array(vec![]))], vec![]),
+    for (table, id, fields, expected) in [
+        ("file_parts", b, vec![("label".to_owned(), Value::Text("B2".to_owned()))], vec!["B2", "A", "B2"]),
+        ("files", file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(a), Value::Uuid(b), Value::Uuid(b)]))], vec!["A", "B2", "B2"]),
+        ("files", file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(b), Value::Uuid(a)]))], vec!["B2", "A"]),
+        ("files", file, vec![("parts".to_owned(), Value::Array(vec![Value::Uuid(b), Value::Uuid(b), Value::Uuid(a)]))], vec!["B2", "B2", "A"]),
+        ("files", file, vec![("parts".to_owned(), Value::Array(vec![]))], vec![]),
     ] {
         log.clear();
-        clients.alice.update(id, fields).expect("update reference or child");
+        clients.alice.update(table, id, fields).expect("update reference or child");
         wait_for_subscription_update(&mut stream, &mut log, QUERY_TIMEOUT, format!("ordered occurrence update: {expected:?}"), |log| {
             log.iter().flat_map(|delta| &delta.updated).filter_map(|updated| updated.row.as_ref()).any(|row|
                 row.get("part_rows").is_some_and(|value| included_part_labels(value) == expected))

@@ -102,7 +102,7 @@ async fn run() {
     let row_id = wait_for_query(
         &observer,
         Query::from("todos"),
-        Some(DurabilityTier::GlobalServer),
+        jazz::tools::ReadTier::Remote,
         Duration::from_secs(60),
         "device run marker at Core",
         |rows| {

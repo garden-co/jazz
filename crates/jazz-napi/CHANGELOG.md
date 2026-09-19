@@ -1,5 +1,16 @@
 # jazz-napi
 
+## 2.0.0-alpha.55
+
+### Patch Changes
+
+- cc12a09: Return embedded server listener bind failures as NAPI errors.
+- 5245e76: Move subscription result buffering into the Rust core and remove redundant TypeScript query preparation and row caches. Preserve scoped relation reads and wait for complete recursive query results before publishing them. Direct binding consumers must adapt to removal of the Rust–TypeScript `prepareQuery` API.
+
+  [PR #2717](https://github.com/garden-co/jazz/pull/2717).
+
+- 3ce5515: Coalesce queued Node subscription-startup wake callbacks to avoid redundant native ticks while preserving synchronous local write echoes.
+
 ## 2.0.0-alpha.54
 
 ### Patch Changes

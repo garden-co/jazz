@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
 import { col, getCollectedSchema, resetCollectedState, table } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
+import { resolveSchemaSource } from "./schema-source.js";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
 import { defineApp, defineSchema, defineTable } from "./typed-app.js";
 import type { AddOp } from "./schema.js";
@@ -68,9 +69,7 @@ describe("enum DSL invariants", () => {
     expect(() => col.enum({ bad: { tags: col.array(col.string()) } })).toThrow(
       "must be scalar columns",
     );
-    expect(() => col.enum({ bad: { authorId: col.ref("users") } })).toThrow(
-      "cannot use references",
-    );
+    expect(() => col.enum({ linked: { authorId: col.uuid() } })).not.toThrow();
   });
 
   describe("add enum", () => {
@@ -150,7 +149,7 @@ describe("schema default DSL", () => {
       done: col.boolean().default(false),
       status: col.enum("todo", "done").default("todo"),
       metadata: col.json().default({ archived: false }),
-      ownerId: col.ref("users").default("00000000-0000-0000-0000-000000000001"),
+      ownerId: col.uuid().default("00000000-0000-0000-0000-000000000001"),
       tags: col.array(col.string()).default(["work", "personal"]),
       archivedAt: col.timestamp().optional().default(null),
     });
@@ -175,7 +174,6 @@ describe("schema default DSL", () => {
         sqlType: "UUID",
         nullable: false,
         default: "00000000-0000-0000-0000-000000000001",
-        references: "users",
       },
       {
         name: "tags",
@@ -205,7 +203,7 @@ describe("schema default DSL", () => {
     col.boolean().default(false);
     col.timestamp().optional().default(null);
     col.enum("todo", "done").default("todo");
-    col.ref("users").default("00000000-0000-0000-0000-000000000001");
+    col.uuid().default("00000000-0000-0000-0000-000000000001");
     col.array(col.int()).default([1, 2, 3]);
 
     // @ts-expect-error non-nullable defaults cannot be null
@@ -215,7 +213,7 @@ describe("schema default DSL", () => {
     // @ts-expect-error enum defaults must be one of the declared variants
     col.enum("todo", "done").default("archived");
     // @ts-expect-error ref defaults must be strings
-    col.ref("users").default(123);
+    col.uuid().default(123);
     // @ts-expect-error array defaults must match the element type
     col.array(col.int()).default(["1"]);
   });
@@ -412,46 +410,6 @@ describe("column merge strategy DSL", () => {
   });
 });
 
-describe("ref DSL", () => {
-  it("stores references on ref columns", () => {
-    resetCollectedState();
-    table("todos", {
-      imageId: col.ref("images"),
-    });
-    const schema = getCollectedSchema();
-    expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "imageId",
-      references: "images",
-    });
-  });
-
-  it("stores references on array(ref(...)) columns", () => {
-    resetCollectedState();
-    table("bundles", {
-      itemIds: col.array(col.ref("bundle_items")),
-    });
-    const schema = getCollectedSchema();
-    expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "itemIds",
-      references: "bundle_items",
-    });
-  });
-
-  it("rejects scalar reference columns not ending in Id or _id", () => {
-    resetCollectedState();
-    expect(() => table("todos", { image: col.ref("images") })).toThrow(
-      "Invalid reference key 'image'. Rename it to 'image_id' or 'imageId'.",
-    );
-  });
-
-  it("rejects array(ref(...)) columns not ending in Ids or _ids", () => {
-    resetCollectedState();
-    expect(() => table("todos", { images: col.array(col.ref("images")) })).toThrow(
-      "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
-    );
-  });
-});
-
 describe("reserved magic-column namespace", () => {
   it("rejects schema columns starting with $", () => {
     resetCollectedState();
@@ -471,7 +429,7 @@ describe("reserved table id", () => {
       // @ts-expect-error Exercise the runtime guard for untyped callers.
       expect(() => table("items", { id })).toThrow(/id.*reserved.*UUID row ID/);
       // @ts-expect-error Exercise the runtime guard for untyped callers.
-      expect(() => defineTable({ id })).toThrow(/id.*reserved.*UUID row ID/);
+      expect(() => defineTable({ id }, {})).toThrow(/id.*reserved.*UUID row ID/);
       // @ts-expect-error Exercise the runtime guard for untyped callers.
       expect(() => defineSchema({ items: { id } })).toThrow(/id.*reserved.*UUID row ID/);
       // @ts-expect-error Exercise the runtime guard for untyped callers.
@@ -480,6 +438,59 @@ describe("reserved table id", () => {
   );
 
   it("allows id inside an enum payload", () => {
-    expect(() => defineTable({ payload: col.enum({ item: { id: col.string() } }) })).not.toThrow();
+    expect(() =>
+      defineTable({ payload: col.enum({ item: { id: col.string() } }) }, {}),
+    ).not.toThrow();
+  });
+});
+
+describe("reserved table names", () => {
+  const objectPrototypeOwnNames = Object.getOwnPropertyNames(Object.prototype);
+  const fixedControlNames = ["union", "exists", "_schema", "wasmSchema", "schemaAst"];
+
+  it.each([...objectPrototypeOwnNames, ...fixedControlNames])(
+    "rejects reserved table name %s during schema compilation",
+    (tableName) => {
+      resetCollectedState();
+      table(tableName, { value: col.string() });
+
+      expect(() => schemaToWasm(getCollectedSchema())).toThrow(/reserved/i);
+    },
+  );
+
+  it.each(["_schema", "wasmSchema"])(
+    "rejects schema-source table discriminator %s",
+    (tableName) => {
+      expect(() =>
+        resolveSchemaSource({
+          [tableName]: { columns: [] },
+        } as never),
+      ).toThrow(/reserved/i);
+    },
+  );
+
+  it("keeps ordinary, prototype, and hyphenated table names usable", () => {
+    const app = defineApp({
+      normal: defineTable({ value: col.string() }, {}),
+      prototype: defineTable({ value: col.string() }, {}),
+      "hyphenated-name": defineTable({ value: col.string() }, {}),
+    });
+
+    expect(Object.keys(app.wasmSchema).sort()).toEqual(["hyphenated-name", "normal", "prototype"]);
+    expect(JSON.parse(app.normal._build()).table).toBe("normal");
+    expect(JSON.parse(app.prototype._build()).table).toBe("prototype");
+    expect(JSON.parse(app["hyphenated-name"]._build()).table).toBe("hyphenated-name");
+  });
+});
+
+describe("schema table-name uniqueness", () => {
+  it("rejects duplicate legacy table declarations during schema lowering", () => {
+    resetCollectedState();
+    table("tasks", { title: col.string() });
+    table("tasks", { completed: col.boolean() });
+
+    expect(() => schemaToWasm(getCollectedSchema())).toThrow(
+      'Duplicate table name "tasks" in schema.',
+    );
   });
 });

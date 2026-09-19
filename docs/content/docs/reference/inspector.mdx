@@ -63,9 +63,12 @@ that was authored under an older schema.
 
 ## Development overlay
 
-The Vite and SvelteKit development integrations can serve an in-app inspector overlay that opens the
-embedded inspector against the running app's local runtime. The overlay is enabled by default during
-development and can be disabled with the integration's `inspector: false` option.
+The Vite, SvelteKit, and Next.js development integrations can serve an in-app inspector overlay
+that opens the embedded inspector against the running app's local runtime. In React, use
+`JazzProvider` or `JazzSessionProvider` from `jazz-tools/react` to attach that runtime. The overlay is enabled by default
+during development and can be disabled with the integration's `inspector: false` option.
+Next.js serves the assets through a development-only loopback server and rewrite; production
+builds do not include that rewrite or enable the overlay.
 
 For remote or self-hosted sync servers, the hosted client at
 [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) is the easiest way to inspect the server

@@ -3,16 +3,34 @@ use std::time::Duration;
 
 #[cfg(feature = "testing")]
 use crate::query::Query;
+#[cfg(feature = "testing")]
 use crate::tools::object::ObjectId;
 #[cfg(feature = "testing")]
 use crate::tools::public_api::types::Value;
 #[cfg(feature = "testing")]
-use crate::tools::{DurabilityTier, JazzClient};
+use crate::tools::{JazzClient, QueryResult, ReadTier};
 
 #[cfg(feature = "testing")]
 pub use crate::tools::admin_catalogue_row_format::decode_row;
 
+#[cfg(feature = "testing")]
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
+
+/// Project ordinary query results into row-ID/value fixtures for assertions.
+/// Joined results must be asserted as QueryResult values to retain every source ID.
+#[cfg(feature = "testing")]
+pub fn ordinary_rows(results: Vec<QueryResult>) -> QueryRows {
+    results
+        .into_iter()
+        .map(|result| {
+            let id = result
+                .key
+                .row_id()
+                .expect("expected an ordinary row result; use QueryResult assertions for joins");
+            (id, result.into_values())
+        })
+        .collect()
+}
 
 #[cfg(feature = "testing")]
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -53,11 +71,10 @@ fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
 /// Per-attempt query timeouts and transient query errors are retried until the
 /// outer deadline is reached.
 #[cfg(feature = "testing")]
-#[allow(deprecated)] // Intentionally exercises legacy DurabilityTier read controls.
 pub async fn wait_for_query<T, F>(
     client: &JazzClient,
     query: Query,
-    durability_tier: Option<DurabilityTier>,
+    read_tier: ReadTier,
     timeout: Duration,
     description: impl Into<String>,
     mut check_rows: F,
@@ -76,11 +93,12 @@ where
     loop {
         match tokio::time::timeout(
             DEFAULT_QUERY_TIMEOUT,
-            client.query(query.clone(), durability_tier),
+            client.query(query.clone(), read_tier),
         )
         .await
         {
             Ok(Ok(rows)) => {
+                let rows = ordinary_rows(rows);
                 if let Some(value) = check_rows(rows.clone()) {
                     return value;
                 }
@@ -120,11 +138,10 @@ where
 
 /// Re-runs an identity-bearing query until its ResultKey rows satisfy the matcher.
 #[cfg(feature = "testing")]
-#[allow(deprecated)] // Intentionally exercises legacy DurabilityTier read controls.
 pub async fn wait_for_query_results<T, F>(
     client: &JazzClient,
     query: Query,
-    durability_tier: Option<DurabilityTier>,
+    read_tier: ReadTier,
     timeout: Duration,
     description: impl Into<String>,
     mut check_results: F,
@@ -139,7 +156,7 @@ where
     loop {
         match tokio::time::timeout(
             DEFAULT_QUERY_TIMEOUT,
-            client.query_results(query.clone(), durability_tier),
+            client.query(query.clone(), read_tier),
         )
         .await
         {
@@ -164,5 +181,48 @@ where
             }
         }
         tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
+    }
+}
+
+/// Explicit unrestricted grants for fixtures, never a production default.
+#[cfg(any(test, feature = "testing"))]
+pub fn allow_all_policies() -> crate::tools::TablePolicies {
+    crate::tools::permissions(|p| {
+        p.allow_read().where_(crate::tools::policy_expr::always());
+        p.allow_insert().where_(crate::tools::policy_expr::always());
+        p.allow_update().where_(crate::tools::policy_expr::always());
+        p.allow_delete().where_(crate::tools::policy_expr::always());
+    })
+}
+
+/// Test-only opt-in for fixtures whose subject is unrelated to authorization.
+/// Replaces existing policies; apply specific policies after this helper.
+#[cfg(any(test, feature = "testing"))]
+pub trait AllowAll: Sized {
+    fn allow_all(self) -> Self;
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl AllowAll for crate::tools::TableSchemaBuilder {
+    fn allow_all(self) -> Self {
+        self.policies(allow_all_policies())
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl AllowAll for crate::tools::Schema {
+    fn allow_all(mut self) -> Self {
+        for table in self.values_mut() {
+            table.policies = allow_all_policies();
+        }
+        self
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl AllowAll for crate::schema::JazzSchema {
+    fn allow_all(self) -> Self {
+        Self::new(&self.public_schema().clone().allow_all())
+            .expect("allow-all fixture policies compile")
     }
 }

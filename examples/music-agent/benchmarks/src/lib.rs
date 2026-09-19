@@ -10,6 +10,7 @@ use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::{JazzSchema, TableSchema};
+use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -164,7 +165,8 @@ fn schema() -> JazzSchema {
                     .fk_column("turn", "turns")
                     .column("payload", ColumnType::Bytea),
             )
-            .build(),
+            .build()
+            .allow_all(),
     )
     .expect("MusicAgent schema compiles")
 }

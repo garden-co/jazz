@@ -81,8 +81,8 @@ republishes the schema on change — no restart needed.
 
 ```ts
 const schema = {
-  todos: s.table({ title: s.string(), done: s.boolean() }),
-  projects: s.table({ name: s.string() }),
+  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+  projects: s.table({ name: s.string() }, {}),
 };
 ```
 
@@ -115,8 +115,16 @@ provider. The Hono server and Vite build are independent and can be deployed
 side-by-side or on different hosts as long as the `/api/*` proxy is preserved.
 
 For self-hosted deployments you need to run your own Jazz server pointed at the
-Hono server's JWKS endpoint: `jazz-tools server <APP_ID> --jwks-url
-https://<your-host>/api/auth/jwks`.
+Hono server's JWKS endpoint, with matching issuer and audience:
+`jazz-tools server <APP_ID> --jwks-url https://<your-host>/api/auth/jwks
+--jwt-issuer https://<your-host> --jwt-audience https://<your-host>`.
+
+## JWT configuration
+
+`APP_ORIGIN` defaults to `http://localhost:3001`, the Better Auth server.
+Set it consistently in `.env` or the process environment. Better Auth and
+the Jazz plugin use it for matching issuer/audience settings and the JWKS
+endpoint; a frontend proxy does not change the token's issuer or audience.
 
 ## Known limitations
 

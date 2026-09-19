@@ -9,7 +9,7 @@ import { createJazzContext } from "../backend/create-jazz-context.js";
 // Native callback counts are intentional: correct synchronous row callbacks
 // alone do not reveal a queued host-task backlog (#2979).
 it("coalesces native subscription wakes and retains a wake requested from its callback", async () => {
-  const app = s.defineApp({ notes: s.table({ text: s.string() }) });
+  const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
   const permissions = s.definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();

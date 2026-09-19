@@ -6,8 +6,8 @@ import { createAccountManager } from "../../src/accounts/create-account-manager.
 import type { Db } from "../../src/runtime/db.js";
 
 export const recoveryApp = s.defineApp({
-  headers: s.table({ version: s.int() }),
-  items: s.table({ version: s.int() }),
+  headers: s.table({ version: s.int() }, {}),
+  items: s.table({ version: s.int() }, {}),
 });
 export const recoveryPermissions = s.definePermissions(recoveryApp, ({ policy }) => [
   policy.headers.allowRead.always(),

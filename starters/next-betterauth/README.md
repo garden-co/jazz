@@ -73,8 +73,8 @@ republishes the schema on change — no restart needed.
 
 ```ts
 const schema = {
-  todos: s.table({ title: s.string(), done: s.boolean() }),
-  projects: s.table({ name: s.string() }),
+  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+  projects: s.table({ name: s.string() }, {}),
 };
 ```
 
@@ -109,6 +109,14 @@ invalidates all existing Better Auth sessions.
 Better Auth's in-memory adapter (`lib/auth.ts`) is a placeholder.
 Swap it for a persistent database adapter before shipping, or users will
 be wiped on every process restart.
+
+## JWT configuration
+
+`APP_ORIGIN` defaults to `http://localhost:3000`. Better Auth uses it for its
+base URL, issuer, and audience; `withJazz` uses the same value for `jwksUrl`,
+`jwtIssuer`, and `jwtAudience`. Set it to the deployed app origin in production
+and configure the Jazz server with the same issuer/audience and reachable
+JWKS endpoint. JWKS alone is not sufficient to authenticate.
 
 ## Known limitations
 

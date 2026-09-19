@@ -8,7 +8,9 @@ this document or public receipts.
 
 - Triage the release milestone. Identify blockers, deferred issues and pending
   approvals; verify each included PR has independent review and passing gates.
-- Merge approved changes. Confirm Changesets refreshes the release PR from main.
+- Merge approved changes. Cut the reviewed candidate from `main` into the protected, long-lived `release`
+  branch. Confirm Changesets refreshes `changeset-release/release` targeting
+  `release`; ordinary development continues on `main`.
 - Audit changesets against the previous release: include important user-visible
   fixes, migrations and compatibility changes, with detailed commit/PR references.
   Keep announcement prose separate from the detailed package changelog.
@@ -93,7 +95,10 @@ this document or public receipts.
 - Merge the approved release PR only when ready: the publisher can trigger from
   that merge. Avoid dispatching a duplicate publish run.
 - If manual dispatch is needed, use `publish-jazz-tools-alpha.yml` on the exact
-  committed release revision with `mode=publish` and the expected source version.
+  `release` branch with `mode=publish`, `expected-sha=<exact merged version PR SHA>`
+  and `version=<expected source version>`. The workflow rejects a moved branch,
+  a different version, any other branch, or a commit that is not the merge of
+  `changeset-release/release` into `release`. Dry-runs may use feature branches.
   Check workflow inputs before running it. Never publish from a mutable working tree.
 - Watch individual jobs and inspect failure logs. Warm caches can shorten the run,
   but do not replace validation or guarantee identical artifacts.
@@ -153,3 +158,56 @@ not publish. `publish-jazz-tools-alpha.yml` publishes packages and creates the
 source tag. GitHub Release creation/publication is currently manual. Do not assume
 a green Changesets action or an existing tag means the packages or GitHub Release
 have been published.
+
+## Release branch lifecycle and alpha55 migration
+
+`main` remains the development branch and `.changeset/config.json` keeps
+`baseBranch: main` for ordinary development comparisons. Only pushes to `release`
+update the Changesets version PR. Manual Changesets dispatch must also select
+`release`; preview lookup uses the actual invocation ref, never the repository
+default branch. Protect `release` against direct updates, deletion and force
+pushes; require reviewed PRs and the applicable CI checks.
+
+For the alpha55 transition:
+
+1. Record the candidate SHA, existing version PR #2748 head SHA, expected version
+   (verify `alpha.55` in package manifests), and draft release ID/body before
+   changing automation. Preserve the old PR/branch until the replacement is verified.
+2. Create `release` at the agreed candidate. Land this setup on `main`, then merge
+   the setup into `release` through a normal setup PR. Do not merge #2748 or any
+   version PR as part of setup. Setup does not change prerelease bookkeeping and
+   cannot pass the publisher's exact merged-version-PR gate.
+3. Dispatch Changesets on `release` to create `changeset-release/release` targeting
+   `release`. Compare its version, consumed changesets and changelog with #2748;
+   carry any intentionally edited release prose into the replacement and preserve
+   the draft GitHub Release. Close the superseded PR only after this comparison.
+4. Build new preview receipts at the replacement's exact head SHA. An old preview
+   is reusable only when the publisher proves complete Git tree and package-version
+   equality; a workflow-only change still invalidates reuse. Record expected SHA
+   and version before approving publication. No production deployment, package
+   publication, source tag or release publication belongs to this setup operation.
+5. Configure docs and Inspector staging to build the `release` candidate, with
+   automatic production-domain assignment disabled. These Vercel settings are
+   external to the build-only `docs.yml`. Record deployment IDs and source SHAs.
+   Inspector promotion defaults to `release` and requires an explicit exact SHA;
+   it must find that SHA's staged deployment, never the newest `main` deployment.
+
+After publishing, merge `release` back to `main` with a merge commit, preserving
+ancestry. Include versioned manifests, changelogs, lockfile changes and
+`.changeset/pre.json`; keep any new main-only changeset files and do not add their
+IDs to the consumed prerelease list. Resolve conflicts by preserving both the
+released bookkeeping and unconsumed development work, then rerun the focused
+release-cycle test. Do not reset prerelease state, cherry-pick only package
+versions, or regenerate versions on main during the backmerge. For the next cut,
+merge the selected main revision into `release` through a reviewed PR; repeat
+versioning there. The fixture test in `dev/artifacts/release-branch-policy.test.mjs`
+executes the installed pinned Changesets CLI across this full cycle.
+
+The Changesets workflow explicitly dispatches CI and preview because PRs created
+with `GITHUB_TOKEN` do not automatically trigger PR workflows. It checks the PR
+and branch head before and after dispatch. If either moves, rerun Changesets on
+`release`; required checks attach to the actual executed commit and cannot satisfy
+a different head. Release pushes run the trusted suite with credentialed caches
+disabled, retaining ordinary GitHub caches until external branch OIDC trust is
+explicitly enabled. Main pushes retain shared-cache writes; trusted same-repository
+PRs retain shared-cache reads. This setup requires no external IAM change.

@@ -52,9 +52,8 @@ fn schema() -> JazzSchema {
     )
 }
 
-/// A genuinely policy-free table is the public-write control case: it must
-/// settle at an edge without authorization support or deferral.
-fn public_write_schema() -> JazzSchema {
+/// No operation on this table has an explicit grant.
+fn policy_free_schema() -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -1182,7 +1181,7 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
 
 #[test]
 fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
-    let schema = public_write_schema();
+    let schema = schema();
     let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
@@ -1202,15 +1201,19 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
         panic!("expected commit unit");
     };
 
-    let [fate] = edge_ingest(
-        &mut edge_to_client,
-        &mut edge,
-        tx,
-        versions,
-        u64::MAX - SKEW_TOLERANCE_MS,
-    )
-    .try_into()
-    .unwrap();
+    assert!(
+        edge_ingest(
+            &mut edge_to_client,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .is_empty()
+    );
+    let [fate] = drain_edge_fates(&mut edge_to_client, &mut edge, u64::MAX - SKEW_TOLERANCE_MS)
+        .try_into()
+        .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -1244,8 +1247,8 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
 }
 
 #[test]
-fn edge_public_write_table_settles_without_deferral_or_scope() {
-    let schema = public_write_schema();
+fn edge_policy_free_table_denies_without_deferral_or_scope() {
+    let schema = policy_free_schema();
     let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
@@ -1270,9 +1273,9 @@ fn edge_public_write_table_settles_without_deferral_or_scope() {
         fate,
         SyncMessage::FateUpdate {
             tx_id,
-            fate: Fate::Accepted,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             global_time: None,
-            durability: Some(DurabilityTier::Edge),
+            durability: None,
         }
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 0);

@@ -7,7 +7,8 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/dev";
 
-import { mergePermissionsIntoWasmSchema } from "jazz-tools/testing";
+import type { WasmSchema } from "jazz-tools/backend";
+import type { CompiledPermissions } from "jazz-tools/permissions";
 
 import { getStarterConfig, type StarterName } from "./starters.js";
 
@@ -510,14 +511,14 @@ function writeEnvFile(
   fs.writeFileSync(path.join(appDir, ".env"), lines.join("\n") + "\n", "utf-8");
 }
 
-export async function loadStarterSchema(
+export async function loadStarterArtifacts(
   appDir: string,
   config: ReturnType<typeof getStarterConfig>,
-): Promise<ReturnType<typeof mergePermissionsIntoWasmSchema>> {
+): Promise<{ schema: WasmSchema; permissions: CompiledPermissions }> {
   const schemaFile = path.join(appDir, config.schemaPath);
   const module = (await import(pathToFileURL(schemaFile).href)) as {
     app?: {
-      wasmSchema?: Parameters<typeof mergePermissionsIntoWasmSchema>[0];
+      wasmSchema?: WasmSchema;
     };
   };
   if (!module.app?.wasmSchema) {
@@ -526,14 +527,14 @@ export async function loadStarterSchema(
 
   const permissionsFile = path.join(path.dirname(schemaFile), "permissions.ts");
   const permissionsModule = (await import(pathToFileURL(permissionsFile).href)) as {
-    default?: Parameters<typeof mergePermissionsIntoWasmSchema>[1];
+    default?: CompiledPermissions;
   };
   if (!permissionsModule.default) {
     throw new Error(
       `Starter permissions module ${permissionsFile} does not export default permissions`,
     );
   }
-  return mergePermissionsIntoWasmSchema(module.app.wasmSchema, permissionsModule.default);
+  return { schema: module.app.wasmSchema, permissions: permissionsModule.default };
 }
 
 export async function runStarter(opts: RunStarterOptions): Promise<RunStarterResult> {
@@ -631,7 +632,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
     patchInstalledJazzNapi(appDir, opts.repoRoot, harnessFingerprint);
     assertInstalledBrokerWorkerArtifacts(appDir);
 
-    const starterSchema = await loadStarterSchema(appDir, config);
+    const artifacts = await loadStarterArtifacts(appDir, config);
 
     // Start the sync server before we write .env, so we can write the real
     // appId + serverUrl in one go and the build picks them up.
@@ -645,7 +646,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
     server = await startLocalJazzServer({
       inMemory: true,
       allowLocalFirstAuth: true,
-      schema: starterSchema,
+      ...artifacts,
       ...(usesExternalJwt
         ? {
             jwksUrl: `${config.appOrigin}/api/auth/jwks`,

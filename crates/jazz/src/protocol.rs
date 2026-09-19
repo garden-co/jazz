@@ -49,6 +49,11 @@ pub struct AuthorityPublication {
     pub commits: Vec<AuthorityCommitUnit>,
 }
 
+/// Uninhabited payload preserving retired postcard discriminants.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum ReservedWireMessage {}
+
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
@@ -129,13 +134,9 @@ pub enum SyncMessage {
         /// Lens payload.
         lens: MigrationLens,
     },
-    /// Set the current write-schema pointer.
-    SetCurrentWriteSchema {
-        /// Authenticated catalogue admin.
-        author: AuthorSubject,
-        /// Core-ordered pointer payload.
-        pointer: CurrentWriteSchema,
-    },
+    /// Retired wire tag. Uninhabited so it cannot be sent or received.
+    #[doc(hidden)]
+    Reserved12(ReservedWireMessage),
     /// Catalogue-lane acknowledgement.
     CatalogueAck(CatalogueAck),
     /// Downstream current-row view update.
@@ -4765,7 +4766,7 @@ impl<'de> serde::Deserialize<'de> for SchemaVersion {
 }
 
 /// Atomic catalogue payload that admits one non-genesis schema.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct SchemaLineagePublication {
     /// Content-addressed identity of this complete bundle.
     pub id: SchemaLineagePublicationId,
@@ -4781,6 +4782,33 @@ pub struct SchemaLineagePublication {
     /// paths only locate the entity in this immutable descriptor; they are not
     /// inputs to the UUID allocation.
     pub physical_identities: PhysicalIdentityManifest,
+}
+
+// Declaration order is immaterial to the v1 content ID and durable encoding.
+// Equality preserves multiplicity; validation still rejects duplicate declarations.
+// Compare the full payload, never just its claimed (or recomputed) digest.
+impl PartialEq for SchemaLineagePublication {
+    fn eq(&self, other: &Self) -> bool {
+        fn same_declarations(left: &[String], right: &[String]) -> bool {
+            if left == right {
+                return true;
+            }
+            if left.len() != right.len() {
+                return false;
+            }
+            let mut left = left.iter().collect::<Vec<_>>();
+            let mut right = right.iter().collect::<Vec<_>>();
+            left.sort_unstable();
+            right.sort_unstable();
+            left == right
+        }
+        self.id == other.id
+            && self.schema == other.schema
+            && self.lens == other.lens
+            && self.physical_identities == other.physical_identities
+            && same_declarations(&self.new_tables, &other.new_tables)
+            && same_declarations(&self.dropped_tables, &other.dropped_tables)
+    }
 }
 
 /// Immutable globally meaningful physical identities for one published schema
@@ -5490,6 +5518,8 @@ impl SchemaLineagePublication {
             dropped_tables,
             physical_identities,
         };
+        publication.new_tables.sort();
+        publication.dropped_tables.sort();
         publication.id = publication.content_id();
         Ok(publication)
     }
@@ -5515,6 +5545,8 @@ impl SchemaLineagePublication {
             dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
             physical_identities,
         };
+        publication.new_tables.sort();
+        publication.dropped_tables.sort();
         publication.id = publication.content_id();
         publication
     }
@@ -6537,6 +6569,65 @@ mod tests {
                     )))
                     .to_value()
             )
+        );
+    }
+
+    // Byte receipts belong here because integration results cannot detect an
+    // accidental change to persisted policy-claim node encoding.
+    #[test]
+    fn nested_policy_claim_v1_encoding_receipt() {
+        let path = vec!["org".to_owned(), "slug".to_owned()];
+        let key = crate::query::provider_claim_path_operand_key(&path);
+        assert_eq!(key.as_bytes(), b"\0claim-path-v1:3:org4:slug");
+        assert_eq!(
+            crate::query::operand_claim_path(&key),
+            vec!["claims", "org", "slug"]
+        );
+        assert_eq!(
+            crate::query::provider_claim_path_operand_key(&["org.slug".into()]).as_bytes(),
+            b"\0claims:org.slug"
+        );
+        let unusual = vec!["".to_owned(), "é:x".to_owned()];
+        let key = crate::query::provider_claim_path_operand_key(&unusual);
+        assert_eq!(key.as_bytes(), "\0claim-path-v1:0:4:é:x".as_bytes());
+        assert_eq!(crate::query::operand_claim_path(&key)[1..], unusual);
+
+        let object = crate::tools::policy_claims::json_value_to_policy_claim(
+            serde_json::json!({"slug": "north", "revoked": null}),
+            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            object,
+            Value::Tuple(vec![
+                Value::Tuple(vec![Value::String("revoked".into()), Value::Nullable(None)]),
+                Value::Tuple(vec![
+                    Value::String("slug".into()),
+                    Value::String("north".into())
+                ]),
+            ])
+        );
+        let claims = BTreeMap::from([(crate::query::provider_claim_key("org"), object)]);
+        let encoded = policy_binding_directory_claims_value(&claims).unwrap();
+        let Value::Array(nodes) = &encoded else {
+            panic!("claim node array")
+        };
+        let mut receipt = blake3::Hasher::new();
+        for node in nodes {
+            let Value::Record(record) = node else {
+                panic!("claim node record")
+            };
+            receipt.update(&(record.raw().len() as u64).to_le_bytes());
+            receipt.update(record.raw());
+        }
+        assert_eq!(
+            receipt.finalize().to_hex().as_str(),
+            "475d72b7c78a532386605e6391d57c02f6a69eae69993c97cb2e4414bd9d52b4"
+        );
+        assert_eq!(
+            policy_binding_directory_claims_from_value(encoded).unwrap(),
+            claims
         );
     }
 

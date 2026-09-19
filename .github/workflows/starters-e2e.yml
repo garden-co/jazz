@@ -4,7 +4,7 @@ name: Starters E2E
 # changesets release PR if any starter fails to scaffold, install, build, or
 # pass its Playwright suite against the production build.
 #
-# Trigger: a changesets-managed release pull request targeting `main`, plus
+# Trigger: a changesets-managed release pull request targeting `release`, plus
 # manual dispatch for ad-hoc runs. Ordinary pull requests are skipped.
 #
 # Shape: the `prepare` job builds the workspace once and packs the three
@@ -17,7 +17,7 @@ name: Starters E2E
 
 on:
   pull_request:
-    branches: [main]
+    branches: [release]
   workflow_dispatch:
     inputs:
       starter:
@@ -38,7 +38,7 @@ jobs:
   prepare:
     # On PR events, only fire on the changesets release PR. Manual dispatch is
     # always allowed (handy for testing a starter in isolation).
-    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
@@ -132,7 +132,7 @@ jobs:
   e2e:
     needs: prepare
     name: E2E ${{ matrix.starter }}${{ matrix.cancel_reopen_subscription_probe && ' cancel/reopen' || '' }}
-    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:

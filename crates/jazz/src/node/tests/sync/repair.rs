@@ -936,12 +936,9 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: renamed.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: renamed.id,
     })
     .unwrap();
 
@@ -1178,12 +1175,9 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
     )
     .unwrap();
     receiver
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 2,
-                schema: reintroduced_version.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 2,
+            schema: reintroduced_version.id,
         })
         .unwrap();
     let old_table_id = receiver

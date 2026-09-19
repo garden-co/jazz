@@ -11,10 +11,13 @@ import { schema as s } from "jazz-tools";
 
 // Define your schema
 const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 const app = s.defineApp(schema);
 

@@ -180,16 +180,11 @@ pub(super) fn prepared_claim_value(
             crate::tools::policy_claims::author_policy_claims(*permission_subject).remove(&name),
         );
     }
-    let name = match path.0.as_slice() {
-        [name] => name.clone(),
-        [claims, name] if claims == "claims" => crate::query::provider_claim_key(name),
-        _ => return Err(Error::InvalidStoredValue("unsupported session claim path")),
-    };
-    if let Some(value) = claims.get(&name) {
-        return Ok(Some(value.clone()));
+    if let Some(value) = crate::tools::policy_claims::policy_claim_at_path(claims, &path.0) {
+        return Ok(Some(value));
     }
-    if let Some(value) = default_policy_claim_values(*permission_subject).get(&name) {
-        return Ok(Some(value.clone()));
+    if let [name] = path.0.as_slice() {
+        return Ok(default_policy_claim_values(*permission_subject).remove(name));
     }
     Ok(None)
 }

@@ -1,3 +1,41 @@
+/// Alice and Bob's duplicate merge caches leave Carol's
+/// ordinary child beside an obsolete cache. Internal history/count checks are
+/// needed because public read equality cannot prove no synthetic publication.
+/// Alice/Bob -> M1,M2 -> Carol(M1) -> reconcile -> reopen -> reconcile.
+#[test]
+fn singleton_raw_frontier_is_quiescent_across_reopen() {
+    let schema = counter_schema();
+    let (directory, mut core) = open_node_with_schema(node(0x94), schema.clone());
+    let row = row(0x95);
+    let alice = TxId::new(TxTime::from(10), node(0x11));
+    let bob = TxId::new(TxTime::from(11), node(0x12));
+    let merged_time = bob.time.tick_after().unwrap();
+    let first_merge = TxId::new(merged_time, node(0x21));
+    let obsolete_merge = TxId::new(merged_time, node(0x22));
+    let carol = TxId::new(merged_time.tick_after().unwrap(), node(0x13));
+    ingest_counter_version(&mut core, &schema, row, alice, vec![], 1, "alice");
+    ingest_counter_version(&mut core, &schema, row, bob, vec![], 2, "bob");
+    ingest_counter_version(&mut core, &schema, row, first_merge, vec![alice, bob], 3, "bob");
+    ingest_counter_version(&mut core, &schema, row, obsolete_merge, vec![alice, bob], 3, "bob");
+    ingest_counter_version(&mut core, &schema, row, carol, vec![first_merge], 4, "carol");
+    core.rebuild_merge_heads_from_history_for_test("counters", row).unwrap();
+    for reopen in [false, true] {
+        if reopen {
+            drop(core);
+            core = reopen_node_at(&directory, node(0x94), schema.clone());
+        }
+        for _ in 0..3 {
+            let outcome = crate::db::block_on(core.create_merge_version_if_needed("counters", row)).unwrap();
+            assert_eq!(core.query_all_versions().unwrap().len(), 5, "singleton must not publish new history");
+            settle_outcome(&mut core, outcome).unwrap();
+            assert_eq!(core.query_all_versions().unwrap().len(), 5, "singleton must not synthesize history");
+            let winner = core.query_local_layer_winner("counters", row, VersionLayer::Content).unwrap().unwrap();
+            assert_eq!(core.version_tx_id(&winner).unwrap(), carol);
+            assert_eq!(winner.cells(&schema.tables[0]).unwrap().get("count"), Some(&Value::I32(4)));
+        }
+    }
+}
+
 #[test]
 fn core_creates_merge_versions_for_concurrent_heads() {
     let schema = two_column_schema();

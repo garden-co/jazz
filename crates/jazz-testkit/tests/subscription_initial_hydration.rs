@@ -6,8 +6,7 @@ use jazz_testkit as support;
 use jazz::query::{col, eq, lit};
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, ResultKey, Schema, SchemaBuilder, SubscriptionStreamItem,
-    TableSchema,
+    ColumnType, ResultKey, Schema, SchemaBuilder, SubscriptionStreamItem, TableSchema,
 };
 use jazz_server::JazzServer;
 
@@ -54,8 +53,9 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
             let query = jazz::query::Query::from("items");
             let expected_ids = BTreeSet::from([first_id, second_id]);
             let rows = client
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("subscriber reaches the initial edge view");
             assert_eq!(
                 rows.into_iter().map(|(id, _)| id).collect::<BTreeSet<_>>(),

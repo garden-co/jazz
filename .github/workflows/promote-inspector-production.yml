@@ -3,16 +3,20 @@ name: Promote inspector production
 on:
   workflow_dispatch:
     inputs:
+      deploy-sha:
+        description: "Exact GitHub source commit SHA of the verified staged deployment"
+        required: true
+        type: string
       deploy-branch:
         description: "Vercel deployment branch to promote"
         required: false
-        default: "main"
+        default: "release"
         type: string
   workflow_call:
     inputs:
       deploy-branch:
         required: false
-        default: "main"
+        default: "release"
         type: string
       deploy-sha:
         description: "GitHub source commit SHA to promote"
@@ -33,7 +37,7 @@ jobs:
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
       VERCEL_DEPLOY_BRANCH: ${{ inputs.deploy-branch }}
-      DEPLOY_SHA: ${{ inputs.deploy-sha || github.sha }}
+      DEPLOY_SHA: ${{ inputs.deploy-sha }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 

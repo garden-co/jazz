@@ -23,7 +23,7 @@ function listedStarters(source) {
 }
 
 const expectedReleaseCondition =
-  "github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main'";
+  "github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release'";
 const unmarkedConventionalProvenance =
   /^[ \t]*(createdAt|createdBy|updatedAt|updatedBy):(?![ \t]*s\.allowExternalProvenanceName\()/m;
 
@@ -38,7 +38,7 @@ test("release starter gate covers the canonical scaffold catalogue and no ordina
   assert.ok(expected.length > 0, "canonical starter catalogue is empty");
 
   assert.match(workflow, /^  workflow_dispatch:/m);
-  assert.match(workflow, /^  pull_request:\n    branches: \[main\]$/m);
+  assert.match(workflow, /^  pull_request:\n    branches: \[release\]$/m);
   assert.doesNotMatch(workflow, /^  push:/m);
 
   const prepare = job("prepare", "e2e");

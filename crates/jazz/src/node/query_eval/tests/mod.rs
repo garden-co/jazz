@@ -491,12 +491,9 @@ fn evolved_todos_version() -> (
         ),
     })
     .unwrap();
-    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_payload.id,
-        },
+    node.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
     })
     .unwrap();
     let todo = row(0xe2);
@@ -656,10 +653,10 @@ fn historical_titles_via_full_scan(
     position: GlobalTime,
 ) -> BTreeMap<RowUuid, Value> {
     let table_id = node
-        .physical_table_id_for_schema(node.catalogue.current_schema_version_id, &table.name)
+        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, &table.name)
         .expect("physical table id");
     let history_source = node
-        .physical_history_source_graph(node.catalogue.current_schema_version_id, &table.name)
+        .physical_history_source_graph(node.catalogue.local_schema_version_id, &table.name)
         .expect("physical history source");
     let deltas = node
         .database

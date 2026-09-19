@@ -320,7 +320,7 @@ where
         context: &mut ViewEvaluationContext,
     ) -> Result<Option<VersionRow>, Error> {
         let table_id =
-            self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
         let global = self
             .visible_global_layer_tx_id_for_physical_table_now(
                 table_id,
@@ -523,7 +523,7 @@ where
     /// Subscribe to the raw history storage table.
     pub async fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
-        let schema_version = self.catalogue.current_schema_version_id;
+        let schema_version = self.catalogue.local_schema_version_id;
         let source = self.physical_history_source_graph(schema_version, table)?;
         self.database
             .subscribe_one_sink(source)
@@ -976,7 +976,7 @@ where
             && allow_authoritative_scalar_exit_refresh
             && !exit_candidates.is_empty()
             && has_default_read_view
-            && shape.schema_version() == self.catalogue.current_schema_version_id
+            && shape.schema_version() == self.catalogue.local_schema_version_id
             && simple_scalar_exit_query(shape.query())
         {
             let (read_shape, read_binding) =
@@ -2578,10 +2578,10 @@ where
         let (schema, schema_version) = if self.table(table).is_ok() {
             (
                 &self.catalogue.schema,
-                self.catalogue.current_schema_version_id,
+                self.catalogue.local_schema_version_id,
             )
         } else {
-            let schema_version = self.catalogue.current_write_schema.schema;
+            let schema_version = self.catalogue.active_schema.schema;
             (
                 &self
                     .catalogue

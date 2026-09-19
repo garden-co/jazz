@@ -3636,6 +3636,10 @@ fn lower_contains(
     let value = lower_value_ref(value, source_id, source, request)?;
     let needle = lower_value_ref(needle, source_id, source, request)?;
     match (value, needle) {
+        (
+            LoweredValueRef::Literal(LiteralValue::Array(values)),
+            LoweredValueRef::Literal(needle),
+        ) => Ok(constant_predicate(values.contains(&needle))),
         (LoweredValueRef::Field(field), LoweredValueRef::Literal(value)) => {
             let value = coerce_literal_for_source_array_element(value, source, &field);
             Ok(GroovePredicateExpr::Contains { field, value })
@@ -3897,20 +3901,11 @@ pub(super) fn claim_value(
             .remove(&name)
             .ok_or_else(|| UnsupportedReason::UnboundClaim(path.clone()));
     }
-    let name = match path.0.as_slice() {
-        [name] => name.clone(),
-        [claims, name] if claims == "claims" => crate::query::provider_claim_key(name),
-        _ => {
-            return Err(UnsupportedReason::Operator(
-                "unsupported session claim path".to_owned(),
-            ));
-        }
-    };
-    if let Some(value) = claims.get(&name) {
-        return Ok(value.clone());
+    if let Some(value) = crate::tools::policy_claims::policy_claim_at_path(claims, &path.0) {
+        return Ok(value);
     }
-    match name.as_str() {
-        "user" => Ok(permission_subject.to_value()),
+    match path.0.as_slice() {
+        [name] if name == "user" => Ok(permission_subject.to_value()),
         _ => Err(UnsupportedReason::UnboundClaim(path.clone())),
     }
 }

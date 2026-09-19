@@ -1852,11 +1852,23 @@ struct EdgeFateObligation {
 
 type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, EdgeFateObligation>>>;
 
-struct LocalFateRoute {
+pub(super) struct LocalFateRoute {
     queue: Weak<RefCell<Vec<SyncMessage>>>,
     local_acknowledged: bool,
+    /// A replay route is admitted before its causal closure is available.
+    /// Keep it alive across link replacement without allowing its queue to
+    /// receive a fate that the receiver cannot yet apply.
+    replay_ready: bool,
+    replay_author: Option<AuthorSubject>,
+    /// The exact pending unit is retained while the route is blocked. Durable
+    /// outbox recovery remains the source of truth for unsettled writes; this
+    /// copy covers a live link that receives a terminal fate before repair.
+    replay_unit: Option<SyncMessage>,
+    /// At most one latest fate is retained while replay is blocked. Local
+    /// acknowledgement is reconstructed from durable state after readiness.
+    held_fate: Option<SyncMessage>,
 }
-type LocalFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<LocalFateRoute>>>>;
+pub(super) type LocalFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<LocalFateRoute>>>>;
 
 fn register_local_fate_route(
     routes: &LocalFateRoutes,
@@ -1880,24 +1892,103 @@ fn register_local_fate_route_with_acknowledgement(
     queue: &PendingDownstreamFates,
     local_acknowledged: bool,
 ) {
+    register_local_fate_route_state(routes, tx_id, queue, local_acknowledged, true, None, None);
+}
+
+fn register_local_replay_route(
+    routes: &LocalFateRoutes,
+    tx_id: TxId,
+    queue: &PendingDownstreamFates,
+    author: AuthorSubject,
+    replay_unit: Option<SyncMessage>,
+) {
+    register_local_fate_route_state(
+        routes,
+        tx_id,
+        queue,
+        false,
+        false,
+        Some(author),
+        replay_unit,
+    );
+}
+
+fn register_local_fate_route_state(
+    routes: &LocalFateRoutes,
+    tx_id: TxId,
+    queue: &PendingDownstreamFates,
+    local_acknowledged: bool,
+    replay_ready: bool,
+    replay_author: Option<AuthorSubject>,
+    replay_unit: Option<SyncMessage>,
+) {
     let mut routes = routes.borrow_mut();
     routes.retain(|_, pending| {
-        pending.retain(|candidate| candidate.queue.upgrade().is_some());
+        pending.retain(|candidate| !candidate.replay_ready || candidate.queue.upgrade().is_some());
         !pending.is_empty()
     });
-    if routes.get(&tx_id).is_some_and(|pending| {
-        pending.iter().any(|candidate| {
-            candidate
+
+    if let Some(candidate) = routes.get_mut(&tx_id).and_then(|pending| {
+        pending.iter_mut().find(|route| {
+            route
                 .queue
                 .upgrade()
-                .is_some_and(|candidate| Rc::ptr_eq(&candidate, queue))
+                .is_some_and(|existing| Rc::ptr_eq(&existing, queue))
         })
     }) {
+        candidate.local_acknowledged |= local_acknowledged;
+        if replay_ready {
+            candidate.replay_ready = true;
+            candidate.replay_unit = None;
+        } else {
+            candidate.replay_author = replay_author.or(candidate.replay_author);
+            if replay_unit.is_some() {
+                candidate.replay_unit = replay_unit;
+            }
+        }
         return;
     }
+
+    if !replay_ready
+        && let Some(candidate) = routes.get_mut(&tx_id).and_then(|pending| {
+            pending.iter_mut().find(|route| {
+                !route.replay_ready
+                    && route.queue.upgrade().is_none()
+                    && route.replay_author == replay_author
+            })
+        })
+    {
+        candidate.queue = Rc::downgrade(queue);
+        candidate.local_acknowledged = local_acknowledged;
+        if candidate.replay_unit.is_none() {
+            candidate.replay_unit = replay_unit;
+        }
+        return;
+    }
+
+    let held_fate = if !replay_ready {
+        routes.get(&tx_id).and_then(|pending| {
+            pending.iter().find_map(|candidate| {
+                let live_same_author = !candidate.replay_ready
+                    && candidate.replay_author == replay_author
+                    && candidate.queue.upgrade().is_some();
+                live_same_author
+                    .then_some(candidate.held_fate.as_ref())
+                    .flatten()
+                    .filter(|fate| local_fate_is_terminal(fate))
+                    .cloned()
+            })
+        })
+    } else {
+        None
+    };
     routes.entry(tx_id).or_default().push(LocalFateRoute {
         queue: Rc::downgrade(queue),
         local_acknowledged,
+        replay_ready,
+        replay_author,
+        replay_unit,
+        held_fate,
     });
 }
 
@@ -1912,9 +2003,9 @@ where
         .borrow()
         .iter()
         .filter(|(_, pending)| {
-            pending
-                .iter()
-                .any(|route| !route.local_acknowledged && route.queue.strong_count() > 0)
+            pending.iter().any(|route| {
+                route.replay_ready && !route.local_acknowledged && route.queue.strong_count() > 0
+            })
         })
         .map(|(tx_id, _)| *tx_id)
         .collect::<Vec<_>>();
@@ -1935,9 +2026,9 @@ where
         let locally_durable = durable.contains(tx_id);
         pending.retain_mut(|route| {
             let Some(queue) = route.queue.upgrade() else {
-                return false;
+                return !route.replay_ready;
             };
-            if locally_durable && !route.local_acknowledged {
+            if route.replay_ready && locally_durable && !route.local_acknowledged {
                 queue.borrow_mut().push(SyncMessage::FateUpdate {
                     tx_id: *tx_id,
                     fate: Fate::Pending,
@@ -1952,8 +2043,8 @@ where
     });
 }
 
-fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
-    let terminal = matches!(
+fn local_fate_is_terminal(fate: &SyncMessage) -> bool {
+    matches!(
         fate,
         SyncMessage::FateUpdate {
             fate: Fate::Rejected(_),
@@ -1962,12 +2053,52 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
             durability: Some(DurabilityTier::Global),
             ..
         }
-    );
+    )
+}
+
+fn release_local_replay_fates(routes: &LocalFateRoutes) {
+    let mut routes = routes.borrow_mut();
+    routes.retain(|_, pending| {
+        pending.retain_mut(|route| {
+            if !route.replay_ready {
+                return true;
+            }
+            let Some(queue) = route.queue.upgrade() else {
+                return false;
+            };
+            let Some(fate) = route.held_fate.take() else {
+                return true;
+            };
+            let terminal = local_fate_is_terminal(&fate);
+            queue.borrow_mut().push(fate);
+            !terminal
+        });
+        !pending.is_empty()
+    });
+}
+
+fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
+    let terminal = local_fate_is_terminal(fate);
     let mut routes = routes.borrow_mut();
     let Some(pending) = routes.get_mut(&tx_id) else {
         return;
     };
-    pending.retain(|candidate| {
+    pending.retain_mut(|candidate| {
+        if !candidate.replay_ready {
+            // The durable transaction state is authoritative; retaining the
+            // latest wire fate only covers the interval before a repair-ready
+            // route can reconstruct and emit it. Never replace a terminal
+            // fate with a later non-terminal progress update.
+            if terminal
+                || candidate
+                    .held_fate
+                    .as_ref()
+                    .is_none_or(|held| !local_fate_is_terminal(held))
+            {
+                candidate.held_fate = Some(fate.clone());
+            }
+            return true;
+        }
         let Some(queue) = candidate.queue.upgrade() else {
             return false;
         };
@@ -2011,33 +2142,224 @@ fn route_edge_admission_fate(routes: &EdgeFateRoutes, tx_id: TxId, fate: &SyncMe
     }
 }
 
-async fn collect_local_replay_commit_units<S>(
+#[derive(Clone, Copy, PartialEq, Eq)]
+
+enum LocalReplayStatus {
+    Visiting,
+    Complete,
+    Blocked,
+}
+fn local_replay_unit_is_complete(unit: &SyncMessage) -> bool {
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        return false;
+    };
+    usize::try_from(tx.n_total_writes).ok() == Some(versions.len())
+}
+
+enum LocalReplayFrame {
+    Enter(TxId),
+    Exit(TxId),
+}
+
+async fn plan_local_replay_commit_units<S>(
     node: &mut NodeState<S>,
-    tx_id: TxId,
-    visited: &mut BTreeSet<TxId>,
-    units: &mut Vec<(TxId, SyncMessage)>,
+    roots: &BTreeSet<TxId>,
+    retained_replay_units: &BTreeMap<TxId, SyncMessage>,
+) -> Result<
+    (
+        BTreeMap<TxId, LocalReplayStatus>,
+        BTreeMap<TxId, SyncMessage>,
+        Vec<(TxId, SyncMessage)>,
+    ),
+    crate::node::Error,
+>
+where
+    S: OrderedKvStorage,
+{
+    let mut statuses = BTreeMap::new();
+    let mut units = BTreeMap::new();
+    let mut overrides = retained_replay_units.clone();
+    let mut parents_by_tx: BTreeMap<TxId, Vec<TxId>> = BTreeMap::new();
+    let mut complete_units = Vec::new();
+
+    for root_tx_id in roots {
+        let mut frames = vec![LocalReplayFrame::Enter(*root_tx_id)];
+        while let Some(frame) = frames.pop() {
+            match frame {
+                LocalReplayFrame::Enter(tx_id) => {
+                    match statuses.get(&tx_id) {
+                        Some(LocalReplayStatus::Complete | LocalReplayStatus::Blocked) => continue,
+                        Some(LocalReplayStatus::Visiting) => {
+                            // A causal parent must not point back into the
+                            // active stack. Fail closed instead of publishing
+                            // a cyclic closure.
+                            statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                            continue;
+                        }
+                        None => {}
+                    }
+
+                    let unit = match overrides.remove(&tx_id) {
+                        Some(unit) => unit,
+                        None => match node.commit_unit_for(tx_id).await {
+                            Ok(unit) => unit,
+                            Err(crate::node::Error::MissingTransaction(_)) => {
+                                statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        },
+                    };
+                    let (n_total_writes, version_count, parents) = {
+                        let SyncMessage::CommitUnit { tx, versions } = &unit else {
+                            unreachable!("commit_unit_for always returns a commit unit")
+                        };
+                        (
+                            tx.n_total_writes,
+                            versions.len(),
+                            versions
+                                .iter()
+                                .flat_map(crate::protocol::VersionRecord::parents)
+                                .collect::<BTreeSet<_>>()
+                                .into_iter()
+                                .collect::<Vec<_>>(),
+                        )
+                    };
+                    units.insert(tx_id, unit);
+                    if usize::try_from(n_total_writes).ok() != Some(version_count) {
+                        statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                        continue;
+                    }
+                    parents_by_tx.insert(tx_id, parents.clone());
+                    statuses.insert(tx_id, LocalReplayStatus::Visiting);
+                    frames.push(LocalReplayFrame::Exit(tx_id));
+                    for parent in parents.into_iter().rev() {
+                        frames.push(LocalReplayFrame::Enter(parent));
+                    }
+                }
+                LocalReplayFrame::Exit(tx_id) => {
+                    if !matches!(statuses.get(&tx_id), Some(LocalReplayStatus::Visiting)) {
+                        continue;
+                    }
+                    let complete = parents_by_tx
+                        .get(&tx_id)
+                        .into_iter()
+                        .flatten()
+                        .all(|parent| {
+                            matches!(statuses.get(parent), Some(LocalReplayStatus::Complete))
+                        });
+                    if complete {
+                        statuses.insert(tx_id, LocalReplayStatus::Complete);
+                        let unit = units
+                            .remove(&tx_id)
+                            .expect("visiting replay node retains its unit");
+                        complete_units.push((tx_id, unit));
+                    } else {
+                        statuses.insert(tx_id, LocalReplayStatus::Blocked);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((statuses, units, complete_units))
+}
+
+pub(super) async fn restore_local_subscriber_replay<S>(
+    node: &SharedNodeState<S>,
+    outbox: &Outbox,
+    routes: &LocalFateRoutes,
+    author: AuthorSubject,
+    downstream_fates: &PendingDownstreamFates,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage,
 {
-    if !visited.insert(tx_id) {
-        return Ok(());
-    }
-    let unit = node.commit_unit_for(tx_id).await?;
-    let SyncMessage::CommitUnit { versions, .. } = &unit else {
-        unreachable!("commit_unit_for always returns a commit unit")
+    let (retained_replay_roots, retained_replay_units) = {
+        let routes = routes.borrow();
+        let mut roots = BTreeSet::new();
+        let mut units = BTreeMap::new();
+        for (tx_id, routes) in routes.iter() {
+            let matching = routes
+                .iter()
+                .filter(|route| !route.replay_ready && route.replay_author == Some(author));
+            let mut has_matching_route = false;
+            for route in matching {
+                has_matching_route = true;
+                if let Some(unit) = &route.replay_unit
+                    && local_replay_unit_is_complete(unit)
+                {
+                    units.entry(*tx_id).or_insert_with(|| unit.clone());
+                }
+            }
+            if has_matching_route {
+                roots.insert(*tx_id);
+            }
+        }
+        (roots, units)
     };
-    let parents = versions
-        .iter()
-        .flat_map(crate::protocol::VersionRecord::parents)
-        .collect::<BTreeSet<_>>();
-    for parent in parents {
-        Box::pin(collect_local_replay_commit_units(
-            node, parent, visited, units,
-        ))
+    let mut node_state = node.lock().await;
+    let mut pending = node_state
+        .pending_transaction_ids_for_author(author)
         .await?;
+    pending.sort();
+    pending.dedup();
+    let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
+    let mut roots = pending_set.clone();
+    roots.extend(retained_replay_roots);
+    let (statuses, blocked_units, replay_units) =
+        plan_local_replay_commit_units(&mut node_state, &roots, &retained_replay_units).await?;
+    drop(node_state);
+
+    let mut outbox_units = outbox
+        .borrow()
+        .iter()
+        .filter_map(|pending| pending.unit.as_ref().map(|_| pending.tx_id))
+        .collect::<BTreeSet<_>>();
+    for (tx_id, unit) in replay_units {
+        // A reopened main-thread runtime has no transaction history. Send
+        // accepted causal ancestors before each pending unit so the latter
+        // can be ingested before its Local ack or later authority fate.
+        downstream_fates.borrow_mut().push(unit.clone());
+        if pending_set.contains(&tx_id) && outbox_units.insert(tx_id) {
+            // Durable recovery omits exclusive snapshot/read evidence. A live
+            // sibling may already retain the exact authored unit; never
+            // replace that unit with its redacted history replay.
+            queue_pending_upload_in(outbox, tx_id, Some(unit));
+        }
     }
-    units.push((tx_id, unit));
+
+    let ready_roots = roots
+        .iter()
+        .filter(|tx_id| matches!(statuses.get(tx_id), Some(LocalReplayStatus::Complete)));
+    for tx_id in ready_roots {
+        // Re-admit through the blocked state first so a replacement queue can
+        // reclaim a dead same-author route and its held terminal fate.
+        register_local_replay_route(routes, *tx_id, downstream_fates, author, None);
+        register_local_fate_route(routes, *tx_id, downstream_fates);
+    }
+    for tx_id in roots {
+        if matches!(statuses.get(&tx_id), Some(LocalReplayStatus::Complete)) {
+            continue;
+        }
+        // Admission remains live while causal history is incomplete. Keep
+        // the exact pending root for a later repair-ready reconnect, but do
+        // not send it or any fate until its whole closure is present.
+        let unit = blocked_units
+            .get(&tx_id)
+            .cloned()
+            .or_else(|| retained_replay_units.get(&tx_id).cloned());
+        register_local_replay_route(routes, tx_id, downstream_fates, author, unit.clone());
+        if pending_set.contains(&tx_id)
+            && let Some(unit) = unit
+        {
+            if outbox_units.insert(tx_id) {
+                queue_pending_upload_in(outbox, tx_id, Some(unit));
+            }
+        }
+    }
+    queue_local_acknowledgements(routes, node).await;
+    release_local_replay_fates(routes);
     Ok(())
 }
 
@@ -2455,10 +2777,10 @@ struct ServedAuthorizationScopeClause {
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
 /// upstream [`PeerConnection`]s, each of which tracks how far it has shipped.
-type Outbox = Rc<RefCell<UploadOutbox>>;
+pub(super) type Outbox = Rc<RefCell<UploadOutbox>>;
 
 #[derive(Default)]
-struct UploadOutbox {
+pub(super) struct UploadOutbox {
     entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
     authority_members: HashSet<TxId>,

@@ -398,6 +398,166 @@ fn schema_hash_matches_portable_column_types_cross_runtime_fixture() {
     );
 }
 
+// This public schema-hash corpus stays beside the structural unit tests because
+// its observable contract is the exact cross-runtime hash, not database behavior.
+#[test]
+fn schema_hash_matches_default_values_cross_runtime_fixture() {
+    let cases = vec![
+        (
+            "integer-min",
+            ColumnType::Integer,
+            Some(Value::Integer(i32::MIN)),
+        ),
+        (
+            "integer-max",
+            ColumnType::Integer,
+            Some(Value::Integer(i32::MAX)),
+        ),
+        (
+            "bigint-min",
+            ColumnType::BigInt,
+            Some(Value::BigInt(i64::MIN)),
+        ),
+        (
+            "bigint-max",
+            ColumnType::BigInt,
+            Some(Value::BigInt(i64::MAX)),
+        ),
+        ("double", ColumnType::Double, Some(Value::Double(-12.5))),
+        (
+            "boolean-false",
+            ColumnType::Boolean,
+            Some(Value::Boolean(false)),
+        ),
+        (
+            "text-unicode",
+            ColumnType::Text,
+            Some(Value::Text("café 🌿".into())),
+        ),
+        (
+            "json",
+            ColumnType::Json { schema: None },
+            Some(Value::Text(r#"{"count":2}"#.into())),
+        ),
+        (
+            "json-schema",
+            ColumnType::Json {
+                schema: Some(
+                    serde_json::json!({"type": "object", "properties": {"z": {"minimum": 1.25, "type": "number"}, "a": {"type": "string"}, "\u{e000}": {"type": "string"}, "\u{10000}": {"type": "string"}}, "additionalProperties": false}),
+                ),
+            },
+            Some(Value::Text(r#"{"z":2,"a":"ok"}"#.into())),
+        ),
+        (
+            "timestamp",
+            ColumnType::Timestamp,
+            Some(Value::Timestamp(1_700_000_000_123)),
+        ),
+        (
+            "uuid",
+            ColumnType::Uuid,
+            Some(Value::Uuid(crate::tools::object::ObjectId::from_uuid(
+                Uuid::from_u128(0x00112233445566778899aabbccddeeff),
+            ))),
+        ),
+        (
+            "bytea",
+            ColumnType::Bytea,
+            Some(Value::Bytea(vec![0, 1, 127, 128, 255])),
+        ),
+        (
+            "array",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Integer),
+            },
+            Some(Value::Array(vec![Value::Integer(-1), Value::Integer(2)])),
+        ),
+        (
+            "empty-array",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Integer),
+            },
+            Some(Value::Array(vec![])),
+        ),
+        (
+            "row",
+            ColumnType::Row {
+                columns: Box::new(RowDescriptor::new(vec![
+                    ColumnDescriptor::new("count", ColumnType::Integer),
+                    ColumnDescriptor::new("note", ColumnType::Text).nullable(),
+                ])),
+            },
+            Some(Value::Row {
+                id: None,
+                values: vec![Value::Integer(3), Value::Null],
+            }),
+        ),
+        (
+            "enum",
+            ColumnType::Enum {
+                variants: vec!["draft".into(), "active".into()],
+            },
+            Some(Value::Text("active".into())),
+        ),
+        (
+            "enum-payload",
+            ColumnType::EnumPayload {
+                cases: vec![
+                    EnumCaseDescriptor {
+                        name: "created".into(),
+                        fields: vec![ColumnDescriptor::new("title", ColumnType::Text)],
+                    },
+                    EnumCaseDescriptor {
+                        name: "deleted".into(),
+                        fields: vec![],
+                    },
+                ],
+            },
+            Some(Value::Enum {
+                case: "created".into(),
+                values: vec![Value::Text("hello".into())],
+            }),
+        ),
+        ("null", ColumnType::Text, Some(Value::Null)),
+        ("absent", ColumnType::Text, None),
+        (
+            "branch-by",
+            ColumnType::Text,
+            Some(Value::Text("main".into())),
+        ),
+        ("merge-only", ColumnType::Integer, None),
+        (
+            "default-and-merge",
+            ColumnType::Integer,
+            Some(Value::Integer(5)),
+        ),
+    ];
+    let actual: Vec<_> = cases.into_iter().map(|(name, column_type, default)| {
+        let nullable = matches!(name, "null" | "absent");
+        let mut table = match &default {
+            Some(value) => TableSchema::builder("values").column_with_default("value", column_type.clone(), value.clone()),
+            None => TableSchema::builder("values").column("value", column_type.clone()),
+        };
+        if name == "branch-by" { table = table.branch_by("value"); }
+        let mut table = table.build();
+        table.columns.columns[0].nullable = nullable;
+        if matches!(name, "merge-only" | "default-and-merge") {
+            table.columns.columns[0].merge_strategy = Some(ColumnMergeStrategy::Counter);
+        }
+        let schema: Schema = [(TableName::new("values"), table)].into_iter().collect();
+        let mut case = serde_json::json!({ "name": name, "columnType": column_type, "nullable": nullable, "hash": SchemaHash::compute(&schema).to_hex() });
+        if let Some(default) = default { case["default"] = serde_json::to_value(default).unwrap(); }
+        if name == "branch-by" { case["branchBy"] = serde_json::json!(["value"]); }
+        if matches!(name, "merge-only" | "default-and-merge") { case["mergeStrategy"] = serde_json::json!("Counter"); }
+        case
+    }).collect();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
+    ))
+    .unwrap();
+    assert_eq!(serde_json::Value::Array(actual), fixture["defaultCases"]);
+}
+
 #[test]
 fn schema_hash_different_schemas() {
     let schema1 = SchemaBuilder::new()
@@ -692,5 +852,47 @@ fn explicit_table_id_columns_are_rejected() {
             .unwrap_err()
             .to_string()
             .contains("reserved")
+    );
+}
+
+#[test]
+fn user_columns_starting_with_dollar_are_rejected() {
+    for column_name in ["$createdAt", "$foo"] {
+        let source = SchemaBuilder::new()
+            .table(TableSchema::builder("items").column(column_name, ColumnType::Text))
+            .build();
+        let error = crate::schema::JazzSchema::new(&source)
+            .expect_err("user columns starting with '$' must be rejected");
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("$.items.columns.{column_name}: ")),
+            "expected the reserved column path, got {error}"
+        );
+        assert!(
+            error.to_string().contains("reserved for magic columns"),
+            "expected the reserved magic-column error, got {error}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_created_at_column_is_accepted() {
+    let source = SchemaBuilder::new()
+        .table(TableSchema::builder("items").column("createdAt", ColumnType::Timestamp))
+        .build();
+
+    let schema =
+        crate::schema::JazzSchema::new(&source).expect("ordinary createdAt column is allowed");
+    let table = schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "items")
+        .expect("items table is present");
+    assert!(
+        table
+            .columns
+            .iter()
+            .any(|column| column.name == "createdAt")
     );
 }

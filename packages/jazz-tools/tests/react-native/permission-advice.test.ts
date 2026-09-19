@@ -4,7 +4,7 @@ import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
 import { encodeNativeForegroundCommand, decodeNativeForegroundResponse } from "jazz-rn/relay";
 
-const app = schema.defineApp({ notes: schema.table({ title: schema.string() }) });
+const app = schema.defineApp({ notes: schema.table({ title: schema.string() }, {}) });
 const permissions = schema.definePermissions(app, ({ policy, session }) => [
   policy.notes.allowRead.where({ $createdBy: session.user }),
   policy.notes.allowInsert.always(),
@@ -15,7 +15,7 @@ const permissions = schema.definePermissions(app, ({ policy, session }) => [
 // Opaque operation ownership and explicit cancellation are below the public
 // can* promise API; exercise the real native byte boundary, not a fake waiter.
 it("isolates pending advice handles and retires them on cancel and close", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const first = fixture.nativeHost.openAttached(fixture.capability);
     const second = fixture.nativeHost.openAttached(fixture.capability);
     const command = encodeNativeForegroundCommand({
@@ -63,7 +63,7 @@ it("isolates pending advice handles and retires them on cancel and close", async
 });
 
 it("rejects spoofed credentials and keeps local permission advice unknown without an authority", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     await expect(
       fixture.createDb({
         ...fixture.config,
@@ -86,7 +86,7 @@ it("rejects spoofed credentials and keeps local permission advice unknown withou
 });
 
 it("uses authority dry runs and admitted identity across scopes, disconnect, and shutdown", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
@@ -95,7 +95,6 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
     jwtIssuer: issuer.issuer,
     jwtAudience: issuer.audience,
   });
-  const nativeApp = { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) };
   const options = (user: string) => ({
     appId: server.appId,
     session: { issuer: issuer.issuer, user_id: user, claims: {}, authMode: "external" as const },
@@ -110,7 +109,8 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
       permissions,
     });
     await withNativeRelayFixture(
-      nativeApp,
+      app,
+      permissions,
       async (alice) => {
         const db = await alice.createDb();
         await db.all(app.notes, { tier: ReadTier.Remote });
@@ -122,7 +122,8 @@ it("uses authority dry runs and admitted identity across scopes, disconnect, and
         expect(await db.canDelete(app.notes, row.id)).toBe("denied");
         expect(await db.all(app.notes, { tier: ReadTier.Remote })).toEqual([row]);
         await withNativeRelayFixture(
-          nativeApp,
+          app,
+          permissions,
           async (bob) => {
             await expect(
               bob.createDb({

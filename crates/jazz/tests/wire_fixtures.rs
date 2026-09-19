@@ -631,17 +631,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
-            "set_current_write_schema_revision",
-            "SetCurrentWriteSchema",
-            SyncMessage::SetCurrentWriteSchema {
-                author,
-                pointer: CurrentWriteSchema {
-                    revision: 9,
-                    schema: target_schema_version,
-                },
-            },
-        ),
-        (
             "catalogue_ack_schema_applied",
             "CatalogueAck",
             SyncMessage::CatalogueAck(CatalogueAck {
@@ -827,7 +816,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v2",
+        fixture_set: "jazz-wire-message-frames-v3",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -991,6 +980,19 @@ fn wire_hello_frame_fixtures_decode_exactly() {
         let mut suffixed = frame_bytes;
         suffixed.push(0);
         assert!(jazz::wire::decode_frame(&suffixed).is_err());
+    }
+}
+
+/// Retired tags must fail even at the trusted codec boundary; the other
+/// fixtures pin every remaining message's existing discriminant.
+#[test]
+fn retired_wire_tag_12_rejects_decoding() {
+    let retired_payload = parse_hex(
+        "0c5f5b2265356565633830332d626565372d353566352d613162382d646330383032396338346235222c2275726e3a6a617a7a3a74657374222c2235353535353535352d353535352d353535352d353535352d353535353535353535353535225d091045454545454545454545454545454545",
+    );
+    for payload in [&[12][..], &[12, 0][..], retired_payload.as_slice()] {
+        assert!(decode_sync_message(payload).is_err());
+        assert!(jazz::wire::decode_sync_message_trusted(payload).is_err());
     }
 }
 

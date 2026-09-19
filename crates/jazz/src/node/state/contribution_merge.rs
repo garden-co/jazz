@@ -124,7 +124,7 @@ where
                     .map_err(Error::InvalidBranchKey)?;
             }
         }
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let coordinates = provenance.substitutions.iter().flat_map(|substitution| {
             std::iter::once(&substitution.target)
                 .chain(substitution.sources.iter().map(|source| &source.coordinate))
@@ -188,7 +188,7 @@ where
         // commit constructor runs. Preserve the original capability for policy
         // evaluation; the preview below receives a temporary durable author.
         let permission_subject = request.permission_subject.unwrap_or(request.made_by);
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let schema = self
             .catalogue
             .catalogue_schemas

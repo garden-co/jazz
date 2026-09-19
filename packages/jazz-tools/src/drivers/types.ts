@@ -184,6 +184,8 @@ export interface TablePolicies {
 }
 
 export interface TableSchema {
+  /** Authoring metadata; excluded from storage schema identity. */
+  relations?: import("../relationships.js").Relationships;
   columns: ColumnDescriptor[];
   indexed_columns?: string[];
   policies?: TablePolicies;

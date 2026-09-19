@@ -247,6 +247,9 @@ pub struct WireTransportAdapter<T> {
     reassembly_started: Instant,
     pending_outbound_frames: VecDeque<Vec<u8>>,
     next_outbound_message_id: u64,
+    /// A permanent failure closes this adapter even when first observed while
+    /// a receive poll flushes an accepted outbound backlog.
+    terminal_error: Option<TransportError>,
 }
 
 impl<T> WireTransportAdapter<T>
@@ -312,6 +315,7 @@ where
             reassembly_started: Instant::now(),
             pending_outbound_frames: VecDeque::new(),
             next_outbound_message_id: 0,
+            terminal_error: None,
         }
     }
 
@@ -340,9 +344,19 @@ where
     }
 
     fn flush_pending_outbound(&mut self) -> Result<(), TransportError> {
+        if let Some(error) = &self.terminal_error {
+            return Err(error.clone());
+        }
         while let Some(frame) = self.pending_outbound_frames.pop_front() {
             if let Err(error) = self.inner.send_frame(frame.clone()) {
-                self.pending_outbound_frames.push_front(frame);
+                if matches!(error, TransportError::Failed(_)) {
+                    // A terminal adapter must not retain accepted-but-unsent
+                    // frames after the only possible retry path has closed.
+                    self.pending_outbound_frames.clear();
+                    self.terminal_error = Some(error.clone());
+                } else {
+                    self.pending_outbound_frames.push_front(frame);
+                }
                 return Err(error);
             }
         }
@@ -361,7 +375,10 @@ where
                         .extend(frames[index..].iter().cloned());
                     return Ok(());
                 }
-                Err(error @ TransportError::Failed(_)) => return Err(error),
+                Err(error @ TransportError::Failed(_)) => {
+                    self.terminal_error = Some(error.clone());
+                    return Err(error);
+                }
             }
         }
         Ok(())
@@ -381,7 +398,8 @@ where
     /// Receive one validated wire message for a short-lived adapter-owned
     /// exchange such as native edge bootstrap.
     pub fn try_recv_strict(&mut self) -> Result<Option<SyncMessage>, WireError> {
-        let _ = self.flush_pending_outbound();
+        self.flush_pending_outbound()
+            .map_err(Self::transport_error_as_wire_error)?;
         let now_ms = self.reassembly_now_ms();
         self.reassembler.expire(now_ms);
         while let Some(bytes) = self.inner.try_recv_frame() {
@@ -439,6 +457,18 @@ where
             }
         }
         Ok(None)
+    }
+    fn transport_error_as_wire_error(error: TransportError) -> WireError {
+        match error {
+            TransportError::Backpressure => WireError::new(
+                WireErrorCode::Backpressure,
+                WireRetry::Later,
+                "transport backpressure",
+            ),
+            TransportError::Failed(message) => {
+                WireError::new(WireErrorCode::Internal, WireRetry::Never, message)
+            }
+        }
     }
 }
 
@@ -545,7 +575,11 @@ where
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
-        let _ = self.flush_pending_outbound();
+        self.try_recv_result().ok().flatten()
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        self.flush_pending_outbound()?;
         let now_ms = self.reassembly_now_ms();
         self.reassembler.expire(now_ms);
         while let Some(bytes) = self.inner.try_recv_frame() {
@@ -570,7 +604,7 @@ where
             };
             match frame {
                 WireFrame::Message(envelope) => match self.decode_inbound_envelope(envelope) {
-                    Ok(message) => return Some(message),
+                    Ok(message) => return Ok(Some(message)),
                     Err(error) => self.send_wire_error(error),
                 },
                 WireFrame::MessageFragment(fragment) => {
@@ -593,7 +627,7 @@ where
                     let now_ms = self.reassembly_now_ms();
                     match self.reassembler.push(fragment, now_ms) {
                         Ok(Some(envelope)) => match self.decode_inbound_envelope(envelope) {
-                            Ok(message) => return Some(message),
+                            Ok(message) => return Ok(Some(message)),
                             Err(error) => self.send_wire_error(error),
                         },
                         Ok(None) => {}
@@ -615,7 +649,7 @@ where
                 WireFrame::Error(_) => {}
             }
         }
-        None
+        Ok(None)
     }
 
     fn set_trusted_encoder(&mut self, trusted: bool) {

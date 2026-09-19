@@ -2,25 +2,28 @@ import { describe, expectTypeOf, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 
 const schema = {
-  items: s.table({
-    count: s.int().merge("counter"),
-    tags: s.array(s.string()).merge("g-set"),
-    transformed: s.string().transform({
-      from: (value) => value.length,
-      to: (value) => value.toString(),
-    }),
-    optionalCount: s.int().optional(),
-    defaultedCount: s.int().default(0),
-    optionalDefaulted: s.int().optional().default(null),
-    transformedOptional: s
-      .string()
-      .optional()
-      .transform({
-        from: (value) => (value === null ? null : value.length),
-        to: (value) => (value === null ? null : value.toString()),
+  items: s.table(
+    {
+      count: s.int().merge("counter"),
+      tags: s.array(s.string()).merge("g-set"),
+      transformed: s.string().transform({
+        from: (value) => value.length,
+        to: (value) => value.toString(),
       }),
-    defaultedMerge: s.int().default(0).merge("counter"),
-  }),
+      optionalCount: s.int().optional(),
+      defaultedCount: s.int().default(0),
+      optionalDefaulted: s.int().optional().default(null),
+      transformedOptional: s
+        .string()
+        .optional()
+        .transform({
+          from: (value) => (value === null ? null : value.length),
+          to: (value) => (value === null ? null : value.toString()),
+        }),
+      defaultedMerge: s.int().default(0).merge("counter"),
+    },
+    {},
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;

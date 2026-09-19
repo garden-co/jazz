@@ -150,17 +150,10 @@ fn migration_owner_follower_cases(kind: &str) {
                         Vec::<String>::new(),
                     )
                     .unwrap();
-                    alice
-                        .apply_trusted_catalogue_message_settled(
-                            SyncMessage::SetCurrentWriteSchema {
-                                author: AuthorSubject::SYSTEM,
-                                pointer: CurrentWriteSchema {
-                                    revision: 1,
-                                    schema: evolved.version_id(),
-                                },
-                            },
-                        )
-                        .unwrap();
+                    alice.activate_catalogue_schema_settled(CurrentWriteSchema {
+                        revision: 1,
+                        schema: evolved.version_id(),
+                    }).unwrap();
                     let tx = if let Some(tx) = old_tx {
                         tx
                     } else {

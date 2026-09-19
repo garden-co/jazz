@@ -7,26 +7,32 @@ fn joined_issue_query() -> Query {
 }
 
 fn indexed_documents_schema() -> JazzSchema {
+    use crate::tools::test_support::AllowAll;
     build_public_db_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("documents")
-                .column("team", PublicColumnType::Uuid)
-                .column("active", PublicColumnType::Boolean)
-                .column("title", PublicColumnType::Text)
-                .index_only(["team"]),
-        ),
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("documents")
+                    .column("team", PublicColumnType::Uuid)
+                    .column("active", PublicColumnType::Boolean)
+                    .column("title", PublicColumnType::Text)
+                    .index_only(["team"]),
+            )
+            .allow_all(),
     )
 }
 
 fn multi_index_documents_schema() -> JazzSchema {
+    use crate::tools::test_support::AllowAll;
     build_public_db_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("documents")
-                .column("team", PublicColumnType::Uuid)
-                .column("active", PublicColumnType::Boolean)
-                .column("title", PublicColumnType::Text)
-                .index_only(["team", "active"]),
-        ),
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("documents")
+                    .column("team", PublicColumnType::Uuid)
+                    .column("active", PublicColumnType::Boolean)
+                    .column("title", PublicColumnType::Text)
+                    .index_only(["team", "active"]),
+            )
+            .allow_all(),
     )
 }
 

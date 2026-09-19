@@ -14,6 +14,12 @@ Most migration systems are one-way: rewrite every row to the new shape, then cut
 
 Jazz keeps every schema version usable and translates rows between them on read and write. Clients on different versions stay interoperable, and nothing on disk is rewritten when you ship a new schema.
 
+## Adding relations to existing UUID columns
+
+Adding `s.rel("users", "ownerId")` to an existing `s.uuid()` column changes its reference metadata without changing the stored UUID values. The same applies to optional UUID columns and UUID arrays. Generate and publish the migration through the normal workflow: Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
+
+The generated schema witnesses include the referenced tables and preserve their structural defaults, including bigint, timestamp, bytes, arrays, JSON, enum, UUID and nullable defaults. Both witnesses must match their canonical schemas exactly; missing or altered defaults are rejected. The automatic reference-addition path requires otherwise unchanged column defaults. Ordinary default-only changes affect future writes and need no row transform; each witness must retain its own endpoint defaults. Branch-bound column invariants still apply. Timestamp defaults must be exactly representable as JavaScript Dates. Generated witnesses for payload-enum and row-valued columns are not yet supported. CLI-computed hashes for defaults and branch bindings match the existing server schema identities; stored identities are unchanged. Existing rows become available through the relation's index when read under the new schema. Changing only a relation alias does not require a row lens. Removing or retargeting a reference, or renaming its column in the same migration, is not supported by this automatic path.
+
 ## Schemas and lenses
 
 Every unique version of your `schema.ts` has a hash which can be used to refer to it. When creating migrations, you describe the changes required to move between two schema versions. This is known as a 'lens'. Fetching all intermediate lenses allows clients with any published schema version to read data created with any other published schema version.
@@ -54,24 +60,23 @@ In practice, this lets you:
    current schema and writes a stub migration file into `migrations/`. It also saves a snapshot of the generated schema.
 
 5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
-6. **Publish**&hairsp;—&hairsp;push the migration to the server:
-
-   ```bash
-   pnpm dlx jazz-tools@alpha migrations push <appId> <fromHash> <toHash>
-   ```
-
-   If you also want to publish the current schema, the migration and permissions in one step, you can run:
+6. **Deploy**&hairsp;—&hairsp;publish the schema, permissions, and required migrations:
 
    ```bash
    pnpm dlx jazz-tools@alpha deploy <appId>
    ```
 
+   Both `schema.ts` and `permissions.ts` must be present. First deployments and
+   permission-only changes need no migration; compatible schema changes can use an
+   inferred migration. Changes requiring row transformations need a reviewed migration path.
+
    `deploy` walks through the publish pipeline in one go:
-   1. Publishes the current schema if the server does not already have it.
-   2. If your previous `permissions.ts` was tied to an older schema hash, asks the server whether
+   1. Before publishing, it checks that permissions and any required migrations are present.
+   2. Publishes the current schema if the server does not already have it.
+   3. If the server is on an older schema hash, asks the server whether
       it already has a migration path between the two hashes. If not, pushes the local migration
       file that closes the gap (and fails with a helpful message if you haven't created one yet).
-   3. Publishes the current permissions, attached to the current schema hash.
+   4. Publishes the current permissions, attached to the current schema hash.
 
 Permission-only changes in `permissions.ts` don't need a migration but still need to be deployed:
 `pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.

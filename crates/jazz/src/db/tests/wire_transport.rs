@@ -276,6 +276,47 @@ impl WireTransport for ScriptedSendTransport {
 }
 
 #[test]
+fn receive_poll_reports_permanent_failure_while_flushing_accepted_backlog() {
+    let message = SyncMessage::SessionClaims {
+        identity: AuthorSubject::for_test_bytes([0x77; 16]),
+        claims: BTreeMap::new(),
+    };
+    let mut adapter = WireTransportAdapter::new(
+        ScriptedSendTransport {
+            send_results: std::collections::VecDeque::from([
+                Err(TransportError::Backpressure),
+                Err(TransportError::Failed("wire closed".to_owned())),
+                Err(TransportError::Failed("wire closed".to_owned())),
+            ]),
+        },
+        WIRE_PROTOCOL_VERSION,
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION,
+        None,
+    );
+
+    assert_eq!(
+        adapter.send(message),
+        Ok(()),
+        "Backpressure accepts the logical message and retains its physical frame"
+    );
+
+    // Live peers use `Transport::try_recv_result` to observe receive failures.
+    // Exercise the concrete adapter's fallible receive path here to ensure
+    // terminal errors remain observable.
+    let first = adapter
+        .try_recv_strict()
+        .expect_err("receive polling must report a permanent flush failure");
+    assert_eq!(first.retry, WireRetry::Never);
+    assert!(first.message.contains("wire closed"));
+
+    let second = adapter
+        .try_recv_strict()
+        .expect_err("a failed adapter must not resume silently on a later poll");
+    assert_eq!(second.retry, WireRetry::Never);
+    assert!(second.message.contains("wire closed"));
+}
+
+#[test]
 fn pending_outbound_backpressure_rejects_later_logical_message_without_encoding_it() {
     let message = SyncMessage::SessionClaims {
         identity: AuthorSubject::for_test_bytes([0x76; 16]),
