@@ -13,7 +13,7 @@ const app = schema.defineApp({
 // These cases intentionally have no authority peer: an ordinary persisted
 // local write is not evidence of Edge or Global admission.
 it("keeps Edge and Global waits pending while local writes remain responsive", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const write = db.insert(app.todos, { title: "pending admission", done: false });
     const row = await write.wait({ tier: "local" });
@@ -37,7 +37,7 @@ it("keeps Edge and Global waits pending while local writes remain responsive", a
 });
 
 it("does not publish unconfirmed local rows to a strict remote subscription", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     const remote: unknown[][] = [];
     const local: unknown[][] = [];
@@ -64,7 +64,7 @@ it("does not publish unconfirmed local rows to a strict remote subscription", as
 });
 
 it("resumes strict remote reads and both write tiers after native reconnect", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
@@ -88,7 +88,8 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
       permissions,
     });
     await withNativeRelayFixture(
-      { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
+      app,
+      permissions,
       async (fixture) => {
         const db = await fixture.createDb();
         expect(await db.all(app.todos, { tier: ReadTier.Remote })).toEqual([]);
@@ -162,7 +163,7 @@ it("resumes strict remote reads and both write tiers after native reconnect", as
 }, 30_000);
 
 it("keeps local work usable while remote read tiers recover from an established native socket outage", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
   const dataDir = await mkdtemp(join(tmpdir(), "jazz-rn-established-outage-"));
@@ -191,7 +192,8 @@ it("keeps local work usable while remote read tiers recover from an established 
       backendSecret: server.backendSecret,
     };
     await withNativeRelayFixture(
-      { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
+      app,
+      permissions,
       async (fixture) => {
         const db = await fixture.createDb();
         expect(await db.all(app.todos, { tier: ReadTier.Remote })).toEqual([]);

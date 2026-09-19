@@ -135,10 +135,8 @@ async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_wr
     server.shutdown().await;
 }
 
-/// Verifies that an enforcing local runtime with an empty loaded permissions
-/// bundle denies writes that lack an explicit INSERT policy.
+/// Verifies server rejection of an optimistic write without an INSERT grant.
 #[tokio::test]
-#[ignore = "#1794: the server currently allows INSERT when a table has no explicit policy bundle"]
 async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -332,4 +330,130 @@ async fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_n
 
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
+}
+
+/// Missing grants stay closed regardless of policies on other tables. Explicit
+/// allow-all fixtures exercise the same operations as a positive control.
+#[tokio::test]
+async fn missing_operation_policies_deny_reads_and_writes() {
+    use jazz::tools::test_support::AllowAll;
+    use jazz::tools::{ReadTier, TablePolicies};
+    use jazz_testkit::connect_ready_client;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for case in ["empty", "other_table", "select_only", "allow_all"] {
+                let mut notes = TableSchema::builder("notes").column("content", ColumnType::Text);
+                if case == "select_only" {
+                    notes = notes.policies(TablePolicies::new().with_select(pe::always()));
+                }
+                let mut builder = SchemaBuilder::new().table(notes);
+                if case == "other_table" {
+                    builder = builder.table(TableSchema::builder("other").allow_all());
+                }
+                let mut schema = builder.build();
+                if case == "allow_all" {
+                    schema = schema.allow_all();
+                }
+                let server = JazzServer::start_with_schema(schema.clone()).await.unwrap();
+                let admin =
+                    connect_ready_client(&server, &schema, super::BOB_ID, "notes", READY_TIMEOUT)
+                        .await;
+                let (seed, _, tx) = admin
+                    .insert("notes", crate::row_input!("content" => "seed"))
+                    .unwrap();
+                wait_for_edge_txs(&admin, &[tx.unwrap()]).await;
+                let client =
+                    connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT)
+                        .await;
+                let rows = client
+                    .query(Query::from("notes"), ReadTier::Remote)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    rows.len(),
+                    usize::from(matches!(case, "select_only" | "allow_all")),
+                    "{case}: SELECT"
+                );
+
+                let writes = [
+                    client
+                        .insert("notes", crate::row_input!("content" => "insert"))
+                        .map(|result| result.2),
+                    client.update("notes", seed, vec![("content".into(), "update".into())]),
+                    client.delete("notes", seed),
+                ];
+                for (operation, tx) in ["INSERT", "UPDATE", "DELETE"].into_iter().zip(writes) {
+                    let settled = match tx {
+                        Ok(Some(tx)) => client
+                            .wait_for_transaction(tx, DurabilityTier::EdgeServer)
+                            .await
+                            .map(|_| ()),
+                        Ok(None) => panic!("{case}: {operation} did not commit"),
+                        Err(error) => Err(error),
+                    };
+                    if case == "allow_all" {
+                        settled.unwrap();
+                    } else {
+                        let error = settled.expect_err("missing grant must deny").to_string();
+                        assert!(
+                            error.contains("authorization_denied")
+                                || error.contains("read policy denied"),
+                            "{case}: {operation}: {error}"
+                        );
+                    }
+                }
+                client.shutdown().await.unwrap();
+                admin.shutdown().await.unwrap();
+                server.shutdown().await;
+            }
+        })
+        .await;
+}
+
+/// Alice's insert-then-delete is authorized against the inserted content and
+/// its actual creator, even though there is no previously persisted row.
+#[tokio::test]
+async fn insert_then_delete_checks_candidate_content_and_provenance() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("notes")
+                        .column("content", ColumnType::Text)
+                        .policies(permissions(|p| {
+                            p.allow_insert().always();
+                            p.allow_delete().where_(pe::all_of([
+                                pe::eq("content", pe::literal("allowed")),
+                                pe::eq("$createdBy", pe::session("user")),
+                            ]));
+                        })),
+                )
+                .build();
+            let server = JazzServer::start_with_schema(schema.clone()).await.unwrap();
+            let alice =
+                connect_ready_user(&server, &schema, super::ALICE_ID, "notes", READY_TIMEOUT).await;
+            for content in ["allowed", "denied"] {
+                let tx = alice.begin_transaction().unwrap();
+                let (row, _, _) = tx
+                    .insert("notes", crate::row_input!("content" => content))
+                    .unwrap();
+                tx.delete("notes", row).unwrap();
+                let id = tx.commit().unwrap();
+                let settled = tokio::time::timeout(
+                    READY_TIMEOUT,
+                    alice.wait_for_transaction(id, DurabilityTier::EdgeServer),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    settled.is_ok(),
+                    content == "allowed",
+                    "{content}: {settled:?}"
+                );
+            }
+            alice.shutdown().await.unwrap();
+            server.shutdown().await;
+        })
+        .await;
 }

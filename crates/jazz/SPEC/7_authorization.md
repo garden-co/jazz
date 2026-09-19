@@ -28,7 +28,7 @@ Invariant digest:
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
-- `INV-RLS-15`: A table with no declared policy clauses is public for reads and for writes by non-anonymous permission subjects; anonymous permission subjects are structurally read-only, and once a table declares any clause, every omitted operation is denied.
+- `INV-RLS-15`: Every omitted operation is denied at the serving authority, including when the table has no policy clauses; anonymous permission subjects remain structurally read-only.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
@@ -74,11 +74,11 @@ authenticated claims for the peer being evaluated. The stored core shape is
 `insert_check`, `update_using`, `update_check`, and `delete_using` clauses.
 
 `TableSchema::new` defaults every clause to `None`. Such a **policy-free table**
-is public for reads and for writes by non-anonymous permission subjects so an
-app can use ordinary data before it introduces authorization. An anonymous
-permission subject remains structurally read-only regardless of table policy.
-Declaring any one clause closes that table's policy set: the declared operation
-is evaluated normally and every other operation with no clause is denied. For
+denies ordinary user reads and writes at the serving authority. Every operation
+requires an explicit grant. Trusted
+backend operations use their explicit SYSTEM capability; client-local optimistic
+staging does not grant authority acceptance. An anonymous permission subject
+remains structurally read-only regardless of table policy. For
 update, either `update_using` or `update_check` declares the update operation;
 when both are supplied, both must pass. An absent subclause within an otherwise
 declared update contributes no additional check. This rule is enforced by the
@@ -225,9 +225,7 @@ For an insert, `insert_check` is evaluated against the inserted row. For an
 update, `update_using` is evaluated against the previous content row and
 `update_check` is evaluated against the new content row; if both clauses are
 present both must pass. For a delete, `delete_using` is evaluated against the row
-being deleted. Subject to the structural anonymous-write gate, all of those
-operations are public on a policy-free table. On a table with any declared
-clause, an omitted insert or delete clause denies; an
+being deleted. An omitted insert or delete clause denies; an
 update with neither `update_using` nor `update_check` denies; and a missing read
 policy emits no rows. Missing clauses never fall back to another operation's
 policy.

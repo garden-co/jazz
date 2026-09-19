@@ -12,7 +12,6 @@ import {
   exportSchema as exportCatalogueSchema,
   getCurrentSchemaHash,
   getPermissionsStatus,
-  pushMigration as pushCatalogueMigration,
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
@@ -106,20 +105,12 @@ export interface CreateMigrationOptions extends MigrationCommandOptions {
   name?: string;
 }
 
-export interface PushMigrationOptions extends MigrationCommandOptions {
-  // Can be a full hash or short hash prefix
-  fromHash: string;
-  // Can be a full hash or short hash prefix
-  toHash: string;
-}
-
 export interface DeployOptions {
   appId: string;
   serverUrl: string;
   adminSecret: string;
   schemaDir: string;
   migrationsDir: string;
-  noVerify?: boolean;
 }
 
 // Framework bundlers (Vite, SvelteKit, Next.js, Expo) expose public env vars
@@ -384,14 +375,7 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
         "No reviewed migration file needed because this schema change does not require row transformations.",
       );
       console.log(
-        "Next step: Run npx jazz-tools@" +
-          version +
-          " migrations push " +
-          (options.appId ?? "<appId>") +
-          " " +
-          shortSchemaHash(result.fromHash) +
-          " " +
-          shortSchemaHash(result.toHash),
+        "Next step: Run npx jazz-tools@" + version + " deploy " + (options.appId ?? "<appId>"),
       );
       return null;
     }
@@ -411,39 +395,12 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
         (result.needsRename ? "3" : "2") +
           ". Run npx jazz-tools@" +
           version +
-          " migrations push " +
-          (options.appId ?? "<appId>") +
-          " " +
-          shortSchemaHash(result.fromHash) +
-          " " +
-          shortSchemaHash(result.toHash),
+          " deploy " +
+          (options.appId ?? "<appId>"),
       );
       return result.filePath;
     }
   }
-}
-
-export async function pushMigration(options: PushMigrationOptions): Promise<void> {
-  const { appId, serverUrl, adminSecret } = requireMigrationServerOptions(options);
-  const result = await pushCatalogueMigration({
-    appId,
-    serverUrl,
-    adminSecret,
-    migrationsDir: options.migrationsDir,
-    fromHash: options.fromHash,
-    toHash: options.toHash,
-  });
-
-  if (result.filePath) {
-    console.log(
-      `Pushed migration ${shortSchemaHash(result.fromHash)} -> ${shortSchemaHash(result.toHash)} from ${basename(result.filePath)}.`,
-    );
-    return;
-  }
-
-  console.log(
-    `Pushed migration ${shortSchemaHash(result.fromHash)} -> ${shortSchemaHash(result.toHash)} without a reviewed migration file because no row transformations are required.`,
-  );
 }
 
 function describePermissionsHead(head: StoredPermissionsHead): string {
@@ -476,7 +433,7 @@ export async function permissionsStatus(options: PermissionsCommandOptions): Pro
 
   if (!result.head) {
     console.log("Server has no published permissions head yet.");
-    console.log("Next push will publish version 1.");
+    console.log("Next deploy will publish version 1.");
     return;
   }
 
@@ -485,10 +442,10 @@ export async function permissionsStatus(options: PermissionsCommandOptions): Pro
     console.log("Current server permissions already target this structural schema.");
   } else {
     console.log(
-      `Current server permissions target ${shortSchemaHash(result.head.schemaHash)}; pushing will retarget the head to ${shortSchemaHash(result.localSchemaHash)}.`,
+      `Current server permissions target ${shortSchemaHash(result.head.schemaHash)}; deploying will retarget the head to ${shortSchemaHash(result.localSchemaHash)}.`,
     );
   }
-  console.log(`Next push will require parent bundle ${result.head.bundleObjectId}.`);
+  console.log(`Next deploy will require parent bundle ${result.head.bundleObjectId}.`);
 }
 
 export async function deploy(options: DeployOptions): Promise<void> {
@@ -509,9 +466,6 @@ export async function deploy(options: DeployOptions): Promise<void> {
           console.log(
             `The current schema is already stored in the server as ${shortSchemaHash(event.hash)}; skipping publish.`,
           );
-          break;
-        case "permissions-skipped":
-          console.log("No permissions.ts found; skipping permissions publish.");
           break;
         case "permissions-loaded":
           console.log(`Loaded current permissions from ${event.permissionsFile}.`);
@@ -569,16 +523,13 @@ function isMainModule(): boolean {
 function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
-  console.log("  validate              Validate root schema.ts and optional permissions.ts");
+  console.log("  validate              Validate root schema.ts and permissions.ts");
   console.log("  schema hash           Print the short hash of the current schema.ts");
   console.log("  schema export         Print the compiled structural schema as JSON");
-  console.log("  deploy <appId>        Publish the current schema.ts and permissions.ts");
+  console.log("  deploy <appId>        Publish schema, permissions, and required migrations");
   console.log("  permissions status <appId> Show the current server permissions head for this app");
   console.log(
     "  migrations create     Generate a typed structural migration stub between two schema versions",
-  );
-  console.log(
-    "  migrations push <appId> <fromHash> <toHash> Push a reviewed migration edge to the server",
   );
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
@@ -607,7 +558,7 @@ function printHelp(): void {
   console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
   console.log("\nMigration options:");
   console.log(
-    "  <appId>               Required for remote create/push commands (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
+    "  <appId>               Required for remote migration creation and deploy (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
   );
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log(
@@ -697,24 +648,11 @@ if (isMainModule()) {
         toHash: getFlagValue(commandArgs, "--toHash"),
         name: getFlagValue(commandArgs, "--name"),
       });
-    } else if (subcommand === "push") {
-      const appId = args[2];
-      const fromHash = args[3];
-      const toHash = args[4];
-      const sharedArgs = args.slice(5);
-
-      if (!appId || !fromHash || !toHash) {
-        console.error(
-          "Usage: node dist/cli.js migrations push <appId> <fromHash> <toHash> [options]",
-        );
-        process.exit(1);
-      }
-
-      const options = resolveMigrationOptions(sharedArgs);
-      task = pushMigration({ ...options, appId, fromHash, toHash });
     } else {
       task = Promise.reject(
-        new Error("Usage: node dist/cli.js migrations <create|push> [<appId>] [options]"),
+        new Error(
+          "Use `jazz-tools migrations create` to prepare migrations and `jazz-tools deploy <appId>` to publish them.",
+        ),
       );
     }
 
@@ -739,13 +677,18 @@ if (isMainModule()) {
       process.exit(1);
     });
   } else if (command === "deploy") {
+    if (hasFlag(args, "--no-verify")) {
+      console.error(
+        "--no-verify is no longer supported; deploy requires a complete migration path.",
+      );
+      process.exit(1);
+    }
     const { appId, args: commandArgs } = splitLeadingAppId(args.slice(1));
     const options = { ...resolveMigrationOptions(commandArgs), appId };
     deploy({
       ...requireMigrationServerOptions(options),
       schemaDir: options.schemaDir ?? process.cwd(),
       migrationsDir: options.migrationsDir,
-      noVerify: hasFlag(commandArgs, "--no-verify"),
     }).catch((err) => {
       console.error(err.message);
       process.exit(1);

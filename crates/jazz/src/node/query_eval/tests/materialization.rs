@@ -123,7 +123,7 @@ fn authoritative_reset_version_uses_non_base_partition_descriptor() {
     assert_eq!(version.tx_node_alias(), alias);
     let row = node
         .projected_current_row_from_materialized_version_in_read_schema(
-            node.catalogue.current_schema_version_id,
+            node.catalogue.local_schema_version_id,
             &version,
         )
         .unwrap()
@@ -149,7 +149,7 @@ fn relation_edge_target_uses_non_base_partition_descriptor() {
     let row = node
         .materialize_relation_edge_target_row(
             &ReadViewSpec::default(),
-            node.catalogue.current_schema_version_id,
+            node.catalogue.local_schema_version_id,
             "todos",
             todo,
             tx_id.time,
@@ -624,12 +624,9 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename_and_preserves_p
         publication: Box::new(publication.clone()),
     })
     .expect("publish users to people lens");
-    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: v2.id,
-        },
+    node.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: v2.id,
     })
     .expect("activate v2 read schema");
 

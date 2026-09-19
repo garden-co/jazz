@@ -33,6 +33,7 @@ import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.j
 import { collectMissingExplicitPolicyDiagnostics } from "../schema-permissions.js";
 import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance.js";
 import {
+  publishStoredPermissions,
   fetchPermissionsHead,
   fetchSchemaConnectivity,
   fetchSchemaHashes,
@@ -64,7 +65,6 @@ export type CatalogueEvent =
   | { type: "schema-skipped"; hash: string; reason: "already-stored" }
   | { type: "permissions-loaded"; permissionsFile?: string }
   | { type: "permissions-published"; schemaHash: string; version?: number }
-  | { type: "permissions-skipped"; reason: "missing-permissions-file" }
   | { type: "migration-published"; fromHash: string; toHash: string; filePath?: string }
   | { type: "migration-skipped"; reason: "already-connected"; fromHash: string; toHash: string }
   | { type: "warning"; message: string };
@@ -130,9 +130,8 @@ export interface DeployResult {
   schema: DeploySchemaResult;
   migration?:
     | PushMigrationResult
-    | { status: "already-connected"; fromHash: string; toHash: string }
-    | { status: "missing"; fromHash: string; toHash: string };
-  permissions?: PushPermissionsResult;
+    | { status: "already-connected"; fromHash: string; toHash: string };
+  permissions: PushPermissionsResult;
   warnings: string[];
 }
 
@@ -141,7 +140,6 @@ export interface DeployOptions extends CatalogueProjectOptions {
    * Directory containing migration files. Defaults to `<schemaDir>/migrations`.
    */
   migrationsDir?: string;
-  noVerify?: boolean;
 }
 
 export interface ValidateProjectOptions {
@@ -228,6 +226,7 @@ interface PermissionsStatusResult {
 }
 
 interface ResolvedProjectDeployMigrationChain {
+  previousHead: StoredPermissionsHead;
   migrations: Array<{
     migration: DefinedMigration;
     filePath: string;
@@ -251,7 +250,7 @@ function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaPr
 } {
   if (!compiled.permissions || !compiled.permissionsFile) {
     throw new Error(
-      "No permissions found for this app. Create a permissions.ts file before using permissions commands.",
+      "No permissions found for this app. Create a permissions.ts file before deploying.",
     );
   }
 
@@ -1594,7 +1593,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
 function disconnectedSchemaMessage(appId: string, fromHash: string, toHash: string): string {
   const fromShortHash = shortSchemaHash(fromHash);
   const toShortHash = shortSchemaHash(toHash);
-  return `The new permissions schema ${toShortHash} is not connected to the previous permissions schema ${fromShortHash} on the server. Reads and writes may fail until you push a migration. Run \`jazz-tools migrations create ${appId} --fromHash ${fromShortHash} --toHash ${toShortHash}\` to create a migration and then re-run this command.`;
+  return `The new schema ${toShortHash} is not connected to the previous schema ${fromShortHash} on the server. Run \`jazz-tools migrations create ${appId} --fromHash ${fromShortHash}\` to create a migration and then re-run this command.`;
 }
 
 function noMigrationFileMessage(
@@ -1627,11 +1626,6 @@ function emitDeployResult(
       hash: result.schema.hash,
       reason: "already-stored",
     });
-  }
-
-  if (!result.permissions) {
-    emit(options, { type: "permissions-skipped", reason: "missing-permissions-file" });
-    return;
   }
 
   emit(options, { type: "permissions-loaded", permissionsFile });
@@ -1811,18 +1805,20 @@ async function resolveProjectDeployMigrationChain(
       `Multiple local migration chains connect ${shortSchemaHash(head.schemaHash)} to ${shortSchemaHash(toHash)}. Keep exactly one reviewed path.`,
     );
   }
-  return paths[0] ? { migrations: paths[0] } : undefined;
+  return paths[0] ? { previousHead: head, migrations: paths[0] } : undefined;
 }
 
 /**
  * Publishes the current schema and permissions.
  *
  * When updating a schema, also attempts to publish a migration between the old and new schemas.
- * Set `noVerify` to return a warning instead of throwing if that migration is missing.
+ * Missing permissions or required migrations fail before publication.
  */
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
   const migrationsDir = options.migrationsDir ?? join(options.schemaDir, "migrations");
-  const compiled = await loadCompiledSchema(options.schemaDir);
+  if ("noVerify" in options)
+    throw new Error("noVerify is no longer supported; deploy requires a complete migration path.");
+  const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   emit(options, { type: "schema-loaded", schemaFile: compiled.schemaFile });
   const resolvedChain = await resolveProjectDeployMigrationChain(options, migrationsDir, compiled);
   const releaseHash = await computeSchemaHash(compiled.wasmSchema);
@@ -1902,20 +1898,15 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       }
     }
 
-    const { head: previousHead } = await fetchPermissionsHead(options.serverUrl, {
+    const previousHead = resolvedChain.previousHead;
+    const { head } = await publishStoredPermissions(options.serverUrl, {
       appId: options.appId,
-      adminSecret: options.adminSecret,
-    });
-    if (!previousHead) {
-      throw new Error("Permissions head disappeared while replaying local migration chain.");
-    }
-    const permissions = await pushCataloguePermissions({
-      appId: options.appId,
-      serverUrl: options.serverUrl,
       adminSecret: options.adminSecret,
       schemaHash: releaseHash,
-      permissions: compiled.permissions!,
+      permissions: compiled.permissions,
+      expectedParentBundleObjectId: previousHead.bundleObjectId,
     });
+    const permissions = { schemaHash: releaseHash, previousHead, head };
 
     if (!schema) {
       throw new Error(
@@ -1952,28 +1943,20 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     };
   }
 
-  let result = await deployCatalogue({
-    appId: options.appId,
-    serverUrl: options.serverUrl,
-    adminSecret: options.adminSecret,
-    schema: compiled.wasmSchema,
-    permissions: compiled.permissions,
-    noVerify: options.noVerify,
-  });
-
-  if (result.migration?.status === "missing") {
-    const message = disconnectedSchemaMessage(
-      options.appId,
-      result.migration.fromHash,
-      result.migration.toHash,
-    );
-    if (!options.noVerify) {
-      throw new Error(message);
+  let result;
+  try {
+    result = await deployCatalogue({
+      appId: options.appId,
+      serverUrl: options.serverUrl,
+      adminSecret: options.adminSecret,
+      schema: compiled.wasmSchema,
+      permissions: compiled.permissions,
+    });
+  } catch (error) {
+    if (error instanceof MissingMigrationError) {
+      throw new Error(disconnectedSchemaMessage(options.appId, error.fromHash, error.toHash));
     }
-    result = {
-      ...result,
-      warnings: [...result.warnings, message],
-    };
+    throw error;
   }
 
   emitDeployResult(options, result, compiled.permissionsFile);
@@ -1984,12 +1967,6 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       ...result.schema,
       schemaFile: compiled.schemaFile,
     },
-    permissions:
-      result.permissions && compiled.permissionsFile
-        ? {
-            ...result.permissions,
-            permissionsFile: compiled.permissionsFile,
-          }
-        : undefined,
+    permissions: { ...result.permissions, permissionsFile: compiled.permissionsFile },
   };
 }

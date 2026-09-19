@@ -992,7 +992,7 @@ pub(super) async fn permissions_head_handler(
 
     match state
         .catalogue
-        .current_permissions_head(&state.catalogue_store)
+        .active_schema_summary(&state.catalogue_store)
     {
         Ok(head) => {
             let head = head.map(permissions_head_view);
@@ -1038,12 +1038,12 @@ pub(super) async fn permissions_handler(
         };
     }
 
-    match state.catalogue.current_permissions(&state.catalogue_store) {
+    match state.catalogue.active_schema(&state.catalogue_store) {
         Ok(current) => (
             StatusCode::OK,
             Json(match current {
                 Some(current) => StoredPermissionsResponse {
-                    head: Some(permissions_head_view(current.head)),
+                    head: Some(permissions_head_view(current.summary)),
                     permissions: Some(permissions_map_view(current.permissions)),
                 },
                 None => StoredPermissionsResponse {

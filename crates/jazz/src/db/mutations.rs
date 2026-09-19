@@ -3218,7 +3218,7 @@ where
         if self.local_current_row(table, row).await?.is_none() {
             return Ok(None);
         }
-        if identity == AuthorSubject::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+        if identity == AuthorSubject::SYSTEM {
             return Ok(None);
         }
         Err(read_for_write_denied("UPSERT", table))

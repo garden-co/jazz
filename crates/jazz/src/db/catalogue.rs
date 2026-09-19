@@ -80,23 +80,84 @@ where
         self.finish_publication_outcome(outcome).await
     }
 
-    /// Set the current write-schema pointer through the catalogue lane.
-    pub async fn set_current_write_schema(
+    #[cfg(feature = "runtime")]
+    pub(crate) fn validate_schema_activation(
         &self,
-        pointer: CurrentWriteSchema,
-    ) -> Result<Vec<SyncMessage>, Error> {
+        revision: u64,
+        schema: JazzSchema,
+    ) -> Result<(), Error> {
         self.check_catalogue_admin()?;
-        let outcome = self
+        self.node
             .node
+            .borrow()
+            .validate_schema_activation(revision, schema)?;
+        Ok(())
+    }
+
+    /// Activate an admitted structural schema with its explicit permissions.
+    /// The revision covers both schema and permissions, including policy-only changes.
+    pub async fn activate_schema(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+        permissions: std::collections::HashMap<
+            crate::tools::public_schema::TableName,
+            crate::tools::public_schema::TablePolicies,
+        >,
+    ) -> Result<(), Error> {
+        self.check_catalogue_admin()?;
+        let mut source = schema.public_schema().clone();
+        for (name, table) in &mut source {
+            table.policies = permissions.get(name).cloned().unwrap_or_default();
+        }
+        if permissions.keys().any(|name| !source.contains_key(name)) {
+            return Err(crate::node::Error::InvalidCatalogueUpdate(
+                "active schema permissions reference unknown table",
+            )
+            .into());
+        }
+        let schema = JazzSchema::new(&source).map_err(|error| {
+            Error::new(
+                ErrorCode::Schema,
+                format!("invalid active schema permissions: {error}"),
+            )
+        })?;
+        self.node
             .node
             .lock()
             .await
-            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-                author: self.identity.author,
-                pointer,
-            })
+            .activate_schema(revision, schema)
             .await?;
-        self.finish_publication_outcome(outcome).await
+        self.node.set_permissions_ready(true)?;
+        Ok(())
+    }
+
+    /// Internal fixture utility: activate grants declared on an admitted test schema.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn activate_catalogue_schema_for_test(
+        &self,
+        pointer: CurrentWriteSchema,
+    ) -> Result<(), Error> {
+        let schema = self.catalogue_schema(pointer.schema).ok_or(
+            crate::node::Error::InvalidCatalogueUpdate("fixture schema is not admitted"),
+        )?;
+        self.activate_schema_for_test(pointer.revision, schema)
+            .await
+    }
+
+    /// Internal fixture utility: activate the grants embedded in a test schema.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn activate_schema_for_test(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+    ) -> Result<(), Error> {
+        let permissions = schema
+            .public_schema()
+            .iter()
+            .map(|(name, table)| (name.clone(), table.policies.clone()))
+            .collect();
+        self.activate_schema(revision, schema, permissions).await
     }
 
     /// Set whether this authority may settle session-scoped reads and writes.

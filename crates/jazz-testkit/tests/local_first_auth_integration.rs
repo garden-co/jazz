@@ -38,12 +38,14 @@ fn bob_seed() -> [u8; 32] {
 }
 
 fn test_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("completed", ColumnType::Boolean),
         )
+        .allow_all()
         .build()
 }
 

@@ -29,6 +29,12 @@ async function resolveWrappedConfig(
 function deployed(hash = "abc123def4567890") {
   return {
     schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    permissions: {
+      schemaHash: hash,
+      permissionsFile: "permissions.ts",
+      previousHead: null,
+      head: null,
+    },
     warnings: [],
   };
 }
@@ -166,6 +172,7 @@ describe("withJazz", () => {
   it("starts a local server in development and injects NEXT_PUBLIC_JAZZ_* env vars", async () => {
     const schemaDir = await tempRoots.create("jazz-next-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const wrapped = withJazz(
@@ -274,6 +281,7 @@ describe("withJazz", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-next-retry-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const deploy = vi
       .spyOn(catalogueProject, "deploy")
@@ -306,6 +314,7 @@ describe("withJazz", () => {
 
     const schemaDir = await tempRoots.create("jazz-next-fallback-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
     const port = await getAvailablePort();
 
     const resolved = await resolveWrappedConfig(
@@ -329,6 +338,7 @@ describe("withJazz", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-next-repeat-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const wrapped = withJazz(
       {},
@@ -350,6 +360,7 @@ describe("withJazz", () => {
     const firstPort = await getAvailablePort();
     const firstSchemaDir = await tempRoots.create("jazz-next-conflict-a-");
     await writeFile(join(firstSchemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(firstSchemaDir, "permissions.ts"), "export default {};\n");
 
     const firstWrapped = withJazz(
       {},
@@ -364,6 +375,7 @@ describe("withJazz", () => {
     const secondPort = await getAvailablePort();
     const secondSchemaDir = await tempRoots.create("jazz-next-conflict-b-");
     await writeFile(join(secondSchemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(secondSchemaDir, "permissions.ts"), "export default {};\n");
 
     const secondWrapped = withJazz(
       {},
@@ -400,6 +412,7 @@ describe("withJazz", () => {
     const appRoot = await tempRoots.create("jazz-next-schema-hash-");
     const schemaDir = appRoot;
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const wrapped = withJazz(
       {},
@@ -442,6 +455,7 @@ describe("withJazz", () => {
     const appRoot = await tempRoots.create("jazz-next-alias-");
     const schemaDir = appRoot;
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const wrapped = withJazz(
       {},
@@ -473,6 +487,7 @@ describe("withJazz", () => {
   it("throws when env-driven existing-server config changes in one process", async () => {
     const schemaDir = await tempRoots.create("jazz-next-env-conflict-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const serverHandle = await devServer.startLocalJazzServer({
       appId: "00000000-0000-0000-0000-000000000101",

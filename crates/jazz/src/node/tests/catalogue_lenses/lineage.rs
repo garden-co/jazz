@@ -740,12 +740,9 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     assert_ne!(
@@ -849,12 +846,9 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
 
     assert_eq!(core.runtime_stats_for_test().active_subscriptions, 0);
     assert_ne!(core.groove_runtime_token(), runtime);
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_id,
     })
     .unwrap();
     core.commit_mergeable_settled(

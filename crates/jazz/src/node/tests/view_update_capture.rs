@@ -990,6 +990,7 @@ fn member_cells(owner: AuthorSubject, title: &str, root: RowUuid) -> BTreeMap<St
 }
 
 fn recursive_rls_capture_schema() -> JazzSchema {
+    use crate::tools::test_support::AllowAll;
     let recursive_policy = crate::test_public_schema::seeded_recursive_access_policy(
         "doc_access",
         "doc",
@@ -1007,12 +1008,6 @@ fn recursive_rls_capture_schema() -> JazzSchema {
     );
     build_public_test_schema(
         PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("docs")
-                    .column("title", PublicColumnType::Text)
-                    .column("kind", PublicColumnType::Text)
-                    .policies(PublicTablePolicies::new().with_select(recursive_policy)),
-            )
             .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
             .table(
                 PublicTableSchemaBuilder::new("doc_access")
@@ -1023,6 +1018,13 @@ fn recursive_rls_capture_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("team_edges")
                     .fk_column("member", "teams")
                     .fk_column("parent", "teams"),
+            )
+            .allow_all()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("title", PublicColumnType::Text)
+                    .column("kind", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(recursive_policy)),
             ),
     )
 }
