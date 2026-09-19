@@ -2002,6 +2002,154 @@ async fn input_source_deltas_are_atomic_and_proportional_to_changed_records() {
 }
 
 /// Ungrouped aggregates own one empty group. This stays in the ordinary Groove
+/// Shared arrangements are advanced by their producer, while four distinct
+/// consumers independently publish the same atomic left/right transition.
+#[futures_test::test]
+async fn shared_arrangement_transitions_preserve_all_consumers_and_simultaneous_changes() {
+    let mut database = Database::new(albums_schema(), MemoryStorage::new(&["albums"]).unwrap())
+        .await
+        .unwrap();
+    let ld = RecordDescriptor::new([("id", ColumnType::U64), ("key", ColumnType::U64)]);
+    let rd = RecordDescriptor::new([("key", ColumnType::U64)]);
+    let left = database.allocate_input_source(ld);
+    let right_a = database.allocate_input_source(rd);
+    let right_b = database.allocate_input_source(rd);
+    let mut antis = Vec::new();
+    let mut semis = Vec::new();
+    for right in [right_a, right_b] {
+        let l = GraphBuilder::input_source(left, ld);
+        let r = GraphBuilder::input_source(right, rd);
+        antis.push(
+            database
+                .subscribe_one_sink(GraphBuilder::anti_join(
+                    l.clone(),
+                    r.clone(),
+                    ["key"],
+                    ["key"],
+                ))
+                .await
+                .unwrap(),
+        );
+        semis.push(
+            database
+                .subscribe_one_sink(GraphBuilder::semi_join(l, r, ["key"], ["key"]))
+                .await
+                .unwrap(),
+        );
+    }
+    for subscription in antis.iter().chain(&semis) {
+        assert!(subscription.recv().unwrap().is_empty());
+    }
+    let row = |id| ld.create(&[Value::U64(id), Value::U64(7)]).unwrap();
+    let expected = |id, weight| (vec![Value::U64(id), Value::U64(7)], weight);
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: left,
+            descriptor: ld,
+            adds: vec![row(1), row(2)],
+            removes: vec![],
+        }])
+        .await
+        .unwrap();
+    for subscription in &antis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(1, 1), expected(2, 1)]
+        );
+    }
+    for subscription in &semis {
+        assert!(subscription.try_recv().is_err());
+    }
+
+    // Visibility is unchanged: only the changed records may be published.
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: left,
+            descriptor: ld,
+            adds: vec![row(3)],
+            removes: vec![row(1)],
+        }])
+        .await
+        .unwrap();
+    for subscription in &antis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(1, -1), expected(3, 1)]
+        );
+    }
+    for subscription in &semis {
+        assert!(subscription.try_recv().is_err());
+    }
+
+    let blocker = rd.create(&[Value::U64(7)]).unwrap();
+    database
+        .apply_input_source_deltas([
+            InputSourceDelta {
+                id: right_b,
+                descriptor: rd,
+                adds: vec![blocker.clone()],
+                removes: vec![],
+            },
+            InputSourceDelta {
+                id: left,
+                descriptor: ld,
+                adds: vec![row(4)],
+                removes: vec![row(2)],
+            },
+            InputSourceDelta {
+                id: right_a,
+                descriptor: rd,
+                adds: vec![blocker.clone()],
+                removes: vec![],
+            },
+        ])
+        .await
+        .unwrap();
+    for subscription in &antis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(2, -1), expected(3, -1)]
+        );
+    }
+    for subscription in &semis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(3, 1), expected(4, 1)]
+        );
+    }
+
+    database
+        .apply_input_source_deltas([
+            InputSourceDelta {
+                id: right_a,
+                descriptor: rd,
+                adds: vec![],
+                removes: vec![blocker.clone()],
+            },
+            InputSourceDelta {
+                id: right_b,
+                descriptor: rd,
+                adds: vec![],
+                removes: vec![blocker],
+            },
+        ])
+        .await
+        .unwrap();
+    for subscription in &antis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(3, 1), expected(4, 1)]
+        );
+    }
+    for subscription in &semis {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [expected(3, -1), expected(4, -1)]
+        );
+    }
+}
+
+/// Ungrouped aggregates own one empty group. This stays in the ordinary Groove
 /// graph so direct queries, maintained subscriptions, and runtime-owned
 /// covered inputs all observe the same identity transition; no caller creates
 /// a synthetic aggregate record for an empty source.

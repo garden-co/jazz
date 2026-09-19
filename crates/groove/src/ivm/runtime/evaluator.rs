@@ -1009,7 +1009,10 @@ impl TickEvaluator<'_> {
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
             if matches!(
                 graph_node.descriptor.operator,
-                OpType::Aggregate(_) | OpType::ArgMinBy(_) | OpType::ArgMaxBy(_)
+                OpType::Aggregate(_)
+                    | OpType::ArgMinBy(_)
+                    | OpType::ArgMaxBy(_)
+                    | OpType::Arrange(_)
             ) {
                 return Ok(true);
             }
@@ -1038,6 +1041,17 @@ impl TickEvaluator<'_> {
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
         let operator = graph_node.descriptor.operator.clone();
         let inputs = graph_node.descriptor.inputs.clone();
+        if matches!(operator, OpType::Arrange(_)) && self.arrangement_needs_index(node) {
+            let key = ArrangementKey {
+                scope: self.operator_scope(node)?,
+                input: node,
+            };
+            if self.arrangement_states.get(&key).and_then(AsOf::as_of)
+                != Some(self.arrangement_sub_tick(&key))
+            {
+                return Ok(false);
+            }
+        }
         if matches!(operator, OpType::ArgMinBy(_) | OpType::ArgMaxBy(_)) {
             let key = self.operator_key(node)?;
             let expected = SubTick {
@@ -1237,11 +1251,34 @@ impl TickEvaluator<'_> {
                     self.binding_snapshots,
                     self.context.arrangement_update_mode,
                 ),
-                OpType::Arrange(_) => {
+                OpType::Arrange(spec) => {
                     let [input] = graph_node.descriptor.inputs.as_slice() else {
                         return Err(IvmRuntimeError::GraphInputArityMismatch(node));
                     };
-                    Ok(self.update_node(*input).await?.as_ref().clone())
+                    let input = self.update_node(*input).await?;
+                    if self.arrangement_needs_index(node) {
+                        let fields = spec.fields.iter().cloned().collect();
+                        let input = self.materialize_indirect_fields(&input, &fields)?;
+                        let key =
+                            self.arrangement_key(node, output_desc, &spec.fields, spec.comparison)?;
+                        let stamp = self.arrangement_sub_tick(&key);
+                        #[cfg(feature = "cold-settle-attribution")]
+                        self.trace_arrangement_snapshot(&key, &input.deltas);
+                        let mut state = self.arrangement_states.remove(&key).unwrap_or_default();
+                        super::join::prepare_arrangement(
+                            &mut state,
+                            &output_desc,
+                            &spec.fields,
+                            spec.comparison,
+                            JoinInput::snapshot(&input),
+                            stamp,
+                            self.context.arrangement_update_mode,
+                        )?;
+                        self.insert_arrangement(key, state);
+                        Ok(input.as_ref().clone())
+                    } else {
+                        Ok(input.as_ref().clone())
+                    }
                 }
                 OpType::FrontierSource(frontier_source) => {
                     self.frontier_source(frontier_source, &output_desc)
@@ -1778,19 +1815,8 @@ impl TickEvaluator<'_> {
         left: &Arc<RecordDeltas>,
         right: &Arc<RecordDeltas>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let left_delta = &left.deltas;
-        let right_delta = &right.deltas;
-        let operator_key = self.operator_key(node)?;
-        let operator = self
-            .operator_states
-            .entry(operator_key)
-            .or_insert_with(|| operator_state_for(&OpType::Join(join.clone())));
-        let OperatorState::Join(join_state) = operator else {
-            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
-        };
-        let join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
-        let output_mapping = self.join_output_mapping(
+        let mapping = self.join_output_mapping(
             node,
             join.left_descriptor,
             join.right_descriptor,
@@ -1804,72 +1830,28 @@ impl TickEvaluator<'_> {
             &right_on,
             join.comparison,
         )?;
-        #[cfg(feature = "cold-settle-attribution")]
-        {
-            self.trace_arrangement_snapshot(&left_key, left_delta);
-            self.trace_arrangement_snapshot(&right_key, right_delta);
-        }
-        let mut left_arrangement = self
+        let left_state = self
             .arrangement_states
-            .remove(&left_key)
-            .unwrap_or_default();
-        // Pull arrangements out while applying so both sides can be mutated
-        // without aliasing the arrangement map.
-        let shared_arrangement_keys = if left_key == right_key {
-            let mut keys = touched_join_keys(
-                &join.left_descriptor,
-                left_on.as_ref(),
-                left_delta,
-                join.comparison,
-            )?;
-            keys.extend(touched_join_keys(
-                &join.right_descriptor,
-                right_on.as_ref(),
-                right_delta,
-                join.comparison,
-            )?);
-            // `replace_keys` consumes each replacement bucket. A key can be
-            // present in both sides' deltas, so pass every touched key once.
-            keys.sort_unstable();
-            keys.dedup();
-            Some(keys)
-        } else {
-            None
-        };
-        let mut right_arrangement = if let Some(keys) = &shared_arrangement_keys {
-            AsOf {
-                value: left_arrangement.value().clone_keys(keys.iter()),
-                as_of: left_arrangement.as_of(),
-            }
-        } else {
-            self.arrangement_states
-                .remove(&right_key)
-                .unwrap_or_default()
-        };
-        let deltas = join_state.apply(
-            &mut left_arrangement,
-            &mut right_arrangement,
+            .get(&left_key)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(left_input))?;
+        let right_state = self
+            .arrangement_states
+            .get(&right_key)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(right_input))?;
+        let deltas = JoinState.evaluate(
+            left_state,
+            right_state,
             &join.left_descriptor,
             &join.right_descriptor,
             &output_desc,
-            &output_mapping,
-            left_on.as_ref(),
-            right_on.as_ref(),
+            &mapping,
+            &left_on,
+            &right_on,
             join.comparison,
             JoinInput::snapshot(left),
             JoinInput::snapshot(right),
-            self.arrangement_sub_tick(&left_key),
-            self.arrangement_sub_tick(&right_key),
             self.context.arrangement_update_mode,
         )?;
-        if let Some(keys) = shared_arrangement_keys {
-            left_arrangement
-                .value_mut()
-                .replace_keys(keys.iter(), right_arrangement.value().clone());
-        } else {
-            self.insert_arrangement(right_key, right_arrangement);
-        }
-        self.insert_arrangement(left_key, left_arrangement);
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
@@ -1894,81 +1876,16 @@ impl TickEvaluator<'_> {
         left: &Arc<RecordDeltas>,
         right: &Arc<RecordDeltas>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let operator_key = self.operator_key(node)?;
-        let (left_on, right_on) = self.join_field_names(node, join);
-        let left_key =
-            self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
-        let right_key = self.arrangement_key(
+        self.update_threshold_join(
+            node,
+            join,
+            output_desc,
+            left_input,
             right_input,
-            join.right_descriptor,
-            &right_on,
-            join.comparison,
-        )?;
-        // Anti-join publication is operator-local state. Take it while the
-        // evaluator mutates arrangements, then restore it even if evaluation
-        // rejects a malformed delta. Cloning would copy every published row
-        // for each small incremental update.
-        #[cfg(feature = "cold-settle-attribution")]
-        {
-            self.trace_arrangement_snapshot(&left_key, &left.deltas);
-            self.trace_arrangement_snapshot(&right_key, &right.deltas);
-        }
-        let mut join_state = match self.operator_states.remove(&operator_key) {
-            None => AntiJoinState::default(),
-            Some(OperatorState::AntiJoin(state)) => state,
-            Some(operator) => {
-                self.operator_states.insert(operator_key, operator);
-                return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
-            }
-        };
-        let mut left_arrangement = self
-            .arrangement_states
-            .remove(&left_key)
-            .unwrap_or_default();
-        let mut right_arrangement = if left_key == right_key {
-            left_arrangement.clone()
-        } else {
-            self.arrangement_states
-                .remove(&right_key)
-                .unwrap_or_default()
-        };
-        let result = (|| {
-            let deltas = join_state.apply(
-                &mut left_arrangement,
-                &mut right_arrangement,
-                &join.left_descriptor,
-                &join.right_descriptor,
-                &output_desc,
-                left_on.as_ref(),
-                right_on.as_ref(),
-                join.comparison,
-                JoinInput::snapshot(left),
-                JoinInput::snapshot(right),
-                self.arrangement_sub_tick(&left_key),
-                self.arrangement_sub_tick(&right_key),
-                self.context.arrangement_update_mode,
-            )?;
-            if left_key == right_key {
-                left_arrangement = right_arrangement;
-            } else {
-                self.insert_arrangement(right_key, right_arrangement);
-            }
-            self.insert_arrangement(left_key, left_arrangement);
-            #[cfg(feature = "cold-settle-attribution")]
-            crate::cold_settle_attribution::record_join(
-                self.context.eval_mode == EvalMode::Hydrate,
-                left.deltas.len(),
-                right.deltas.len(),
-                deltas.len(),
-            );
-            Ok(RecordDeltas {
-                descriptor: output_desc,
-                deltas,
-            })
-        })();
-        self.operator_states
-            .insert(operator_key, OperatorState::AntiJoin(join_state));
-        result
+            left,
+            right,
+            false,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1982,15 +1899,31 @@ impl TickEvaluator<'_> {
         left: &Arc<RecordDeltas>,
         right: &Arc<RecordDeltas>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
+        self.update_threshold_join(
+            node,
+            join,
+            output_desc,
+            left_input,
+            right_input,
+            left,
+            right,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_threshold_join(
+        &mut self,
+        node: NodeId,
+        join: &JoinOp,
+        output_desc: RecordDescriptor,
+        left_input: NodeId,
+        right_input: NodeId,
+        _left: &Arc<RecordDeltas>,
+        _right: &Arc<RecordDeltas>,
+        semi: bool,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
         let operator_key = self.operator_key(node)?;
-        let operator = self
-            .operator_states
-            .entry(operator_key.clone())
-            .or_insert_with(|| operator_state_for(&OpType::SemiJoin(join.clone())));
-        let OperatorState::SemiJoin(join_state) = operator else {
-            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
-        };
-        let mut join_state = join_state.clone();
         let (left_on, right_on) = self.join_field_names(node, join);
         let left_key =
             self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
@@ -2000,50 +1933,39 @@ impl TickEvaluator<'_> {
             &right_on,
             join.comparison,
         )?;
-        #[cfg(feature = "cold-settle-attribution")]
-        {
-            self.trace_arrangement_snapshot(&left_key, &left.deltas);
-            self.trace_arrangement_snapshot(&right_key, &right.deltas);
-        }
-        let mut left_arrangement = self
+        let lt = self.arrangement_sub_tick(&left_key);
+        let rt = self.arrangement_sub_tick(&right_key);
+        let left = self
             .arrangement_states
-            .remove(&left_key)
-            .unwrap_or_default();
-        let mut right_arrangement = if left_key == right_key {
-            left_arrangement.clone()
-        } else {
-            self.arrangement_states
-                .remove(&right_key)
-                .unwrap_or_default()
+            .get(&left_key)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(left_input))?;
+        let right = self
+            .arrangement_states
+            .get(&right_key)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(right_input))?;
+        let left = super::join::ArrangementTransition::at(left, lt);
+        let right = super::join::ArrangementTransition::at(right, rt);
+        let operator = self.operator_states.entry(operator_key).or_insert_with(|| {
+            if semi {
+                OperatorState::SemiJoin(SemiJoinState::default())
+            } else {
+                OperatorState::AntiJoin(AntiJoinState::default())
+            }
+        });
+        let deltas = match operator {
+            OperatorState::SemiJoin(state) if semi => {
+                state.evaluate(left, right, self.context.arrangement_update_mode)
+            }
+            OperatorState::AntiJoin(state) if !semi => {
+                state.evaluate(left, right, self.context.arrangement_update_mode)
+            }
+            _ => return Err(IvmRuntimeError::NodeStateOperatorMismatch(node)),
         };
-        let deltas = join_state.apply(
-            &mut left_arrangement,
-            &mut right_arrangement,
-            join.left_descriptor,
-            join.right_descriptor,
-            &output_desc,
-            left_on.as_ref(),
-            right_on.as_ref(),
-            join.comparison,
-            JoinInput::snapshot(left),
-            JoinInput::snapshot(right),
-            self.arrangement_sub_tick(&left_key),
-            self.arrangement_sub_tick(&right_key),
-            self.context.arrangement_update_mode,
-        )?;
-        if left_key == right_key {
-            left_arrangement = right_arrangement;
-        } else {
-            self.insert_arrangement(right_key, right_arrangement);
-        }
-        self.insert_arrangement(left_key, left_arrangement);
-        self.operator_states
-            .insert(operator_key, OperatorState::SemiJoin(join_state));
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
-            left.deltas.len(),
-            right.deltas.len(),
+            _left.deltas.len(),
+            _right.deltas.len(),
             deltas.len(),
         );
         Ok(RecordDeltas {
@@ -2392,42 +2314,23 @@ impl TickEvaluator<'_> {
         // Structural validation permits only terminal filter/projection
         // adapters above CollectBy, so a non-root evaluation scope here is a
         // routed terminal adapter, never recursive relational state.
-        let sub_tick = self.arrangement_sub_tick(&arrangement_key);
-        let mut arrangement = self
-            .arrangement_states
-            .remove(&arrangement_key)
-            .unwrap_or_default();
-        let should_apply_arrangement = self.context.arrangement_update_mode
-            == ArrangementUpdateMode::Replace
-            || arrangement.as_of() != Some(sub_tick);
-        if should_apply_arrangement {
-            let replace_within_same_tick = self.context.arrangement_update_mode
-                == ArrangementUpdateMode::Replace
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current.tick == sub_tick.tick);
-            if !replace_within_same_tick
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current > sub_tick)
-            {
-                return Err(IvmRuntimeError::OutOfOrderRuntimeState {
-                    current: format!("{:?}", arrangement.as_of().expect("checked above")),
-                    next: format!("{sub_tick:?}"),
-                });
-            }
-            arrangement.value_mut().apply_record_deltas(
+        // Root collectors own an ordered terminal index, not a second retained
+        // hash index. Only ambiguous hydration needs a temporary snapshot view.
+        let mut snapshot_arrangement;
+        let arrangement = if collect_by.mode == CollectByMode::Root {
+            snapshot_arrangement = AsOf::<ArrangementState, SubTick>::default();
+            snapshot_arrangement.value_mut().apply_record_deltas(
                 input_desc,
                 &collect_by.group_fields,
                 &input.deltas,
-                self.context.arrangement_update_mode,
+                ArrangementUpdateMode::Replace,
             )?;
-            if replace_within_same_tick {
-                arrangement.replace_as_of_at_least(sub_tick);
-            } else {
-                arrangement.mark_forward_as_of(sub_tick)?;
-            }
-        }
+            &snapshot_arrangement
+        } else {
+            self.arrangement_states
+                .get(&arrangement_key)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(*input_node))?
+        };
 
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
@@ -2524,7 +2427,6 @@ impl TickEvaluator<'_> {
                 }
             }
         }
-        self.insert_arrangement(arrangement_key, arrangement);
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas: output,
@@ -2592,17 +2494,6 @@ impl TickEvaluator<'_> {
                     .or_default()
                     .push((delta.record.clone(), delta.weight));
             }
-            if self.context.hydrate_arrangements {
-                let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
-                arrangement.value_mut().apply_record_deltas(
-                    input_desc,
-                    group_fields.as_ref(),
-                    &input.deltas,
-                    ArrangementUpdateMode::Replace,
-                )?;
-                arrangement.mark_forward_as_of(self.arrangement_sub_tick(&arrangement_key))?;
-                self.insert_arrangement(arrangement_key, arrangement);
-            }
             let mut output = Vec::new();
             for records in groups.values() {
                 if let Some(record) =
@@ -2616,7 +2507,6 @@ impl TickEvaluator<'_> {
                 deltas: output,
             });
         }
-        let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
             let group_key =
@@ -2626,74 +2516,23 @@ impl TickEvaluator<'_> {
                 .or_default()
                 .push(delta.clone());
         }
-        let current_arrangement = self.arrangement_states.get(&arrangement_key);
-        let current_as_of = current_arrangement.and_then(AsOf::as_of);
-        let should_apply_arrangement = self.context.arrangement_update_mode
-            == ArrangementUpdateMode::Replace
-            || current_as_of != Some(sub_tick);
-        let replace_within_same_tick = self.context.arrangement_update_mode
-            == ArrangementUpdateMode::Replace
-            && current_as_of.is_some_and(|current| current.tick == sub_tick.tick);
-        if !replace_within_same_tick && current_as_of.is_some_and(|current| current > sub_tick) {
-            return Err(IvmRuntimeError::OutOfOrderRuntimeState {
-                current: format!("{:?}", current_as_of.expect("checked above")),
-                next: format!("{sub_tick:?}"),
-            });
-        }
-        let before_groups = if self.context.arrangement_update_mode
-            == ArrangementUpdateMode::Replace
-            || !should_apply_arrangement
-        {
-            BTreeMap::new()
-        } else {
-            touched_groups
-                .keys()
-                .map(|group| {
-                    (
-                        group.clone(),
-                        current_arrangement
-                            .map(|arrangement| arrangement.value().records_for_key(group))
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>()
-        };
-        let mut staged_arrangement =
-            if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
-                ArrangementState::default()
-            } else {
-                current_arrangement
-                    .map(|arrangement| arrangement.value().clone_keys(touched_groups.keys()))
-                    .unwrap_or_default()
-            };
-        if should_apply_arrangement {
-            staged_arrangement.apply_record_deltas(
-                input_desc,
-                group_fields.as_ref(),
-                &input.deltas,
-                self.context.arrangement_update_mode,
-            )?;
-        }
+        let arrangement = self
+            .arrangement_states
+            .get(&arrangement_key)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(*input_node))?;
 
         let mut output = Vec::new();
         for group_prefix in touched_groups.keys() {
-            let after_records = staged_arrangement.records_for_key(group_prefix);
+            let after_records = arrangement.value().records_for_key(group_prefix);
             let after =
                 aggregate_row_from_records(input_desc, output_desc, aggregate, &after_records)?;
-            let before_records = if let Some(records) = before_groups
-                .get(group_prefix)
-                .filter(|records| !records.is_empty())
-            {
-                records.clone()
-            } else {
-                records_before_from_deltas(
-                    after_records,
-                    touched_groups
-                        .get(group_prefix)
-                        .cloned()
-                        .unwrap_or_default(),
-                )
-            };
+            let before_records = records_before_from_deltas(
+                after_records,
+                touched_groups
+                    .get(group_prefix)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
             let before =
                 aggregate_row_from_records(input_desc, output_desc, aggregate, &before_records)?;
             if before == after {
@@ -2706,33 +2545,27 @@ impl TickEvaluator<'_> {
                 output.push(RecordDelta { record, weight: 1 });
             }
         }
-        if should_apply_arrangement {
-            match self.context.arrangement_update_mode {
-                ArrangementUpdateMode::Accumulate => {
-                    let arrangement = self.arrangement_entry(arrangement_key);
-                    arrangement.mark_forward_as_of(sub_tick)?;
-                    arrangement
-                        .value_mut()
-                        .replace_keys(touched_groups.keys(), staged_arrangement);
-                }
-                ArrangementUpdateMode::Replace => {
-                    let mut arrangement = AsOf {
-                        value: staged_arrangement,
-                        as_of: current_as_of,
-                    };
-                    if replace_within_same_tick {
-                        arrangement.replace_as_of_at_least(sub_tick);
-                    } else {
-                        arrangement.mark_forward_as_of(sub_tick)?;
-                    }
-                    self.insert_arrangement(arrangement_key, arrangement);
-                }
-            }
-        }
 
         Ok(RecordDeltas {
             descriptor: output_desc,
             deltas: consolidate_deltas(output),
+        })
+    }
+
+    fn arrangement_needs_index(&self, node: NodeId) -> bool {
+        self.graph.node(node).is_some_and(|arrange| {
+            arrange.children.iter().any(|child| {
+                self.graph
+                    .node(*child)
+                    .is_some_and(|child| match &child.descriptor.operator {
+                        OpType::Join(_)
+                        | OpType::SemiJoin(_)
+                        | OpType::AntiJoin(_)
+                        | OpType::Aggregate(_) => true,
+                        OpType::CollectBy(collect) => collect.mode != CollectByMode::Root,
+                        _ => false,
+                    })
+            })
         })
     }
 
@@ -2856,14 +2689,6 @@ impl TickEvaluator<'_> {
             .or_default()
             .insert(key.clone());
         self.arrangement_states.insert(key, state);
-    }
-
-    fn arrangement_entry(&mut self, key: ArrangementKey) -> &mut AsOf<ArrangementState, SubTick> {
-        self.arrangement_keys_by_input
-            .entry(key.input)
-            .or_default()
-            .insert(key.clone());
-        self.arrangement_states.entry(key).or_default()
     }
 
     async fn update_recursive(
