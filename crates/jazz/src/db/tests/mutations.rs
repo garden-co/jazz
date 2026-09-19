@@ -1898,6 +1898,59 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
     assert_eq!(events[0].transaction.kind, TransactionKind::Mergeable);
 }
 
+// Local persistence must not claim a later authority rejection.
+#[test]
+fn completed_local_wait_preserves_later_mutation_error() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let client = open_db(0xc1, author, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+
+    let write = client
+        .insert(
+            "todos",
+            cells("rejected", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .unwrap();
+
+    client.tick().unwrap();
+    assert!(events.borrow().is_empty());
+    client.tick().unwrap();
+
+    let events = events.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        client.write_state(write.mergeable_tx_id()).unwrap(),
+        WriteState {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: DurabilityTier::Edge,
+        }
+    );
+    assert_eq!(events[0].code, "permission_denied");
+    assert_eq!(
+        events[0].transaction.transaction_id,
+        TransactionId::from_committed_tx(write.mergeable_tx_id())
+    );
+    assert_eq!(events[0].transaction.kind, TransactionKind::Mergeable);
+}
+
 #[test]
 fn internal_observer_does_not_consume_authority_rejection() {
     let author = AuthorSubject::for_test_bytes([0xb5; 16]);
