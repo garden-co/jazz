@@ -32,6 +32,92 @@ function transport(overrides: Partial<Transport> = {}): Transport {
 }
 
 describe("BrowserWorkerTransportPump", () => {
+  it("expires a silent partial while semantic work is held and another peer progresses", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let deadline: number | undefined;
+    let retired = false;
+    const failure = vi.fn();
+    const peer = transport({
+      tick: () => held,
+      routeAuxiliaryWireFrame: () => {
+        deadline = performance.now() + 20;
+        return undefined;
+      },
+      auxiliaryReceiveTimeoutMs: () =>
+        deadline === undefined ? undefined : Math.max(0, deadline - performance.now()),
+      expireAuxiliaryReceive: () => {
+        if (deadline !== undefined && performance.now() >= deadline) {
+          retired = true;
+          deadline = undefined;
+          throw new Error("incomplete channel message expired");
+        }
+      },
+    });
+    const source = new BrowserWorkerTransportPump(runtime(peer), peer, vi.fn(), failure);
+    const siblingTick = vi.fn(() => 0);
+    const siblingPeer = transport({ tick: siblingTick });
+    const sibling = new BrowserWorkerTransportPump(
+      runtime(siblingPeer),
+      siblingPeer,
+      vi.fn(),
+      vi.fn(),
+    );
+    try {
+      source.receive([Uint8Array.from([17, 1])]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(retired).toBe(true);
+      expect(failure).toHaveBeenCalledOnce();
+      expect(String(failure.mock.calls[0]?.[0])).toContain("expired");
+      expect(siblingTick).toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      source.receive([Uint8Array.from([17, 2])]);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(failure).toHaveBeenCalledOnce();
+      sibling.schedule();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(siblingTick.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      release();
+      source.close();
+      sibling.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([true, false])("cancels an incomplete receive timer on retirement=%s", async (retire) => {
+    vi.useFakeTimers();
+    let partial = false;
+    const expire = vi.fn();
+    const peer = transport({
+      routeAuxiliaryWireFrame: (frame) => {
+        partial = frame[1] === 1;
+        return undefined;
+      },
+      auxiliaryReceiveTimeoutMs: () => (partial ? 20 : undefined),
+      expireAuxiliaryReceive: expire,
+    });
+    const pump = new BrowserWorkerTransportPump(runtime(peer), peer, vi.fn(), vi.fn());
+    try {
+      pump.receive([Uint8Array.from([17, 1])]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      if (retire) pump.close();
+      else pump.receive([Uint8Array.from([17, 2])]);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(expire).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      pump.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("reruns an active sibling when another peer admits external work", async () => {
     const listeners = new Set<(requiresDistinctPass?: boolean) => void>();
     let releaseSiblingPass!: () => void;

@@ -2364,6 +2364,72 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("expires silent auxiliary ingress and closes its carrier while a core tick is held", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    let deadline: number | undefined;
+    let retired = false;
+    let hold = false;
+    const blocked = deferred<void>();
+    const transport = Object.assign(new FakeTransport([]), {
+      routeAuxiliaryWireFrame: () => {
+        deadline = performance.now() + 20;
+        return undefined;
+      },
+      auxiliaryReceiveTimeoutMs: () =>
+        deadline === undefined ? undefined : Math.max(0, deadline - performance.now()),
+      expireAuxiliaryReceive: () => {
+        if (deadline !== undefined && performance.now() >= deadline) {
+          retired = true;
+          deadline = undefined;
+          throw new Error("incomplete channel message expired");
+        }
+      },
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => (hold ? blocked.promise : undefined),
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    hold = true;
+    const held = runtime.progressPeerTransport();
+    try {
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([17, 1])]));
+      await vi.waitFor(() => expect(retired).toBe(true));
+      expect(sockets[0]!.closed).toBe(true);
+      expect(terminal).toHaveBeenCalledOnce();
+      expect(String(terminal.mock.calls[0]?.[0])).toContain("expired");
+      expect(transport.closed).toBe(false); // semantic retirement waits; core expiry does not
+    } finally {
+      hold = false;
+      blocked.resolve();
+      await held;
+      await runtime.close();
+    }
+    expect(transport.closed).toBe(true);
+  });
+
   it("stages an already-arrived websocket frame group before one native transport tick", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {

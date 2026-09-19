@@ -1,3 +1,4 @@
+import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
@@ -413,6 +414,8 @@ export type Transport = {
   clearOutboundScheduler?(): void;
   routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
   recvAuxiliaryWireFrames?(maxFrames?: number, maxBytes?: number): unknown[];
+  auxiliaryReceiveTimeoutMs?(): number | null | undefined;
+  expireAuxiliaryReceive?(): void;
   auxiliaryOutboundReady?(): boolean | Promise<void>;
   /** Bounded redacted diagnostics emitted by the auxiliary chunk relay. */
   takeAuxiliaryTrace?(): unknown[];
@@ -644,6 +647,7 @@ function openMemoryDb(
 }
 
 export class NativeRuntimeAdapter implements Runtime {
+  private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
@@ -947,6 +951,8 @@ export class NativeRuntimeAdapter implements Runtime {
 
   retirePeerTransport(transport: Transport): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.retirePeerTransport(transport);
+    this.auxiliaryReceiveDeadlines.get(transport)?.close();
+    this.auxiliaryReceiveDeadlines.delete(transport);
     if (!this.coreOperation) {
       transport.close();
       return Promise.resolve();
@@ -3338,6 +3344,8 @@ export class NativeRuntimeAdapter implements Runtime {
     let processedInbound = false;
     const operation = this.serverInboundRouting.then(async () => {
       const transport = this.serverTransport;
+      const carrier = this.serverCarrier;
+      const generation = this.serverConnectionGeneration;
       if (!transport || this.pendingInboundServerFrames.length === 0) return;
       const frames = this.pendingInboundServerFrames.splice(0);
       processedInbound = true;
@@ -3347,6 +3355,9 @@ export class NativeRuntimeAdapter implements Runtime {
         const routed = transport.routeAuxiliaryWireFrame
           ? await transport.routeAuxiliaryWireFrame(frame)
           : frame;
+        if (carrier) this.refreshAuxiliaryReceiveDeadline(transport, carrier, generation);
+        if (transport !== this.serverTransport || generation !== this.serverConnectionGeneration)
+          return;
         if (routed != null) canonical.push(normalizeTransportFrame(routed));
       }
       this.publishAuxiliaryTrace(transport);
@@ -3360,7 +3371,6 @@ export class NativeRuntimeAdapter implements Runtime {
       // narrower than the general native tick scheduler, whose routine wakes
       // must remain coalescible to avoid self-sustaining peer-pump loops.
       this.notifyPeerTransportWork(true);
-      const carrier = this.serverCarrier;
       if (carrier) {
         this.flushAuxiliaryOutbound(transport, carrier, this.serverConnectionGeneration);
       }
@@ -3371,6 +3381,41 @@ export class NativeRuntimeAdapter implements Runtime {
     );
     await operation;
     return processedInbound;
+  }
+
+  private refreshAuxiliaryReceiveDeadline(
+    transport: Transport,
+    carrier: WebSocketCarrier,
+    generation: number,
+  ): void {
+    if (
+      this.closed ||
+      transport !== this.serverTransport ||
+      generation !== this.serverConnectionGeneration
+    )
+      return;
+    let deadline = this.auxiliaryReceiveDeadlines.get(transport);
+    if (!deadline) {
+      deadline = new AuxiliaryReceiveDeadline(transport, (error) => {
+        if (
+          this.closed ||
+          transport !== this.serverTransport ||
+          generation !== this.serverConnectionGeneration
+        )
+          return;
+        const failure = error instanceof Error ? error : new Error(errorMessage(error));
+        const attempt = this.serverConnectionAttempt;
+        if (attempt?.transport === transport) {
+          this.finishServerConnectionAttempt(attempt, failure);
+        } else {
+          carrier.close();
+          this.handleServerTransportError(failure, generation);
+          void this.retirePeerTransport(transport).catch(reportAsyncRuntimeError);
+        }
+      });
+      this.auxiliaryReceiveDeadlines.set(transport, deadline);
+    }
+    deadline.refresh();
   }
 
   private flushAuxiliaryOutbound(
