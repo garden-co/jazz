@@ -402,12 +402,14 @@ impl WebSocketTransport {
     ) -> Result<jazz::protocol::CatalogueSnapshot, WebSocketClientError> {
         validate_catalogue_bootstrap_upstream_url(base_url.as_ref(), app_id)
             .map_err(WebSocketClientError::ServerRejected)?;
+        let progress = Arc::new(Notify::new());
+        let progress_wake = Arc::clone(&progress);
         let transport = Self::connect_with_wake_and_bootstrap(
             base_url,
             app_id,
             peer_identity,
             auth,
-            Arc::new(|| {}),
+            Arc::new(move || progress_wake.notify_one()),
             true,
             NativeTransportLink::OrdinarySession,
         )
@@ -444,10 +446,18 @@ impl WebSocketTransport {
                     )));
                 }
             }
+            let flush = jazz::db::Transport::poll_flush(&mut wire).map_err(|error| {
+                WebSocketClientError::ServerRejected(format!("bootstrap credit flush: {error:?}"))
+            })?;
+            if flush == jazz::db::WireFlushStatus::MoreReady {
+                tokio::task::yield_now().await;
+                continue;
+            }
             if let Some(error) = inbound_error.lock().ok().and_then(|error| error.clone()) {
                 return Err(WebSocketClientError::ServerRejected(error));
             }
             tokio::select! {
+                _ = progress.notified() => {}
                 _ = notified => {}
                 _ = tokio::time::sleep_until(deadline) => {
                     return Err(WebSocketClientError::HandshakeTimeout);

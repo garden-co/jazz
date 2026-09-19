@@ -760,11 +760,8 @@ async fn handle_ws_connection(
         if send_ws_encoded_frames(&mut socket, &[hello]).await.is_err() {
             return;
         }
-        let frames = match core_server_shell
-            .encoded_trusted_catalogue_snapshot(negotiated.protocol_version, negotiated.features)
-            .await
-        {
-            Ok(frames) => frames,
+        let snapshot = match core_server_shell.trusted_catalogue_snapshot().await {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 send_ws_error(
                     &mut socket,
@@ -775,8 +772,13 @@ async fn handle_ws_connection(
                 return;
             }
         };
-        let _ = send_ws_encoded_frames(&mut socket, &frames).await;
-        let _ = socket.close().await;
+        let _ = stream_bootstrap_catalogue(
+            socket,
+            snapshot,
+            negotiated.protocol_version,
+            negotiated.features,
+        )
+        .await;
         return;
     }
 
@@ -1040,6 +1042,122 @@ async fn handle_ws_connection(
     }
 }
 
+type BootstrapQueues = (VecDeque<Vec<u8>>, VecDeque<Vec<u8>>);
+
+#[derive(Clone, Default)]
+struct BootstrapWire {
+    queues: Arc<std::sync::Mutex<BootstrapQueues>>,
+}
+impl jazz::wire::WireTransport for BootstrapWire {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), jazz::wire::TransportError> {
+        let mut queues = self.queues.lock().expect("bootstrap queue lock poisoned");
+        if queues.1.len() >= 32 {
+            return Err(jazz::wire::TransportError::Backpressure);
+        }
+        queues.1.push_back(frame);
+        Ok(())
+    }
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.queues
+            .lock()
+            .expect("bootstrap queue lock poisoned")
+            .0
+            .pop_front()
+    }
+}
+
+async fn stream_bootstrap_catalogue(
+    socket: WebSocket,
+    snapshot: jazz::protocol::CatalogueSnapshot,
+    version: u16,
+    features: jazz::wire::WireFeatures,
+) -> Result<(), String> {
+    use jazz::db::{Transport, WireFlushStatus, WireTransportAdapter};
+    let queues = BootstrapWire::default();
+    let mut adapter = WireTransportAdapter::new(queues.clone(), version, features, None);
+    adapter
+        .send(jazz::protocol::SyncMessage::CatalogueSnapshot(Box::new(
+            snapshot,
+        )))
+        .map_err(|error| format!("bootstrap enqueue: {error:?}"))?;
+    let (mut sink, mut source) = socket.split();
+    let (sender, mut receiver) = mpsc::channel::<Vec<Message>>(2);
+    let (stopped_tx, mut stopped_rx) = tokio::sync::oneshot::channel();
+    let mut writer = tokio::spawn(async move {
+        let result = async {
+            while let Some(batch) = receiver.recv().await {
+                for message in batch {
+                    sink.send(message)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            sink.close().await.map_err(|error| error.to_string())
+        }
+        .await;
+        let _ = stopped_tx.send(());
+        result
+    });
+    let result = async {
+        let mut pending = None;
+        loop {
+            let status = adapter.poll_flush().map_err(|error| format!("bootstrap flush: {error:?}"))?;
+            if pending.is_none() {
+                let frames = queues.queues.lock().map_err(|_| "bootstrap queue poisoned")?.1.drain(..).collect::<Vec<_>>();
+                if !frames.is_empty() {
+                    pending = Some(encode_ws_frame_batches(&frames).map_err(|error| error.to_string())?
+                        .into_iter().map(|bytes| Message::Binary(bytes.into())).collect::<Vec<_>>());
+                }
+            }
+            if status == WireFlushStatus::Idle && pending.is_none() { break; }
+            tokio::select! {
+                _ = &mut stopped_rx => return Err("bootstrap writer stopped before delivery".to_owned()),
+                permit = sender.reserve(), if pending.is_some() => {
+                    permit.map_err(|_| "bootstrap writer stopped")?.send(pending.take().unwrap());
+                }
+                incoming = source.next() => {
+                    match incoming {
+                        Some(Ok(Message::Binary(bytes))) => {
+                            let frames = decode_ws_encoded_frame_batch(&bytes).map_err(|error| error.to_string())?;
+                            for frame in &frames {
+                                if !matches!(jazz::wire::decode_frame(frame), Ok(WireFrame::ChannelCredit(_))) {
+                                    return Err("snapshot-only bootstrap accepts only channel credit".to_owned());
+                                }
+                            }
+                            if frames.len() > 64 { return Err("bootstrap credit frame count exceeded".to_owned()); }
+                            queues.queues.lock().map_err(|_| "bootstrap queue poisoned")?.0.extend(frames);
+                            if adapter.try_recv_result().map_err(|error| format!("bootstrap credit: {error:?}"))?.is_some() {
+                                return Err("snapshot-only bootstrap received semantic traffic".to_owned());
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => return Err("bootstrap peer disconnected before delivery".to_owned()),
+                        Some(Err(error)) => return Err(error.to_string()),
+                        _ => {}
+                    }
+                }
+                _ = tokio::task::yield_now(), if status == WireFlushStatus::MoreReady && pending.is_none() => {}
+            }
+        }
+        Ok(())
+    }.await;
+    drop(sender);
+    if result.is_err() {
+        writer.abort();
+        let _ = writer.await;
+        return result;
+    }
+    // Idle means the codec has no more frames; completion also requires the
+    // sole writer to flush every queued carrier before sending socket close.
+    match tokio::time::timeout(std::time::Duration::from_secs(10), &mut writer).await {
+        Ok(result) => result.map_err(|error| error.to_string())?,
+        Err(_) => {
+            writer.abort();
+            let _ = writer.await;
+            Err("bootstrap writer timed out".to_owned())
+        }
+    }
+}
+
 fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
     if let Ok(frame) = encode_frame(&WireFrame::Error(error))
         && let Ok(batches) = encode_ws_frame_batches(&[frame])
@@ -1143,7 +1261,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use futures::StreamExt as _;
     use futures::stream::FuturesUnordered;
     use jazz::db::{
         Db, DbConfig, DbIdentity, PreparedQuery, QueryAttachment, ReadOpts, RowCells,
@@ -1470,6 +1587,102 @@ mod tests {
     fn websocket_limits_match_the_wire_protocol_limit() {
         assert_eq!(WS_MAX_FRAME_BYTES, MAX_WIRE_FRAME_BYTES);
         assert_eq!(WS_MAX_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_streams_small_and_large_catalogues_through_live_receiver_credit() {
+        use jazz::db::Transport;
+        use jazz::tools::{ColumnDescriptor, RowDescriptor, TableName, Value as PublicValue};
+        for default_bytes in [8, 2 * 1024 * 1024] {
+            let schema = Schema::from([(
+                TableName::new("records"),
+                PublicTableSchema::with_policies(
+                    RowDescriptor::new(vec![
+                        ColumnDescriptor::new("label", ColumnType::Text)
+                            .default(PublicValue::Text("x".repeat(default_bytes))),
+                    ]),
+                    public_table_policies(),
+                ),
+            )]);
+            let server = ServerBuilder::new(AppId::random())
+                .with_auth_config(AuthConfig {
+                    admin_secret: Some("admin-secret".to_owned()),
+                    ..Default::default()
+                })
+                .with_storage(StorageBackend::InMemory)
+                .with_schema(schema)
+                .build()
+                .await
+                .unwrap();
+            let state = server.state.clone();
+            let expected = state
+                .runtime()
+                .unwrap()
+                .trusted_catalogue_snapshot()
+                .await
+                .unwrap();
+            let expected_bytes = jazz::wire::encode_sync_message(&SyncMessage::CatalogueSnapshot(
+                Box::new(expected),
+            ))
+            .unwrap();
+            if default_bytes > 1024 * 1024 {
+                assert!(expected_bytes.len() > 1024 * 1024);
+            }
+            let addr = start_ws_test_server(state.clone()).await;
+            let prelude = serde_json::to_vec(&serde_json::json!({
+                "peer_identity": AuthorSubject::SYSTEM.canonical(),
+                "auth": { "admin_secret": "admin-secret" },
+                "bootstrap_catalogue": true,
+            }))
+            .unwrap();
+            let mut socket = open_negotiated_ws_with_prelude_and_features(
+                addr,
+                &state,
+                prelude,
+                current_wire_features(),
+            )
+            .await;
+            let queue = BootstrapWire::default();
+            let mut receiver = WireTransportAdapter::current(queue.clone());
+            let mut grants = 0;
+            let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let Some(Ok(WsMessage::Binary(bytes))) = socket.next().await else {
+                        panic!("bootstrap closed before full snapshot")
+                    };
+                    queue
+                        .queues
+                        .lock()
+                        .unwrap()
+                        .0
+                        .extend(decode_ws_encoded_frame_batch(&bytes).unwrap());
+                    let message = receiver.try_recv_result().unwrap();
+                    if let Some(SyncMessage::CatalogueSnapshot(snapshot)) = message {
+                        break snapshot;
+                    }
+                    receiver.poll_flush().unwrap();
+                    let outgoing = queue.queues.lock().unwrap().1.drain(..).collect::<Vec<_>>();
+                    grants += outgoing.len();
+                    for batch in encode_ws_frame_batches(&outgoing).unwrap() {
+                        socket.send(WsMessage::Binary(batch.into())).await.unwrap();
+                    }
+                }
+            })
+            .await
+            .expect("credit must advance a snapshot larger than the physical window");
+            assert_eq!(
+                jazz::wire::encode_sync_message(&SyncMessage::CatalogueSnapshot(snapshot)).unwrap(),
+                expected_bytes
+            );
+            if default_bytes > 1024 * 1024 {
+                assert!(
+                    grants > 0,
+                    "the live receiver replenished its physical window"
+                );
+            }
+            let _ = socket.close(None).await;
+            let _ = server.shutdown().await;
+        }
     }
 
     async fn make_ws_test_state() -> Arc<ServerState> {
@@ -2837,7 +3050,21 @@ mod tests {
                         SyncMessage::FateUpdate { tx_id, .. } => Some(tx_id),
                         _ => None,
                     }),
-                WireFrame::Hello(_) | WireFrame::Error(_) | WireFrame::MessageFragment(_) => None,
+                WireFrame::Channel(envelope) if envelope.extent.first && envelope.extent.last => {
+                    decoder
+                        .decode_message(&envelope.extent.payload, envelope.features)
+                        .ok()
+                        .and_then(|payload| decode_sync_message(&payload).ok())
+                        .and_then(|message| match message {
+                            SyncMessage::FateUpdate { tx_id, .. } => Some(tx_id),
+                            _ => None,
+                        })
+                }
+                WireFrame::Hello(_)
+                | WireFrame::Error(_)
+                | WireFrame::MessageFragment(_)
+                | WireFrame::Channel(_)
+                | WireFrame::ChannelCredit(_) => None,
             })
             .collect()
     }

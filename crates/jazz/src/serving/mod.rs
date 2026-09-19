@@ -320,6 +320,22 @@ struct WireQueues {
     outbound: VecDeque<Vec<u8>>,
 }
 
+impl WireQueues {
+    fn stage_inbound(&mut self, frame: Vec<u8>) -> std::result::Result<(), String> {
+        let charge = crate::wire::channel_credit::channel_frame_credit_cost;
+        let used = self
+            .inbound
+            .iter()
+            .map(|frame| charge(frame.len()))
+            .sum::<usize>();
+        if used.saturating_add(charge(frame.len())) > 8 * 1024 * 1024 {
+            return Err("inbound physical channel queue exceeds receive budget".to_owned());
+        }
+        self.inbound.push_back(frame);
+        Ok(())
+    }
+}
+
 pub(super) struct ServerUpstreamIo {
     pub(super) transport: SharedWireTransport,
     pub(super) pump: crate::db::PeerIoPump,
@@ -1057,23 +1073,6 @@ impl InMemoryServerShell {
         self.db.set_catalogue_activation_failpoint(failpoint);
     }
 
-    /// Encode the snapshot through the ordinary negotiated wire codec so
-    /// large catalogues retain the protocol's fragmentation and feature rules.
-    pub(crate) fn encoded_trusted_catalogue_snapshot(
-        &self,
-        protocol_version: u16,
-        features: crate::wire::WireFeatures,
-    ) -> ShellResult<Vec<AbiBytes>> {
-        let transport = SharedWireTransport::default();
-        let mut wire =
-            WireTransportAdapter::new(transport.clone(), protocol_version, features, None);
-        wire.send(SyncMessage::CatalogueSnapshot(Box::new(
-            self.trusted_catalogue_snapshot()?,
-        )))
-        .map_err(|error| ShellError::Transport(format!("{error:?}")))?;
-        Ok(transport.queues.borrow_mut().outbound.drain(..).collect())
-    }
-
     /// Return the shell's ABI runtime handle for diagnostics in unit tests.
     #[cfg(test)]
     pub fn runtime_handle(&self) -> usize {
@@ -1544,7 +1543,12 @@ impl InMemoryServerShell {
                 crate::db::block_on(state.auxiliary_pump.route_incoming_wire_frame(frame))
                     .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
-                state.transport.queues.borrow_mut().inbound.push_back(frame);
+                state
+                    .transport
+                    .queues
+                    .borrow_mut()
+                    .stage_inbound(frame)
+                    .map_err(ShellError::Transport)?;
             }
         }
         Ok(())
@@ -1569,7 +1573,12 @@ impl InMemoryServerShell {
                 .await
                 .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
-                state.transport.queues.borrow_mut().inbound.push_back(frame);
+                state
+                    .transport
+                    .queues
+                    .borrow_mut()
+                    .stage_inbound(frame)
+                    .map_err(ShellError::Transport)?;
             }
         }
         Ok(())

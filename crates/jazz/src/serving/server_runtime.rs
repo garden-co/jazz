@@ -88,7 +88,9 @@ impl FrameQueueCredit {
         let charge = frames
             .iter()
             .try_fold(0usize, |sum, frame| {
-                sum.checked_add(frame.len().max(16 * 1024))
+                sum.checked_add(crate::wire::channel_credit::channel_frame_credit_cost(
+                    frame.len(),
+                ))
             })
             .ok_or_else(|| "wire frame queue budget exceeded".to_owned())?
             .max(16 * 1024);
@@ -121,6 +123,9 @@ struct FrameStreamSender {
 }
 impl FrameStreamSender {
     fn send(&self, result: Result<Vec<AbiBytes>, String>) -> Result<(), ()> {
+        if result.as_ref().is_ok_and(Vec::is_empty) {
+            return Ok(());
+        }
         if self.failed.load(Ordering::Acquire) || self.sender.is_closed() {
             return Err(());
         }
@@ -806,11 +811,11 @@ async fn drive_upstream_wire(
             while let Some(frame) = wire.try_recv_frame() {
                 match io.pump.route_incoming_wire_frame(frame).await {
                     Ok(Some(canonical)) => {
-                        io.transport
-                            .queues
-                            .borrow_mut()
-                            .inbound
-                            .push_back(canonical);
+                        if let Err(error) =
+                            io.transport.queues.borrow_mut().stage_inbound(canonical)
+                        {
+                            return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                        }
                         staged_semantic_input = true;
                     }
                     Ok(None) => {
@@ -1066,15 +1071,14 @@ impl ServerRuntimeHandle {
         })
     }
 
-    /// Encode the trusted catalogue through the negotiated wire format.
-    pub async fn encoded_trusted_catalogue_snapshot(
+    /// Read the owned authority snapshot for an authenticated bootstrap socket.
+    /// The socket retains its live adapter until credit-driven delivery ends.
+    pub async fn trusted_catalogue_snapshot(
         &self,
-        protocol_version: u16,
-        features: crate::wire::WireFeatures,
-    ) -> Result<Vec<AbiBytes>, String> {
+    ) -> Result<crate::protocol::CatalogueSnapshot, String> {
         self.run(move |shell| {
             shell
-                .encoded_trusted_catalogue_snapshot(protocol_version, features)
+                .trusted_catalogue_snapshot()
                 .map_err(|error| error.to_string())
         })
         .await
@@ -2312,6 +2316,137 @@ mod tests {
             ),
             "canonical input staged after an empty activity tick must queue a post-stage shell tick"
         );
+    }
+
+    // Holding the owner borrow is an internal scheduling fault-injection seam;
+    // real authenticated sessions and channel bytes exercise the ingress path.
+    #[tokio::test]
+    async fn auxiliary_ingress_serves_two_sessions_while_semantic_owner_is_suspended() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let features = crate::wire::current_wire_features();
+        let mut sessions = Vec::new();
+        for byte in [91, 92] {
+            sessions.push(
+                runtime
+                    .open_with_session_context(
+                        AuthorSubject::for_test_bytes([byte; 16]),
+                        BTreeMap::new(),
+                        CommitUnitTrust::TrustedAdmin,
+                        features,
+                        None,
+                        crate::serving::ServerLinkAdmission::OrdinarySession,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let held_runtime = runtime.clone();
+        let held = tokio::spawn(async move {
+            held_runtime
+                .run_async(move |_| {
+                    Box::pin(async move {
+                        let _ = started_tx.send(());
+                        release_rx.await.map_err(|_| "hold cancelled".to_owned())
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        for (index, session) in sessions.iter().copied().enumerate() {
+            let mut stream = runtime.open_wire_stream(session).unwrap();
+            let mut client =
+                crate::db::AuxiliaryChannelEndpoint::new(crate::wire::WireInboundContext::new(
+                    crate::wire::WIRE_PROTOCOL_VERSION,
+                    features,
+                    None,
+                ))
+                .unwrap();
+            client
+                .enqueue(SyncMessage::ChunkRequestBatch(
+                    crate::protocol::ChunkRequestBatch {
+                        requests: vec![crate::protocol::ChunkRequestEntry {
+                            request_id: index as u64,
+                            locator: groove::large_values::Locator::random(),
+                            expected_hash: [37; 32],
+                            remaining_hops: 0,
+                        }],
+                    },
+                ))
+                .unwrap();
+            let frame = client.peek_outbound().unwrap().unwrap();
+            client.accept_outbound().unwrap();
+            runtime.receive_wire_frames(session, vec![frame]).unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    for bytes in stream.recv().await.unwrap().unwrap() {
+                        match crate::wire::decode_frame(&bytes).unwrap() {
+                            WireFrame::ChannelCredit(grant) => client
+                                .channel_credits()
+                                .lock()
+                                .unwrap()
+                                .receive_credit(grant)
+                                .unwrap(),
+                            WireFrame::Channel(envelope) => {
+                                if let Some(message) =
+                                    client.receive(envelope, bytes.len()).unwrap()
+                                {
+                                    return message;
+                                }
+                            }
+                            _ => panic!("only channel traffic expected"),
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("auxiliary response must not wait for the suspended semantic owner");
+            assert!(matches!(response, SyncMessage::ChunkResponseBatch(batch)
+                if batch.responses.len() == 1 && batch.responses[0].request_id == index as u64
+                && batch.responses[0].result == crate::protocol::ChunkResponse::Unavailable));
+            assert!(
+                !held.is_finished(),
+                "serving chunks did not resume the held semantic job"
+            );
+            runtime.close(session);
+            let mut retired = runtime.receive_tick_stream(session, vec![]).unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(2), retired.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                error.is_err(),
+                "retired session cannot regain auxiliary authority"
+            );
+        }
+        release_tx.send(()).unwrap();
+        held.await.unwrap().unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    // Queue credits are private ownership, so test their exact release at this
+    // seam rather than relying on allocation timing through a remote socket.
+    #[test]
+    fn session_frame_queue_caps_bytes_and_tiny_frame_count_and_releases_on_drop() {
+        let used = Arc::new(AtomicUsize::new(0));
+        let frames = vec![vec![0]; 512];
+        let credit = FrameQueueCredit::reserve(&used, &frames).unwrap();
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_err());
+        let held = Arc::clone(&credit);
+        drop(credit);
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_err());
+        drop(held);
+        assert_eq!(used.load(Ordering::Acquire), 0);
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0; FRAME_QUEUE_BUDGET + 1]]).is_err());
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_ok());
     }
 
     #[tokio::test]

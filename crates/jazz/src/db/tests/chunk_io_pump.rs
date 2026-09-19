@@ -88,6 +88,40 @@ fn test_wire_inbound_context() -> Option<Rc<crate::wire::WireInboundContext>> {
     )))
 }
 
+// Internal codec receipt: the public API does not expose encoded reservation
+// bytes or hop-local credit balances. A real persistent receiver verifies them.
+fn decode_auxiliary_extent(
+    receiver: &mut AuxiliaryChannelEndpoint,
+    sender: &PeerIoPump,
+    bytes: Vec<u8>,
+) -> Option<SyncMessage> {
+    let WireFrame::Channel(envelope) = crate::wire::decode_frame(&bytes).unwrap() else {
+        panic!("auxiliary output is a channel extent");
+    };
+    let message = receiver.receive(envelope, bytes.len()).unwrap();
+    let credits = receiver.channel_credits();
+    let mut credits = credits.lock().unwrap();
+    while let Some(frame) = credits.peek_grant().unwrap() {
+        let WireFrame::ChannelCredit(grant) = crate::wire::decode_frame(&frame).unwrap() else {
+            unreachable!()
+        };
+        sender
+            .channel_credits()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .receive_credit(grant)
+            .unwrap();
+        credits.accept_grant().unwrap();
+    }
+    message
+}
+
+fn auxiliary_decoder() -> AuxiliaryChannelEndpoint {
+    AuxiliaryChannelEndpoint::new((**test_wire_inbound_context().as_ref().unwrap()).clone())
+        .unwrap()
+}
+
 #[test]
 fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tick() {
     crate::db::block_on(async {
@@ -155,13 +189,15 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            downstream
-                .route_incoming_wire_frame(upstream.take_outbound_wire_frame().unwrap().unwrap(),)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        while let Some(frame) = upstream.take_outbound_wire_frame().unwrap() {
+            assert!(
+                downstream
+                    .route_incoming_wire_frame(frame)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
 
         let bytes = read.await.unwrap();
         assert!(!bytes.is_empty());
@@ -178,7 +214,7 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
 }
 
 #[test]
-fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_wire_frame() {
+fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_logical_message() {
     let resolver = PeerChunkResolver::default();
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
     let database = crate::db::block_on(groove::db::Database::new(
@@ -210,30 +246,25 @@ fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_wire_frame() {
         state.relay_chunk_obligations = response_count as usize;
     }
 
-    let features = crate::wire::current_wire_features();
+    let mut receiver = auxiliary_decoder();
     let mut observed_request_ids = Vec::new();
-    for _ in 0..response_count {
+    while observed_request_ids.len() < response_count as usize {
         let frame = subscriber
             .take_outbound_wire_frame()
             .unwrap()
-            .expect("each queued response has its own wire frame");
-        assert!(
-            frame.len() <= crate::protocol_limits::MAX_WIRE_FRAME_BYTES,
-            "one auxiliary frame stays below the wire allocation limit"
-        );
-        let crate::wire::WireFrame::Message(envelope) = crate::wire::decode_frame(&frame).unwrap()
-        else {
-            panic!("auxiliary output is a complete message frame");
-        };
-        let payload =
-            crate::wire::decompress_sync_payload(&envelope.payload, envelope.features).unwrap();
-        let SyncMessage::ChunkResponseBatch(batch) =
-            crate::wire::decode_sync_message_for_features(&payload, features).unwrap()
-        else {
-            panic!("subscriber emits chunk responses");
-        };
-        assert_eq!(batch.responses.len(), 1, "the requested bound is honored");
-        observed_request_ids.push(batch.responses[0].request_id);
+            .expect("queued chunk response retains its next extent");
+        assert!(frame.len() <= crate::protocol_limits::MAX_WIRE_FRAME_BYTES);
+        if let Some(message) = decode_auxiliary_extent(&mut receiver, &subscriber, frame) {
+            let SyncMessage::ChunkResponseBatch(batch) = message else {
+                panic!("subscriber emits chunk responses")
+            };
+            assert_eq!(
+                batch.responses.len(),
+                1,
+                "one chunk per logical auxiliary message"
+            );
+            observed_request_ids.push(batch.responses[0].request_id);
+        }
     }
     assert_eq!(
         observed_request_ids,
@@ -275,7 +306,7 @@ fn bounded_auxiliary_drain_keeps_large_response_batches_fifo_and_within_bytes() 
         state.relay_chunk_obligations = response_count as usize;
     }
 
-    let features = crate::wire::current_wire_features();
+    let mut receiver = auxiliary_decoder();
     let byte_budget = groove::large_values::LEAF_MAX_BYTES * 4;
     let mut observed_request_ids = Vec::new();
     loop {
@@ -294,16 +325,10 @@ fn bounded_auxiliary_drain_keeps_large_response_batches_fifo_and_within_bytes() 
             "byte budget bounds every host batch"
         );
         for frame in frames {
-            let crate::wire::WireFrame::Message(envelope) =
-                crate::wire::decode_frame(&frame).unwrap()
-            else {
-                panic!("auxiliary output is a complete message frame");
+            let Some(message) = decode_auxiliary_extent(&mut receiver, &subscriber, frame) else {
+                continue;
             };
-            let payload =
-                crate::wire::decompress_sync_payload(&envelope.payload, envelope.features).unwrap();
-            let SyncMessage::ChunkResponseBatch(batch) =
-                crate::wire::decode_sync_message_for_features(&payload, features).unwrap()
-            else {
+            let SyncMessage::ChunkResponseBatch(batch) = message else {
                 panic!("subscriber emits chunk responses");
             };
             assert_eq!(batch.responses.len(), 1, "per-frame bound remains intact");
@@ -449,7 +474,6 @@ fn reserved_wire_chunk_request_retries_after_backpressure_without_changing_its_i
             Poll::Pending
         ));
 
-        let features = crate::wire::current_wire_features();
         let mut first = pump
             .reserve_outbound_wire_frame()
             .unwrap()
@@ -464,26 +488,15 @@ fn reserved_wire_chunk_request_retries_after_backpressure_without_changing_its_i
         let retry_frame = retry.take_frame();
         retry.commit();
 
-        let request_id = |frame: Vec<u8>| {
-            let crate::wire::WireFrame::Message(envelope) =
-                crate::wire::decode_frame(&frame).unwrap()
-            else {
-                panic!("reserved request is an ordinary wire message");
-            };
-            let payload =
-                crate::wire::decompress_sync_payload(&envelope.payload, envelope.features).unwrap();
-            let SyncMessage::ChunkRequestBatch(batch) =
-                crate::wire::decode_sync_message_for_features(&payload, features).unwrap()
-            else {
-                panic!("upstream reservation carries a chunk request");
-            };
-            batch.requests[0].request_id
-        };
         assert_eq!(
-            request_id(retry_frame),
-            request_id(first_frame),
-            "backpressure retries the exact same chunk request once"
+            retry_frame, first_frame,
+            "retry preserves exact compressed bytes and sequence"
         );
+        let mut receiver = auxiliary_decoder();
+        assert!(matches!(
+            decode_auxiliary_extent(&mut receiver, &pump, retry_frame),
+            Some(SyncMessage::ChunkRequestBatch(_))
+        ));
         assert!(
             pump.reserve_outbound_wire_frame().unwrap().is_none(),
             "committing the retry consumes the request exactly once"
@@ -1238,19 +1251,20 @@ fn paired_wire_context_governs_auxiliary_frames_in_both_directions() {
             .take_outbound_wire_frame()
             .unwrap()
             .expect("pending chunk demand produces an auxiliary frame");
-        let WireFrame::Message(outbound_envelope) = crate::wire::decode_frame(&outbound).unwrap()
+        let WireFrame::Channel(outbound_envelope) = crate::wire::decode_frame(&outbound).unwrap()
         else {
-            panic!("auxiliary output must use a complete message envelope");
+            panic!("auxiliary output must use a channel envelope");
         };
         assert_eq!(outbound_envelope.protocol_version, WIRE_PROTOCOL_VERSION);
         assert_eq!(outbound_envelope.features, features);
         assert_eq!(outbound_envelope.session.as_ref(), Some(&session));
-        let request_id = match crate::wire::decode_sync_message_for_features(
-            &outbound_envelope.payload,
+        let mut receiver = AuxiliaryChannelEndpoint::new(crate::wire::WireInboundContext::new(
+            WIRE_PROTOCOL_VERSION,
             features,
-        )
-        .unwrap()
-        {
+            Some(session.clone()),
+        ))
+        .unwrap();
+        let request_id = match decode_auxiliary_extent(&mut receiver, &pump, outbound).unwrap() {
             SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
             message => panic!("expected auxiliary chunk request, got {message:?}"),
         };
@@ -1284,4 +1298,72 @@ fn paired_wire_context_governs_auxiliary_frames_in_both_directions() {
             "rejected session metadata must not resolve the pending chunk"
         );
     });
+}
+
+// Encoded frame identity and inflight relay accounting are internal transport
+// obligations; application queries cannot observe a codec sequence rewind.
+#[test]
+fn fragmented_auxiliary_response_retains_first_and_middle_frames_on_backpressure() {
+    let resolver = PeerChunkResolver::default();
+    let (reader, _) = deferred_local_chunk_reader();
+    let pump = PeerIoPump::new(
+        resolver.clone(),
+        reader,
+        93,
+        PeerIoPumpRole::Subscriber,
+        test_wire_inbound_context(),
+    );
+    let bytes = (0..groove::large_values::LEAF_MAX_BYTES)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    {
+        let mut state = resolver.state.borrow_mut();
+        state.relay_responses.insert(
+            93,
+            vec![ChunkResponseEntry {
+                request_id: 93,
+                result: ChunkResponse::Found(bytes.clone()),
+            }],
+        );
+        state.relay_chunk_obligations = 1;
+    }
+    let mut receiver = auxiliary_decoder();
+    let mut extents = 0;
+    let mut completed = None;
+    while let Some(mut reservation) = pump.reserve_outbound_wire_frame().unwrap() {
+        let encoded = reservation.take_frame();
+        assert!(
+            pump.reserve_outbound_wire_frame().unwrap().is_none(),
+            "only one physical reservation may be outstanding"
+        );
+        if extents == 0 || extents == 2 {
+            drop(reservation);
+            assert!(
+                pump.take_outbound_wire_frames(1, 1).is_err(),
+                "byte-budget rejection keeps the same reservation"
+            );
+            reservation = pump.reserve_outbound_wire_frame().unwrap().unwrap();
+            assert_eq!(
+                reservation.take_frame(),
+                encoded,
+                "retry must preserve bytes, codec state and sequence"
+            );
+        }
+        reservation.commit();
+        let message = decode_auxiliary_extent(&mut receiver, &pump, encoded);
+        extents += 1;
+        if message.is_some() {
+            completed = message;
+        }
+        assert_eq!(
+            retained_relay_obligations(&resolver.state.borrow()),
+            usize::from(completed.is_none()),
+            "only last physical handoff releases the logical obligation"
+        );
+    }
+    assert!(extents >= 4, "the response exercised a middle extent");
+    let Some(SyncMessage::ChunkResponseBatch(batch)) = completed else {
+        panic!("complete response received")
+    };
+    assert_eq!(batch.responses[0].result, ChunkResponse::Found(bytes));
 }
