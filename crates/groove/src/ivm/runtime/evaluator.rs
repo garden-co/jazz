@@ -616,6 +616,15 @@ pub(super) struct RootOrderingWindows {
     pub(super) after: BTreeMap<Vec<u8>, usize>,
 }
 
+/// Ephemeral lookup inputs, not a cached proof of producer readiness. A miss
+/// may reuse these only within the same node evaluation, never across the
+/// postorder traversal that can rebuild its input state.
+struct NodeMemoLookup {
+    key: EvalMemoKey,
+    input_watermark: u64,
+    depends_on_context: bool,
+}
+
 pub(super) struct TickEvaluator<'a> {
     pub(super) schema: &'a DatabaseSchema,
     pub(super) graph: &'a IvmGraph,
@@ -1141,25 +1150,45 @@ impl TickEvaluator<'_> {
         // their memo before entering another evaluator future: even a cache
         // hit inside update_one_node would recursively poll that wide future
         // beneath its parent, overflowing Safari's WebAssembly call stack.
-        match self.cached_node_records(node) {
+        match self
+            .prepare_memo_lookup(node)
+            .and_then(|lookup| self.cached_node_records(&lookup))
+        {
             Ok(Some(records)) => Box::pin(std::future::ready(Ok(records))),
             Err(error) => Box::pin(std::future::ready(Err(error))),
             Ok(None) => Box::pin(self.update_subgraph(node)),
         }
     }
 
+    fn prepare_memo_lookup(&mut self, node: NodeId) -> Result<NodeMemoLookup, IvmRuntimeError> {
+        let prepare =
+            |this: &Self, signature: &NodeInputSignature, input_watermark| NodeMemoLookup {
+                key: this.memo_key(node, signature),
+                input_watermark,
+                depends_on_context: !signature.frontier_bindings.is_empty(),
+            };
+        // The common path borrows the compiled signature and its current
+        // watermark together. No Arc clone or reference survives this call.
+        if let Some(meta) = self.node_meta.get(&node)
+            && let Some(signature) = meta.input_signature.as_deref()
+        {
+            return Ok(prepare(self, signature, meta.input_generation));
+        }
+        let signature = self.input_signature(node)?;
+        Ok(prepare(self, &signature, self.input_generation(node)))
+    }
+
     fn cached_node_records(
         &mut self,
-        node: NodeId,
+        lookup: &NodeMemoLookup,
     ) -> Result<Option<Arc<RecordDeltas>>, IvmRuntimeError> {
-        let signature = self.input_signature(node)?;
-        let memo_key = self.memo_key(node, &signature);
-        let current_watermark = self.input_generation(node);
+        let node = lookup.key.node;
+        let current_watermark = lookup.input_watermark;
         // Readiness is necessary only when reusing a result. A missing or
         // invalidated memo will execute the producer normally below.
         if self
             .eval_memo
-            .get(&memo_key)
+            .get(&lookup.key)
             .is_none_or(|entry| entry.input_watermark != current_watermark)
         {
             return Ok(None);
@@ -1187,7 +1216,7 @@ impl TickEvaluator<'_> {
             || (self.context.eval_mode == EvalMode::Tick
                 && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
         if !requires_state_rebuild
-            && let Some(entry) = self.eval_memo.get_mut(&memo_key)
+            && let Some(entry) = self.eval_memo.get_mut(&lookup.key)
             && entry.input_watermark == current_watermark
         {
             *self.memo_use_clock += 1;
@@ -1205,24 +1234,26 @@ impl TickEvaluator<'_> {
         node: NodeId,
     ) -> StorageFuture<'_, Result<Arc<RecordDeltas>, IvmRuntimeError>> {
         Box::pin(async move {
-            if let Some(records) = self.cached_node_records(node)? {
+            let lookup = self.prepare_memo_lookup(node)?;
+            if let Some(records) = self.cached_node_records(&lookup)? {
                 return Ok(records);
             }
+            let NodeMemoLookup {
+                key: memo_key,
+                input_watermark: current_watermark,
+                depends_on_context,
+            } = lookup;
             let graph_node = self
                 .graph
                 .node(node)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-            let signature = self.input_signature(node)?;
-            let memo_key = self.memo_key(node, &signature);
-            let current_watermark = self.input_generation(node);
-
             if self.context.eval_mode == EvalMode::Hydrate {
                 self.metrics.hydration_memo_computes += 1;
                 self.metrics.hydration_memo_computed_nodes.insert(node);
             }
 
             let output_desc = graph_node.descriptor.output.records();
-            if self.context.sub_tick > 1 && signature.frontier_bindings.is_empty() {
+            if self.context.sub_tick > 1 && !depends_on_context {
                 let result = Arc::new(RecordDeltas::empty(output_desc));
                 *self.memo_use_clock += 1;
                 if let Some(previous) = self.eval_memo.insert(
