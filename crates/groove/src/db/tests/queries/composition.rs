@@ -2,6 +2,311 @@
 
 use super::*;
 
+/// Reusing lookup inputs inside an evaluation must not retain a binding's
+/// context or watermark across later writes and fresh subscriptions.
+#[futures_test::test]
+async fn prepared_memo_lookup_keeps_bindings_and_write_frontiers_distinct() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let params = RecordDescriptor::new([("row", ColumnType::U64)]);
+    let graph = GraphBuilder::join(
+        GraphBuilder::binding_source("selected_row", params),
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"]),
+        ["row"],
+        ["row"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.row", "row"),
+        ProjectField::renamed("right.stamp", "stamp"),
+    ]);
+    let prepared = db
+        .prepare_one_sink(graph, "selected_row", params, ["row"])
+        .await
+        .unwrap();
+    let mut batch = db.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "first"));
+    batch.insert("history", history_values(2, 20, 1, "second"));
+    db.commit_batch(batch).await.unwrap();
+    let first = db
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(1)])
+        .await
+        .unwrap();
+    let second = db
+        .bind_shape_one_sink(prepared.id(), &[Value::U64(2)])
+        .await
+        .unwrap();
+    let values = |row, stamp| vec![Value::U64(row), Value::U64(stamp)];
+    assert_eq!(
+        first.recv().unwrap().to_values().unwrap(),
+        [(values(1, 10), 1)]
+    );
+    assert_eq!(
+        second.recv().unwrap().to_values().unwrap(),
+        [(values(2, 20), 1)]
+    );
+    for (row, old, new, changed, unchanged) in [
+        (1, 10, 30, &first, &second),
+        (2, 20, 40, &second, &first),
+        (1, 30, 50, &first, &second),
+    ] {
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(row, old, 1));
+        batch.insert("history", history_values(row, new, 1, "replacement"));
+        db.commit_batch(batch).await.unwrap();
+        let deltas = changed.recv().unwrap().to_values().unwrap();
+        assert_eq!(deltas.len(), 2);
+        assert!(deltas.contains(&(values(row, old), -1)));
+        assert!(deltas.contains(&(values(row, new), 1)));
+        assert!(matches!(unchanged.try_recv(), Err(TryRecvError::Empty)));
+        let fresh = db
+            .bind_shape_one_sink(prepared.id(), &[Value::U64(row)])
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh.recv().unwrap().to_values().unwrap(),
+            [(values(row, new), 1)]
+        );
+        assert!(db.unsubscribe(fresh.id()));
+    }
+}
+
+/// Keeping a prepared graph (and its immutable dependency classification)
+/// across detachment must not keep a stale runtime-readiness proof.
+#[futures_test::test]
+async fn prepared_hydration_after_detach_rebuilds_current_candidates() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let graph =
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"])
+            .project(["row", "stamp"]);
+    let params = RecordDescriptor::new([("row", ColumnType::U64)]);
+    let prepared = db
+        .prepare_one_sink(
+            GraphBuilder::join(
+                GraphBuilder::binding_source("selected_row", params),
+                graph.clone(),
+                ["row"],
+                ["row"],
+            )
+            .project_fields([
+                ProjectField::renamed("left.row", "row"),
+                ProjectField::renamed("right.stamp", "stamp"),
+            ]),
+            "selected_row",
+            params,
+            ["row"],
+        )
+        .await
+        .unwrap();
+    let mut batch = db.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "runner-up"));
+    db.commit_batch(batch).await.unwrap();
+    let values = |stamp| vec![Value::U64(1), Value::U64(stamp)];
+    for winner in [20, 30] {
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, winner, 1, "winner"));
+        db.commit_batch(batch).await.unwrap();
+        assert_eq!(
+            db.query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(values(winner), 1)]
+        );
+        let subscription = db
+            .bind_shape_one_sink(prepared.id(), &[Value::U64(1)])
+            .await
+            .unwrap();
+        assert_eq!(
+            subscription.recv().unwrap().to_values().unwrap(),
+            [(values(winner), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, winner, 1));
+        db.commit_batch(batch).await.unwrap();
+        let changes = subscription.recv().unwrap().to_values().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.contains(&(values(winner), -1)));
+        assert!(changes.contains(&(values(10), 1)));
+        assert!(db.unsubscribe(subscription.id()));
+    }
+}
+
+/// Alice probes a prepared-but-unbound graph before Bob subscribes. A cached
+/// winner is not evidence of a seeded candidate index: deleting that winner
+/// must expose its runner-up. Further probes must not erase Bob's live state.
+/// prepare -> one-shot -> bind -> delete winner -> one-shot -> delete runner-up.
+#[futures_test::test]
+async fn arg_by_probe_memo_seeds_later_subscription_and_preserves_live_candidates() {
+    for maximum in [false, true] {
+        let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+        let mut db = Database::new(history_schema(), storage).await.unwrap();
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, 10, 1, "older"));
+        batch.insert("history", history_values(1, 20, 1, "newer"));
+        db.commit_batch(batch).await.unwrap();
+        let input = GraphBuilder::table("history");
+        let graph = if maximum {
+            GraphBuilder::arg_max_by(input, ["row"], ["stamp", "node"])
+        } else {
+            GraphBuilder::arg_min_by(input, ["row"], ["stamp", "node"])
+        }
+        .project(["row", "stamp"]);
+        let params = RecordDescriptor::new([("row", ColumnType::U64)]);
+        let prepared = db
+            .prepare_one_sink(
+                GraphBuilder::join(
+                    GraphBuilder::binding_source("probe_row", params),
+                    graph.clone(),
+                    ["row"],
+                    ["row"],
+                )
+                .project_fields([
+                    ProjectField::renamed("left.row", "row"),
+                    ProjectField::renamed("right.stamp", "stamp"),
+                ]),
+                "probe_row",
+                params,
+                ["row"],
+            )
+            .await
+            .unwrap();
+        let (winner, next) = if maximum { (20, 10) } else { (10, 20) };
+        let values = |stamp| vec![Value::U64(1), Value::U64(stamp)];
+        assert_eq!(
+            db.query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(values(winner), 1)]
+        );
+        let sub = db
+            .bind_shape_one_sink(prepared.id(), &[Value::U64(1)])
+            .await
+            .unwrap();
+        assert_eq!(
+            sub.try_recv().unwrap().to_values().unwrap(),
+            [(values(winner), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, winner, 1));
+        db.commit_batch(batch).await.unwrap();
+        let deltas = sub.try_recv().unwrap().to_values().unwrap();
+        assert_eq!(deltas.len(), 2);
+        assert!(deltas.contains(&(values(winner), -1)));
+        assert!(deltas.contains(&(values(next), 1)));
+        assert_eq!(
+            db.query_graph(graph).await.unwrap().to_values().unwrap(),
+            [(values(next), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, next, 1));
+        db.commit_batch(batch).await.unwrap();
+        assert_eq!(
+            sub.try_recv().unwrap().to_values().unwrap(),
+            [(values(next), -1)]
+        );
+    }
+}
+
+/// Alice and Bob share an extrema query. Attaching Bob and issuing one-shot
+/// reads must not double-count Alice's retained inputs. Identical rows from
+/// two sources contribute twice, but the winner is always emitted once.
+/// seed -> attach twice -> retract duplicates -> empty -> attach -> refill.
+#[futures_test::test]
+async fn arg_by_shared_hydration_preserves_multiplicity_and_empty_refill() {
+    for maximum in [false, true] {
+        let storage = MemoryStorage::new(&["history", "history_shadow"]).unwrap();
+        let mut database = Database::new(two_history_tables_schema(), storage)
+            .await
+            .unwrap();
+        let input = GraphBuilder::union([
+            GraphBuilder::table("history"),
+            GraphBuilder::table("history_shadow"),
+        ]);
+        let graph = if maximum {
+            GraphBuilder::arg_max_by(input, ["row"], ["stamp", "node"])
+        } else {
+            GraphBuilder::arg_min_by(input, ["row"], ["stamp", "node"])
+        };
+        let older = history_values(1, 10, 1, "older");
+        let newer = history_values(1, 20, 1, "newer");
+        let initial = if maximum {
+            newer.clone()
+        } else {
+            older.clone()
+        };
+        let mut batch = database.open_batch();
+        batch.insert("history", older.clone());
+        batch.insert("history", newer.clone());
+        batch.insert("history_shadow", newer);
+        database.commit_batch(batch).await.unwrap();
+        let alice = database.subscribe_one_sink(graph.clone()).await.unwrap();
+        assert_eq!(
+            alice.recv().unwrap().to_values().unwrap(),
+            [(initial.clone(), 1)]
+        );
+        let bob = database.subscribe_one_sink(graph.clone()).await.unwrap();
+        assert_eq!(
+            bob.recv().unwrap().to_values().unwrap(),
+            [(initial.clone(), 1)]
+        );
+        assert_eq!(
+            database
+                .query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(initial.clone(), 1)]
+        );
+
+        let mut batch = database.open_batch();
+        batch.delete("history", history_key(1, 20, 1));
+        database.commit_batch(batch).await.unwrap();
+        for sub in [&alice, &bob] {
+            assert!(matches!(sub.try_recv(), Err(TryRecvError::Empty)));
+        }
+        let mut batch = database.open_batch();
+        batch.delete("history_shadow", history_key(1, 20, 1));
+        database.commit_batch(batch).await.unwrap();
+        for sub in [&alice, &bob] {
+            if maximum {
+                assert_eq!(
+                    sub.recv().unwrap().to_values().unwrap(),
+                    [(initial.clone(), -1), (older.clone(), 1)]
+                );
+            } else {
+                assert!(matches!(sub.try_recv(), Err(TryRecvError::Empty)));
+            }
+        }
+        let mut batch = database.open_batch();
+        batch.delete("history", history_key(1, 10, 1));
+        database.commit_batch(batch).await.unwrap();
+        for sub in [&alice, &bob] {
+            assert_eq!(
+                sub.recv().unwrap().to_values().unwrap(),
+                [(older.clone(), -1)]
+            );
+        }
+        let carol = database.subscribe_one_sink(graph.clone()).await.unwrap();
+        assert!(carol.recv().unwrap().is_empty());
+        assert!(database.query_graph(graph).await.unwrap().is_empty());
+        let refill = history_values(1, 30, 1, "refill");
+        let mut batch = database.open_batch();
+        batch.insert("history", refill.clone());
+        database.commit_batch(batch).await.unwrap();
+        for sub in [&alice, &bob, &carol] {
+            assert_eq!(
+                sub.recv().unwrap().to_values().unwrap(),
+                [(refill.clone(), 1)]
+            );
+        }
+    }
+}
+
 #[futures_test::test]
 async fn arg_max_by_feeds_join_and_anti_join() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"])

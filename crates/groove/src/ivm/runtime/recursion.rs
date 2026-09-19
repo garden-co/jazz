@@ -20,11 +20,10 @@ use super::evaluation_session::EvaluationInputs;
 use super::subscriptions::BindingDelta;
 
 use super::{
-    ArgByDirection, ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError,
-    NodeState, RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta,
-    VariantProjection, VariantProjectionKey, arg_by_candidate_replaces, consolidate_deltas,
-    encoded_record_key_part, plan_expr_names, project_binding_source_deltas, raw_projection_fields,
-    scan_bounds, touched_join_keys,
+    ArgByDirection, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState, RecordDelta,
+    RecordDeltas, ScopeId, StaticScanBounds, TableDelta, VariantProjection, VariantProjectionKey,
+    arg_by_candidate_replaces, consolidate_deltas, encoded_record_key_part, plan_expr_names,
+    project_binding_source_deltas, raw_projection_fields, scan_bounds, touched_join_keys,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -1527,15 +1526,15 @@ fn reject_non_positive_frontier_deltas(deltas: &[RecordDelta]) -> Result<(), Ivm
 // Use the maintained operator's shared declared-key/full-record comparator so
 // winner selection cannot diverge by evaluation path.
 
-fn hydrated_arg_by_winners(
-    input: RecordDeltas,
+pub(super) fn hydrated_arg_by_winners(
+    input: &RecordDeltas,
     output_desc: RecordDescriptor,
     group_field_indices: &[usize],
     comparison_field_indices: &[usize],
     direction: ArgByDirection,
 ) -> Result<RecordDeltas, IvmRuntimeError> {
     let mut winners = std::collections::BTreeMap::<Vec<u8>, (Vec<u8>, Bytes)>::new();
-    for delta in input.deltas {
+    for delta in &input.deltas {
         if delta.weight <= 0 {
             continue;
         }
@@ -1544,7 +1543,7 @@ fn hydrated_arg_by_winners(
             encoded_record_key_part(output_desc, delta.raw(), comparison_field_indices)?;
         match winners.entry(group_key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert((comparison_key, delta.record));
+                entry.insert((comparison_key, delta.record.clone()));
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let winner = entry.get_mut();
@@ -1556,7 +1555,7 @@ fn hydrated_arg_by_winners(
                     direction,
                 );
                 if replaces {
-                    *winner = (comparison_key, delta.record);
+                    *winner = (comparison_key, delta.record.clone());
                 }
             }
         }
@@ -1725,7 +1724,7 @@ impl HydrationEvaluator<'_> {
                 OpType::ArgMaxBy(arg_max_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     hydrated_arg_by_winners(
-                        input,
+                        &input,
                         output_desc,
                         &arg_max_by.group_field_indices,
                         &arg_max_by.comparison_field_indices,
@@ -1735,7 +1734,7 @@ impl HydrationEvaluator<'_> {
                 OpType::ArgMinBy(arg_min_by) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
                     hydrated_arg_by_winners(
-                        input,
+                        &input,
                         output_desc,
                         &arg_min_by.group_field_indices,
                         &arg_min_by.comparison_field_indices,
@@ -1825,31 +1824,13 @@ impl HydrationEvaluator<'_> {
                     };
                     let left = self.eval_node(*left).await?;
                     let right = self.eval_node(*right).await?;
-                    let mut join_state = super::join::AntiJoinState::default();
-                    let left_on = plan_expr_names(&join.left_key);
-                    let right_on = plan_expr_names(&join.right_key);
-                    let mut left_arrangement = AsOf::new(super::join::ArrangementState::default());
-                    let mut right_arrangement = AsOf::new(super::join::ArrangementState::default());
-                    let deltas = join_state.apply(
-                        &mut left_arrangement,
-                        &mut right_arrangement,
-                        &join.left_descriptor,
-                        &join.right_descriptor,
-                        &output_desc,
-                        &left_on,
-                        &right_on,
+                    let deltas = super::join::threshold_snapshot(
+                        &left,
+                        &right,
+                        &plan_expr_names(&join.left_key),
+                        &plan_expr_names(&join.right_key),
                         join.comparison,
-                        super::join::JoinInput::deltas(&left.deltas),
-                        super::join::JoinInput::deltas(&right.deltas),
-                        SubTick {
-                            tick: 0,
-                            sub_tick: 0,
-                        },
-                        SubTick {
-                            tick: 0,
-                            sub_tick: 0,
-                        },
-                        ArrangementUpdateMode::Accumulate,
+                        false,
                     )?;
                     #[cfg(feature = "cold-settle-attribution")]
                     crate::cold_settle_attribution::record_join(
@@ -1886,29 +1867,13 @@ impl HydrationEvaluator<'_> {
                     };
                     let left = self.eval_node(*left).await?;
                     let right = self.eval_node(*right).await?;
-                    let mut join_state = super::join::SemiJoinState::default();
-                    let mut left_arrangement = AsOf::new(super::join::ArrangementState::default());
-                    let mut right_arrangement = AsOf::new(super::join::ArrangementState::default());
-                    let deltas = join_state.apply(
-                        &mut left_arrangement,
-                        &mut right_arrangement,
-                        join.left_descriptor,
-                        join.right_descriptor,
-                        &output_desc,
+                    let deltas = super::join::threshold_snapshot(
+                        &left,
+                        &right,
                         &plan_expr_names(&join.left_key),
                         &plan_expr_names(&join.right_key),
                         join.comparison,
-                        super::join::JoinInput::deltas(&left.deltas),
-                        super::join::JoinInput::deltas(&right.deltas),
-                        SubTick {
-                            tick: 0,
-                            sub_tick: 0,
-                        },
-                        SubTick {
-                            tick: 0,
-                            sub_tick: 0,
-                        },
-                        ArrangementUpdateMode::Replace,
+                        true,
                     )?;
                     Ok(RecordDeltas {
                         descriptor: output_desc,

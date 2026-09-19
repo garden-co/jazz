@@ -781,6 +781,9 @@ impl<'a> IncrementalEvaluation<'a> {
             if let OperatorState::TopBy(top_by) = state {
                 top_by.value_mut().commit_overlays();
             }
+            if let OperatorState::ArgBy(arg_by) = state {
+                arg_by.value_mut().commit_overlay();
+            }
             if let OperatorState::SemiJoin(semi_join) = state {
                 semi_join.commit_published_overlay();
             }
@@ -1602,6 +1605,9 @@ impl<'a> EvaluationSession<'a> {
         for state in self.operator_states.values_mut() {
             if let OperatorState::TopBy(top_by) = state {
                 top_by.value_mut().commit_overlays();
+            }
+            if let OperatorState::ArgBy(arg_by) = state {
+                arg_by.value_mut().commit_overlay();
             }
             if let OperatorState::SemiJoin(semi_join) = state {
                 semi_join.commit_published_overlay();
@@ -2807,7 +2813,10 @@ impl IvmRuntime {
                 .graph
                 .node(ancestor)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
-            if matches!(graph_node.descriptor.operator, OpType::Aggregate(_)) {
+            if matches!(
+                graph_node.descriptor.operator,
+                OpType::Aggregate(_) | OpType::ArgMinBy(_) | OpType::ArgMaxBy(_)
+            ) {
                 return Ok(true);
             }
         }
