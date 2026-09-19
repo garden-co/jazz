@@ -45,6 +45,58 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("coalesces receive deadlines, advances earlier wakes and re-arms later peers", async () => {
+    vi.useFakeTimers();
+    let schedule: ((urgency: "immediate" | "deferred" | `after:${number}`) => void) | undefined;
+    const deadlines = [10, 100];
+    let ticks = 0;
+    const start = performance.now();
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: typeof schedule) => {
+              schedule = callback;
+            },
+            tick: () => {
+              ticks += 1;
+              const elapsed = performance.now() - start;
+              while (deadlines.length && deadlines[0]! <= elapsed) deadlines.shift();
+              if (deadlines.length) schedule?.(`after:${deadlines[0]! - elapsed}`);
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      schedule?.("after:100");
+      for (let i = 0; i < 100; i += 1) schedule?.("after:100");
+      schedule?.("after:10");
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(9);
+      expect(ticks).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ticks).toBe(1);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(90);
+      expect(ticks).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+      schedule?.("after:100");
+      await runtime.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("marks external peer admission as requiring a distinct peer pass", () => {
     const runtime = new NativeRuntimeAdapter(
       {

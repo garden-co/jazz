@@ -710,6 +710,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
   private coreTickScheduled = false;
+  private coreDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  private coreDeadlineAt: number | undefined;
   private coreTickAgain = false;
   private coreOperation: {
     kind: "tick" | "admission";
@@ -988,6 +990,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
     if (this.closed) throw new Error("Native runtime is already closed");
     this.closed = true;
+    this.clearCoreDeadline();
     this.foregroundLeaseQuiesced = true;
     const capture = this.captureForegroundTxTimeHighWater();
     this.foregroundLeaseCapture = capture;
@@ -1134,6 +1137,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.closed = true;
+    this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     await this.foregroundLeaseCapture?.catch(() => undefined);
     if (this.pendingStreamingMutations.size > 0) {
@@ -1162,6 +1166,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private closeRuntimeState(alreadyMarkedClosed = false): boolean {
     if (this.closed && !alreadyMarkedClosed) return false;
     this.closed = true;
+    this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const [handle, subscription] of this.subscriptions) {
       this.terminateSubscription(handle, subscription);
@@ -3008,6 +3013,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
+  private clearCoreDeadline(): void {
+    if (this.coreDeadlineTimer !== undefined) clearTimeout(this.coreDeadlineTimer);
+    this.coreDeadlineTimer = undefined;
+    this.coreDeadlineAt = undefined;
+  }
+
   private scheduleCoreWake(urgency: CoreTickWake): void {
     if (this.closed) return;
     if (urgency === "after-current-turn") {
@@ -3024,7 +3035,17 @@ export class NativeRuntimeAdapter implements Runtime {
       // A protocol admission deadline is not a deferred microtask. Keep the
       // host event loop live and only wake the thread-affine core after the
       // promised window has elapsed.
-      setTimeout(() => this.scheduleCoreWake("immediate"), delayMs);
+      const deadline = performance.now() + delayMs;
+      if (this.coreDeadlineAt !== undefined && this.coreDeadlineAt <= deadline) return;
+      this.clearCoreDeadline();
+      this.coreDeadlineAt = deadline;
+      this.coreDeadlineTimer = setTimeout(() => {
+        this.coreDeadlineTimer = undefined;
+        this.coreDeadlineAt = undefined;
+        // This tick services every connection. Still-live later obligations
+        // re-arm their remaining deadline through the same earliest timer.
+        this.scheduleCoreWake("immediate");
+      }, delayMs);
       return;
     }
     this.notifyPeerTransportWork();
