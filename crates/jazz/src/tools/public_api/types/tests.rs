@@ -854,3 +854,45 @@ fn explicit_table_id_columns_are_rejected() {
             .contains("reserved")
     );
 }
+
+#[test]
+fn user_columns_starting_with_dollar_are_rejected() {
+    for column_name in ["$createdAt", "$foo"] {
+        let source = SchemaBuilder::new()
+            .table(TableSchema::builder("items").column(column_name, ColumnType::Text))
+            .build();
+        let error = crate::schema::JazzSchema::new(&source)
+            .expect_err("user columns starting with '$' must be rejected");
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("$.items.columns.{column_name}: ")),
+            "expected the reserved column path, got {error}"
+        );
+        assert!(
+            error.to_string().contains("reserved for magic columns"),
+            "expected the reserved magic-column error, got {error}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_created_at_column_is_accepted() {
+    let source = SchemaBuilder::new()
+        .table(TableSchema::builder("items").column("createdAt", ColumnType::Timestamp))
+        .build();
+
+    let schema =
+        crate::schema::JazzSchema::new(&source).expect("ordinary createdAt column is allowed");
+    let table = schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "items")
+        .expect("items table is present");
+    assert!(
+        table
+            .columns
+            .iter()
+            .any(|column| column.name == "createdAt")
+    );
+}

@@ -7,7 +7,7 @@ const app = schema.defineApp({
 });
 
 it("runs public CRUD, query, subscription and foreground propagation through the real RN owner, then closes", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const writer = await fixture.createDb();
     const observer = await fixture.createDb();
     const snapshots: { id: string; title: string; done: boolean }[][] = [];

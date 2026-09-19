@@ -39,12 +39,9 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_payload.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
     })
     .unwrap();
 
@@ -156,12 +153,9 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_payload.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
     })
     .unwrap();
 
@@ -270,12 +264,9 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
         ["tasks"],
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_payload.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
     })
     .unwrap();
 

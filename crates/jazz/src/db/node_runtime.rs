@@ -226,6 +226,7 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    owner_release_wait: RefCell<Option<futures::future::LocalBoxFuture<'static, ()>>>,
     mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
     close_owner: futures::lock::Mutex<()>,
     tx_time_reservation_clock: Rc<Cell<TxTime>>,
@@ -296,7 +297,8 @@ where
     pub(super) chunk_resolver: PeerChunkResolver,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
     pub(super) observed_chunk_completion_generation: Cell<u64>,
-    local_availability_dirty: Cell<bool>,
+    local_subscription_dirty_generation: Cell<u64>,
+    observed_local_subscription_dirty_generation: Cell<u64>,
 }
 
 impl<S> Node<S>
@@ -371,6 +373,7 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            owner_release_wait: RefCell::new(None),
             mutation_owner_lifecycle: Cell::new(MutationOwnerLifecycle::Open),
             close_owner: futures::lock::Mutex::new(()),
             tx_time_reservation_clock,
@@ -434,7 +437,8 @@ where
             chunk_resolver,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
-            local_availability_dirty: Cell::new(false),
+            local_subscription_dirty_generation: Cell::new(0),
+            observed_local_subscription_dirty_generation: Cell::new(0),
         }
     }
 
@@ -646,6 +650,32 @@ where
     pub(super) fn owner_is_available(&self) -> bool {
         // Drop the probe guard before maintenance can acquire the owner.
         self.node.try_lock().is_some()
+    }
+
+    /// Yield without losing the host wake needed after an external read finishes.
+    pub(super) fn owner_is_available_or_wake_when_released(&self) -> bool {
+        let mut waiter = self.owner_release_wait.borrow_mut();
+        if self.owner_is_available() {
+            waiter.take();
+            return true;
+        }
+        let Some(waker) = self.query_runtime_waker() else {
+            return false;
+        };
+        // Retain the lock future: dropping a pending mutex waiter cancels its wake.
+        let pending = waiter.get_or_insert_with(|| {
+            let node = Rc::clone(&self.node);
+            Box::pin(async move { drop(node.lock().await) })
+        });
+        if pending
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_ready()
+        {
+            waiter.take();
+            return true;
+        }
+        false
     }
 
     pub(super) fn queued_transaction_error(&self, id: OpenTransactionId) -> Option<Error> {
@@ -1048,40 +1078,14 @@ where
         author: AuthorSubject,
         downstream_fates: &PendingDownstreamFates,
     ) -> Result<(), Error> {
-        let mut node = self.node.lock().await;
-        let pending = node.pending_transaction_ids_for_author(author).await?;
-        let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
-        let mut replay_units = Vec::new();
-        let mut visited = BTreeSet::new();
-        for tx_id in &pending {
-            collect_local_replay_commit_units(&mut node, *tx_id, &mut visited, &mut replay_units)
-                .await?;
-        }
-        drop(node);
-        for (tx_id, unit) in replay_units {
-            // A reopened main-thread runtime has no transaction history. Send
-            // accepted causal ancestors before each pending unit so the latter
-            // can be ingested before its Local ack or later authority fate.
-            downstream_fates.borrow_mut().push(unit.clone());
-            if pending_set.contains(&tx_id) {
-                // Durable recovery omits exclusive snapshot/read evidence. A
-                // live sibling may already retain the exact authored unit;
-                // never replace that unit with its redacted history replay.
-                let retained_unit = self
-                    .outbox
-                    .borrow()
-                    .iter()
-                    .any(|pending| pending.tx_id == tx_id && pending.unit.is_some());
-                if !retained_unit {
-                    self.queue_pending_upload(tx_id, Some(unit));
-                }
-            }
-        }
-        for tx_id in pending {
-            register_local_fate_route(&self.local_fate_routes, tx_id, downstream_fates);
-        }
-        queue_local_acknowledgements(&self.local_fate_routes, &self.node).await;
-        Ok(())
+        restore_local_subscriber_replay(
+            &self.node,
+            &self.outbox,
+            &self.local_fate_routes,
+            author,
+            downstream_fates,
+        )
+        .await
     }
 
     pub(super) fn mark_subscriber_connections_dirty(&self) {
@@ -1106,6 +1110,11 @@ where
             .query_runtime_wake_pending
             .swap(false, Ordering::AcqRel)
         {
+            self.local_subscription_dirty_generation.set(
+                self.local_subscription_dirty_generation
+                    .get()
+                    .wrapping_add(1),
+            );
             self.mark_subscriber_connections_dirty();
         }
     }
@@ -1396,6 +1405,7 @@ where
         self.finish_transaction_abandonment_shutdown_in(&mut node)
     }
 
+    #[cfg(test)]
     pub(super) fn transaction_abandonment_shutdown_is_pending(&self) -> bool {
         self.transaction_abandonment_shutdown_pending.get()
     }
@@ -1553,10 +1563,6 @@ where
         self.pending_relay_subscription_rejections
             .borrow_mut()
             .clear();
-    }
-
-    pub(super) fn subscription_finalization_shutdown_is_pending(&self) -> bool {
-        self.subscription_finalizations_closed.get() && !self.subscription_runtime_retired.get()
     }
 
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
@@ -2362,7 +2368,9 @@ where
                 #[cfg(any(test, feature = "testing"))]
                 fail_next_subscription_refresh: Cell::new(false),
                 observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
+                local_replay_epoch: self.subscriber_dirty_epoch.get(),
                 observed_session_claim_revision: Cell::new(0),
+                inbound_authority_receipt_quarantine: false,
                 connection_epoch,
                 startup_error: None,
                 released_outbox_tx_ids: Vec::new(),
@@ -2787,8 +2795,10 @@ where
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             #[cfg(any(test, feature = "testing"))]
             fail_next_subscription_refresh: Cell::new(false),
+            local_replay_epoch: self.subscriber_dirty_epoch.get(),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
+            inbound_authority_receipt_quarantine: false,
             connection_epoch,
             startup_error,
             released_outbox_tx_ids: Vec::new(),
@@ -3320,7 +3330,12 @@ where
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
-        if self.local_availability_dirty.replace(false)
+        // Another query can finish a local subscription's first terminal batch
+        // before this turn. Groove is then idle, but the queued terminal still
+        // needs to be folded into the application stream. Preserve its wake as
+        // local delivery work as well as downstream peer publication work.
+        let local_dirty_generation = self.local_subscription_dirty_generation.get();
+        if local_dirty_generation != self.observed_local_subscription_dirty_generation.get()
             || self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
             || self.node.lock().await.has_pending_query_runtime()
@@ -3332,6 +3347,10 @@ where
                 progress_waker.as_ref(),
             ))
             .await?;
+            // Acknowledge only completed delivery. Cancellation/error retains
+            // this generation, and wakes consumed during refresh remain dirty.
+            self.observed_local_subscription_dirty_generation
+                .set(local_dirty_generation);
             self.observed_chunk_completion_generation
                 .set(chunk_completion_generation);
         }
@@ -3639,7 +3658,11 @@ where
                             drop(owner);
                             self.subscriber_dirty_epoch
                                 .set(self.subscriber_dirty_epoch.get().wrapping_add(1));
-                            self.local_availability_dirty.set(true);
+                            self.local_subscription_dirty_generation.set(
+                                self.local_subscription_dirty_generation
+                                    .get()
+                                    .wrapping_add(1),
+                            );
                             self.schedule_tick(TickUrgency::Immediate);
                         }
                     }
@@ -5378,13 +5401,25 @@ pub(super) fn route_upstream_subscription_rejection(
 /// ones with [`Transport::try_recv`]; the binding owns the actual socket and
 /// scheduling and bridges these to real I/O on its own runtime. Both methods are
 /// non-blocking — `try_recv` returning `None` means "nothing staged right now,"
-/// not "closed" (a disconnect surface lands with a later B slice). This is the
-/// single seam that keeps the async boundary *between* nodes, never inside `Db`.
+/// not "closed." `try_recv_result` is the fallible servicing seam used by
+/// [`PeerConnection`]: transport implementations can surface a sticky terminal
+/// failure discovered while flushing an accepted outbound backlog, while the
+/// default preserves the historical Option-only behavior for semantic adapters.
+/// This is the single seam that keeps the async boundary *between* nodes, never
+/// inside `Db`.
 pub trait Transport {
     /// Hand an outbound message to the binding's wire.
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
+    /// Fallible receive poll for connection servicing.
+    ///
+    /// `Ok(None)` is idle, `Err(Backpressure)` is recoverable, and
+    /// `Err(Failed(_))` is terminal for the transport. Implementations that do
+    /// not expose transport failures retain the Option-only behavior.
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        Ok(self.try_recv())
+    }
 
     /// Assign encoder trust from the locally admitted connection role.
     /// Semantic transports have no byte decoder to configure.

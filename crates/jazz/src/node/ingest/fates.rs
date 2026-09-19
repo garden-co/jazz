@@ -673,7 +673,7 @@ where
                 return Ok(false);
             }
             if !self
-                .version_satisfies_write_policy(version, permission_subject, tx.tx_id)
+                .version_satisfies_write_policy(version, permission_subject, tx.tx_id, versions)
                 .await?
             {
                 return Ok(false);
@@ -690,9 +690,15 @@ where
         version: &VersionRecord,
         author: AuthorSubject,
         candidate_tx_id: TxId,
+        candidate_versions: &[VersionRecord],
     ) -> Result<bool, Error> {
-        self.write_policy_allows_version_record(version, author, Some(candidate_tx_id))
-            .await
+        self.write_policy_allows_version_record(
+            version,
+            author,
+            Some(candidate_tx_id),
+            candidate_versions,
+        )
+        .await
     }
 
     pub(super) async fn cascade_root_for_versions(
@@ -1054,6 +1060,7 @@ where
         if rejected.is_empty() {
             return Ok(None);
         }
+        self.clear_content_version_reachability_cache();
         let affected = rejected
             .iter()
             .map(|version| (version.table, version.row_uuid(), version.layer()))
@@ -1140,6 +1147,7 @@ where
             )
             .await?;
         }
+        self.clear_content_version_reachability_cache();
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
         Ok(rejected_payload)

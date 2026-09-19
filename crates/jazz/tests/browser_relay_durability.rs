@@ -242,6 +242,7 @@ fn write_only_policy_schema() -> JazzSchema {
 }
 
 fn included_relation_schema() -> JazzSchema {
+    use jazz::tools::test_support::AllowAll;
     compile_schema(
         &SchemaBuilder::new()
             .table(TableSchemaBuilder::new("profiles").column("name", ColumnType::Text))
@@ -251,6 +252,7 @@ fn included_relation_schema() -> JazzSchema {
                     .column("body", ColumnType::Text)
                     .column("created", ColumnType::Timestamp),
             )
+            .allow_all()
             .build(),
     )
 }
@@ -2193,6 +2195,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
 /// ```
 #[test]
 fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
+    use jazz::tools::test_support::AllowAll;
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -2201,6 +2204,7 @@ fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
                     .column("title", ColumnType::Text)
                     .branch_by("branch"),
             )
+            .allow_all()
             .build(),
     );
     let alice = AuthorSubject::for_test_bytes([0xd2; 16]);
@@ -2411,6 +2415,7 @@ fn exclusive_sibling_edge_reads_extend_relay_projection(
     write_through_worker: bool,
     deny_note: bool,
 ) {
+    use jazz::tools::test_support::AllowAll;
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(TableSchemaBuilder::new("orgs").column("name", ColumnType::Text))
@@ -2420,6 +2425,7 @@ fn exclusive_sibling_edge_reads_extend_relay_projection(
                     .fk_column("org_id", "orgs")
                     .fk_column("todo_id", "todos"),
             )
+            .allow_all()
             .table(
                 TableSchemaBuilder::new("notes")
                     .fk_column("org_id", "orgs")

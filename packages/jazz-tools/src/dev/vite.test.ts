@@ -21,6 +21,12 @@ const originalCustomEnvValues = Object.fromEntries(
 function deployed(hash = "abc123def4567890") {
   return {
     schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    permissions: {
+      schemaHash: hash,
+      permissionsFile: "permissions.ts",
+      previousHead: null,
+      head: null,
+    },
     warnings: [],
   };
 }
@@ -100,6 +106,7 @@ describe("jazzPlugin", () => {
   it("persists the generated app ID before Vite starts its server", async () => {
     const schemaDir = await tempRoots.create("jazz-vite-bootstrap-env-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const plugin = jazzPlugin({ schemaDir });
     const config = plugin.config as (
@@ -119,6 +126,7 @@ describe("jazzPlugin", () => {
     const appId = "00000000-0000-0000-0000-000000000121";
     const root = await tempRoots.create("jazz-vite-mode-env-test-");
     await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     await writeFile(
       join(root, ".env.development.local"),
       [
@@ -179,6 +187,7 @@ describe("jazzPlugin", () => {
     await mkdir(root, { recursive: true });
     await mkdir(sharedEnvDir, { recursive: true });
     await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     await writeFile(
       join(sharedEnvDir, ".env.production.local"),
       [
@@ -211,6 +220,7 @@ describe("jazzPlugin", () => {
   it("does not load env files when Vite is created with envFile:false", async () => {
     const root = await tempRoots.create("jazz-vite-env-file-disabled-test-");
     await writeFile(join(root, "schema.ts"), todoSchema());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
     await writeFile(
       join(root, ".env"),
       [
@@ -266,6 +276,7 @@ describe("jazzPlugin", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const plugin = jazzPlugin({
@@ -353,6 +364,7 @@ describe("jazzPlugin", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-env-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const plugin = jazzPlugin({
       server: { port, adminSecret: "vite-env-test-admin" },
@@ -409,6 +421,7 @@ describe("jazzPlugin", () => {
 
     const schemaDir = await tempRoots.create("jazz-vite-reload-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const wsSend = vi.fn();
     const fakeViteServer = {
@@ -454,6 +467,7 @@ describe("jazzPlugin", () => {
 
     const schemaDir = await tempRoots.create("jazz-vite-top-level-telemetry-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const plugin = jazzPlugin({
       server: { port: 19881, adminSecret: "vite-telemetry-admin" },
@@ -489,6 +503,7 @@ describe("jazzPlugin", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-vite-existing-env-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const existingAppId = "00000000-0000-0000-0000-000000000001";
     await writeFile(join(schemaDir, ".env"), `VITE_JAZZ_APP_ID=${existingAppId}\n`);
@@ -539,6 +554,7 @@ describe("jazzPlugin", () => {
 
     const schemaDir = await tempRoots.create("jazz-vite-telemetry-string-server-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const plugin = jazzPlugin({
       appId: "00000000-0000-0000-0000-000000000090",

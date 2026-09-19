@@ -3,6 +3,7 @@ import { Link, Navigate, useParams } from "react-router";
 import type { WasmSchema } from "jazz-tools";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import styles from "./TableSchemaSql.module.css";
+import { stringifyForPresentation } from "../../utility/presentation-serialization.js";
 
 export function TableSchemaDefinition() {
   const { table } = useParams();
@@ -24,7 +25,7 @@ export function TableSchemaDefinition() {
   }
 
   const formattedSchema = useMemo(() => {
-    return JSON.stringify({ [table]: tableSchema }, null, 2);
+    return stringifyForPresentation({ [table]: tableSchema }, 2);
   }, [table, tableSchema]);
 
   const formattedPermissions = useMemo(() => {
@@ -38,7 +39,7 @@ export function TableSchemaDefinition() {
     if (!tablePermissions) {
       return `No stored permissions for table "${table}".`;
     }
-    return JSON.stringify({ [table]: tablePermissions }, null, 2);
+    return stringifyForPresentation({ [table]: tablePermissions }, 2);
   }, [runtime, storedPermissions, table]);
 
   return (

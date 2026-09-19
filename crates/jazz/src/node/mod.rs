@@ -409,7 +409,6 @@ pub(crate) fn is_catalogue_mutation(message: &SyncMessage) -> bool {
             | SyncMessage::PublishSchema { .. }
             | SyncMessage::PublishSchemaWithLens { .. }
             | SyncMessage::PublishLens { .. }
-            | SyncMessage::SetCurrentWriteSchema { .. }
     )
 }
 
@@ -473,15 +472,23 @@ pub(super) enum LensPathDirection {
 struct LensPathCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
-    direction: LensPathDirection,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct CompiledLensCacheKey {
     source: SchemaVersionId,
     target: SchemaVersionId,
-    direction: LensPathDirection,
     table: String,
+}
+const CONTENT_VERSION_REACHABILITY_CACHE_MAX_ENTRIES: usize = 64;
+const CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS: usize = 65_536;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ContentVersionReachabilityCacheKey {
+    table_id: PhysicalTableId,
+    branch_key: BranchKey,
+    row_uuid: RowUuid,
+    start: TxId,
 }
 
 #[derive(Clone, Debug)]
@@ -570,6 +577,16 @@ pub struct NodeState<S> {
     /// Exact ahead-current keys used to make peer replay idempotent. No caller
     /// needs ordering, so use the low-overhead deterministic hasher here.
     ahead_current_keys: FxHashSet<(PhysicalTableId, VersionLayer, Vec<u8>)>,
+    /// Complete row-local ancestry closures. Entries are bounded by both
+    /// frontier count and total transaction identities because a single merge
+    /// graph can otherwise dominate the node's memory.
+    content_version_reachability_cache:
+        BTreeMap<ContentVersionReachabilityCacheKey, FxHashSet<TxId>>,
+    /// Approximate insertion order for the bounded ancestry cache.
+    content_version_reachability_cache_order: VecDeque<ContentVersionReachabilityCacheKey>,
+    /// Total transaction identities retained by the ancestry cache.
+    content_version_reachability_cache_tx_ids: usize,
+
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
     /// Runtime counters for query-engine read authorization paths.
@@ -578,6 +595,12 @@ pub struct NodeState<S> {
     /// node-scoped so unrelated parallel test nodes cannot contaminate it.
     #[cfg(any(test, feature = "testing"))]
     merge_head_reachability_walks: usize,
+    /// Test-only count of transaction nodes visited by merge-head walks.
+    #[cfg(any(test, feature = "testing"))]
+    merge_head_reachability_nodes: usize,
+    /// Test-only count of query programs actually lowered, excluding cache hits.
+    #[cfg(any(test, feature = "testing"))]
+    query_program_compilations: usize,
     /// Process-local claims attached to authenticated subscriber sessions.
     session_claims: BTreeMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.
@@ -646,9 +669,9 @@ struct LargeValueIngressState {
 #[derive(Clone, Debug)]
 struct SchemaCatalogue {
     /// Schema version used for the node's base/local API schema.
-    current_schema_version_id: SchemaVersionId,
-    /// Compact alias for `current_schema_version_id` once recovered or allocated.
-    current_schema_version_alias: Option<SchemaVersionAlias>,
+    local_schema_version_id: SchemaVersionId,
+    /// Compact alias for `local_schema_version_id` once recovered or allocated.
+    local_schema_version_alias: Option<SchemaVersionAlias>,
     /// Base schema supplied when the node was opened.
     schema: JazzSchema,
     /// Mapping from schema version IDs to compact on-disk aliases.
@@ -667,14 +690,12 @@ struct SchemaCatalogue {
     active_lineages_by_target: BTreeMap<SchemaVersionId, StagedSchemaLineage>,
     /// Highest contiguously activated schema catalogue position.
     active_catalogue_seq: u64,
-    /// Durable write-pointer updates waiting for their schema to become Active.
-    pending_write_pointers: BTreeMap<u64, CurrentWriteSchema>,
     /// Next database-local physical table id.
     next_physical_table_id: u64,
     /// Next database-local physical column id.
     next_physical_column_id: u64,
-    /// Shortest migration-lens paths by schema pair and traversal direction.
-    lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<MigrationLensId>>>,
+    /// Shortest migration-lens paths by schema pair, with a direction for each step.
+    lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<(MigrationLensId, LensPathDirection)>>>,
     /// Table-specific, already-validated lens programs used by hot read/write paths.
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
     /// Immutable lowering plans reused by authored-to-physical row writes.
@@ -686,7 +707,97 @@ struct SchemaCatalogue {
         >,
     >,
     /// Schema version currently used for newly authored writes.
-    current_write_schema: CurrentWriteSchema,
+    active_schema: ActiveSchema,
+}
+
+/// One authority selection: structural schema, permissions, and revision.
+/// `compiled` is a derived authorization view, never a catalogue schema entry.
+/// The legacy wire pointer is retained only at protocol compatibility boundaries.
+#[derive(Clone, Debug, PartialEq)]
+struct ActiveSchema {
+    schema: SchemaVersionId,
+    revision: u64,
+    compiled: JazzSchema,
+}
+
+impl ActiveSchema {
+    /// Project the unified selection into the unchanged legacy wire envelope.
+    fn wire_pointer(&self) -> CurrentWriteSchema {
+        CurrentWriteSchema {
+            revision: self.revision,
+            schema: self.schema,
+        }
+    }
+
+    // Policy expressions are lowered against the selected structural schema.
+    // Equal predicates on a different source still require rebuilding live graphs.
+    // Equal absent and literal allow/deny clauses can retain the runtime during
+    // history-only growth when their unpartitioned physical row source is stable.
+    // A revision-only update is also a true authorization no-op.
+    fn same_authorization_source(
+        &self,
+        other: &Self,
+        source_mapping: Option<&SchemaPhysicalMapping>,
+        other_mapping: Option<&SchemaPhysicalMapping>,
+    ) -> bool {
+        self.same_permissions(other)
+            && (self.schema == other.schema
+                || self.compiled.tables.iter().zip(&other.compiled.tables).all(
+                    |(table, other_table)| {
+                        // Even constant policies read a physical row source. A
+                        // replacement table or branch partition changes that source.
+                        if !table.branch_by.is_empty() || !other_table.branch_by.is_empty() {
+                            return false;
+                        }
+                        let Some((source, target)) = source_mapping
+                            .and_then(|mapping| mapping.tables.get(&table.name))
+                            .zip(other_mapping.and_then(|mapping| mapping.tables.get(&table.name)))
+                        else {
+                            return false;
+                        };
+                        if source.table_id != target.table_id {
+                            return false;
+                        }
+                        let allow = crate::query::Query::from(table.name.as_str());
+                        let deny = allow
+                            .clone()
+                            .filter(crate::query::Predicate::Any(Vec::new()));
+                        table
+                            .read_policy
+                            .iter()
+                            .chain(table.write_policies.iter().map(|(_, policy)| policy))
+                            // Compare the complete query, rather than just filters:
+                            // joins, inherited policies and other clauses must not
+                            // accidentally qualify as schema-independent.
+                            .all(|policy| policy == &allow || policy == &deny)
+                    },
+                ))
+    }
+
+    fn same_permissions(&self, other: &Self) -> bool {
+        self.compiled
+            .tables
+            .iter()
+            .map(|table| (&table.name, &table.read_policy, &table.write_policies))
+            .eq(other
+                .compiled
+                .tables
+                .iter()
+                .map(|table| (&table.name, &table.read_policy, &table.write_policies)))
+    }
+
+    fn new(pointer: CurrentWriteSchema, compiled: JazzSchema) -> Result<Self, Error> {
+        if compiled.version_id() != pointer.schema {
+            return Err(Error::InvalidCatalogueUpdate(
+                "active schema permissions target mismatch",
+            ));
+        }
+        Ok(Self {
+            schema: pointer.schema,
+            revision: pointer.revision,
+            compiled,
+        })
+    }
 }
 
 /// Readiness of a dynamically catalogued node.
@@ -737,6 +848,64 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(crate) fn clear_content_version_reachability_cache(&mut self) {
+        self.content_version_reachability_cache.clear();
+        self.content_version_reachability_cache_order.clear();
+        self.content_version_reachability_cache_tx_ids = 0;
+    }
+
+    fn cached_content_version_reachability(
+        &self,
+        key: &ContentVersionReachabilityCacheKey,
+        target: TxId,
+    ) -> Option<bool> {
+        self.content_version_reachability_cache
+            .get(key)
+            .map(|ancestors| ancestors.contains(&target))
+    }
+
+    fn cache_content_version_reachability(
+        &mut self,
+        key: ContentVersionReachabilityCacheKey,
+        ancestors: FxHashSet<TxId>,
+    ) {
+        if ancestors.len() > CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS {
+            return;
+        }
+
+        if let Some(previous) = self.content_version_reachability_cache.remove(&key) {
+            self.content_version_reachability_cache_tx_ids -= previous.len();
+            self.content_version_reachability_cache_order
+                .retain(|existing| existing != &key);
+        }
+
+        while self.content_version_reachability_cache.len()
+            >= CONTENT_VERSION_REACHABILITY_CACHE_MAX_ENTRIES
+            || self.content_version_reachability_cache_tx_ids + ancestors.len()
+                > CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS
+        {
+            let Some(oldest) = self.content_version_reachability_cache_order.pop_front() else {
+                break;
+            };
+            let Some(evicted) = self.content_version_reachability_cache.remove(&oldest) else {
+                continue;
+            };
+            self.content_version_reachability_cache_tx_ids -= evicted.len();
+        }
+
+        if self.content_version_reachability_cache.len()
+            < CONTENT_VERSION_REACHABILITY_CACHE_MAX_ENTRIES
+            && self.content_version_reachability_cache_tx_ids + ancestors.len()
+                <= CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS
+        {
+            self.content_version_reachability_cache_tx_ids += ancestors.len();
+            self.content_version_reachability_cache_order
+                .push_back(key.clone());
+            self.content_version_reachability_cache
+                .insert(key, ancestors);
+        }
+    }
+
     pub(crate) fn reserve_tx_time_after(&mut self, high_water: TxTime) -> Result<(), Error> {
         // Binding mutations reserve through the shared clock before taking
         // the node lock. A reused foreground must advance that mirror too,
@@ -753,10 +922,23 @@ where
 {
     pub(super) fn reset_merge_head_reachability_walks_for_test(&mut self) {
         self.merge_head_reachability_walks = 0;
+        self.merge_head_reachability_nodes = 0;
     }
 
     pub(super) fn merge_head_reachability_walks_for_test(&self) -> usize {
         self.merge_head_reachability_walks
+    }
+
+    pub(super) fn merge_head_reachability_nodes_for_test(&self) -> usize {
+        self.merge_head_reachability_nodes
+    }
+
+    pub(super) fn reset_query_program_compilations_for_test(&mut self) {
+        self.query_program_compilations = 0;
+    }
+
+    pub(super) fn query_program_compilations_for_test(&self) -> usize {
+        self.query_program_compilations
     }
 
     fn allocate_global_time_for_test(&mut self) -> GlobalTime {
@@ -882,6 +1064,9 @@ struct QueryServing {
     /// Derived read-policy authorization requests keyed by policy context.
     read_policy_authorization_request_cache:
         BTreeMap<ReadPolicyAuthorizationRequestCacheKey, query_engine::QueryProgramRequest>,
+    /// Lowered cache-safe storage-backed query programs keyed by their complete
+    /// request and access-path identity. Dynamic source graphs never enter it.
+    compiled_query_program_cache: BTreeMap<String, Arc<query_engine::QueryProgram>>,
     /// Lowered authorization row-id graphs keyed by their full query-engine request.
     policy_authorization_graph_cache: BTreeMap<String, query_eval::PolicyAuthorizationGraph>,
     /// Temporary point-policy replacements required by one compiler turn. The
@@ -2764,11 +2949,11 @@ struct CatalogueOpenState {
     pending_lineages: BTreeMap<u64, PendingSchemaLineage>,
     active_lineages_by_target: BTreeMap<SchemaVersionId, StagedSchemaLineage>,
     active_catalogue_seq: u64,
-    pending_write_pointers: BTreeMap<u64, CurrentWriteSchema>,
     next_physical_table_id: u64,
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
     catalogue_bootstrap_marker: bool,
+    recovered_active_schema: Option<ActiveSchema>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

@@ -1,19 +1,22 @@
+import { expect } from "@playwright/test";
 import { fetchSchemaHashes } from "jazz-tools";
+import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import runServer from "../../scripts/dev-sync-server.js";
 import { createServer } from "vite";
 import { fileURLToPath } from "node:url";
 import { createServer as createHttpServer } from "node:http";
+import { standalonePermissions } from "./schema.js";
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
   // #2641: let each listener own an OS-assigned port for its entire lifetime.
   // Concurrent worktrees must neither collide nor reuse another checkout.
-  const { serverHandle } = await runServer({ port: 0 });
+  const servers: LocalJazzServerHandle[] = [];
   const httpServer = createHttpServer();
   let webServer: Awaited<ReturnType<typeof createServer>> | undefined;
   const cleanup = async () => {
     await Promise.all([
       webServer?.close(),
-      serverHandle.stop(),
+      ...servers.map((server) => server.stop()),
       new Promise<void>((resolve, reject) => {
         if (!httpServer.listening) return resolve();
         httpServer.close((error) => (error ? reject(error) : resolve()));
@@ -22,6 +25,28 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     ]);
   };
   try {
+    const { serverHandle: overlay } = await runServer({ port: 0 });
+    servers.push(overlay);
+    // Seed only Core. Standalone Inspector must retrieve protected remote rows
+    // through Edge, while the embedded host keeps its public-read application.
+    const { serverHandle: core } = await runServer({
+      port: 0,
+      serverPermissions: standalonePermissions,
+    });
+    servers.push(core);
+    const edge = await startLocalJazzServer({
+      appId: core.appId,
+      port: 0,
+      adminSecret: core.adminSecret,
+      backendSecret: core.backendSecret,
+      upstreamUrl: core.url,
+    });
+    servers.push(edge);
+    // Binding a listener does not mean Edge has installed Core's catalogue yet.
+    await expect
+      .poll(async () => (await fetch(`${edge.url}/health`)).status, { timeout: 15_000 })
+      .toBe(200);
+
     webServer = await createServer({
       root: fileURLToPath(new URL("../..", import.meta.url)),
       // Vite treats port 0 as its default port; Node owns the actual listener.
@@ -40,15 +65,17 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       throw new Error("Inspector browser web server did not bind a TCP listener");
     }
     process.env.JAZZ_INSPECTOR_TEST_WEB_URL = `http://127.0.0.1:${address.port}`;
-    process.env.JAZZ_INSPECTOR_TEST_SERVER_URL = serverHandle.url;
+    process.env.JAZZ_INSPECTOR_TEST_SERVER_URL = overlay.url;
+    process.env.JAZZ_INSPECTOR_TEST_STANDALONE_SERVER_URL = edge.url;
     console.log("Inspector browser endpoints", {
       web: process.env.JAZZ_INSPECTOR_TEST_WEB_URL,
-      sync: serverHandle.url,
+      sync: overlay.url,
+      standalone: edge.url,
     });
 
-    const { hashes } = await fetchSchemaHashes(serverHandle.url, {
-      appId: serverHandle.appId,
-      adminSecret: serverHandle.adminSecret,
+    const { hashes } = await fetchSchemaHashes(edge.url, {
+      appId: edge.appId,
+      adminSecret: edge.adminSecret,
     });
 
     const publishedSchemaHash = hashes.at(-1);

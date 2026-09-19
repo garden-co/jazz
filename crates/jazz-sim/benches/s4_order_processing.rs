@@ -19,6 +19,7 @@ use jazz::time::GlobalTime;
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
+use jazz::tools::test_support::AllowAll;
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
 use jazz_sim::fixture::{
@@ -1775,7 +1776,8 @@ fn schema() -> JazzSchema {
                     .fk_column("customer", CUSTOMERS)
                     .column("amount", PublicColumnType::Double),
             )
-            .build(),
+            .build()
+            .allow_all(),
     )
 }
 

@@ -8,7 +8,11 @@ import { schemaDefinitionToAst } from "../migrations.js";
 import { toValue } from "../runtime/value-converter.js";
 import type { Lens, SqlType } from "../schema.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
-import { collectMissingExplicitPolicyDiagnostics } from "../schema-permissions.js";
+import {
+  collectMissingExplicitPolicyDiagnostics,
+  mergePermissionsIntoWasmSchema,
+  validatePermissionsAgainstSchema,
+} from "../schema-permissions.js";
 import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { computeSchemaHash } from "../schema-hash.js";
@@ -90,8 +94,7 @@ export interface PushMigrationResult {
 
 export type DeployMigrationResult =
   | PushMigrationResult
-  | { status: "already-connected"; fromHash: string; toHash: string }
-  | { status: "missing"; fromHash: string; toHash: string };
+  | { status: "already-connected"; fromHash: string; toHash: string };
 
 export interface DeployOptions extends CatalogueServerOptions {
   /**
@@ -99,26 +102,20 @@ export interface DeployOptions extends CatalogueServerOptions {
    */
   schema: SchemaSourceInput;
   /**
-   * Permissions to publish. Omitting this param restricts `deploy` to only publish the schema.
+   * Permissions to publish. Pass an explicit empty bundle to deny all access.
    */
-  permissions?: CompiledPermissionsMap;
+  permissions: CompiledPermissionsMap;
   /**
    * Migration between the current server schema and the new schema.
    * Only published if there's no existing migration between these schemas.
-   * In order to publish migrations, provide {@link permissions} as well.
    */
   migration?: DefinedMigration;
-  /**
-   * Set to `true` to publish permissions even if a migration is missing between
-   * the current server schema and the new schema.
-   */
-  noVerify?: boolean;
 }
 
 export interface DeployResult {
   schema: DeploySchemaResult;
   migration?: DeployMigrationResult;
-  permissions?: PushPermissionsResult;
+  permissions: PushPermissionsResult;
   warnings: string[];
 }
 
@@ -194,6 +191,14 @@ export function assertMigrationMatchesCanonicalBundle(
       }
     }
   }
+
+  if (
+    migration.forward.length === 0 &&
+    schemaTransitionRequiresRowTransform(canonical.fromSchema, canonical.toSchema)
+  ) {
+    throw new MissingMigrationError(canonical.fromHash, canonical.toHash);
+  }
+  serializeForwardLenses(migration.forward);
 
   for (const lens of migration.forward) {
     const sourceTable = lens.renamedFrom ?? lens.table;
@@ -507,116 +512,89 @@ export async function pushMigration(options: PushMigrationOptions): Promise<Push
   };
 }
 
-/**
- * Publishes a schema and optional permissions.
- *
- * When updating permissions to target a new schema, also attempts to publish a migration
- * between the old and new schemas. When a required migration is missing, returns
- * `migration.status === "missing"` without publishing permissions. Set `noVerify` to
- * publish permissions anyway.
- */
+/** Publishes the schema, required migration, and permissions */
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
-  const wasmSchema = resolveSchemaSource(options.schema);
-
+  if (options.permissions == null) {
+    throw new Error("deploy requires an explicit permissions bundle. Pass {} to deny all access.");
+  }
+  if ("noVerify" in options) {
+    throw new Error("noVerify is no longer supported; deploy requires a complete migration path.");
+  }
+  const wasmSchema = mergePermissionsIntoWasmSchema(resolveSchemaSource(options.schema), {});
+  validatePermissionsAgainstSchema(Object.keys(wasmSchema), options.permissions);
   const warnings: string[] = [];
   for (const diagnostic of collectMissingExplicitPolicyDiagnostics(
     Object.keys(wasmSchema),
-    options.permissions ?? undefined,
+    options.permissions,
   )) {
     collectWarning(warnings, diagnostic.message);
   }
-
   const storedSchemaHash = await resolveStoredStructuralSchemaHash(
     options.appId,
     options.serverUrl,
     options.adminSecret,
     wasmSchema,
   );
-
-  let schema: DeploySchemaResult;
-  if (storedSchemaHash) {
-    schema = {
-      hash: storedSchemaHash,
-      status: "already-stored",
-    };
-  } else {
-    const publishedSchema = await publishStoredSchema(options.serverUrl, {
-      appId: options.appId,
-      adminSecret: options.adminSecret,
-      schema: wasmSchema,
-    });
-    schema = {
-      hash: publishedSchema.hash,
-      status: "published",
-      objectId: publishedSchema.objectId,
-    };
-  }
-
-  if (!options.permissions) {
-    return { schema, warnings };
-  }
-
+  const targetHash = storedSchemaHash ?? (await computeSchemaHash(wasmSchema));
   const { head: previousHead } = await fetchPermissionsHead(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
   });
-
-  let migration: DeployResult["migration"];
-  if (previousHead && previousHead.schemaHash !== schema.hash) {
-    const { connected } = await fetchSchemaConnectivity(options.serverUrl, {
-      appId: options.appId,
-      adminSecret: options.adminSecret,
-      fromHash: previousHead.schemaHash,
-      toHash: schema.hash,
-    });
-
-    if (connected) {
-      migration = {
-        status: "already-connected",
+  let connected = false;
+  const transitioning = previousHead && previousHead.schemaHash !== targetHash;
+  if (transitioning) {
+    if (storedSchemaHash) {
+      ({ connected } = await fetchSchemaConnectivity(options.serverUrl, {
+        appId: options.appId,
+        adminSecret: options.adminSecret,
         fromHash: previousHead.schemaHash,
-        toHash: schema.hash,
-      };
-    } else {
-      try {
-        migration = await pushMigration(
-          options.migration
-            ? {
-                appId: options.appId,
-                serverUrl: options.serverUrl,
-                adminSecret: options.adminSecret,
-                migration: options.migration,
-                fromHash: previousHead.schemaHash,
-                toHash: schema.hash,
-              }
-            : {
-                appId: options.appId,
-                serverUrl: options.serverUrl,
-                adminSecret: options.adminSecret,
-                fromHash: previousHead.schemaHash,
-                toHash: schema.hash,
-              },
-        );
-      } catch (error) {
-        if (!(error instanceof MissingMigrationError)) {
-          throw error;
-        }
-
-        migration = {
-          status: "missing",
-          fromHash: error.fromHash,
-          toHash: error.toHash,
-        };
-        if (!options.noVerify) {
-          return {
-            schema,
-            migration,
-            warnings,
-          };
-        }
+        toHash: targetHash,
+      }));
+    }
+    if (!connected) {
+      const fromSchema = await loadSchema(options, previousHead.schemaHash);
+      if (options.migration) {
+        assertMigrationMatchesCanonicalBundle(options.migration, {
+          fromHash: previousHead.schemaHash,
+          toHash: targetHash,
+          fromSchema,
+          toSchema: wasmSchema,
+        });
+      }
+      if (
+        (!options.migration || options.migration.forward.length === 0) &&
+        schemaTransitionRequiresRowTransform(fromSchema, wasmSchema)
+      ) {
+        throw new MissingMigrationError(previousHead.schemaHash, targetHash);
       }
     }
   }
 
+  // All local inputs are checked before publication. Network failures can still
+  // leave stored artifacts; retrying deploy reuses them before advancing the head.
+  const schema: DeploySchemaResult = storedSchemaHash
+    ? { hash: storedSchemaHash, status: "already-stored" }
+    : {
+        ...(await publishStoredSchema(options.serverUrl, {
+          appId: options.appId,
+          adminSecret: options.adminSecret,
+          schema: wasmSchema,
+        })),
+        status: "published",
+      };
+  let migration: DeployResult["migration"];
+  if (transitioning) {
+    migration = connected
+      ? { status: "already-connected", fromHash: previousHead.schemaHash, toHash: schema.hash }
+      : await pushMigration({
+          appId: options.appId,
+          serverUrl: options.serverUrl,
+          adminSecret: options.adminSecret,
+          fromHash: previousHead.schemaHash,
+          toHash: schema.hash,
+          ...(options.migration ? { migration: options.migration } : {}),
+        });
+  }
   const { head } = await publishStoredPermissions(options.serverUrl, {
     appId: options.appId,
     adminSecret: options.adminSecret,
@@ -624,15 +602,10 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     permissions: options.permissions,
     expectedParentBundleObjectId: previousHead?.bundleObjectId ?? null,
   });
-
   return {
     schema,
     migration,
-    permissions: {
-      schemaHash: schema.hash,
-      previousHead,
-      head,
-    },
+    permissions: { schemaHash: schema.hash, previousHead, head },
     warnings,
   };
 }

@@ -2087,37 +2087,9 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     let alice_reader = open_db(0xa2, alice, &permission_schema);
     let reader = open_db(0xb2, bob, &permission_schema);
 
-    let schema_version = SchemaVersion::new(permission_schema.clone());
-    let schema_id = schema_version.id;
-    let acks = server.publish_schema(schema_version).unwrap();
-    assert!(acks.into_iter().any(|message| matches!(
-        message,
-        SyncMessage::CatalogueAck(CatalogueAck {
-            applied: true,
-            schema: Some(applied_schema),
-            ..
-        }) if applied_schema == schema_id
-    )));
-    let current_acks = server
-        .server
-        .node()
-        .borrow_mut()
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: schema_id,
-            },
-        })
+    server
+        .activate_schema_for_test(1, permission_schema.clone())
         .unwrap();
-    assert!(current_acks.into_iter().any(|message| matches!(
-        message,
-        SyncMessage::CatalogueAck(CatalogueAck {
-            applied: true,
-            schema: Some(applied_schema),
-            ..
-        }) if applied_schema == schema_id
-    )));
 
     let (writer_transport, server_writer_transport) = duplex();
     let _writer_upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
@@ -3514,6 +3486,10 @@ fn cold_runtime_replacement_defers_empty_facade_until_local_snapshot_arrives() {
 // this particular cold scan. A child watchdog contains the historical busy
 // loop so a regression fails one test instead of hanging the suite.
 fn pending_restore_child(test_name: &str) -> bool {
+    pending_restore_child_with_timeout(test_name, std::time::Duration::from_secs(20))
+}
+
+fn pending_restore_child_with_timeout(test_name: &str, timeout: std::time::Duration) -> bool {
     const CHILD: &str = "JAZZ_PENDING_RESTORE_CHILD";
     if std::env::var(CHILD).as_deref() == Ok(test_name) {
         return true;
@@ -3525,7 +3501,7 @@ fn pending_restore_child(test_name: &str) -> bool {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             let output = child.wait_with_output().unwrap();
@@ -3541,7 +3517,7 @@ fn pending_restore_child(test_name: &str) -> bool {
             child.kill().unwrap();
             let output = child.wait_with_output().unwrap();
             panic!(
-                "recovery did not yield to asynchronous storage within 20s: {}{}",
+                "recovery did not complete within {timeout:?}: {}{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -3652,6 +3628,712 @@ fn cold_browser_relay_restore_yields_to_storage() {
     ) {
         cold_pending_restore_yields_and_recovers(true);
     }
+}
+
+#[test]
+fn reopened_local_subscriber_does_not_poison_on_evicted_causal_parent() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xcf; 16]);
+    let worker = open_db(0xcf, author, &schema);
+    let core = open_core(0xd0, AuthorSubject::SYSTEM, &schema);
+
+    let (worker_transport, core_transport) = duplex();
+    let worker_upstream = block_on(worker.connect_upstream(worker_transport));
+    let core_subscriber = core.accept_subscriber(core_transport, author);
+
+    let parent = worker
+        .insert(
+            "todos",
+            cells("accepted parent", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let parent_tx = parent.mergeable_tx_id();
+    worker.tick().unwrap();
+    core.tick().unwrap();
+    worker.tick().unwrap();
+    assert!(matches!(
+        worker.write_state(parent_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
+
+    let child = worker
+        .update(
+            "todos",
+            parent.row_uuid(),
+            cells("pending child", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let child_tx = child.mergeable_tx_id();
+    assert!(matches!(
+        worker.write_state(child_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            ..
+        }
+    ));
+
+    assert!(worker.detach_connection(&worker_upstream));
+    assert!(core.server.detach_connection(&core_subscriber));
+    let eviction = block_on(
+        worker
+            .node
+            .node
+            .borrow_mut()
+            .evict_cold(&crate::peer::PeerEvictionPins::default()),
+    )
+    .unwrap();
+    assert!(
+        eviction.row_versions_evictable > 0,
+        "the accepted parent must be evictable while the pending child remains pinned"
+    );
+
+    let foreground = open_db(0xd1, author, &schema);
+    foreground.set_non_durable_client();
+    let (foreground_transport, worker_foreground_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
+
+    for _ in 0..8 {
+        worker
+            .tick()
+            .expect("worker admission must survive incomplete replay ancestry");
+        foreground
+            .tick()
+            .expect("foreground must not receive an unappliable replay frame");
+    }
+}
+
+#[test]
+fn reopened_local_subscriber_replays_deep_causal_chain_without_stack_overflow() {
+    // Keep a recursive-regression stack overflow inside a subprocess so it
+    // reports a failing test instead of aborting every test in this binary.
+    if !pending_restore_child_with_timeout(
+        "db::tests::node_runtime::reopened_local_subscriber_replays_deep_causal_chain_without_stack_overflow",
+        std::time::Duration::from_secs(60),
+    ) {
+        return;
+    }
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc9; 16]);
+    let worker = open_db(0xc9, author, &schema);
+    let core = open_core(0xc8, AuthorSubject::SYSTEM, &schema);
+    let (worker_transport, core_transport) = duplex();
+    let worker_upstream = block_on(worker.connect_upstream(worker_transport));
+    let core_subscriber = core.accept_subscriber(core_transport, author);
+
+    let first = worker
+        .insert(
+            "todos",
+            cells("causal root", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let row_id = first.row_uuid();
+    let mut ancestors = vec![first.mergeable_tx_id()];
+    for index in 0..256 {
+        worker.tick().unwrap();
+        core.tick().unwrap();
+        worker.tick().unwrap();
+        assert!(matches!(
+            worker.write_state(*ancestors.last().unwrap()).unwrap(),
+            WriteState {
+                fate: Fate::Accepted,
+                durability: DurabilityTier::Global,
+                ..
+            }
+        ));
+        if index < 255 {
+            let write = worker
+                .update(
+                    "todos",
+                    row_id,
+                    cells(&format!("accepted step {index}"), false, author),
+                    Default::default(),
+                )
+                .unwrap();
+            ancestors.push(write.mergeable_tx_id());
+        }
+    }
+    assert!(worker.detach_connection(&worker_upstream));
+    assert!(core.server.detach_connection(&core_subscriber));
+    let tip = worker
+        .update(
+            "todos",
+            row_id,
+            cells("pending causal tip", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let latest_tx = tip.mergeable_tx_id();
+    // Only the tip is a replay root: accepted ancestors cannot flatten the
+    // traversal by independently appearing first in the sorted pending list.
+    assert_eq!(
+        block_on(
+            worker
+                .node
+                .node
+                .borrow_mut()
+                .pending_transaction_ids_for_author(author)
+        )
+        .unwrap(),
+        vec![latest_tx]
+    );
+
+    let foreground = open_db(0xca, author, &schema);
+    foreground.set_non_durable_client();
+    assert_eq!(
+        foreground.write_state(latest_tx).unwrap_err().code,
+        ErrorCode::NotObserved
+    );
+    let (foreground_transport, worker_foreground_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
+    for _ in 0..8 {
+        worker
+            .tick()
+            .expect("deep replay must not overflow the owner stack");
+        foreground
+            .tick()
+            .expect("foreground must not receive a malformed replay frame");
+    }
+    // No foreground query/subscription has run: only causal replay can make
+    // this transaction and its ancestors observable in the empty foreground.
+    assert!(matches!(
+        foreground.write_state(latest_tx).unwrap(),
+        WriteState {
+            fate: Fate::Pending,
+            durability: DurabilityTier::Local,
+            ..
+        }
+    ));
+    for ancestor in ancestors {
+        foreground
+            .write_state(ancestor)
+            .expect("replay delivers the complete ancestor chain");
+    }
+    let rows = prepared_read(&foreground, &foreground.table("todos"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables()[0], "title"),
+        Some(Value::String("pending causal tip".to_owned()))
+    );
+}
+
+#[test]
+fn reopened_local_subscriber_replays_after_complete_parent_repair() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xcb; 16]);
+    let worker = open_db(0xcb, author, &schema);
+    let core = open_core(0xcc, AuthorSubject::SYSTEM, &schema);
+
+    let (worker_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, author);
+
+    let parent = worker
+        .insert(
+            "todos",
+            cells("repairable parent", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let parent_tx = parent.mergeable_tx_id();
+    worker.tick().unwrap();
+    core.tick().unwrap();
+    worker.tick().unwrap();
+    assert_eq!(
+        worker.write_state(parent_tx).unwrap().durability,
+        DurabilityTier::Global
+    );
+
+    let repair_requests = vec![crate::protocol::RowVersionRef::new(
+        "todos",
+        parent.row_uuid(),
+        parent_tx,
+    )];
+
+    let child = worker
+        .update(
+            "todos",
+            parent.row_uuid(),
+            cells("repairable child", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let child_tx = child.mergeable_tx_id();
+    assert_eq!(worker.write_state(child_tx).unwrap().fate, Fate::Pending);
+    let eviction = block_on(
+        worker
+            .node
+            .node
+            .borrow_mut()
+            .evict_cold(&crate::peer::PeerEvictionPins::default()),
+    )
+    .unwrap();
+    assert!(eviction.row_versions_evictable > 0);
+
+    let foreground = open_db(0xcd, author, &schema);
+    foreground.set_non_durable_client();
+    let (foreground_transport, worker_foreground_transport) = duplex();
+    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
+    for _ in 0..16 {
+        worker.tick().unwrap();
+        core.tick().unwrap();
+        worker.tick().unwrap();
+        if worker.write_state(child_tx).unwrap().durability == DurabilityTier::Global {
+            break;
+        }
+    }
+    assert_eq!(
+        worker.write_state(child_tx).unwrap().durability,
+        DurabilityTier::Global,
+        "the authority fate must arrive before the missing parent is repaired"
+    );
+
+    foreground.tick().unwrap();
+    assert_eq!(
+        foreground.write_state(child_tx).unwrap_err().code,
+        ErrorCode::NotObserved,
+        "a terminal fate alone must not release replay with missing ancestry"
+    );
+    // This scoped internal repair is necessary to isolate replay from query
+    // hydration: an authority query can independently supply the foreground
+    // with the child. Restore the genuine authority-owned ancestor, then use
+    // the server shell's progress notification boundary to service the same
+    // live foreground connection. No foreground query exists at this point.
+    let repaired_parent = core
+        .node()
+        .borrow_mut()
+        .row_version_payloads_for_refs(
+            &repair_requests,
+            crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(author),
+        )
+        .unwrap();
+    assert_eq!(repaired_parent.len(), 1);
+    worker
+        .node
+        .node
+        .borrow_mut()
+        .apply_row_version_payloads_for_requests(&repair_requests, repaired_parent)
+        .unwrap();
+    let restored_parent = worker
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(parent_tx)
+        .unwrap();
+    assert!(
+        local_replay_unit_is_complete(&restored_parent),
+        "repair must actually restore the complete parent"
+    );
+    worker.mark_subscriber_connections_dirty_for_test();
+
+    let mut repaired = false;
+    for _ in 0..64 {
+        foreground.tick().unwrap();
+        worker.tick().unwrap();
+        core.tick().unwrap();
+        worker.tick().unwrap();
+        foreground.tick().unwrap();
+        if matches!(
+            foreground.write_state(child_tx),
+            Ok(WriteState {
+                fate: Fate::Accepted,
+                durability: DurabilityTier::Global,
+                ..
+            })
+        ) {
+            repaired = true;
+            break;
+        }
+    }
+    assert!(
+        repaired,
+        "a complete parent repair must release the child replay without a foreground query"
+    );
+    foreground
+        .write_state(parent_tx)
+        .expect("causal parent must arrive before the repaired child");
+    let rows = prepared_read(&foreground, &foreground.table("todos"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables()[0], "title"),
+        Some(Value::String("repairable child".to_owned()))
+    );
+    assert!(matches!(
+        worker.write_state(child_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
+    assert!(matches!(
+        foreground.write_state(child_tx).unwrap(),
+        WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn local_replay_route_retains_terminal_fate_across_dead_queue() {
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let unrelated_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let author = AuthorSubject::for_test_bytes([0xd2; 16]);
+    let tx_id = TxId::new(TxTime(1), NodeUuid::from_bytes([0xd3; 16]));
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(1)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    register_local_replay_route(&routes, tx_id, &old_queue, author, None);
+    route_local_fate(&routes, tx_id, &fate);
+    drop(old_queue);
+    register_local_fate_route(
+        &routes,
+        TxId::new(TxTime(2), NodeUuid::from_bytes([0xd4; 16])),
+        &unrelated_queue,
+    );
+    register_local_replay_route(&routes, tx_id, &replacement_queue, author, None);
+    register_local_fate_route(&routes, tx_id, &replacement_queue);
+    release_local_replay_fates(&routes);
+
+    assert!(matches!(
+        replacement_queue.borrow().as_slice(),
+        [SyncMessage::FateUpdate {
+            tx_id: received,
+            fate: Fate::Accepted,
+            durability: Some(DurabilityTier::Global),
+            ..
+        }] if *received == tx_id
+    ));
+}
+
+#[test]
+fn local_replay_routes_keep_independent_live_receivers() {
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let first_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let author = AuthorSubject::for_test_bytes([0xd5; 16]);
+    let tx_id = TxId::new(TxTime(3), NodeUuid::from_bytes([0xd6; 16]));
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(2)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    register_local_replay_route(&routes, tx_id, &first_queue, author, None);
+    register_local_replay_route(&routes, tx_id, &second_queue, author, None);
+    route_local_fate(&routes, tx_id, &fate);
+    register_local_fate_route(&routes, tx_id, &first_queue);
+    register_local_fate_route(&routes, tx_id, &second_queue);
+    release_local_replay_fates(&routes);
+
+    for queue in [&first_queue, &second_queue] {
+        assert!(matches!(
+            queue.borrow().as_slice(),
+            [SyncMessage::FateUpdate {
+                tx_id: received,
+                fate: Fate::Accepted,
+                durability: Some(DurabilityTier::Global),
+                ..
+            }] if *received == tx_id
+        ));
+    }
+}
+
+/// A live same-author replay route stores a terminal fate before a second
+/// receiver attaches; repair must make both independent queues deliver:
+///
+/// ```text
+/// A: blocked ──terminal──► held fate
+/// B: blocked ──late attach─┘
+/// A,B: replay ──local ack──► terminal (once each)
+/// ```
+///
+/// This private route-registry seam is required because public APIs cannot
+/// deterministically force a terminal-before-late-attach ordering or inspect
+/// each receiver's queue independently.
+#[test]
+fn local_replay_route_copies_terminal_fate_to_late_live_receiver() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe0; 16]);
+    let worker = open_db(0xe1, author, &schema);
+    let write = worker
+        .insert(
+            "todos",
+            cells("late live replay route", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let replay = worker
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .unwrap();
+
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let first_queue: PendingDownstreamFates = Rc::new(RefCell::new(vec![replay.clone()]));
+    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(vec![replay]));
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(4)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    register_local_replay_route(&routes, tx_id, &first_queue, author, None);
+    route_local_fate(&routes, tx_id, &fate);
+    register_local_replay_route(&routes, tx_id, &second_queue, author, None);
+    register_local_fate_route(&routes, tx_id, &first_queue);
+    register_local_fate_route(&routes, tx_id, &second_queue);
+    block_on(queue_local_acknowledgements(&routes, &worker.node.node));
+    release_local_replay_fates(&routes);
+
+    for queue in [&first_queue, &second_queue] {
+        assert!(matches!(
+            queue.borrow().as_slice(),
+            [
+                SyncMessage::CommitUnit { tx, .. },
+                SyncMessage::FateUpdate {
+                    tx_id: local_id,
+                    fate: Fate::Pending,
+                    durability: Some(DurabilityTier::Local),
+                    ..
+                },
+                SyncMessage::FateUpdate {
+                    tx_id: terminal_id,
+                    fate: Fate::Accepted,
+                    durability: Some(DurabilityTier::Global),
+                    ..
+                }
+            ] if tx.tx_id == tx_id && *local_id == tx_id && *terminal_id == tx_id
+        ));
+    }
+}
+
+#[test]
+fn repaired_local_replay_reconnect_delivers_retained_terminal_fate() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xda; 16]);
+    let worker = open_db(0xdb, author, &schema);
+    let write = worker
+        .insert(
+            "todos",
+            cells("reconnectable replay", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_replay_route(&routes, tx_id, &old_queue, author, None);
+    drop(old_queue);
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(3)),
+        durability: Some(DurabilityTier::Global),
+    };
+    route_local_fate(&routes, tx_id, &fate);
+
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &replacement_queue,
+    ))
+    .unwrap();
+
+    assert!(
+        replacement_queue.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::FateUpdate {
+                    tx_id: received,
+                    fate: Fate::Accepted,
+                    durability: Some(DurabilityTier::Global),
+                    ..
+                } if *received == tx_id
+            )
+        }),
+        "a repaired replacement must receive the retained terminal fate"
+    );
+}
+
+#[test]
+fn incomplete_retained_root_reloads_after_storage_repair() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xdc; 16]);
+    let worker = open_db(0xdd, author, &schema);
+    let write = worker
+        .insert(
+            "todos",
+            cells("repaired retained root", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    worker.tick().unwrap();
+    let tx_id = write.mergeable_tx_id();
+    let SyncMessage::CommitUnit {
+        mut tx,
+        mut versions,
+    } = worker
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .unwrap()
+    else {
+        unreachable!("commit_unit_for returns a commit unit")
+    };
+    versions.clear();
+    tx.n_total_writes = tx.n_total_writes.saturating_add(1);
+    let incomplete = SyncMessage::CommitUnit { tx, versions };
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    register_local_replay_route(&routes, tx_id, &queue, author, Some(incomplete));
+
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &queue,
+    ))
+    .unwrap();
+
+    assert!(
+        queue.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id
+            )
+        }),
+        "a repaired root must be reconstructed instead of replaying partial retained data"
+    );
+}
+
+fn local_replay_restore_point_reads(chain_len: usize) -> usize {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let worker = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd9; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd9))),
+    }))
+    .unwrap();
+
+    let first = worker
+        .insert(
+            "todos",
+            cells("shared replay root", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let row_id = first.row_uuid();
+    let mut expected_transactions = vec![first.mergeable_tx_id()];
+    worker.tick().unwrap();
+    for index in 0..chain_len {
+        let write = worker
+            .update(
+                "todos",
+                row_id,
+                cells(&format!("shared replay step {index}"), false, author),
+                Default::default(),
+            )
+            .unwrap();
+        expected_transactions.push(write.mergeable_tx_id());
+        worker.tick().unwrap();
+    }
+
+    eviction.evict_all();
+    let before = control.point_read_count();
+    let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
+    let downstream: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    block_on(restore_local_subscriber_replay(
+        &worker.node.node,
+        &worker.node.outbox,
+        &routes,
+        author,
+        &downstream,
+    ))
+    .unwrap();
+    let reads = control.point_read_count() - before;
+    let delivered = downstream
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::CommitUnit { tx, .. } => Some(tx.tx_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        delivered, expected_transactions,
+        "the measured restore must deliver every causal transaction exactly once"
+    );
+    let local_acks = downstream
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Pending,
+                durability: Some(DurabilityTier::Local),
+                ..
+            } => Some(*tx_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        local_acks, expected_transactions,
+        "all pending roots receive local acknowledgement after replay"
+    );
+    assert!(
+        reads > 0,
+        "the evicted restore must perform actual storage work"
+    );
+    reads
+}
+
+#[test]
+fn reopened_local_subscriber_shares_replay_traversal_work() {
+    let smaller = local_replay_restore_point_reads(16);
+    let larger = local_replay_restore_point_reads(32);
+    assert!(
+        larger <= smaller * 3,
+        "doubling pending roots must stay near-linear: {smaller} reads for 17 roots, {larger} for 33 roots"
+    );
 }
 
 #[test]
@@ -3778,4 +4460,166 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
         })
     ));
     assert!(!routes.borrow().contains_key(&rejected_id));
+}
+
+/// Alice's second independent query may finish the first query's cold graph.
+/// Its completed first batch must still trigger local publication after the
+/// shared runtime becomes idle. Controlled storage fixes that interleaving;
+/// a public JazzClient cannot pause one graph at the storage boundary.
+///
+/// A opens (cold) -> storage resumes -> B opens/drives A -> owner tick -> A reset
+#[test]
+fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
+    use crate::tools::test_support::AllowAll;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct HostWake(AtomicBool);
+    impl futures::task::ArcWake for HostWake {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.store(true, Ordering::SeqCst);
+        }
+    }
+    struct HostScheduler(Arc<HostWake>);
+    impl TickScheduler for HostScheduler {
+        fn schedule_tick(&self, _urgency: TickUrgency) {
+            self.0.0.store(true, Ordering::SeqCst);
+        }
+        fn schedule_tick_after(&self, _delay_ms: u64) {
+            self.0.0.store(true, Ordering::SeqCst);
+        }
+        fn query_runtime_waker(&self) -> Option<Waker> {
+            Some(futures::task::waker(self.0.clone()))
+        }
+    }
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("records_a").column("value", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("records_b").column("value", PublicColumnType::Text),
+            )
+            .allow_all(),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xe1; 16]),
+            author: alice,
+        },
+    )))
+    .unwrap();
+    let wake = Arc::new(HostWake(AtomicBool::new(false)));
+    db.set_tick_scheduler(Some(Rc::new(HostScheduler(wake.clone()))));
+    let expected = db
+        .insert(
+            "records_a",
+            BTreeMap::from([("value".to_owned(), Value::String("first".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    db.insert(
+        "records_b",
+        BTreeMap::from([("value".to_owned(), Value::String("second".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let first = db.prepare_query(&db.table("records_a")).unwrap();
+    let second_query = db.prepare_query(&db.table("records_b")).unwrap();
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    let mut first = block_on(db.subscribe(&first, ReadOpts::default())).unwrap();
+    assert!(first.try_next_event().is_none());
+    wake.0.store(false, Ordering::SeqCst);
+    control.resume();
+    let mut second = block_on(db.subscribe(&second_query, ReadOpts::default())).unwrap();
+    db.node.node.borrow_mut().drive_query_runtime().unwrap();
+    assert!(!db.node.node.borrow().has_pending_query_runtime());
+    assert!(wake.0.load(Ordering::SeqCst));
+    // Native relay may consume the cross-thread wake before the owner tick.
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+    // Cancellation inside refresh must not acknowledge undelivered work.
+    let pause = crate::db::node_runtime::pause_subscription_refresh_after_detach_for_test();
+    let mut interrupted = Box::pin(db.node.tick());
+    let host_waker = futures::task::waker(wake.clone());
+    let mut cx = std::task::Context::from_waker(&host_waker);
+    assert!(matches!(
+        interrupted.as_mut().poll(&mut cx),
+        std::task::Poll::Pending
+    ));
+    assert!(pause.entered(), "tick must suspend inside refresh");
+    drop(interrupted);
+    drop(pause);
+    for _ in 0..16 {
+        if !wake.0.swap(false, Ordering::SeqCst) {
+            break;
+        }
+        db.tick().unwrap();
+    }
+    assert!(!wake.0.load(Ordering::SeqCst), "owner must become idle");
+    let first_events = std::iter::from_fn(|| first.try_next_event()).collect::<Vec<_>>();
+    let second_events = std::iter::from_fn(|| second.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        first_events.iter().any(|event| matches!(event,
+            SubscriptionEvent::Delta { reset: true, added, .. }
+            if added.iter().any(|row| row.row_uuid() == expected)
+        )),
+        "first subscription must publish after independent progress: first={first_events:?} second={second_events:?}\n{}",
+        db.query_delivery_diagnostics_for_test()
+    );
+    assert!(second_events.iter().any(|event| matches!(event,
+        SubscriptionEvent::Delta { reset: true, added, .. } if added.len() == 1
+    )));
+    crate::db::node_runtime::reset_subscription_refresh_visits_for_test();
+    db.tick().unwrap();
+    assert_eq!(
+        crate::db::node_runtime::subscription_refresh_visits_for_test(),
+        0
+    );
+    assert!(first.try_next_event().is_none());
+    assert!(second.try_next_event().is_none());
+    assert!(!wake.0.load(Ordering::SeqCst));
+
+    // Consume a newer wake while refresh owns an older generation.
+    db.node.query_runtime_waker().unwrap().wake_by_ref();
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+    let pause = crate::db::node_runtime::pause_subscription_refresh_after_detach_for_test();
+    let mut refresh = Box::pin(db.node.tick());
+    assert!(matches!(
+        refresh.as_mut().poll(&mut cx),
+        std::task::Poll::Pending
+    ));
+    assert!(pause.entered(), "tick must suspend inside refresh");
+    db.node.query_runtime_waker().unwrap().wake_by_ref();
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+    pause.release();
+    assert!(matches!(
+        refresh.as_mut().poll(&mut cx),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    drop(refresh);
+    drop(pause);
+    crate::db::node_runtime::reset_subscription_refresh_visits_for_test();
+    db.tick().unwrap();
+    assert_eq!(
+        crate::db::node_runtime::subscription_refresh_visits_for_test(),
+        2,
+        "newer wake consumed during await must survive older generation acknowledgment"
+    );
+    crate::db::node_runtime::reset_subscription_refresh_visits_for_test();
+    db.tick().unwrap();
+    assert_eq!(
+        crate::db::node_runtime::subscription_refresh_visits_for_test(),
+        0,
+        "successful refresh must acknowledge the retained generation"
+    );
 }

@@ -565,10 +565,27 @@ pub(super) fn lowered_terminals(
             publication_fields,
             terminal,
         ) = match app_rows.projection.clone() {
-            _ if !app_rows.public_terminal => (
-                visible_root_with_routes.clone(),
-                source.row_shape.descriptor.clone(),
-                hidden_source_fields(&source.row_shape),
+            _ if !app_rows.public_terminal => {
+                // Authorization consumes existence, not candidate payloads.
+                // Project only after all predicates/relations have run, and
+                // retain scope routes required by prepared bindings.
+                let row_id = &source.row_shape.row_uuid_field;
+                let fields = std::iter::once(row_id.clone())
+                    .chain(root_route_fields.iter().cloned())
+                    .collect::<Vec<_>>();
+                let descriptor = RecordDescriptor::new_with_fields(
+                    source
+                        .row_shape
+                        .descriptor
+                        .fields()
+                        .iter()
+                        .filter(|field| field.name.as_ref() == Some(row_id))
+                        .cloned(),
+                );
+                (
+                visible_root_with_routes.clone().project(fields),
+                descriptor,
+                BTreeSet::new(),
                 AppRowCarrier::CurrentRow,
                 BTreeMap::new(),
                 BTreeMap::new(),
@@ -577,6 +594,7 @@ pub(super) fn lowered_terminals(
                     .descriptor
                     .fields()
                     .iter()
+                    .filter(|field| field.name.as_ref() == Some(row_id))
                     .filter_map(|field| {
                         let carrier = field.name.clone()?;
                         let binding = match crate::node::query_engine::descriptor_public_name(field)
@@ -594,7 +612,8 @@ pub(super) fn lowered_terminals(
                     })
                     .collect(),
                 AppRowTerminal::Direct,
-            ),
+                )
+            }
             PayloadProjection::Tree(tree) => {
                 let collected = lower_collect_by_app_rows(
                     closure.visible_root.clone(),

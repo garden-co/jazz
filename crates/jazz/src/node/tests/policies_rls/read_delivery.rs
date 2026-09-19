@@ -284,7 +284,8 @@ fn read_policy_compares_indirect_text_by_its_logical_value() {
 
 #[test]
 fn camel_case_message_read_policy_incrementally_adds_member_message() {
-    let mut wire_membership = crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
+    let mut wire_membership =
+        crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
     let alice = user(0xa1);
     let bob = user(0xb2);
     let chat = row(0x18);
@@ -437,9 +438,18 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         .query_update(&mut core, &shape, &binding)
         .unwrap();
     let update = wire_membership.observe(&update);
-    let SyncMessage::ViewUpdate(payload) = &update else { panic!("expected snapshot"); };
-    assert_eq!(payload.supporting_rows.added_rows().iter().map(|input| input.row).collect::<BTreeSet<_>>(),
-        BTreeSet::from([chat, alice_message, alice_profile, bob_message, bob_profile]));
+    let SyncMessage::ViewUpdate(payload) = &update else {
+        panic!("expected snapshot");
+    };
+    assert_eq!(
+        payload
+            .supporting_rows
+            .added_rows()
+            .iter()
+            .map(|input| input.row)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([chat, alice_message, alice_profile, bob_message, bob_profile])
+    );
     assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
     assert!(
         canonical_view_update_rows(&update).contains(&(
@@ -978,6 +988,7 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
 
 #[test]
 fn composed_read_policy_grants_and_revokes_incrementally() {
+    use crate::tools::test_support::AllowAll;
     let invited = user(0xa1);
     let spy = user(0xb2);
     let canvas_row = row(8);
@@ -995,15 +1006,16 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
                 PublicTableSchemaBuilder::new("canvases").column("title", PublicColumnType::Text),
             )
             .table(
+                PublicTableSchemaBuilder::new("canvasInvites")
+                    .fk_column("canvas", "canvases")
+                    .column("userID", PublicColumnType::Uuid),
+            )
+            .allow_all()
+            .table(
                 PublicTableSchemaBuilder::new("shapes")
                     .fk_column("canvas", "canvases")
                     .column("title", PublicColumnType::Text)
                     .policies(PublicTablePolicies::new().with_select(shape_policy)),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("canvasInvites")
-                    .fk_column("canvas", "canvases")
-                    .column("userID", PublicColumnType::Uuid),
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
