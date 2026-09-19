@@ -957,7 +957,7 @@ where
 
     /// Enable only for a host that owns complete current policy inputs. The
     /// historical-read flag is insufficient: server edge shells also use it.
-    #[cfg(feature = "runtime")]
+    #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&mut self) {
         if self.client_relay_scope().is_none() {
             self.authoritative_scalar_exit_refresh = true;
