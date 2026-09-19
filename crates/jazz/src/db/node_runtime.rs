@@ -4055,19 +4055,12 @@ where
                     .await
                     .unsubscribe_groove_subscription(subscription_id);
             }
-            let (shape, binding, prepared_plan) = {
+            let (shape, binding) = {
                 let mut owner = node.lock().await;
-                let mut scoped =
-                    owner.scoped_optional_session_claims(author, request_claims.clone());
-                scoped
-                    .prepare_query_binding_for_link_in_authorization_mode(
-                        &shape,
-                        &binding,
-                        read_tier,
-                        author,
-                        authorization_mode,
-                    )
-                    .await?
+                let scoped = owner.scoped_optional_session_claims(author, request_claims.clone());
+                // Reopening installs its own maintained graph, just like the
+                // initial opener; no unused AppRows graph needs to be retained.
+                scoped.query_binding_for_link(&shape, &binding)?
             };
             let (previous_snapshot, previous_snapshot_index) = {
                 let state_ref = state.borrow();
@@ -4090,7 +4083,7 @@ where
                         author,
                         read_tier,
                         &read_view,
-                        Some(prepared_plan),
+                        None,
                         authorization_mode,
                         pending_overlay,
                         progress_waker,
