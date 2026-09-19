@@ -49,7 +49,13 @@ pub(super) struct CurrentSourceGraph {
     pub(super) metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy)]
+pub(super) enum HydrationLifetime {
+    FirstResult,
+    Retained,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
     Index {
@@ -1335,8 +1341,8 @@ where
                     self.projected_visible_current_source_graph(request, &table, tier)
                         .await?
                 };
-                let graph = match &authorization {
-                    SourceAuthorizationRequest::System => source.graph,
+                let (graph, routing_fields) = match &authorization {
+                    SourceAuthorizationRequest::System => (source.graph, BTreeSet::new()),
                     SourceAuthorizationRequest::PolicyFiltered {
                         permission_subject,
                         plan,
@@ -1373,7 +1379,8 @@ where
                             );
                             request
                         });
-                        self.node
+                        let filtered = self
+                            .node
                             .compose_policy_filtered_current_source_graph(
                                 policy_request,
                                 source.graph,
@@ -1381,11 +1388,11 @@ where
                             )
                             .map_err(|error| {
                                 source_resolution_error_from_policy_proof(request, error)
-                            })?
-                            .graph
+                            })?;
+                        (filtered.graph, filtered.route_fields)
                     }
                 };
-                (graph, source.descriptor, source.metadata, BTreeSet::new())
+                (graph, source.descriptor, source.metadata, routing_fields)
             }
         } else if request.visibility == RowVisibility::IncludeDeleted && pending_overlay {
             // A receiver's own pending deletion needs no read-policy proof.
@@ -1880,8 +1887,8 @@ where
                     self.projected_visible_current_source_graph(request, &table, tier)
                         .await?
                 };
-                let graph = match &authorization {
-                    SourceAuthorizationRequest::System => source.graph,
+                let (graph, routing_fields) = match &authorization {
+                    SourceAuthorizationRequest::System => (source.graph, BTreeSet::new()),
                     SourceAuthorizationRequest::PolicyFiltered {
                         permission_subject,
                         plan,
@@ -1918,7 +1925,8 @@ where
                             );
                             request
                         });
-                        self.node
+                        let filtered = self
+                            .node
                             .compose_policy_filtered_current_source_graph(
                                 policy_request,
                                 source.graph,
@@ -1926,11 +1934,11 @@ where
                             )
                             .map_err(|error| {
                                 source_resolution_error_from_policy_proof(request, error)
-                            })?
-                            .graph
+                            })?;
+                        (filtered.graph, filtered.route_fields)
                     }
                 };
-                (graph, source.descriptor, source.metadata, BTreeSet::new())
+                (graph, source.descriptor, source.metadata, routing_fields)
             };
         let deletion_register =
             self.deletion_register_source_for_request(request, &table, Some(tier), None, None)?;
@@ -4315,6 +4323,45 @@ where
         {
             *source_limit = Some(limit);
         }
+        Ok(paths)
+    }
+
+    /// Binding-specific access paths for an executing current query. Both a
+    /// one-result consumer and a retained subscription hydrate live sources;
+    /// neither may embed these prefixes into a generic prepared-plan cache.
+    pub(super) fn current_query_hydration_access_paths(
+        &self,
+        request: &QueryProgramRequest,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        lifetime: HydrationLifetime,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        let mut paths = match lifetime {
+            HydrationLifetime::Retained => {
+                self.current_query_primary_key_access_paths(shape, binding)?
+            }
+            HydrationLifetime::FirstResult => {
+                // Preserve bounded current ID reads. The policy-point guard
+                // from #2187 applies to future deletion delivery, not an
+                // initial snapshot whose owner releases it before any writes.
+                // Do not inherit snapshot-only secondary-index intersections
+                // or source limits: both consumers use live index graphs below.
+                let tier = request
+                    .reads
+                    .primary
+                    .source_current_tier(&root_source_id(&shape.query().table))
+                    .unwrap_or(DurabilityTier::None);
+                self.one_shot_access_paths(shape, binding, tier)?
+                    .into_iter()
+                    .filter(|(_, path)| matches!(path, CurrentAccessPath::PrimaryKey(_)))
+                    .collect()
+            }
+        };
+        paths.extend(
+            self.query_program_access_paths(request, true)?
+                .into_iter()
+                .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
+        );
         Ok(paths)
     }
 

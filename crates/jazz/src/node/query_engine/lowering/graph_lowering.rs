@@ -2051,7 +2051,12 @@ fn binding_descriptor_params_with_user_params(
     let domain = parameter_domain_for_request(request)?;
     let mut user_params = request.input.binding.extra_user_params.clone();
     user_params.extend(domain.user_params.clone());
-    user_params.extend(additional_user_params);
+    for (name, ty) in additional_user_params {
+        // A source's physical type is only a fallback for synthetic parameters;
+        // it must not replace a validated binding type (including nullability
+        // and enum registry identity).
+        user_params.entry(name).or_insert(ty);
+    }
     Ok(user_params
         .into_iter()
         .chain(

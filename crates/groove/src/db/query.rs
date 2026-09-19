@@ -491,6 +491,22 @@ impl Database {
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
+        self.subscribe_with_lifetime(sinks, SubscriptionLifetime::Retained, progress_waker)
+    }
+
+    /// Install the same query pipeline with an explicit consumer lifetime.
+    /// First-result consumers end automatically after the complete initial
+    /// update; their temporary indexes do not replace retained consumer state.
+    pub fn subscribe_with_lifetime<I, K>(
+        &mut self,
+        sinks: I,
+        lifetime: SubscriptionLifetime,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+    {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -501,7 +517,7 @@ impl Database {
             Rc::clone(&self.storage_read_metrics),
         ));
         self.ivm_runtime
-            .subscribe_with_waker(sinks, &storage, progress_waker)
+            .subscribe_with_lifetime(sinks, &storage, lifetime, progress_waker)
             .map_err(Error::IvmRuntime)
     }
 
@@ -904,6 +920,24 @@ impl Database {
         binding_values: &[Value],
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<MultisinkSubscription, Error> {
+        self.bind_shape_with_lifetime(
+            shape,
+            binding_values,
+            SubscriptionLifetime::Retained,
+            progress_waker,
+        )
+        .await
+    }
+
+    /// Bind a prepared graph for one initial result or continued maintenance.
+    /// Lifetime is per consumer, not part of the reusable graph's identity.
+    pub async fn bind_shape_with_lifetime(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        lifetime: SubscriptionLifetime,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error> {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -914,7 +948,7 @@ impl Database {
             Rc::clone(&self.storage_read_metrics),
         ));
         self.ivm_runtime
-            .bind_shape_with_waker(shape, binding_values, &storage, progress_waker)
+            .bind_shape_with_lifetime(shape, binding_values, &storage, lifetime, progress_waker)
             .map_err(Error::IvmRuntime)
     }
 
