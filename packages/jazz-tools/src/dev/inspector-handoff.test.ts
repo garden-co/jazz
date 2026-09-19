@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { startInspectorHandoff } from "./inspector-handoff.js";
@@ -8,7 +8,7 @@ afterEach(() => {
   cleanup.splice(0).forEach((close) => close());
 });
 
-async function setup() {
+async function setup(timeoutMs?: number) {
   const requests: { path?: string; root?: string; body: unknown }[] = [];
   const server = createServer(async (req, res) => {
     let text = "";
@@ -41,15 +41,17 @@ async function setup() {
     serverUrl: `http://127.0.0.1:${address.port}`,
     adminSecret: "configured-root",
     inspectorUrl: "https://inspector.example",
+    timeoutMs,
   });
   cleanup.push(handoff.close);
   const url = new URL(handoff.url);
   const endpoint = new URLSearchParams(url.hash.slice(1)).get("handoff")!;
+  const launchCode = new URLSearchParams(url.hash.slice(1)).get("launch")!;
   const post = (path: string, body: unknown, origin = url.origin) =>
     fetch(`${endpoint}${path}`, {
       method: "POST",
       headers: { Origin: origin, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ launch_code: launchCode, ...(body as object) }),
     });
   return { handoff, requests, post, endpoint };
 }
@@ -68,6 +70,10 @@ describe("CLI Inspector handoff", () => {
     const verifier = "a".repeat(43);
     const code_challenge = createHash("sha256").update(verifier).digest("base64url");
     expect((await post("/challenge", { code_challenge }, "https://other.example")).status).toBe(
+      403,
+    );
+    expect((await post("/challenge", { code_challenge, launch_code: undefined })).status).toBe(403);
+    expect((await post("/challenge", { code_challenge, launch_code: "x".repeat(43) })).status).toBe(
       403,
     );
     const challenge = await post("/challenge", { code_challenge });
@@ -105,5 +111,21 @@ describe("CLI Inspector handoff", () => {
       ).status,
     ).toBe(403);
     expect((await post("/challenge", { code_challenge: "a".repeat(43) })).status).toBe(200);
+  });
+  it("closes an in-flight body at timeout and cannot reopen a challenge", async () => {
+    const { handoff, endpoint, post } = await setup(30);
+    const pending = request(`${endpoint}/challenge`, {
+      method: "POST",
+      headers: { Origin: "https://inspector.example", "Content-Type": "application/json" },
+    });
+    const closed = new Promise<void>((resolve) => {
+      pending.on("error", () => resolve());
+      pending.on("close", () => resolve());
+    });
+    pending.write('{"code_challenge":');
+    await handoff.done;
+    await closed;
+    pending.destroy();
+    await expect(post("/challenge", { code_challenge: "a".repeat(43) })).rejects.toThrow();
   });
 });

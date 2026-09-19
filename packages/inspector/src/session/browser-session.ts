@@ -215,7 +215,12 @@ export function completeInspectorCallback(): boolean {
   return true;
 }
 
-export async function receiveCliSession(handoff: string, appId: string): Promise<InspectorSession> {
+export async function receiveCliSession(
+  handoff: string,
+  appId: string,
+  launchCode: string,
+): Promise<InspectorSession> {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(launchCode)) throw new Error("Invalid Inspector launch code");
   const endpoint = new URL(handoff);
   if (
     endpoint.protocol !== "http:" ||
@@ -238,7 +243,10 @@ export async function receiveCliSession(handoff: string, appId: string): Promise
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-  const challenge = await post("/challenge", { code_challenge: await proofChallenge(verifier) });
+  const challenge = await post("/challenge", {
+    launch_code: launchCode,
+    code_challenge: await proofChallenge(verifier),
+  });
   if (!challenge.ok) throw new Error("Inspector handoff expired. Run the CLI again.");
   const { code } = (await challenge.json()) as { code?: unknown };
   if (typeof code !== "string" || !code) throw new Error("Invalid Inspector handoff");

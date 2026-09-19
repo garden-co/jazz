@@ -24,6 +24,8 @@ export interface SessionConnection {
   appId: string;
   dashboard?: string;
   handoff?: string;
+  launchCode?: string;
+  restore?: boolean;
 }
 const metadataKey = "jazz-inspector-session-connection";
 
@@ -32,11 +34,15 @@ export function readSessionConnection(dashboard?: string): SessionConnection | n
   const fragment = new URLSearchParams(window.location.hash.slice(1));
   const appId = fragment.get("appId");
   const handoff = fragment.get("handoff");
+  const launchCode = fragment.get("launch");
   const cloud = fragment.get("login") === "dashboard";
   if (handoff || cloud) {
     window.history.replaceState(null, "", window.location.pathname);
     if (!appId || (!handoff && !dashboard)) return null;
-    const connection = { appId, ...(handoff ? { handoff } : { dashboard }) };
+    const connection = {
+      appId,
+      ...(handoff ? { handoff, launchCode: launchCode ?? "" } : { dashboard }),
+    };
     if (!handoff) localStorage.setItem(metadataKey, JSON.stringify({ appId, mode: "dashboard" }));
     return connection;
   }
@@ -44,7 +50,7 @@ export function readSessionConnection(dashboard?: string): SessionConnection | n
     try {
       const stored = JSON.parse(localStorage.getItem(metadataKey) ?? "null");
       if (stored?.mode === "dashboard" && typeof stored.appId === "string")
-        return { appId: stored.appId, dashboard };
+        return { appId: stored.appId, dashboard, restore: stored.signedOut !== true };
     } catch {
       /* invalid connection metadata */
     }
@@ -93,6 +99,11 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
     setSession(null);
   };
   const logout = () => {
+    if (auth)
+      localStorage.setItem(
+        metadataKey,
+        JSON.stringify({ appId: connection.appId, mode: "dashboard", signedOut: true }),
+      );
     generation.current++;
     auth?.logout();
     clear();
@@ -112,7 +123,11 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
     if (!connection.handoff) return;
     let active = true;
     const current = generation.current;
-    handoffAttempt.current ??= receiveCliSession(connection.handoff, connection.appId);
+    handoffAttempt.current ??= receiveCliSession(
+      connection.handoff,
+      connection.appId,
+      connection.launchCode ?? "",
+    );
     setBusy(true);
     handoffAttempt.current
       .then(
@@ -132,6 +147,29 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
     };
   }, [connection.handoff, connection.appId]);
 
+  useEffect(() => {
+    if (!auth || !connection.restore) return;
+    let active = true;
+    const current = generation.current;
+    setBusy(true);
+    void auth
+      .renew()
+      .then(
+        (value) => {
+          if (active && current === generation.current) setSession(value);
+        },
+        () => {
+          if (active && current === generation.current) setError("Session restore needs sign-in.");
+        },
+      )
+      .finally(() => {
+        if (active && current === generation.current) setBusy(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth, connection.restore]);
+
   const login = async () => {
     if (!auth) return;
     const current = ++generation.current;
@@ -140,7 +178,13 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
     setError(null);
     try {
       const value = await auth.authorize(requested);
-      if (current === generation.current) setSession(value);
+      if (current === generation.current) {
+        localStorage.setItem(
+          metadataKey,
+          JSON.stringify({ appId: connection.appId, mode: "dashboard" }),
+        );
+        setSession(value);
+      }
     } catch {
       if (current === generation.current)
         setError("Sign-in failed. Allow the popup and try again.");
@@ -160,6 +204,7 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
         setError("Session ended. Sign in again.");
       }
     };
+    const remaining = Math.max(0, session.expiresAt * 1000 - Date.now());
     const expiry = setTimeout(expire, Math.max(0, session.expiresAt * 1000 - Date.now()));
     const renewal = auth
       ? setTimeout(
@@ -174,7 +219,7 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
               }
             }, expire);
           },
-          Math.max(0, session.expiresAt * 1000 - Date.now() - 60_000),
+          remaining - Math.min(60_000, remaining / 2),
         )
       : undefined;
     return () => {
@@ -263,13 +308,14 @@ export default function SessionApp({ connection }: { connection: SessionConnecti
   return (
     <JazzClientProvider client={loaded.client}>
       <div style={{ padding: 8 }}>
-        Inspector session · {session.capabilities.join(", ")}{" "}
-        <button onClick={logout}>Log out</button>
+        {session.capabilities.includes("inspector:edit") ? "Editing enabled" : "Read-only session"}{" "}
+        · {session.capabilities.join(", ")} <button onClick={logout}>Log out</button>
       </div>
       <DevtoolsProvider
         wasmSchema={loaded.schema}
         storedPermissions={loaded.permissions}
         runtime="standalone"
+        readOnly={!session.capabilities.includes("inspector:edit")}
       >
         <StandaloneProvider
           onManageConnections={logout}
