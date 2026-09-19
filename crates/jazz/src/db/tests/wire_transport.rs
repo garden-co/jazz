@@ -300,8 +300,8 @@ fn receive_poll_reports_permanent_failure_while_flushing_accepted_backlog() {
         "Backpressure accepts the logical message and retains its physical frame"
     );
 
-    // `Transport::try_recv` returns only `Option`, and live peer polling uses
-    // that infallible seam. Exercise the concrete adapter's fallible receive
+    // Live peers use `Transport::try_recv_result` to observe receive failures.
+    // Exercise the concrete adapter's fallible receive
     // path here until the production transport interface can expose terminal
     // failures to its callers.
     let first = adapter

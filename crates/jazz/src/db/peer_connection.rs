@@ -1977,6 +1977,18 @@ where
             return Err(error);
         }
         let mut stats = DbTickStats::default();
+        // Finish draining the old authority's transport backlog before sending
+        // reissued opens. Otherwise a fast confirming snapshot can join that
+        // backlog and be discarded as an ineligible pre-handoff receipt.
+        if self.inbound_authority_receipt_quarantine {
+            self.stage_inbound_without_authority_receipt();
+            if let Some(error) = self.startup_error.take() {
+                return Err(error);
+            }
+            if self.inbound_authority_receipt_quarantine {
+                return Ok(stats);
+            }
+        }
         let progress_waker = make_query_runtime_waker(
             &self.scheduler,
             &self.query_runtime_wake_pending,
