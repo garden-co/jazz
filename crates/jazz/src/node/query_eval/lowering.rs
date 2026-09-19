@@ -8,6 +8,37 @@
 use super::*;
 use crate::node::query_engine::RequestedSourceExpr;
 
+/// A first-result consumer owns exactly its subscription and, when needed,
+/// its prepared shape. Dropping a suspended read cannot keep a binding alive
+/// or retire graph roots owned by a different subscription.
+struct HydrationSubscription<'a> {
+    database: &'a mut groove::db::Database,
+    subscription: Option<MultisinkSubscription>,
+    prepared_shape: Option<PreparedShapeId>,
+}
+
+impl HydrationSubscription<'_> {
+    fn release(&mut self) -> Result<(), Error> {
+        if let Some(subscription) = self.subscription.take() {
+            self.database.unsubscribe(subscription.id());
+        }
+        if let Some(shape) = self.prepared_shape.take() {
+            self.database
+                .retire_prepared_shape(shape)
+                .map_err(Error::Groove)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for HydrationSubscription<'_> {
+    fn drop(&mut self) {
+        // A poisoned database can reject retirement. Its ordinary shutdown
+        // still owns that state; never panic while cancelling another error.
+        let _ = self.release();
+    }
+}
+
 #[cfg(test)]
 pub(super) struct ScopedPolicyGraphReplacementPause;
 
@@ -793,7 +824,12 @@ where
                 match preparer.policy_dependency_request(source)? {
                     Some(dependency) => {
                         footprint.include(&dependency);
-                        dependencies.push(dependency);
+                        // Match the outer occurrence before translating to
+                        // the authorization program's protected root. An
+                        // unrelated alias of the same table is not restricted
+                        // by this query occurrence's equality.
+                        let path = outer_access_paths.get(&source.source).cloned();
+                        dependencies.push((dependency, path));
                     }
                     None => {
                         // Unsupported policy shapes must not silently become
@@ -807,30 +843,29 @@ where
             }
             (dependencies, footprint)
         };
-        let dependencies = dependencies
-            .into_iter()
-            .map(|dependency| {
-                (
-                    policy_authorization_graph_cache_key(&dependency),
-                    dependency,
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        for (cache_key, dependency) in dependencies {
-            let point_path = match &dependency.policy {
+        let mut grouped = BTreeMap::new();
+        for (dependency, path) in dependencies {
+            let key = policy_authorization_graph_cache_key(&dependency);
+            let entry = grouped.entry(key).or_insert((dependency, path.clone()));
+            // The same reusable proof may serve more than one occurrence.
+            // Specialize only when every consumer has the same candidate
+            // domain; an unrestricted consumer forces the ordinary proof.
+            if entry.1 != path {
+                entry.1 = None;
+            }
+        }
+        for (cache_key, (dependency, path)) in grouped {
+            let candidate_paths = match &dependency.policy {
                 PolicyContext::AuthorizationSubplan {
                     protected_source, ..
-                } => outer_access_paths
-                    .get(protected_source)
-                    .cloned()
-                    // A cached policy graph may preserve a primary-key point
-                    // proof, but must never retain a secondary index prefix
-                    // resolved from the outer identity's claims.
-                    .filter(|path| matches!(path, CurrentAccessPath::PrimaryKey(_)))
-                    .map(|path| BTreeMap::from([(protected_source.clone(), path)])),
+                } => path.map(|path| BTreeMap::from([(protected_source.clone(), path)])),
                 _ => None,
             };
-            if let Some(access_paths) = point_path {
+            if let Some(access_paths) = candidate_paths {
+                // This request-owned proof covers every OR arm over the
+                // protected root, never just the arm providing a claim. The
+                // scoped replacement is restored after compilation (including
+                // cancellation), leaving reusable policy caches neutral.
                 self.begin_scoped_policy_authorization_graph_replacement(&cache_key, lease);
                 match Box::pin(
                     self.point_policy_authorization_row_id_graph(dependency, access_paths),
@@ -1079,6 +1114,27 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<MultisinkSubscription, Error> {
+        self.install_lowered_program_subscription(
+            program,
+            binding,
+            binding_source_shape,
+            prepared_claim_binding_mode,
+            progress_waker,
+        )
+        .await
+        .map(|(subscription, _)| subscription)
+    }
+
+    /// The same installation and binding path serves one-result and retained
+    /// consumers. Output terminals differ, but source hydration does not.
+    async fn install_lowered_program_subscription(
+        &mut self,
+        program: QueryProgram,
+        binding: &Binding,
+        binding_source_shape: String,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<(MultisinkSubscription, Option<PreparedShapeId>), Error> {
         // Subscription opening performs one bounded IVM poll.  When that poll
         // finds cold storage, retain the node owner's wake route so the
         // runtime can resume it without unrelated transport traffic.
@@ -1089,6 +1145,7 @@ where
             return self
                 .database
                 .subscribe_with_waker(sinks, progress_waker)
+                .map(|subscription| (subscription, None))
                 .map_err(|error| {
                     if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                         eprintln!(
@@ -1145,7 +1202,15 @@ where
                 }
                 Error::Groove(error)
             })?;
-        self.database
+        // prepare() allocates a caller-owned shape. Own it before the binding
+        // await so cancellation during cold hydration also releases it.
+        let mut owner = HydrationSubscription {
+            database: &mut self.database,
+            subscription: None,
+            prepared_shape: Some(prepared.id()),
+        };
+        let subscription = owner
+            .database
             .bind_shape_with_waker(prepared.id(), &values, progress_waker)
             .await
             .map_err(|error| {
@@ -1153,7 +1218,74 @@ where
                     eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
                 }
                 Error::Groove(error)
-            })
+            })?;
+        owner.prepared_shape = None;
+        Ok((subscription, Some(prepared.id())))
+    }
+
+    pub(super) async fn hydrate_lowered_program_once(
+        &mut self,
+        mut program: QueryProgram,
+        binding: &Binding,
+    ) -> Result<RecordDeltas, Error> {
+        // Hydrate through the same live installation as a retained consumer.
+        // The native CurrentRow boundary still consumes the compiler's
+        // materialization layout (including physical provenance), whereas a
+        // retained stream publishes its terminal layout directly.
+        let graph = lowered_materialization_app_rows_graph(&program)?;
+        program
+            .lowered
+            .terminals
+            .retain(|terminal| terminal.sink == JAZZ_APP_ROWS_SINK);
+        program.lowered.terminals[0].graph = graph;
+        let binding_source_shape = program
+            .request
+            .input
+            .binding
+            .source_shape
+            .clone()
+            .unwrap_or_else(|| {
+                query_binding_source_shape_for_prepared_params(&prepared_params_from_domain(
+                    &program.lowered.parameters,
+                ))
+            });
+        let (subscription, prepared_shape) = self
+            .install_lowered_program_subscription(
+                program,
+                binding,
+                binding_source_shape,
+                PreparedClaimBindingMode::Strict,
+                None,
+            )
+            .await?;
+        let mut owner = HydrationSubscription {
+            database: &mut self.database,
+            subscription: Some(subscription),
+            prepared_shape,
+        };
+        let result = futures::future::poll_fn(|cx| {
+            let subscription = owner
+                .subscription
+                .as_ref()
+                .expect("hydration owns its stream");
+            if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
+                return std::task::Poll::Ready(Ok(event));
+            }
+            // Unlike a retained consumer, this call owns progress until its
+            // complete initial multisink update, including an empty result.
+            if let std::task::Poll::Ready(Err(error)) = owner.database.poll_progress(cx) {
+                return std::task::Poll::Ready(Err(Error::Groove(error)));
+            }
+            subscription.poll_next_event(cx).map(Ok)
+        })
+        .await;
+        let release = owner.release();
+        let snapshot = match result? {
+            GrooveSubscriptionEvent::Update(update) => update.deltas,
+            GrooveSubscriptionEvent::Error(error) => return Err(Error::Groove(error.into())),
+        };
+        release?;
+        take_required_sink_deltas(snapshot, JAZZ_APP_ROWS_SINK)
     }
 }
 

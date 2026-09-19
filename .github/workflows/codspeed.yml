@@ -197,7 +197,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        workload: [todo, permissioned-resources]
+        workload: [todo, permissioned-resources, policy-scoped-documents]
     env:
       CARGO_BUILD_JOBS: 4
       RUST_MIN_STACK: 4194304
