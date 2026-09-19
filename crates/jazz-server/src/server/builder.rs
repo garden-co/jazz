@@ -269,6 +269,9 @@ impl ServerBuilder {
             http_client,
             forwarding_policy,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
+            websocket_admissions: Arc::new(
+                crate::server::routes::WebSocketAdmissionState::default(),
+            ),
             core_server_shell_storage_config,
             storage_factory: self.storage_factory.clone(),
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
