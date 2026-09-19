@@ -136,7 +136,7 @@ fn failure(status: StatusCode, error: &str) -> Response {
 pub(super) async fn exchange(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<Exchange>,
+    request: Result<Json<Exchange>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     if crate::middleware::auth::validate_admin_secret(
         headers
@@ -148,6 +148,9 @@ pub(super) async fn exchange(
     {
         return failure(StatusCode::UNAUTHORIZED, "invalid_admin_credential");
     }
+    let Ok(Json(request)) = request else {
+        return failure(StatusCode::BAD_REQUEST, "invalid_request");
+    };
     if request.operator.is_empty()
         || request.operator.len() > 256
         || request.operator.chars().any(char::is_control)
@@ -391,6 +394,7 @@ mod tests {
     async fn inspector_exchange_rejects_invalid_scope_ttl_and_operator() {
         let state = state("inspector-invalid-exchange").await;
         for body in [
+            serde_json::json!({"operator":"x", "expiresIn":"must-not-reflect-credential-material"}),
             serde_json::json!({"operator":"x", "capabilities":["account:admin"]}),
             serde_json::json!({"operator":"x", "capabilities":[EDIT]}),
             serde_json::json!({"operator":"x", "expiresIn":901}),
@@ -405,6 +409,13 @@ mod tests {
             )
             .await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({"error":"invalid_request"})
+            );
         }
     }
     // Internal token mutation is necessary to exercise signed-but-wrong claims:

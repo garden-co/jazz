@@ -2125,8 +2125,17 @@ mod tests {
                 crate::serving::ServerLinkAdmission::OrdinarySession,
             )
         };
+        let (allocate, wait_to_allocate) = oneshot::channel();
+        runtime
+            .send(ServerShellCommand::RunAsync(Box::new(move |_| {
+                Box::pin(async move {
+                    let _ = wait_to_allocate.await;
+                })
+            })))
+            .unwrap();
         let mut allocated = Box::pin(open());
         assert!(futures::poll!(&mut allocated).is_pending());
+        allocate.send(()).unwrap();
         assert_eq!(
             runtime
                 .run(|shell| Ok(shell.metrics_snapshot().active_sessions))
