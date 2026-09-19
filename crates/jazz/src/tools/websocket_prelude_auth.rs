@@ -6,6 +6,8 @@ pub struct AuthConfig {
     pub admin_secret: Option<String>,
     #[serde(default, with = "auth_backend_session_serde")]
     pub backend_session: Option<serde_json::Value>,
+    #[serde(default)]
+    pub inspector_token: Option<String>,
 }
 
 mod auth_backend_session_serde {
@@ -44,6 +46,10 @@ mod auth_backend_session_serde {
 impl std::fmt::Debug for AuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthConfig")
+            .field(
+                "inspector_token",
+                &self.inspector_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("jwt_token", &self.jwt_token.as_ref().map(|_| "<redacted>"))
             .field(
                 "backend_secret",

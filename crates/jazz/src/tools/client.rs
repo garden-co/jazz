@@ -3617,6 +3617,7 @@ impl JazzClient {
                 },
                 backend_secret: context.backend_secret.clone(),
                 admin_secret: context.admin_secret.clone(),
+                inspector_token: None,
                 backend_session: None,
             });
             let db = ClientDb::open(

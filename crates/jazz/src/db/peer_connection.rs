@@ -521,7 +521,9 @@ where
                     CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
                         tx.permission_subject.unwrap_or(tx.made_by)
                     }
-                    CommitUnitTrust::TrustedAdmin => ingest_context.identity,
+                    CommitUnitTrust::TrustedAdmin | CommitUnitTrust::Inspector { .. } => {
+                        ingest_context.identity
+                    }
                 };
                 // A direct Session keeps the established authorization-fate
                 // path for an ordinary user-attribution mismatch. It must,
@@ -535,6 +537,7 @@ where
                     CommitUnitTrust::TrustedBackend
                     | CommitUnitTrust::TrustedAuthority
                     | CommitUnitTrust::TrustedAdmin => false,
+                    CommitUnitTrust::Inspector { .. } => true,
                 };
                 if must_bind_provenance
                     && !admitted_provenance_matches(permission_subject, tx.made_by)
@@ -4005,6 +4008,9 @@ where
                         peer,
                     )
                     {
+                        if matches!(ingest_context.trust, CommitUnitTrust::Inspector { .. }) {
+                            return Err(Error::new(ErrorCode::Protocol, "Inspector capability does not permit this operation"));
+                        }
                         drop_peer_request(&self.node);
                         continue;
                     }
