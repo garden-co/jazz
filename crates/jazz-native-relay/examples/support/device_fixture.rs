@@ -2,17 +2,29 @@
 //! explicit authorization: separate local roots do not make public rows private.
 use jazz::groove::records::{OwnedRecord, RecordDescriptor, Value as RecordValue, ValueType};
 use jazz::query::Query;
-use jazz::tools::policy_expr::{eq, session};
+use jazz::tools::policy_expr::{always, eq, session};
 use jazz::tools::{ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 
 pub fn schema() -> Schema {
     schema_with_policy(true)
 }
 
+fn public_policies() -> TablePolicies {
+    TablePolicies::new()
+        .with_select(always())
+        .with_insert(always())
+        .with_update(Some(always()), always())
+        .with_delete(always())
+}
+
 fn schema_with_policy(protected: bool) -> Schema {
     let owner = eq("$createdBy.account", session("user.account"));
     SchemaBuilder::new()
-        .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+        .table(
+            TableSchemaBuilder::new("todos")
+                .column("title", ColumnType::Text)
+                .policies(public_policies()),
+        )
         .table(
             TableSchemaBuilder::new("scope_rows")
                 .column("title", ColumnType::Text)
@@ -23,7 +35,7 @@ fn schema_with_policy(protected: bool) -> Schema {
                         .with_update(Some(owner.clone()), owner.clone())
                         .with_delete(owner)
                 } else {
-                    TablePolicies::default()
+                    public_policies()
                 }),
         )
         .build()
@@ -54,7 +66,7 @@ pub fn fixture() -> serde_json::Value {
 mod tests {
     use super::*;
     use jazz::binding_codec::decode_named_cells;
-    use jazz::tools::{AppContext, ClientStorage, DurabilityTier, Value};
+    use jazz::tools::{AppContext, ClientStorage, Value};
     use jazz_server::{JazzServer, TestJwtIssuer};
     use jazz_testkit::{connect, enroll_test_context, native_connector, wait_for_query};
     use std::time::Duration;
@@ -99,7 +111,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn explicit_owner_policy_isolates_scopes_and_policy_omission_shares_rows() {
+    async fn explicit_owner_policy_isolates_scopes_and_public_policies_share_rows() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 for protected in [true, false] {
@@ -141,6 +153,14 @@ mod tests {
                                 },
                             )
                             .unwrap();
+                        client
+                            .insert(
+                                "todos",
+                                jazz::row_input! {
+                                    "title" => format!("scope-{scope}-public-todo")
+                                },
+                            )
+                            .unwrap();
                         clients.push(client);
                         dirs.push(dir);
                     }
@@ -152,7 +172,7 @@ mod tests {
                             Query::from("scope_rows"),
                             jazz::tools::ReadTier::Remote,
                             Duration::from_secs(20),
-                            "owner write reaches authority",
+                            &format!("owner write reaches authority: protected={protected}, scope={scope}"),
                             |rows| {
                                 rows.into_iter()
                                     .any(|(_, values)| {
@@ -161,6 +181,27 @@ mod tests {
                                         )))
                                     })
                                     .then_some(())
+                            },
+                        )
+                        .await;
+                    }
+                    // The device foreground and independent Core observer share
+                    // todos deliberately; omission would now deny both operations.
+                    for client in &clients {
+                        wait_for_query(
+                            client,
+                            Query::from("todos"),
+                            jazz::tools::ReadTier::Remote,
+                            Duration::from_secs(20),
+                            "both public todos reach authority",
+                            |rows| {
+                                (["a", "b"].into_iter().all(|scope| {
+                                    rows.iter().any(|(_, values)| {
+                                        values.contains(&Value::Text(format!(
+                                            "scope-{scope}-public-todo"
+                                        )))
+                                    })
+                                }) && rows.len() == 2).then_some(())
                             },
                         )
                         .await;
