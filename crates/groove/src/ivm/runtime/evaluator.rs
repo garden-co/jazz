@@ -1062,7 +1062,7 @@ impl TickEvaluator<'_> {
             // indexes must not be looked up using this caller's scope. Its
             // completed hydration is the proof that those child scopes are
             // ready; stale or suspended recursion still needs rebuilding.
-            let key = self.operator_key(node)?;
+            let key = self.operator_key(node);
             let generation = self.input_generation(node);
             return Ok(matches!(
                 self.operator_states.get(&key),
@@ -1075,7 +1075,7 @@ impl TickEvaluator<'_> {
         }
         if matches!(operator, OpType::Arrange(_)) && self.arrangement_needs_index(node) {
             let key = ArrangementKey {
-                scope: self.operator_scope(node)?,
+                scope: self.context.scope,
                 input: node,
             };
             if self.arrangement_states.get(&key).and_then(AsOf::as_of)
@@ -1085,7 +1085,7 @@ impl TickEvaluator<'_> {
             }
         }
         if matches!(operator, OpType::ArgMinBy(_) | OpType::ArgMaxBy(_)) {
-            let key = self.operator_key(node)?;
+            let key = self.operator_key(node);
             let expected = SubTick {
                 tick: self.current_tick,
                 sub_tick: if key.scope == ScopeId::root() {
@@ -1153,7 +1153,7 @@ impl TickEvaluator<'_> {
         node: NodeId,
     ) -> Result<Option<Arc<RecordDeltas>>, IvmRuntimeError> {
         let signature = self.input_signature(node)?;
-        let memo_key = self.memo_key(node, &signature)?;
+        let memo_key = self.memo_key(node, &signature);
         let current_watermark = self.input_generation(node);
         // Readiness is necessary only when reusing a result. A missing or
         // invalidated memo will execute the producer normally below.
@@ -1173,7 +1173,7 @@ impl TickEvaluator<'_> {
         ) && self.arrangement_needs_index(node)
         {
             let key = ArrangementKey {
-                scope: self.operator_scope(node)?,
+                scope: self.context.scope,
                 input: node,
             };
             !self.arrangement_states.contains_key(&key)
@@ -1213,7 +1213,7 @@ impl TickEvaluator<'_> {
                 .node(node)
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
             let signature = self.input_signature(node)?;
-            let memo_key = self.memo_key(node, &signature)?;
+            let memo_key = self.memo_key(node, &signature);
             let current_watermark = self.input_generation(node);
 
             if self.context.eval_mode == EvalMode::Hydrate {
@@ -1222,7 +1222,7 @@ impl TickEvaluator<'_> {
             }
 
             let output_desc = graph_node.descriptor.output.records();
-            if self.context.sub_tick > 1 && !self.depends_on_context(node)? {
+            if self.context.sub_tick > 1 && signature.frontier_bindings.is_empty() {
                 let result = Arc::new(RecordDeltas::empty(output_desc));
                 *self.memo_use_clock += 1;
                 if let Some(previous) = self.eval_memo.insert(
@@ -1670,17 +1670,9 @@ impl TickEvaluator<'_> {
         })
     }
 
-    pub(super) fn memo_key(
-        &mut self,
-        node: NodeId,
-        signature: &NodeInputSignature,
-    ) -> Result<EvalMemoKey, IvmRuntimeError> {
-        Ok(EvalMemoKey {
-            scope: if self.context.scope == ScopeId::root() {
-                self.operator_scope(node)?
-            } else {
-                self.context.scope
-            },
+    pub(super) fn memo_key(&self, node: NodeId, signature: &NodeInputSignature) -> EvalMemoKey {
+        EvalMemoKey {
+            scope: self.context.scope,
             node,
             input_signature_hash: signature.hash,
             tick_epoch: match self.context.eval_mode {
@@ -1689,7 +1681,7 @@ impl TickEvaluator<'_> {
             },
             sub_tick: self.context.sub_tick,
             context_digest: self.context_digest(signature),
-        })
+        }
     }
 
     pub(super) fn input_generation(&self, node: NodeId) -> u64 {
@@ -1716,14 +1708,7 @@ impl TickEvaluator<'_> {
         hasher.finish()
     }
 
-    fn operator_key(&mut self, node: NodeId) -> Result<OperatorStateKey, IvmRuntimeError> {
-        Ok(OperatorStateKey {
-            scope: self.operator_scope(node)?,
-            node,
-        })
-    }
-
-    fn operator_scope(&mut self, node: NodeId) -> Result<ScopeId, IvmRuntimeError> {
+    fn operator_key(&self, node: NodeId) -> OperatorStateKey {
         // Recursive step evaluation must be isolated per recursive node even
         // for context-independent table/index inputs. Sibling recursive nodes
         // can evaluate the same base-table delta in one outer tick; sharing
@@ -1731,20 +1716,12 @@ impl TickEvaluator<'_> {
         // the table side and make later siblings miss the same positive edge.
         // Scoped child operator state is tick-local and is cleared before the
         // public tick exits.
-        if self.context.scope != ScopeId::root() {
-            return Ok(self.context.scope);
+        // The root evaluator naturally keeps unrelated root queries sharing
+        // state. Dependency discovery cannot change either scope choice.
+        OperatorStateKey {
+            scope: self.context.scope,
+            node,
         }
-        // Only fragments downstream of FrontierSource are scoped. Base table
-        // arrangements stay global and can be reused by unrelated queries.
-        if self.depends_on_context(node)? {
-            Ok(self.context.scope)
-        } else {
-            Ok(ScopeId::root())
-        }
-    }
-
-    pub(super) fn depends_on_context(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
-        Ok(!self.input_signature(node)?.frontier_bindings.is_empty())
     }
 
     pub(super) fn input_signature(
@@ -1972,7 +1949,7 @@ impl TickEvaluator<'_> {
         _right: &Arc<RecordDeltas>,
         semi: bool,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let operator_key = self.operator_key(node)?;
+        let operator_key = self.operator_key(node);
         let (left_on, right_on) = self.join_field_names(node, join);
         let left_key =
             self.arrangement_key(left_input, join.left_descriptor, &left_on, join.comparison)?;
@@ -2042,7 +2019,7 @@ impl TickEvaluator<'_> {
                 spec.direction,
             );
         }
-        let operator_key = self.operator_key(node)?;
+        let operator_key = self.operator_key(node);
         let mut operator = self
             .operator_states
             .remove(&operator_key)
@@ -2126,7 +2103,7 @@ impl TickEvaluator<'_> {
         if input.deltas.is_empty() || top_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
-        let operator_key = self.operator_key(node)?;
+        let operator_key = self.operator_key(node);
         let mut operator = self
             .operator_states
             .remove(&operator_key)
@@ -2276,7 +2253,7 @@ impl TickEvaluator<'_> {
             // subscription already owns this shared collector. Rebuild its
             // state instead of applying that snapshot as incremental inserts;
             // otherwise a later retraction leaves a phantom duplicate behind.
-            let operator_key = self.operator_key(node)?;
+            let operator_key = self.operator_key(node);
             self.operator_states.remove(&operator_key);
         }
         if input.deltas.is_empty() || collect_by.limit == TopByLimit::Finite(0) {
@@ -2299,7 +2276,7 @@ impl TickEvaluator<'_> {
                 && (collect_by.slots.is_empty() || direct_tree_slot.is_some())
                 && (collect_by.limit == TopByLimit::Unbounded || direct_tree_slot.is_some()))
         {
-            let operator_key = self.operator_key(node)?;
+            let operator_key = self.operator_key(node);
             let mut operator = self
                 .operator_states
                 .remove(&operator_key)
@@ -2666,7 +2643,7 @@ impl TickEvaluator<'_> {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
         Ok(ArrangementKey {
-            scope: self.operator_scope(input)?,
+            scope: self.context.scope,
             input,
         })
     }
@@ -2777,7 +2754,7 @@ impl TickEvaluator<'_> {
         step_witness: Option<NodeId>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let storage = self.storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
-        let operator_key = self.operator_key(node)?;
+        let operator_key = self.operator_key(node);
         let input_generation = self.input_generation(node);
         let nodes = RecursiveNodes {
             seed,
@@ -2972,7 +2949,7 @@ impl TickEvaluator<'_> {
         recursive_node: NodeId,
         output_desc: RecordDescriptor,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let key = self.operator_key(recursive_node)?;
+        let key = self.operator_key(recursive_node);
         let Some(OperatorState::Recursive(state)) = self.operator_states.get(&key) else {
             return Err(IvmRuntimeError::NodeStateOperatorMismatch(recursive_node));
         };
@@ -3007,7 +2984,7 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         input: Arc<RecordDeltas>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let operator_key = self.operator_key(node)?;
+        let operator_key = self.operator_key(node);
         let operator = self
             .operator_states
             .remove(&operator_key)
