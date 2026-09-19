@@ -2742,7 +2742,7 @@ where
                         else {
                             break;
                         };
-                        received_leases.push(lease.clone());
+                        if let Some(lease)=&lease { received_leases.push(lease.clone()); }
                         let write_state_tx_id = write_state_update_tx_id(&message);
                         #[cfg(feature = "sync-autopsy")]
                         sync_autopsy::record(format!(
@@ -4149,7 +4149,7 @@ where
                                 }
                             }
                         };
-                    received_leases.push(lease.clone());
+                    if let Some(lease)=&lease { received_leases.push(lease.clone()); }
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.

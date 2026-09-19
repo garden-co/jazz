@@ -15,12 +15,13 @@ pub const ENVELOPE_VERSION: u8 = 1;
 pub const MAX_ENVELOPE_OVERHEAD: usize = 1024;
 
 #[derive(Serialize, Deserialize)]
-struct Envelope {
+struct Envelope<'a> {
     version: u8,
     epoch: u64,
     ordinal: u64,
     predecessors: Option<Vec<(u16, u64)>>,
-    payload: Vec<u8>,
+    #[serde(borrow)]
+    payload: &'a [u8],
 }
 
 /// The lease follows payload ownership through canonical and deferred queues.
@@ -41,8 +42,10 @@ impl ReceivedSyncMessage {
 }
 struct Pending {
     channel: u16,
-    class: ChannelClass,
-    envelope: Envelope,
+    epoch: u64,
+    ordinal: u64,
+    predecessors: Option<Vec<(u16, u64)>>,
+    message: SyncMessage,
     lease: BufferLease,
 }
 
@@ -104,7 +107,7 @@ impl RoutedMessages {
             epoch: self.sent_epoch,
             ordinal,
             predecessors,
-            payload,
+            payload: &payload,
         })
         .map_err(|e| e.to_string())
     }
@@ -163,19 +166,30 @@ impl RoutedMessages {
                 return Err(malformed("invalid barrier dependency vector".into()));
             }
         }
+        if self.pending.len() + self.ready.len() >= MAX_CHANNEL_QUEUED_MESSAGES {
+            return Err(malformed("routed message queue count exceeded".into()));
+        }
+        let message = context.decode_semantic_payload(envelope.payload)?;
+        let (expected_class, barrier) = super::channel_endpoint::message_class(&message);
+        if class != expected_class || barrier != envelope.predecessors.is_some() {
+            return Err(malformed(
+                "message routing metadata disagrees with semantics".into(),
+            ));
+        }
         self.received[slot] = envelope.ordinal;
         self.pending.push_back(Pending {
             channel,
-            class,
-            envelope,
+            epoch: envelope.epoch,
+            ordinal: envelope.ordinal,
+            predecessors: envelope.predecessors,
+            message,
             lease,
         });
         loop {
             let eligible = self.pending.iter().position(|pending| {
-                let envelope = &pending.envelope;
-                envelope.epoch == self.receive_epoch
-                    && envelope.ordinal == self.admitted[pending.channel as usize] + 1
-                    && envelope.predecessors.as_ref().is_none_or(|dependencies| {
+                pending.epoch == self.receive_epoch
+                    && pending.ordinal == self.admitted[pending.channel as usize] + 1
+                    && pending.predecessors.as_ref().is_none_or(|dependencies| {
                         dependencies
                             .iter()
                             .all(|(slot, n)| self.admitted[*slot as usize] >= *n)
@@ -183,22 +197,15 @@ impl RoutedMessages {
             });
             let Some(index) = eligible else { break };
             let pending = self.pending.remove(index).unwrap();
-            let message = context.decode_semantic_payload(&pending.envelope.payload)?;
-            let (class, barrier) = super::channel_endpoint::message_class(&message);
-            if class != pending.class || barrier != pending.envelope.predecessors.is_some() {
-                return Err(malformed(
-                    "message routing metadata disagrees with semantics".into(),
-                ));
-            }
-            self.admitted[pending.channel as usize] = pending.envelope.ordinal;
-            if barrier {
+            self.admitted[pending.channel as usize] = pending.ordinal;
+            if pending.predecessors.is_some() {
                 self.receive_epoch = self
                     .receive_epoch
                     .checked_add(1)
                     .ok_or_else(|| malformed("logical epoch exhausted".into()))?;
             }
             self.ready.push_back(ReceivedSyncMessage {
-                message,
+                message: pending.message,
                 lease: Some(pending.lease),
             });
         }
@@ -222,8 +229,8 @@ mod tests {
         assert_eq!(router.sent_epoch, 0);
         assert_eq!(router.sent[0], 0);
         router.accepted(0, true);
-        let next: Envelope =
-            postcard::from_bytes(&router.prepare(1, false, vec![2]).unwrap()).unwrap();
+        let next_bytes = router.prepare(1, false, vec![2]).unwrap();
+        let next: Envelope = postcard::from_bytes(&next_bytes).unwrap();
         assert_eq!(next.epoch, 1);
         assert_eq!(next.ordinal, 1);
         let barrier: Envelope = postcard::from_bytes(&first).unwrap();
