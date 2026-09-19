@@ -984,6 +984,7 @@ pub(super) struct PendingCatalogueSubscription {
 pub(super) struct PendingRowVersionRepair {
     pub(super) update: SyncMessage,
     pub(super) lease: Option<crate::wire::channel_credit::BufferLease>,
+    pub(super) pending_tx_ids: BTreeSet<TxId>,
     pub(super) authority_receipt_eligible: bool,
     /// A later complete set has arrived for this exact usage. Its immutable
     /// bodies may still be useful, but this older set must never be installed.
@@ -2755,7 +2756,7 @@ where
                         if let Some(lease)=&lease { received_leases.push(lease.clone()); }
                         if matches!(&message, SyncMessage::FateUpdate { tx_id, .. }
                             if pending_row_version_repairs.iter().any(|repair|
-                                view_update_mentions_transaction(&repair.update, *tx_id))) {
+                                repair.pending_tx_ids.contains(tx_id))) {
                             if deferred_repair_fates.len() >= crate::wire::channels::MAX_CHANNEL_QUEUED_MESSAGES {
                                 return Err(Error::new(ErrorCode::Protocol, "deferred repair fate queue exceeded"));
                             }
@@ -3077,6 +3078,9 @@ where
                                         || settled_through < *minimum_cut {
                                         #[cfg(any(test, feature = "testing"))]
                                         crate::delivery_diagnostics::record(|| format!("receiver_waiting_snapshot_skip runtime={} subscription={subscription:?} cut={} minimum={}", self.node.borrow().groove_runtime_token(), settled_through.0, minimum_cut.0));
+                                        if let SyncMessage::ViewUpdate(view) = &message {
+                                            self.node.lock().await.remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                        }
                                         continue;
                                     }
                                     awaiting_support_snapshots.remove(&subscription);
@@ -3093,6 +3097,16 @@ where
                                         if matches!(&pending_row_version_repairs[index].update, SyncMessage::ViewUpdate(payload)
                                             if payload.subscription == subscription)
                                         {
+                                            // Superseding membership does not retract already
+                                            // observed Pending transaction identities. Preserve
+                                            // only those headers for later fates; do not publish
+                                            // discarded row bodies or their old supporting set.
+                                            if !pending_row_version_repairs[index].superseded {
+                                                if let SyncMessage::ViewUpdate(view) = &pending_row_version_repairs[index].update {
+                                                    self.node.lock().await
+                                                        .remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                                }
+                                            }
                                             if pending_row_version_fetches[index].sent_count == 0 {
                                                 pending_row_version_repairs.remove(index);
                                                 pending_row_version_fetches.remove(index);
@@ -3131,6 +3145,16 @@ where
                                     for index in (0..pending_row_version_repairs.len()).rev() {
                                         if matches!(&pending_row_version_repairs[index].update,
                                             SyncMessage::ViewUpdate(view) if view.subscription == subscription) {
+                                            // Superseding membership does not retract already
+                                            // observed Pending transaction identities. Preserve
+                                            // only those headers for later fates; do not publish
+                                            // discarded row bodies or their old supporting set.
+                                            if !pending_row_version_repairs[index].superseded {
+                                                if let SyncMessage::ViewUpdate(view) = &pending_row_version_repairs[index].update {
+                                                    self.node.lock().await
+                                                        .remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                                }
+                                            }
                                             if pending_row_version_fetches[index].sent_count == 0 {
                                                 pending_row_version_repairs.remove(index);
                                                 pending_row_version_fetches.remove(index);
@@ -3138,6 +3162,9 @@ where
                                                 pending_row_version_repairs[index].superseded = true;
                                             }
                                         }
+                                    }
+                                    if let SyncMessage::ViewUpdate(view) = &message {
+                                        self.node.lock().await.remember_discarded_pending_view_transactions(&view.version_carriers).await?;
                                     }
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                     continue;
@@ -3202,7 +3229,11 @@ where
                                         // A queued complete snapshot may arrive after its
                                         // last reader has closed. Do not fetch bytes for a
                                         // retired subscription or borrow another reader's
-                                        // authorization to repair it.
+                                        // authorization to repair it. Preserve only Pending
+                                        // transaction headers for already-registered fate observers.
+                                        if let SyncMessage::ViewUpdate(view) = &message {
+                                            self.node.lock().await.remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                        }
                                         continue;
                                     };
                                     pending_row_version_fetches.push_back(PendingRowVersionFetch {
@@ -3212,6 +3243,7 @@ where
                                     });
                                     pending_row_version_repairs.push_back(
                                         PendingRowVersionRepair {
+                                            pending_tx_ids: pending_view_transaction_ids(&message)?,
                                             update: message,
                                             lease: lease.clone(),
                                             authority_receipt_eligible,
@@ -6415,19 +6447,22 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
     }
 }
 
-fn view_update_mentions_transaction(message: &SyncMessage, tx_id: TxId) -> bool {
+fn pending_view_transaction_ids(message: &SyncMessage) -> Result<BTreeSet<TxId>, Error> {
     let SyncMessage::ViewUpdate(view) = message else {
-        return false;
+        return Ok(BTreeSet::new());
     };
-    view.supporting_rows
-        .added_rows()
-        .iter()
-        .any(|row| row.version.tx == tx_id)
-        || view.version_carriers.iter().any(|carrier| {
-            carrier
-                .bundle_refs()
-                .is_ok_and(|bundles| bundles.iter().any(|bundle| bundle.tx.tx_id == tx_id))
-        })
+    let mut ids = BTreeSet::new();
+    for carrier in &view.version_carriers {
+        for bundle in carrier
+            .bundle_refs()
+            .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?
+        {
+            if matches!(bundle.fate, Fate::Pending) {
+                ids.insert(bundle.tx.tx_id);
+            }
+        }
+    }
+    Ok(ids)
 }
 
 fn push_view_update_message_for_receiver(

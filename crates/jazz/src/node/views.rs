@@ -1673,6 +1673,60 @@ where
         Ok(())
     }
 
+    /// Preserve a discarded Pending carrier's transaction identity for its
+    /// already-registered fate observer, without publishing any row version or
+    /// accepting the discarded view's supporting set. A later ordinary carrier
+    /// extends this existing zero-body, view-scoped fragment.
+    pub(crate) async fn remember_discarded_pending_view_transactions(
+        &mut self,
+        carriers: &[VersionCarrier],
+    ) -> Result<(), Error> {
+        let mut headers = BTreeMap::new();
+        for carrier in carriers {
+            for bundle in carrier
+                .bundle_refs()
+                .map_err(|_| Error::MalformedViewUpdate("malformed version-bundle run"))?
+            {
+                if !matches!(bundle.fate, Fate::Pending) {
+                    continue;
+                }
+                let mut tx = transaction_without_permission_subject(bundle.tx);
+                tx.n_total_writes = 0;
+                self.admit_contribution_merge_for_storage(&tx)?;
+                if headers
+                    .get(&tx.tx_id)
+                    .is_some_and(|previous| previous != &tx)
+                {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
+                headers.insert(tx.tx_id, tx);
+            }
+        }
+        let mut missing = Vec::new();
+        for (tx_id, tx) in headers {
+            if let Some(stored) = self.query_transaction(tx_id).await? {
+                let mut identity = transaction_without_permission_subject(&stored.tx);
+                identity.n_total_writes = 0;
+                if identity != tx {
+                    return Err(Error::ConflictingCommitUnit(tx_id));
+                }
+            } else {
+                missing.push(tx);
+            }
+        }
+        for tx in missing {
+            self.ingest_transaction_fragment_without_current_indexes(
+                tx,
+                Vec::new(),
+                Fate::Pending,
+                None,
+                DurabilityTier::Local,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Persist immutable bodies carried by a stale authority link without
     /// accepting that link's source closure as an authority receipt.
     ///

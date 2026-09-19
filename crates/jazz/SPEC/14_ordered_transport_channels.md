@@ -16,7 +16,7 @@ not an optional fallback to independent per-message compression.
 ### Channel identity, ownership and compression
 
 An admitted connection direction owns 64 slots: control 0, requests 1, writes 2,
-dynamic deliveries/transfers 3–62, and immutable auxiliary chunk traffic 63.
+dynamic deliveries/transfers 3–61, progress replies 62, and immutable auxiliary chunk traffic 63.
 Generation and contiguous frame sequence are scoped to that connection and
 direction. Reusing a completely drained dynamic slot explicitly increments its
 generation and starts sequence zero with a new codec. The generation advances
@@ -65,7 +65,16 @@ session metadata or semantic permission checks.
 | ChunkUploadStart, ChunkUploadNodes, ChunkUploadResult                                                                                           | Transfer keyed by immutable root hash                    | Root-first upload order; referencing writes retain semantic Staged prerequisite        |
 | ChunkRequestBatch, ChunkResponseBatch                                                                                                           | Reserved auxiliary                                       | Immutable storage objects only; independent progress while canonical application waits |
 
-FateUpdate conservatively uses the Writes channel with a bilateral canonical barrier. Applying a fate requires the transaction to exist. Direct write acknowledgements refer to an already-authored transaction, but until every cascaded-fate routing path is proven independent of prior deliveries, the transport preserves the existing enqueue order across those deliveries. This is a conservative dependency rule, not a claim that a production sender has been demonstrated to emit an otherwise unsafe sequence. It can be narrowed after that routing proof or with explicit transaction dependencies.
+FateUpdate uses the Writes channel with a bilateral canonical barrier. A local-first
+query can deliver another author's Pending transaction carrier. After accepting
+that view for delivery, the sender registers a fate observer for its recipient;
+a later settlement therefore legitimately follows a query delivery even when
+that recipient never authored a write. The transaction must be introduced before
+its fate applies. Bare supporting-row references do not register such observers,
+and Pending transactions are pinned against cache eviction. If a view is parked
+because another row body is missing, fates for its included carriers wait for
+that view or its non-authoritative carrier caching. No additional body fetch or
+permission capability is inferred solely from a fate.
 
 ### Two independent layers
 
@@ -126,6 +135,13 @@ lease and waits for repair/application; unrelated authored transaction fates
 continue normally. Repair responses remain receivable and apply before the
 deferred fates. This semantic repair queue is distinct from catalogue front
 deferral, so FIFO admission alone is not claimed to complete a parked view.
+When a newer complete view supersedes a parked view, its already-received
+Pending carrier identities are retained as zero-body, view-scoped transaction
+fragments before their envelope is discarded. No discarded row body or current
+index is installed. Later fates can settle these identities without making old
+rows visible; a later ordinary carrier can extend the fragment without
+regressing its fate or durability. Only the replacement view controls membership
+and authority.
 Detaching a connection drops repair and fate queues. Closing a connection retires its credit state; old lease drops cannot
 fund a new connection.
 
@@ -152,7 +168,7 @@ queue while allowing auxiliary traffic to pass independently.
 
 Each frame costs `max(encoded_frame_bytes, 16 KiB)`, including metadata. Initial
 windows are control 256 KiB, requests 512 KiB, delivery 1 MiB, shared writes/large
-values 4 MiB, and auxiliary 1 MiB: 6.75 MiB total, below the 8 MiB / 512-frame
+values 4 MiB, auxiliary 1 MiB, and progress 1 MiB: 7.75 MiB total, below the 8 MiB / 512-frame
 raw binding guard. The floor bounds tiny-frame count as well as bytes. Query,
 control and auxiliary windows cannot be consumed by a bulk upload.
 
