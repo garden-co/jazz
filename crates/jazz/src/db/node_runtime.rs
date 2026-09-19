@@ -226,6 +226,7 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    owner_release_wait: RefCell<Option<futures::future::LocalBoxFuture<'static, ()>>>,
     mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
     close_owner: futures::lock::Mutex<()>,
     tx_time_reservation_clock: Rc<Cell<TxTime>>,
@@ -371,6 +372,7 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            owner_release_wait: RefCell::new(None),
             mutation_owner_lifecycle: Cell::new(MutationOwnerLifecycle::Open),
             close_owner: futures::lock::Mutex::new(()),
             tx_time_reservation_clock,
@@ -646,6 +648,32 @@ where
     pub(super) fn owner_is_available(&self) -> bool {
         // Drop the probe guard before maintenance can acquire the owner.
         self.node.try_lock().is_some()
+    }
+
+    /// Yield without losing the host wake needed after an external read finishes.
+    pub(super) fn owner_is_available_or_wake_when_released(&self) -> bool {
+        let mut waiter = self.owner_release_wait.borrow_mut();
+        if self.owner_is_available() {
+            waiter.take();
+            return true;
+        }
+        let Some(waker) = self.query_runtime_waker() else {
+            return false;
+        };
+        // Retain the lock future: dropping a pending mutex waiter cancels its wake.
+        let pending = waiter.get_or_insert_with(|| {
+            let node = Rc::clone(&self.node);
+            Box::pin(async move { drop(node.lock().await) })
+        });
+        if pending
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_ready()
+        {
+            waiter.take();
+            return true;
+        }
+        false
     }
 
     pub(super) fn queued_transaction_error(&self, id: OpenTransactionId) -> Option<Error> {
@@ -1396,6 +1424,7 @@ where
         self.finish_transaction_abandonment_shutdown_in(&mut node)
     }
 
+    #[cfg(test)]
     pub(super) fn transaction_abandonment_shutdown_is_pending(&self) -> bool {
         self.transaction_abandonment_shutdown_pending.get()
     }
@@ -1553,10 +1582,6 @@ where
         self.pending_relay_subscription_rejections
             .borrow_mut()
             .clear();
-    }
-
-    pub(super) fn subscription_finalization_shutdown_is_pending(&self) -> bool {
-        self.subscription_finalizations_closed.get() && !self.subscription_runtime_retired.get()
     }
 
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
