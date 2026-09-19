@@ -170,3 +170,18 @@ export async function createInspectorAdminClient(config: {
   );
   return createJazzClientFromDb(db);
 }
+
+/** Scoped standalone Inspector; credentials and data stay in memory. */
+export async function createInspectorSessionClient(config: {
+  appId: string;
+  serverUrl: string;
+  env?: string;
+  inspectorToken: string;
+}) {
+  if (!config.inspectorToken) throw new Error("Inspector session is required");
+  const db = await createDbWithRuntimeSource(
+    { ...config, driver: { type: "memory" } },
+    new DefaultRuntimeSource(),
+  );
+  return createJazzClientFromDb(db);
+}

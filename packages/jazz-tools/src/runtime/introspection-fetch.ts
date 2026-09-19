@@ -1,3 +1,4 @@
+import { inspectorAuthorityHeaders } from "./inspector-auth.js";
 import { appScopedUrl } from "./url.js";
 
 export interface IntrospectionSubscriptionGroup {
@@ -16,7 +17,8 @@ export interface IntrospectionSubscriptionResponse {
 }
 
 export interface FetchServerSubscriptionsOptions {
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
   appId: string;
 }
 
@@ -32,12 +34,12 @@ export async function fetchServerSubscriptions(
   const response = await fetch(subscriptionsUrl.toString(), {
     method: "GET",
     headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
+      ...inspectorAuthorityHeaders(options),
     },
   });
 
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
+    const bodyText = options.inspectorToken ? "" : await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
     throw new Error(
       `Server subscriptions fetch failed: ${response.status} ${response.statusText}${detail}`,

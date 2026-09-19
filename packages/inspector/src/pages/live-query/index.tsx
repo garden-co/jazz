@@ -125,6 +125,7 @@ function useServerSubscriptionTelemetry() {
       try {
         const response = await fetchServerSubscriptions(standaloneContext.connection.serverUrl, {
           adminSecret: standaloneContext.connection.adminSecret,
+          inspectorToken: standaloneContext.connection.inspectorToken,
           appId: standaloneContext.connection.appId,
         });
         if (cancelled) {
@@ -156,6 +157,7 @@ function useServerSubscriptionTelemetry() {
     };
   }, [
     standaloneContext?.connection.adminSecret,
+    standaloneContext?.connection.inspectorToken,
     standaloneContext?.connection.appId,
     standaloneContext?.connection.serverUrl,
   ]);
