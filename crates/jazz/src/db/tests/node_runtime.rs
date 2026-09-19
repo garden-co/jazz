@@ -4461,3 +4461,130 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
     ));
     assert!(!routes.borrow().contains_key(&rejected_id));
 }
+
+/// Alice's second independent query may finish the first query's cold graph.
+/// Its completed first batch must still trigger local publication after the
+/// shared runtime becomes idle. Controlled storage fixes that interleaving;
+/// a public JazzClient cannot pause one graph at the storage boundary.
+///
+/// A opens (cold) -> storage resumes -> B opens/drives A -> owner tick -> A reset
+#[test]
+fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
+    use crate::tools::test_support::AllowAll;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct HostWake(AtomicBool);
+    impl futures::task::ArcWake for HostWake {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.store(true, Ordering::SeqCst);
+        }
+    }
+    struct HostScheduler(Arc<HostWake>);
+    impl TickScheduler for HostScheduler {
+        fn schedule_tick(&self, _urgency: TickUrgency) {
+            self.0.0.store(true, Ordering::SeqCst);
+        }
+        fn schedule_tick_after(&self, _delay_ms: u64) {
+            self.0.0.store(true, Ordering::SeqCst);
+        }
+        fn query_runtime_waker(&self) -> Option<Waker> {
+            Some(futures::task::waker(self.0.clone()))
+        }
+    }
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("records_a").column("value", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("records_b").column("value", PublicColumnType::Text),
+            )
+            .allow_all(),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xe1; 16]),
+            author: alice,
+        },
+    )))
+    .unwrap();
+    let wake = Arc::new(HostWake(AtomicBool::new(false)));
+    db.set_tick_scheduler(Some(Rc::new(HostScheduler(wake.clone()))));
+    let expected = db
+        .insert(
+            "records_a",
+            BTreeMap::from([("value".to_owned(), Value::String("first".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    db.insert(
+        "records_b",
+        BTreeMap::from([("value".to_owned(), Value::String("second".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let first = db.prepare_query(&db.table("records_a")).unwrap();
+    let second_query = db.prepare_query(&db.table("records_b")).unwrap();
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    let mut first = block_on(db.subscribe(&first, ReadOpts::default())).unwrap();
+    assert!(first.try_next_event().is_none());
+    wake.0.store(false, Ordering::SeqCst);
+    control.resume();
+    let mut second = block_on(db.subscribe(&second_query, ReadOpts::default())).unwrap();
+    db.node.node.borrow_mut().drive_query_runtime().unwrap();
+    assert!(!db.node.node.borrow().has_pending_query_runtime());
+    assert!(wake.0.load(Ordering::SeqCst));
+    // Native relay may consume the cross-thread wake before the owner tick.
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+    // Cancellation while waiting for the node must not acknowledge delivery.
+    let held_node = block_on(db.node.node.lock());
+    let mut interrupted = Box::pin(db.node.tick());
+    let host_waker = futures::task::waker(wake.clone());
+    let mut cx = std::task::Context::from_waker(&host_waker);
+    assert!(matches!(
+        interrupted.as_mut().poll(&mut cx),
+        std::task::Poll::Pending
+    ));
+    drop(interrupted);
+    drop(held_node);
+    for _ in 0..16 {
+        if !wake.0.swap(false, Ordering::SeqCst) {
+            break;
+        }
+        db.tick().unwrap();
+    }
+    assert!(!wake.0.load(Ordering::SeqCst), "owner must become idle");
+    let first_events = std::iter::from_fn(|| first.try_next_event()).collect::<Vec<_>>();
+    let second_events = std::iter::from_fn(|| second.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        first_events.iter().any(|event| matches!(event,
+            SubscriptionEvent::Delta { reset: true, added, .. }
+            if added.iter().any(|row| row.row_uuid() == expected)
+        )),
+        "first subscription must publish after independent progress: first={first_events:?} second={second_events:?}\n{}",
+        db.query_delivery_diagnostics_for_test()
+    );
+    assert!(second_events.iter().any(|event| matches!(event,
+        SubscriptionEvent::Delta { reset: true, added, .. } if added.len() == 1
+    )));
+    crate::db::node_runtime::reset_subscription_refresh_visits_for_test();
+    db.tick().unwrap();
+    assert_eq!(
+        crate::db::node_runtime::subscription_refresh_visits_for_test(),
+        0
+    );
+    assert!(first.try_next_event().is_none());
+    assert!(second.try_next_event().is_none());
+    assert!(!wake.0.load(Ordering::SeqCst));
+}
