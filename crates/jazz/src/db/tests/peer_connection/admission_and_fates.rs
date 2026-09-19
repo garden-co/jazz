@@ -8,6 +8,146 @@ use crate::db::peer_connection::{
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
+struct ReceivePollTransport {
+    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+    accepted_send: Cell<bool>,
+    receive_polls: Rc<Cell<usize>>,
+    backpressure_polls: Rc<Cell<usize>>,
+    failure: Option<TransportError>,
+    sticky_failure: bool,
+}
+
+impl Transport for ReceivePollTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.accepted_send.set(true);
+        self.outbound.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        None
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        self.receive_polls
+            .set(self.receive_polls.get().saturating_add(1));
+        if !self.accepted_send.get() {
+            return Ok(None);
+        }
+        assert!(
+            !self.outbound.borrow().is_empty(),
+            "receive polling must flush an accepted outbound backlog"
+        );
+        let failure = if self.sticky_failure {
+            self.failure.clone()
+        } else {
+            self.failure.take()
+        };
+        if matches!(failure, Some(TransportError::Backpressure)) {
+            self.backpressure_polls
+                .set(self.backpressure_polls.get().saturating_add(1));
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
+}
+
+#[test]
+fn receive_poll_backpressure_defers_schema_admission_and_failed_is_terminal() {
+    use groove::storage::TestStorage;
+
+    let make_schema = |extra: bool| {
+        let builder = PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid),
+        );
+        build_public_db_test_schema(if extra {
+            builder.table(
+                PublicTableSchemaBuilder::new("controls").column("value", PublicColumnType::Text),
+            )
+        } else {
+            builder
+        })
+    };
+    let base_schema = make_schema(false);
+    let schema = make_schema(true);
+    let open_pending_client = |node: u8| {
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let (storage, _) = TestStorage::controlled(&refs);
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: AuthorSubject::for_test_bytes([node; 16]),
+        };
+        let seeded = block_on(Db::open(DbConfig::new(
+            base_schema.clone(),
+            storage.clone(),
+            identity,
+        )))
+        .unwrap();
+        block_on(seeded.close()).unwrap();
+        block_on(Db::open(DbConfig::new(schema.clone(), storage, identity))).unwrap()
+    };
+    let client = open_pending_client(0xd1);
+    let receive_polls = Rc::new(Cell::new(0));
+    let backpressure_polls = Rc::new(Cell::new(0));
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    let mut transport = ReceivePollTransport {
+        outbound: Rc::clone(&outbound),
+        accepted_send: Cell::new(false),
+        receive_polls: Rc::clone(&receive_polls),
+        backpressure_polls: Rc::clone(&backpressure_polls),
+        failure: Some(TransportError::Backpressure),
+        sticky_failure: false,
+    };
+    transport
+        .send(SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0xd1; 16]),
+            claims: BTreeMap::new(),
+        })
+        .unwrap();
+    let _handle = block_on(client.connect_upstream_for_test(Box::new(transport)));
+
+    block_on(client.tick()).expect("receive backpressure is deferred for retry");
+    let pending = client
+        .prepare_query(&Query::from("todos"))
+        .expect_err("schema admission must remain pending after recoverable backpressure");
+    assert_eq!(pending.code, ErrorCode::Schema);
+    block_on(client.tick()).expect("the connection remains retryable");
+    assert_eq!(backpressure_polls.get(), 1);
+    assert!(receive_polls.get() >= 1);
+
+    let failed_client = open_pending_client(0xd2);
+    let failed_polls = Rc::new(Cell::new(0));
+    let failed_outbound = Rc::new(RefCell::new(VecDeque::new()));
+    let mut failed_transport = ReceivePollTransport {
+        outbound: Rc::clone(&failed_outbound),
+        accepted_send: Cell::new(false),
+        receive_polls: Rc::clone(&failed_polls),
+        backpressure_polls: Rc::new(Cell::new(0)),
+        failure: Some(TransportError::Failed("wire closed".to_owned())),
+        sticky_failure: true,
+    };
+    failed_transport
+        .send(SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0xd2; 16]),
+            claims: BTreeMap::new(),
+        })
+        .unwrap();
+    let _failed_handle =
+        block_on(failed_client.connect_upstream_for_test(Box::new(failed_transport)));
+    let error = match block_on(failed_client.tick()) {
+        Err(error) => error,
+        Ok(_) => block_on(failed_client.tick()).expect_err("permanent receive failure is terminal"),
+    };
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(failed_polls.get() >= 1);
+}
+
 fn finish_catalogue_bootstrap_before_control_backpressure(
     subscriber: &Rc<LocalMutex<PeerConnection<RocksDbStorage>>>,
     outbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
