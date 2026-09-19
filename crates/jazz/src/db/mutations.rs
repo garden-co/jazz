@@ -3329,14 +3329,16 @@ where
         row: RowUuid,
     ) -> Result<(), Error> {
         self.table_schema(table)?;
-        let deleted = self
-            .node
-            .node
-            .lock()
-            .await
+        let mut node = self.node.node.lock().await;
+        // A retained deletion register may have been superseded by a restore.
+        let deleted = node
             .local_deletion_winner_tx_id_in_schema(self.schema_version_id, table, row)
             .await?
-            .is_some();
+            .is_some()
+            && node
+                .local_current_row_in_schema(table, row, self.schema_version_id)
+                .await?
+                .is_none();
         if deleted {
             Err(row_already_deleted(row))
         } else {
