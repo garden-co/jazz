@@ -1819,8 +1819,8 @@ impl TickEvaluator<'_> {
         output_desc: RecordDescriptor,
         left_input: NodeId,
         right_input: NodeId,
-        left: &Arc<RecordDeltas>,
-        right: &Arc<RecordDeltas>,
+        _left: &Arc<RecordDeltas>,
+        _right: &Arc<RecordDeltas>,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let (left_on, right_on) = self.join_field_names(node, join);
         let mapping = self.join_output_mapping(
@@ -1846,24 +1846,25 @@ impl TickEvaluator<'_> {
             .get(&right_key)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(right_input))?;
         let deltas = JoinState.evaluate(
-            left_state,
-            right_state,
+            super::join::ArrangementTransition::at(
+                left_state,
+                self.arrangement_sub_tick(&left_key),
+            ),
+            super::join::ArrangementTransition::at(
+                right_state,
+                self.arrangement_sub_tick(&right_key),
+            ),
             &join.left_descriptor,
             &join.right_descriptor,
             &output_desc,
             &mapping,
-            &left_on,
-            &right_on,
-            join.comparison,
-            JoinInput::snapshot(left),
-            JoinInput::snapshot(right),
             self.context.arrangement_update_mode,
         )?;
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_join(
             self.context.eval_mode == EvalMode::Hydrate,
-            left.deltas.len(),
-            right.deltas.len(),
+            _left.deltas.len(),
+            _right.deltas.len(),
             deltas.len(),
         );
         Ok(RecordDeltas {

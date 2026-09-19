@@ -324,158 +324,71 @@ impl JoinState {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn evaluate(
         &self,
-        left_arrangement: &AsOf<ArrangementState, SubTick>,
-        right_arrangement: &AsOf<ArrangementState, SubTick>,
+        left: ArrangementTransition<'_>,
+        right: ArrangementTransition<'_>,
         left_descriptor: &RecordDescriptor,
         right_descriptor: &RecordDescriptor,
         output_descriptor: &RecordDescriptor,
-        // how to map the the fields from the inputs to the ouput
-        // example:
-        // Left album fields:
-        // 0 = id
-        // 1 = artist_id
-        // 2 = title
-        //
-        // Right artist fields:
-        // 0 = id
-        // 1 = name
-        //
-        // Desire output:
-        // 0 = album id
-        // 1 = album title
-        // 2 = artist name
-        //
-        // [
-        //    (0, 0), // output field 0 comes from left field 0
-        //    (0, 2), // output field 1 comes from left field 2
-        //    (1, 1), // output field 2 comes from right field 1
-        // ]
-        //
-        // 0 is left
-        // 1 is right
         output_mapping: &[(usize, usize)],
-        // left fields of join such as `["id"]
-        left_on: &[String],
-        // right fields of join such as `["artist_id"]
-        right_on: &[String],
-        comparison: ValueComparison,
-        // Changed left records with signed weights
-        left_input: JoinInput<'_>,
-        right_input: JoinInput<'_>,
-        update_mode: ArrangementUpdateMode,
+        mode: ArrangementUpdateMode,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
-        let left_delta = left_input.records;
-        let right_delta = right_input.records;
-        // Fields have to be the same:
-        // left:  (country_id, artist_id)
-        // right: (country_id, id)
-        // This is ok!
-        //
-        // left:  (country_id, artist_id)
-        // right: (id)
-        // This is not ok
-        if left_on.len() != right_on.len() {
-            return Err(IvmRuntimeError::JoinKeyArityMismatch {
-                left: left_on.len(),
-                right: right_on.len(),
-            });
-        }
-
-        // let's get the deltas left and right, adding the join keys. For example:
-        // Left RecordDelta:
-        // album(13, artist_id=7, "Yellow") -> +1
-        //
-        // Keyed left delta:
-        // key = encode(7)
-        // record = album(13, 7, "Yellow")
-        // weight = +1
-        //
-        // The Key will be use to get throught the right_arrangement.index.get(&left_delta.key) fast the matching raws:
-        let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta, comparison)?;
-        let keyed_right_delta =
-            keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?;
-        let estimated_output_bytes = left_delta
-            .iter()
-            .chain(right_delta)
-            .map(|delta| delta.record.len())
-            .sum::<usize>();
-
         let mut output = JoinOutputBuffer {
-            bytes: BytesMut::with_capacity(estimated_output_bytes),
+            bytes: BytesMut::new(),
             deltas: Vec::new(),
             variable_scratch: Vec::new(),
         };
-
-        // Let's create the context of the Join, with all the descriptors (schema-side description needed to interpret compact record bytes)
         let context = JoinChangeContext {
             left_descriptor,
             right_descriptor,
             output_descriptor,
             output_mapping,
         };
-
-        // Replace inputs are faithful full snapshots. Once both arrangements
-        // have been rebuilt, one probe produces the complete join result.
-        // The incremental identity below would emit that result twice and
-        // subtract one copy, only for consolidation to cancel it again.
-        if update_mode == ArrangementUpdateMode::Replace {
-            append_join_deltas(
+        if mode == ArrangementUpdateMode::Replace {
+            append_join_index_deltas(
                 &mut output,
                 &context,
-                &keyed_left_delta,
-                &JoinLookup::Arrangement(right_arrangement.value()),
+                left.current.buckets(),
+                &JoinLookup::Arrangement(right.current),
                 JoinProbeSide::LeftDelta,
                 1,
             )?;
-            let output_buffer = output.bytes.freeze();
-            return Ok(consolidate_deltas(
-                output
-                    .deltas
-                    .into_iter()
-                    .map(|(record, weight)| RecordDelta {
-                        record: output_buffer.slice(record),
-                        weight,
-                    })
-                    .collect(),
-            ));
+        } else {
+            append_join_index_deltas(
+                &mut output,
+                &context,
+                left.change_buckets(),
+                &JoinLookup::Arrangement(right.current),
+                JoinProbeSide::LeftDelta,
+                1,
+            )?;
+            append_join_index_deltas(
+                &mut output,
+                &context,
+                right.change_buckets(),
+                &JoinLookup::Arrangement(left.current),
+                JoinProbeSide::RightDelta,
+                1,
+            )?;
+            // Both current indexes include this transition. Remove the repeated
+            // cross term, borrowing the producer batch rather than rebuilding it.
+            if let Some(left_changes) = left.changes {
+                append_join_index_deltas(
+                    &mut output,
+                    &context,
+                    right.change_buckets(),
+                    &JoinLookup::Index(left_changes),
+                    JoinProbeSide::RightDelta,
+                    -1,
+                )?;
+            }
         }
-
-        append_join_deltas(
-            &mut output,
-            &context,
-            &keyed_left_delta,
-            &JoinLookup::Arrangement(right_arrangement.value()),
-            JoinProbeSide::LeftDelta,
-            1,
-        )?;
-        append_join_deltas(
-            &mut output,
-            &context,
-            &keyed_right_delta,
-            &JoinLookup::Arrangement(left_arrangement.value()),
-            JoinProbeSide::RightDelta,
-            1,
-        )?;
-
-        // Both arrangements are now current, so the two probes above each see
-        // same-tick left/right pairs. Remove one copy of that cross term.
-        let left_delta_index = build_join_delta_index(&keyed_left_delta);
-        append_join_deltas(
-            &mut output,
-            &context,
-            &keyed_right_delta,
-            &JoinLookup::Index(&left_delta_index),
-            JoinProbeSide::RightDelta,
-            -1,
-        )?;
-
-        let output_buffer = output.bytes.freeze();
+        let bytes = output.bytes.freeze();
         Ok(consolidate_deltas(
             output
                 .deltas
                 .into_iter()
-                .map(|(record, weight)| RecordDelta {
-                    record: output_buffer.slice(record),
+                .map(|(range, weight)| RecordDelta {
+                    record: bytes.slice(range),
                     weight,
                 })
                 .collect(),
@@ -523,7 +436,13 @@ impl JoinState {
             mode,
         )?;
         self.evaluate(
-            left, right, ld, rd, output, mapping, lk, rk, comparison, li, ri, mode,
+            ArrangementTransition::at(left, lt),
+            ArrangementTransition::at(right, rt),
+            ld,
+            rd,
+            output,
+            mapping,
+            mode,
         )
     }
 }
@@ -548,6 +467,10 @@ impl<'a> ArrangementTransition<'a> {
 
     fn changed_keys(&self) -> impl Iterator<Item = &JoinKey> {
         self.changes.into_iter().flat_map(|changes| changes.keys())
+    }
+
+    fn change_buckets(&self) -> impl Iterator<Item = (&JoinKey, &JoinBucket)> {
+        self.changes.into_iter().flat_map(|changes| changes.iter())
     }
 
     fn delta_bucket(&self, key: &JoinKey) -> Option<&JoinBucket> {
@@ -741,6 +664,16 @@ impl AntiJoinState {
 }
 
 impl ArrangementState {
+    fn buckets(&self) -> impl Iterator<Item = (&JoinKey, &JoinBucket)> {
+        self.index
+            .iter()
+            .filter(|(key, _)| !self.overlay.contains_key(*key))
+            .chain(
+                self.overlay
+                    .iter()
+                    .filter_map(|(key, bucket)| bucket.as_ref().map(|bucket| (key, bucket))),
+            )
+    }
     /// Fold only the touched buckets into the shared base at tick commit.
     /// Callers drop the previous live arrangement before invoking this method,
     /// making both COW maps uniquely owned in the common path.
@@ -1016,45 +949,39 @@ enum JoinProbeSide {
     RightDelta,
 }
 
-fn append_join_deltas(
+fn append_join_index_deltas<'a>(
     output: &mut JoinOutputBuffer,
     context: &JoinChangeContext<'_>,
-    delta_records: &[KeyedRecordDelta<'_>],
+    changes: impl Iterator<Item = (&'a JoinKey, &'a JoinBucket)>,
     stored: &JoinLookup<'_>,
     side: JoinProbeSide,
     sign: i64,
 ) -> Result<(), IvmRuntimeError> {
-    for delta in delta_records {
-        if delta.delta.weight == 0 {
-            continue;
-        }
-        let Some(bucket) = stored.bucket(&delta.key) else {
+    for (key, changed) in changes {
+        let Some(bucket) = stored.bucket(key) else {
             continue;
         };
-        for (stored_record, right_weight) in bucket.iter() {
-            if *right_weight == 0 {
-                continue;
+        for (changed_record, changed_weight) in changed.iter() {
+            for (stored_record, stored_weight) in bucket.iter() {
+                let weight = sign * changed_weight * stored_weight;
+                if weight == 0 {
+                    continue;
+                }
+                let (left_record, right_record) = match side {
+                    JoinProbeSide::LeftDelta => (changed_record.as_ref(), stored_record.as_ref()),
+                    JoinProbeSide::RightDelta => (stored_record.as_ref(), changed_record.as_ref()),
+                };
+                let record = create_join_record_into(
+                    left_record,
+                    right_record,
+                    context,
+                    &mut output.bytes,
+                    &mut output.variable_scratch,
+                )?;
+                output.deltas.push((record, weight));
             }
-
-            let weight = sign * delta.delta.weight * *right_weight;
-            if weight == 0 {
-                continue;
-            }
-            let (left_record, right_record) = match side {
-                JoinProbeSide::LeftDelta => (delta.delta.raw(), stored_record.as_ref()),
-                JoinProbeSide::RightDelta => (stored_record.as_ref(), delta.delta.raw()),
-            };
-            let record = create_join_record_into(
-                left_record,
-                right_record,
-                context,
-                &mut output.bytes,
-                &mut output.variable_scratch,
-            )?;
-            output.deltas.push((record, weight));
         }
     }
-
     Ok(())
 }
 
