@@ -3,7 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDb, type Db, type DbConfig } from "../../src/react-native/create-db.js";
-import type { WasmSchema } from "../../src/drivers/types.js";
+import { resolveSchemaSource, type SchemaSourceInput } from "../../src/schema-source.js";
+import {
+  mergePermissionsIntoWasmSchema,
+  type CompiledPermissionsMap,
+} from "../../src/schema-permissions.js";
 import type { Session } from "../../src/runtime/context.js";
 import { createAccountManagerWithRuntime } from "../../src/accounts/enrollment.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
@@ -26,7 +30,8 @@ export interface NativeRelayFixtureOptions {
 let factoryCreation: Promise<unknown> = Promise.resolve();
 
 export async function createNativeRelayFixture(
-  app: { wasmSchema: WasmSchema },
+  app: SchemaSourceInput,
+  permissions: CompiledPermissionsMap,
   options: NativeRelayFixtureOptions = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "jazz-rn-api-"));
@@ -129,7 +134,7 @@ export async function createNativeRelayFixture(
           server_url: options.upstream?.serverUrl ?? null,
         }),
       ),
-      serializeSchemaSource(app.wasmSchema),
+      serializeSchemaSource(mergePermissionsIntoWasmSchema(resolveSchemaSource(app), permissions)),
     );
     cleanupCapability = capability;
     const config: DbConfig = { appId, account, ...(options.upstream ? { serverUrl } : {}) };
@@ -172,11 +177,12 @@ export async function createNativeRelayFixture(
 export type NativeRelayFixture = Awaited<ReturnType<typeof createNativeRelayFixture>>;
 
 export async function withNativeRelayFixture<T>(
-  app: { wasmSchema: WasmSchema },
+  app: SchemaSourceInput,
+  permissions: CompiledPermissionsMap,
   run: (fixture: NativeRelayFixture) => Promise<T>,
   options?: NativeRelayFixtureOptions,
 ): Promise<T> {
-  const fixture = await createNativeRelayFixture(app, options);
+  const fixture = await createNativeRelayFixture(app, permissions, options);
   const errors: unknown[] = [];
   let result: T | undefined;
   try {

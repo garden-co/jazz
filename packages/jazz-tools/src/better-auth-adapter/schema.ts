@@ -3,6 +3,7 @@ import type { DBAdapterSchemaCreation } from "better-auth";
 import type { BetterAuthDBSchema, DBFieldAttribute } from "better-auth/db";
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { assertUserColumnNameAllowed } from "../magic-columns.js";
+import { assertSchemaNameAllowed } from "../schema-name.js";
 
 const DEFAULT_SCHEMA_FILE_PATH = "./schema-better-auth/schema.ts";
 const JS_IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
@@ -243,6 +244,7 @@ export function buildJazzSchema(args: {
 
   for (const [modelName, model] of Object.entries(tables)) {
     const tableName = getModelName(modelName);
+    assertSchemaNameAllowed(tableName);
     const columns: WasmSchema[string]["columns"] = [];
     const relations: NonNullable<WasmSchema[string]["relations"]> = {};
 
@@ -319,6 +321,7 @@ export function buildJazzSchemaSourceText(args: {
 
   for (const [modelName, model] of Object.entries(tables)) {
     const tableName = getModelName(modelName);
+    assertSchemaNameAllowed(tableName);
     const lines = [`  ${formatObjectKey(tableName)}: s.table({`];
     const relations: string[] = [];
 

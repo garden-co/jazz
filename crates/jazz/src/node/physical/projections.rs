@@ -838,18 +838,9 @@ where
                 (column.name.clone(), projection)
             })
             .collect::<BTreeMap<_, _>>();
-        for direction in [LensPathDirection::Forward, LensPathDirection::Reverse] {
-            let Some(path) = self.compiled_lens_path(
-                source_schema,
-                target_schema,
-                direction,
-                source_table_name,
-            )?
-            else {
-                continue;
-            };
+        if let Some(path) = self.compiled_lens_path(source_schema, target_schema, source_table_name)? {
             if path.target_table != target_table_name {
-                continue;
+                return Ok(None);
             }
             for op in path.ops {
                 match op {
@@ -1207,22 +1198,14 @@ where
             .collect::<Result<BTreeMap<_, _>, Error>>()?;
 
         if source_schema != target_schema || source_table_name != target_table_name {
-            let mut path = None;
-            for direction in [LensPathDirection::Forward, LensPathDirection::Reverse] {
-                if let Some(candidate) = self.compiled_lens_path(
-                    source_schema,
-                    target_schema,
-                    direction,
-                    source_table_name,
-                )? && candidate.target_table == target_table_name
-                {
-                    path = Some(candidate);
-                    break;
-                }
-            }
-            let Some(path) = path else {
+            let Some(path) =
+                self.compiled_lens_path(source_schema, target_schema, source_table_name)?
+            else {
                 return Ok(None);
             };
+            if path.target_table != target_table_name {
+                return Ok(None);
+            }
             for op in path.ops {
                 match op {
                     CompiledLensOp::Rename { from, to } => {

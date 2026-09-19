@@ -21,7 +21,7 @@ mod shutdown;
 mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
-pub(crate) use catalogue::{PermissionsHeadSummary, ServerCatalogue, StoredCatalogue};
+pub(crate) use catalogue::{ActiveSchemaSummary, ServerCatalogue, StoredCatalogue};
 #[cfg(test)]
 pub(crate) use catalogue_storage::CatalogueStorage;
 pub(crate) use catalogue_storage::{

@@ -66,7 +66,7 @@ async function expectClosed(db: Db) {
 }
 
 it("delivers native insert/update/delete to useAll and useOne and replaces query identity", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const writer = await fixture.createDb(); // Installs the actual native platform factory.
     let observed: Db | undefined;
     const onDb = (db: Db) => {
@@ -113,7 +113,7 @@ it("delivers native insert/update/delete to useAll and useOne and replaces query
 });
 
 it("preserves equivalent provider config and isolates a replacement native identity", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const firstWriter = await fixture.createDb();
     await firstWriter
       .insert(app.notes, { title: "first scope", done: false })
@@ -165,7 +165,7 @@ it("preserves equivalent provider config and isolates a replacement native ident
 });
 
 it("unmounts pending remote hooks, shuts down the provider and preserves a sibling native root", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const writer = await fixture.createDb();
     let observed: Db | undefined;
     const onDb = (db: Db) => {
@@ -206,7 +206,7 @@ it("unmounts pending remote hooks, shuts down the provider and preserves a sibli
 });
 
 it("surfaces native-backed subscription errors through both hooks after shutdown", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     await fixture.createDb();
     let observed: Db | undefined;
     const onDb = (db: Db) => {

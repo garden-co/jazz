@@ -1,15 +1,21 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
-import type { WasmSchema } from "jazz-tools";
+import { schema as s, type WasmSchema } from "jazz-tools";
 import { defaultRuntimeContextKey } from "./contexts/default-runtime-context";
 import type { InspectorRuntimeContext } from "./contexts/host-link";
 import { InspectorApp } from "./inspector-app";
 
-const { closePortMock, openSessionMock, readHostConfigMock } = vi.hoisted(() => ({
-  closePortMock: vi.fn(),
-  openSessionMock: vi.fn(),
-  readHostConfigMock: vi.fn(),
+const { closePortMock, createAttachmentClientMock, openSessionMock, readHostConfigMock } =
+  vi.hoisted(() => ({
+    closePortMock: vi.fn(),
+    createAttachmentClientMock: vi.fn(),
+    openSessionMock: vi.fn(),
+    readHostConfigMock: vi.fn(),
+  }));
+
+vi.mock("jazz-tools/_dev/inspector-client", () => ({
+  createInspectorAttachmentClient: (...args: unknown[]) => createAttachmentClientMock(...args),
 }));
 
 vi.mock("./contexts/host-link", () => ({
@@ -130,5 +136,73 @@ describe("InspectorApp", () => {
 
     expect(closePortMock).toHaveBeenCalledWith(port);
     expect(close).toHaveBeenCalledOnce();
+  });
+  it("keeps equal BigInt-bearing contexts stable and refreshes changed schemas", async () => {
+    vi.useFakeTimers();
+    openSessionMock.mockReset();
+    readHostConfigMock.mockReset();
+    createAttachmentClientMock.mockReset();
+    const schema = (largeCount: bigint): WasmSchema =>
+      s.defineApp({
+        metrics: s.table(
+          {
+            largeCount: s.bigint().default(largeCount),
+          },
+          {},
+        ),
+      }).wasmSchema;
+    const initialContext = context("metrics", localFirstPhysicalDbName);
+    initialContext.schema = schema(9007199254740993n);
+    const equalContext = {
+      ...initialContext,
+      schema: schema(9007199254740993n),
+    };
+    const changedContext = {
+      ...initialContext,
+      schema: schema(9007199254740994n),
+    };
+    let listedContexts = [equalContext];
+    const attach = vi.fn(async () => ({}) as MessagePort);
+    const close = vi.fn();
+    const listContexts = vi.fn(async () => listedContexts);
+    openSessionMock.mockResolvedValue({
+      contexts: [initialContext],
+      listContexts,
+      attach,
+      close,
+    });
+    readHostConfigMock.mockReturnValue({
+      appId,
+      runtimeSources: { inspectorHostPhysicalDbName: localFirstPhysicalDbName },
+    });
+    createAttachmentClientMock.mockResolvedValue({ shutdown: vi.fn() });
+
+    try {
+      render(createElement(InspectorApp));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(attach).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(listContexts).toHaveBeenCalledTimes(1);
+      expect(attach).toHaveBeenCalledTimes(1);
+
+      listedContexts = [changedContext];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(listContexts).toHaveBeenCalledTimes(2);
+      expect(attach).toHaveBeenCalledTimes(2);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
   });
 });

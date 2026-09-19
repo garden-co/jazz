@@ -89,10 +89,6 @@ export interface BackendNodeClock {
 
 type FlushableRuntime = Runtime & { flush?: () => void };
 
-function schemaHasNativePolicies(schema: WasmSchema): boolean {
-  return Object.values(schema).some((table) => table.policies !== undefined);
-}
-
 class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private initializedSchemaJson?: string;
   private runtime?: FlushableRuntime;
@@ -152,8 +148,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     onAuthFailure,
   }: RuntimeClientContext<DbConfig>): JazzClient {
     this.assertOpen();
-    const hasSeparatePermissionsBundle =
-      this.config.permissions !== undefined && !schemaHasNativePolicies(schema);
+    const hasSeparatePermissionsBundle = this.config.permissions !== undefined;
     const schemaJson = serializeRuntimeSchema(schema, {
       loadedPolicyBundle: hasSeparatePermissionsBundle,
     });
@@ -499,7 +494,7 @@ export class JazzContext {
       );
     }
     const schema = resolveSchemaSource(selected);
-    return this.config.permissions && !schemaHasNativePolicies(schema)
+    return this.config.permissions
       ? mergePermissionsIntoWasmSchema(schema, this.config.permissions)
       : schema;
   }

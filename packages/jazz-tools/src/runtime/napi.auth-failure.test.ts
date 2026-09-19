@@ -30,10 +30,14 @@ describe("NAPI on_auth_failure", () => {
       adminSecret,
     });
 
-    const runtime = await createNapiNativeRuntimeAdapter(MINIMAL_SCHEMA, {
-      appId,
-      env: "test",
-    });
+    const runtime = await createNapiNativeRuntimeAdapter(
+      MINIMAL_SCHEMA,
+      {},
+      {
+        appId,
+        env: "test",
+      },
+    );
 
     try {
       const reasons: string[] = [];
@@ -74,10 +78,14 @@ describe("NAPI on_auth_failure", () => {
       backendSecret: "expected-backend-secret",
       adminSecret: "napi-auth-failure-admin-secret",
     });
-    const runtime = await createNapiNativeRuntimeAdapter(MINIMAL_SCHEMA, {
-      appId,
-      env: "test",
-    });
+    const runtime = await createNapiNativeRuntimeAdapter(
+      MINIMAL_SCHEMA,
+      {},
+      {
+        appId,
+        env: "test",
+      },
+    );
 
     try {
       const reasons: string[] = [];
