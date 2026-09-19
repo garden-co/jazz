@@ -17,7 +17,7 @@ use crate::wire::channels::{
 };
 use crate::wire::{
     FEATURE_PAYLOAD_LZ4, FEATURE_PAYLOAD_ZSTD, TransportError, WireChannelEnvelope,
-    WireCompression, WireFrame, WireInboundContext, decode_sync_message_for_features, encode_frame,
+    WireCompression, WireError, WireFrame, WireInboundContext, encode_frame,
     encode_sync_message_for_features,
 };
 
@@ -60,6 +60,7 @@ pub(super) struct ChannelEndpoint {
     pending_last: bool,
     pending_class: ChannelClass,
     failed: Option<String>,
+    last_wire_error: Option<WireError>,
 }
 
 impl ChannelEndpoint {
@@ -85,7 +86,16 @@ impl ChannelEndpoint {
             pending_last: false,
             pending_class: ChannelClass::Control,
             failed: None,
+            last_wire_error: None,
         })
+    }
+
+    pub(super) fn set_trusted_encoder(&mut self, trusted: bool) {
+        self.context.set_trusted_encoder(trusted);
+    }
+
+    pub(super) fn last_wire_error(&self) -> Option<WireError> {
+        self.last_wire_error.clone()
     }
 
     fn expire(&mut self) -> Result<(), String> {
@@ -411,9 +421,13 @@ impl ChannelEndpoint {
         state.progressed = None;
         state.encoded_len = 0;
         let payload = std::mem::take(&mut state.payload);
-        let message =
-            decode_sync_message_for_features(&payload, self.context.negotiated_features())
-                .map_err(|error| format!("invalid channel semantic payload: {error:?}"))?;
+        let message = self
+            .context
+            .decode_semantic_payload(&payload)
+            .map_err(|error| {
+                self.last_wire_error = Some(error.clone());
+                format!("invalid channel semantic payload: {error:?}")
+            })?;
         if message_class(&message).0 != state.class {
             return Err("semantic message does not belong to channel class".into());
         }
@@ -431,9 +445,10 @@ pub(super) fn message_class(message: &SyncMessage) -> (ChannelClass, bool) {
         | PublishLens { .. }
         | CatalogueAck(_)
         | CatalogueSnapshot(_) => (ChannelClass::Control, true),
-        CommitUnit { .. } | FateUpdate { .. } | AuthorityPublication(_) => {
-            (ChannelClass::Writes, false)
-        }
+        // A preceding delivery may introduce this transaction. Preserve that
+        // dependency across independently scheduled delivery/write channels.
+        FateUpdate { .. } => (ChannelClass::Writes, true),
+        CommitUnit { .. } | AuthorityPublication(_) => (ChannelClass::Writes, false),
         RegisterShape { .. }
         | Subscribe(_)
         | Unsubscribe { .. }
@@ -468,6 +483,12 @@ impl AuxiliaryChannelEndpoint {
             pump_owned: false,
             waker: None,
         })
+    }
+    pub(super) fn set_trusted_encoder(&mut self, trusted: bool) {
+        self.endpoint.set_trusted_encoder(trusted);
+    }
+    pub(super) fn last_wire_error(&self) -> Option<WireError> {
+        self.endpoint.last_wire_error()
     }
     /// Share canonical and auxiliary physical windows for this admitted link.
     pub fn set_channel_credits(&mut self, credits: SharedChannelCredits) {
@@ -557,5 +578,95 @@ impl AuxiliaryChannelEndpoint {
             return Err("non-auxiliary frame attempted auxiliary bypass".into());
         }
         self.endpoint.receive(frame, encoded_len)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::db::{Transport, WireTransportAdapter};
+    use crate::protocol::{
+        ChunkResponse, ChunkResponseBatch, ChunkResponseEntry, PermissionAdvice,
+        PermissionAdviceRequestId,
+    };
+    use crate::wire::{WIRE_PROTOCOL_VERSION, WireTransport, decode_frame};
+    use std::collections::VecDeque;
+
+    #[derive(Clone, Default)]
+    struct TestWire {
+        incoming: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        outgoing: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    }
+    impl WireTransport for TestWire {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+            self.outgoing.lock().unwrap().push_back(frame);
+            Ok(())
+        }
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            self.incoming.lock().unwrap().pop_front()
+        }
+    }
+    fn pair() -> (TestWire, TestWire) {
+        let left = TestWire::default();
+        let right = TestWire {
+            incoming: Arc::clone(&left.outgoing),
+            outgoing: Arc::clone(&left.incoming),
+        };
+        (left, right)
+    }
+
+    // Internal wire tests are needed to assert physical interleaving and actual
+    // compressed byte counts; row APIs intentionally hide those details.
+    #[test]
+    fn query_delivery_arrives_while_independent_large_chunk_is_still_in_progress() {
+        let (left, right) = pair();
+        let mut sender = WireTransportAdapter::current(left);
+        let mut receiver = WireTransportAdapter::current(right);
+        let bulk = SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
+            responses: vec![ChunkResponseEntry {
+                request_id: 1,
+                result: ChunkResponse::Found(vec![7; 200_000]),
+            }],
+        });
+        let query = SyncMessage::PermissionAdviceResponse {
+            request_id: PermissionAdviceRequestId([1; 16]),
+            advice: PermissionAdvice::Unknown,
+        };
+        sender.send(bulk.clone()).unwrap();
+        sender.send(query.clone()).unwrap();
+        assert_eq!(
+            receiver.try_recv_result().unwrap(),
+            Some(query),
+            "small delivery must overtake unfinished auxiliary bytes"
+        );
+        let mut completed = None;
+        for _ in 0..20 {
+            assert!(sender.try_recv_result().unwrap().is_none());
+            sender.poll_flush().unwrap();
+            if let Some(message) = receiver.try_recv_result().unwrap() {
+                completed = Some(message);
+                break;
+            }
+        }
+        assert_eq!(completed, Some(bulk));
+    }
+
+    pub(crate) fn compression_receipt(messages: &[SyncMessage], features: u64) -> u64 {
+        let (left, right) = pair();
+        let outgoing = Arc::clone(&left.outgoing);
+        let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+        let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
+        let mut encoded = 0;
+        for message in messages {
+            assert!(sender.try_recv_result().unwrap().is_none());
+            sender.send(message.clone()).unwrap();
+            for frame in outgoing.lock().unwrap().iter() {
+                if let WireFrame::Channel(frame) = decode_frame(frame).unwrap() {
+                    encoded += frame.extent.payload.len() as u64;
+                }
+            }
+            assert_eq!(receiver.try_recv_result().unwrap(), Some(message.clone()));
+        }
+        encoded
     }
 }

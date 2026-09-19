@@ -937,7 +937,8 @@ pub fn loopback_transport_message(
                         WireFrame::Hello(_)
                         | WireFrame::Error(_)
                         | WireFrame::MessageFragment(_)
-                        | WireFrame::Channel(_) => {
+                        | WireFrame::Channel(_)
+                        | WireFrame::ChannelCredit(_) => {
                             panic!("simulator frame decode returned non-message frame")
                         }
                     }

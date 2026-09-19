@@ -79,7 +79,7 @@ use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
-mod channel_endpoint;
+pub(crate) mod channel_endpoint;
 pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
 mod wire_transport;
 #[cfg(test)]

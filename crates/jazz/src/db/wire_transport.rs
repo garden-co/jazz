@@ -261,7 +261,9 @@ pub struct WireTransportAdapter<T> {
     endpoint: super::channel_endpoint::ChannelEndpoint,
     auxiliary: super::SharedAuxiliaryEndpoint,
     routes: BTreeMap<Vec<u8>, (u16, u64)>,
+    canonical_turns: u8,
     terminal_error: Option<TransportError>,
+    last_wire_error: Option<WireError>,
     // Retained only for historical fragment corpus tests, not live admission.
     #[cfg(test)]
     pub(super) reassembler: LogicalMessageReassembler,
@@ -321,7 +323,9 @@ impl<T: WireTransport> WireTransportAdapter<T> {
             endpoint,
             auxiliary: std::sync::Arc::new(std::sync::Mutex::new(auxiliary)),
             routes: BTreeMap::new(),
+            canonical_turns: 0,
             terminal_error: None,
+            last_wire_error: None,
             #[cfg(test)]
             reassembler: LogicalMessageReassembler::default(),
         }
@@ -399,6 +403,30 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                     }
                 }
             }
+            if !pump_owned && self.canonical_turns >= 4 {
+                let mut aux = self
+                    .auxiliary
+                    .lock()
+                    .map_err(|_| TransportError::Failed("auxiliary mutex poisoned".into()))?;
+                if aux.outbound_is_ready() {
+                    if let Some(frame) = aux.peek_outbound().map_err(TransportError::Failed)? {
+                        match self.inner.send_frame(frame) {
+                            Ok(()) => {
+                                aux.accept_outbound().map_err(TransportError::Failed)?;
+                                self.canonical_turns = 0;
+                                continue;
+                            }
+                            Err(TransportError::Backpressure) => {
+                                return Ok(WireFlushStatus::Backpressured);
+                            }
+                            Err(error) => {
+                                self.terminal_error = Some(error.clone());
+                                return Err(error);
+                            }
+                        }
+                    }
+                }
+            }
             let canonical = self
                 .endpoint
                 .peek_outbound()
@@ -409,6 +437,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                         self.endpoint
                             .accept_outbound()
                             .map_err(TransportError::Failed)?;
+                        self.canonical_turns = self.canonical_turns.saturating_add(1);
                     }
                     Err(TransportError::Backpressure) => return Ok(WireFlushStatus::Backpressured),
                     Err(error) => {
@@ -439,6 +468,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                 match self.inner.send_frame(frame) {
                     Ok(()) => {
                         aux.accept_outbound().map_err(TransportError::Failed)?;
+                        self.canonical_turns = 0;
                     }
                     Err(TransportError::Backpressure) => return Ok(WireFlushStatus::Backpressured),
                     Err(error) => {
@@ -465,12 +495,20 @@ impl<T: WireTransport> WireTransportAdapter<T> {
     /// terminate the connection; skipping a corrupt compressed extent is unsafe.
     pub fn try_recv_strict(&mut self) -> Result<Option<SyncMessage>, WireError> {
         self.try_recv_result().map_err(|error| {
-            WireError::new(
-                WireErrorCode::MalformedFrame,
-                WireRetry::AfterResume,
-                format!("{error:?}"),
-            )
+            self.last_wire_error.clone().unwrap_or_else(|| {
+                WireError::new(
+                    WireErrorCode::Internal,
+                    WireRetry::Never,
+                    format!("{error:?}"),
+                )
+            })
         })
+    }
+
+    fn send_wire_error(&mut self, error: &WireError) {
+        if let Ok(frame) = crate::wire::encode_frame(&WireFrame::Error(error.clone())) {
+            let _ = self.inner.send_frame(frame);
+        }
     }
 
     fn receive(&mut self) -> Result<Option<SyncMessage>, TransportError> {
@@ -485,6 +523,12 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                 .inbound_context
                 .decode_frame(&bytes)
                 .map_err(|error| TransportError::Failed(error.to_string()))?;
+            if let WireFrame::Channel(envelope) = &frame {
+                if let Err(error) = self.inbound_context.validate_channel_metadata(envelope) {
+                    self.last_wire_error = Some(error.clone());
+                    return Err(TransportError::Failed(error.message));
+                }
+            }
             let message = match frame {
                 WireFrame::Channel(frame)
                     if frame.extent.channel == crate::wire::channels::AUXILIARY_CHANNEL =>
@@ -511,6 +555,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                     None
                 }
                 WireFrame::Error(error) => {
+                    self.last_wire_error = Some(error.clone());
                     return Err(TransportError::Failed(format!(
                         "remote wire error: {error:?}"
                     )));
@@ -535,6 +580,13 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         if let Some(error) = &self.terminal_error {
             return Err(error.clone());
+        }
+        if let Err(error) = crate::wire::ensure_sync_message_features(
+            &message,
+            self.inbound_context.negotiated_features(),
+        ) {
+            self.send_wire_error(&error);
+            return Ok(());
         }
         if super::channel_endpoint::message_class(&message).0
             == crate::wire::channels::ChannelClass::Auxiliary
@@ -561,8 +613,30 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
         self.try_recv_result().ok().flatten()
     }
     fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        let was_terminal = self.terminal_error.is_some();
         let result = self.receive();
         if let Err(error) = &result {
+            if !was_terminal {
+                let wire_error = self
+                    .last_wire_error
+                    .clone()
+                    .or_else(|| self.endpoint.last_wire_error())
+                    .or_else(|| {
+                        self.auxiliary
+                            .lock()
+                            .ok()
+                            .and_then(|aux| aux.last_wire_error())
+                    })
+                    .unwrap_or_else(|| {
+                        WireError::new(
+                            WireErrorCode::MalformedFrame,
+                            WireRetry::Never,
+                            format!("{error:?}"),
+                        )
+                    });
+                self.send_wire_error(&wire_error);
+                self.last_wire_error = Some(wire_error);
+            }
             self.terminal_error = Some(error.clone());
         }
         result
@@ -575,6 +649,11 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
     }
     fn set_trusted_encoder(&mut self, trusted: bool) {
         self.inbound_context.set_trusted_encoder(trusted);
+        self.endpoint.set_trusted_encoder(trusted);
+        self.auxiliary
+            .lock()
+            .expect("auxiliary mutex poisoned")
+            .set_trusted_encoder(trusted);
     }
     fn wire_inbound_context(&self) -> Option<WireInboundContext> {
         Some(self.inbound_context.clone())

@@ -374,6 +374,22 @@ impl WireInboundContext {
         self.trusted_encoder = trusted;
     }
 
+    pub(crate) fn decode_semantic_payload(&self, bytes: &[u8]) -> Result<SyncMessage, WireError> {
+        if self.trusted_encoder {
+            let message = decode_sync_message_trusted(bytes).map_err(|error| {
+                WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    error.to_string(),
+                )
+            })?;
+            ensure_sync_message_features(&message, self.negotiated_features)?;
+            Ok(message)
+        } else {
+            decode_sync_message_for_features(bytes, self.negotiated_features)
+        }
+    }
+
     pub(crate) fn validate_channel_metadata(
         &self,
         frame: &WireChannelEnvelope,
@@ -2177,10 +2193,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        feature = "transport-compression-lz4",
-        feature = "transport-compression-zstd"
-    ))]
+    #[cfg(feature = "transport-compression-zstd")]
     #[test]
     fn synthetic_small_delta_streaming_compression_receipt() {
         jazz_benchmark_guard::refuse_contaminated_measurement();
@@ -2191,7 +2204,7 @@ mod tests {
             binding_id,
             read_view: Default::default(),
         };
-        let messages = (0..300_u64)
+        let messages = (1..301_u64)
             .map(|i| {
                 SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
@@ -2212,12 +2225,17 @@ mod tests {
             .collect::<Vec<_>>();
         let mut raw = 0_u64;
         let mut per_message_zstd = 0_u64;
-        let mut streaming_zstd = 0_u64;
-        let mut streaming_lz4 = 0_u64;
-        let mut zstd_encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
-        let mut zstd_decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD).unwrap();
-        let mut lz4_encoder = WireStreamEncoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
-        let mut lz4_decoder = WireStreamDecoder::new(FEATURE_PAYLOAD_LZ4).unwrap();
+        let streaming_zstd = crate::db::channel_endpoint::tests::compression_receipt(
+            &messages,
+            (current_wire_features() & !FEATURE_PAYLOAD_LZ4) | FEATURE_PAYLOAD_ZSTD,
+        );
+        #[cfg(feature = "transport-compression-lz4")]
+        let streaming_lz4 = crate::db::channel_endpoint::tests::compression_receipt(
+            &messages,
+            current_wire_features() | FEATURE_PAYLOAD_LZ4,
+        );
+        #[cfg(not(feature = "transport-compression-lz4"))]
+        let streaming_lz4 = 0_u64;
         for message in &messages {
             let payload = encode_sync_message(message).unwrap();
             raw += payload.len() as u64;
@@ -2226,20 +2244,6 @@ mod tests {
             let decompressed = decompress_sync_payload(&compressed, active).unwrap();
             assert_eq!(decompressed, payload);
             per_message_zstd += compressed.len() as u64;
-
-            let zstd_chunk = zstd_encoder.encode_message(&payload).unwrap();
-            let zstd_decoded = zstd_decoder
-                .decode_message(&zstd_chunk, FEATURE_PAYLOAD_ZSTD)
-                .unwrap();
-            assert_eq!(zstd_decoded, payload);
-            streaming_zstd += zstd_chunk.len() as u64;
-
-            let lz4_chunk = lz4_encoder.encode_message(&payload).unwrap();
-            let lz4_decoded = lz4_decoder
-                .decode_message(&lz4_chunk, FEATURE_PAYLOAD_LZ4)
-                .unwrap();
-            assert_eq!(lz4_decoded, payload);
-            streaming_lz4 += lz4_chunk.len() as u64;
         }
         eprintln!(
             "SYNTHETIC_SMALL_DELTA_COMPRESSION raw={raw} per_message_zstd={per_message_zstd} streaming_zstd={streaming_zstd} streaming_lz4={streaming_lz4}"
