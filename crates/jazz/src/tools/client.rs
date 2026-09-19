@@ -68,6 +68,191 @@ use crate::tools::{
 type CoreClientDb = CoreDb<CoreStorage>;
 type BackendConnection = Rc<LocalMutex<CorePeerConnection<CoreStorage>>>;
 
+// Credit windows bound protocol ingress; charge tiny frames as one physical slot
+// too, so a peer cannot turn the byte limit into an unbounded allocation count.
+const CLIENT_WIRE_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+fn client_wire_frame_charge(frame: &[u8]) -> usize {
+    crate::wire::channel_credit::channel_frame_credit_cost(frame.len())
+}
+
+#[derive(Default)]
+struct ClientWireQueues {
+    inbound: VecDeque<Vec<u8>>,
+    outbound: VecDeque<Vec<u8>>,
+    inbound_bytes: usize,
+    outbound_bytes: usize,
+    closed: bool,
+}
+
+#[derive(Clone)]
+struct ClientQueuedWire {
+    queues: Rc<RefCell<ClientWireQueues>>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl crate::wire::WireTransport for ClientQueuedWire {
+    fn send_frame(
+        &mut self,
+        frame: Vec<u8>,
+    ) -> std::result::Result<(), crate::wire::TransportError> {
+        let mut queues = self.queues.borrow_mut();
+        if queues.closed {
+            return Err(crate::wire::TransportError::Failed(
+                "native client wire retired".to_owned(),
+            ));
+        }
+        let charge = client_wire_frame_charge(&frame);
+        if queues.outbound_bytes.saturating_add(charge) > CLIENT_WIRE_QUEUE_BUDGET {
+            return Err(crate::wire::TransportError::Backpressure);
+        }
+        queues.outbound_bytes += charge;
+        queues.outbound.push_back(frame);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        let mut queues = self.queues.borrow_mut();
+        let frame = queues.inbound.pop_front()?;
+        queues.inbound_bytes -= client_wire_frame_charge(&frame);
+        Some(frame)
+    }
+}
+
+struct ClientNativeIo {
+    pump: crate::db::PeerIoPump,
+    transport: ClientQueuedWire,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ClientNativeIo {
+    fn drop(&mut self) {
+        self.pump.disconnect();
+        self.transport.queues.borrow_mut().closed = true;
+        self.task.abort();
+    }
+}
+
+// This owns physical I/O independently of Db::tick: evaluating a received row
+// may await chunks while holding the semantic node. Only canonical frames enter
+// its adapter; auxiliary replies and credit grants never need that node lock.
+async fn drive_native_client_wire(
+    mut wire: Box<dyn crate::wire::WireTransport + Send>,
+    mut terminal: NativeTransportTerminalFuture,
+    transport: ClientQueuedWire,
+    pump: crate::db::PeerIoPump,
+    scheduler: Rc<TickSchedulerImpl>,
+) -> NativeTransportTerminal {
+    use crate::tools::native_transport_connector::NativeTransportError;
+    use crate::wire::TransportError;
+    let failed =
+        |error: String| NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
+    let result = async {
+        loop {
+            let mut received = false;
+            // Bounded turns keep cancellation and other connections runnable.
+            for _ in 0..64 {
+                let Some(frame) = wire.try_recv_frame() else {
+                    break;
+                };
+                let routed = tokio::select! {
+                    biased;
+                    _ = scheduler.cancelled() => return NativeTransportTerminal::OwnerDropped,
+                    stopped = &mut terminal => return stopped,
+                    routed = pump.route_incoming_wire_frame(frame) => routed,
+                };
+                match routed {
+                    Ok(Some(frame)) => {
+                        let mut queues = transport.queues.borrow_mut();
+                        let charge = client_wire_frame_charge(&frame);
+                        if queues.inbound_bytes.saturating_add(charge) > CLIENT_WIRE_QUEUE_BUDGET {
+                            return failed(
+                                "native client canonical ingress exceeded its credit budget"
+                                    .to_owned(),
+                            );
+                        }
+                        queues.inbound_bytes += charge;
+                        queues.inbound.push_back(frame);
+                        scheduler.wake(TickUrgency::Immediate);
+                    }
+                    Ok(None) => {
+                        if pump.take_canonical_credit_progress() {
+                            scheduler.wake(TickUrgency::Immediate);
+                        }
+                    }
+                    Err(error) => return failed(error.to_string()),
+                }
+                received = true;
+            }
+            let mut backpressured = false;
+            for _ in 0..16 {
+                let frame = transport.queues.borrow().outbound.front().cloned();
+                let had_canonical = frame.is_some();
+                if let Some(frame) = frame {
+                    match wire.send_frame(frame) {
+                        Ok(()) => {
+                            let mut queues = transport.queues.borrow_mut();
+                            let frame = queues
+                                .outbound
+                                .pop_front()
+                                .expect("retained canonical frame");
+                            queues.outbound_bytes -= client_wire_frame_charge(&frame);
+                            scheduler.wake(TickUrgency::Immediate);
+                        }
+                        Err(TransportError::Backpressure) => {
+                            backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => return failed(error),
+                    }
+                }
+                let reservation = match pump.reserve_outbound_wire_frame() {
+                    Ok(reservation) => reservation,
+                    Err(error) => return failed(error.to_string()),
+                };
+                let had_auxiliary = reservation.is_some();
+                if let Some(mut reservation) = reservation {
+                    match wire.send_frame(reservation.take_frame()) {
+                        Ok(()) => reservation.commit(),
+                        Err(TransportError::Backpressure) => {
+                            backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => return failed(error),
+                    }
+                }
+                if !had_canonical && !had_auxiliary {
+                    break;
+                }
+            }
+            if !backpressured
+                && (received
+                    || !transport.queues.borrow().outbound.is_empty()
+                    || pump.outbound_is_ready())
+            {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            tokio::select! {
+                biased;
+                _ = scheduler.cancelled() => return NativeTransportTerminal::OwnerDropped,
+                stopped = &mut terminal => return stopped,
+                _ = transport.wake.notified() => {},
+                _ = async {
+                    if backpressured { std::future::pending::<()>().await; }
+                    pump.outbound_ready().await;
+                } => {
+                    if pump.is_disconnected() { return NativeTransportTerminal::OwnerDropped; }
+                }
+            }
+        }
+    }
+    .await;
+    pump.disconnect();
+    transport.queues.borrow_mut().closed = true;
+    result
+}
+
 const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
 const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 const TICK_DRIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
@@ -146,6 +331,7 @@ struct ClientDbInner {
     scheduler: Rc<TickSchedulerImpl>,
     tick_driver: Option<tokio::task::JoinHandle<()>>,
     upstream: Option<BackendConnection>,
+    upstream_io: Option<ClientNativeIo>,
     upstream_generation: u64,
     native_terminal_events: VecDeque<(u64, NativeTransportTerminal)>,
     upstream_recovery_generation: Option<u64>,
@@ -1367,8 +1553,8 @@ impl ClientDb {
         inner: Weak<RefCell<ClientDbInner>>,
         scheduler: Rc<TickSchedulerImpl>,
         generation: u64,
-        terminal: NativeTransportTerminalFuture,
-    ) {
+        terminal: impl Future<Output = NativeTransportTerminal> + 'static,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn_local(async move {
             let terminal = terminal.await;
             let Some(inner) = inner.upgrade() else {
@@ -1379,7 +1565,7 @@ impl ClientDb {
                 .native_terminal_events
                 .push_back((generation, terminal));
             scheduler.wake(TickUrgency::Immediate);
-        });
+        })
     }
 
     async fn handle_native_terminal(
@@ -1522,6 +1708,7 @@ impl ClientDbInner {
     }
 
     fn disconnect_upstream(&mut self) -> bool {
+        self.upstream_io.take();
         self.upstream_generation = self.upstream_generation.wrapping_add(1);
         self.upstream_recovery_generation = None;
         self.upstream_state_notify.notify_waiters();
@@ -1615,6 +1802,7 @@ impl ClientDbInner {
             scheduler,
             tick_driver: None,
             upstream: None,
+            upstream_io: None,
             upstream_generation: 0,
             native_terminal_events: VecDeque::new(),
             upstream_recovery_generation: None,
@@ -1783,6 +1971,7 @@ impl ClientDbInner {
             )
         };
 
+        let wire_wake = Arc::new(tokio::sync::Notify::new());
         let connected = Self::await_native_admission(
             inner,
             expected_generation,
@@ -1790,6 +1979,7 @@ impl ClientDbInner {
             Rc::clone(&scheduler),
             config,
             state_notify,
+            Arc::clone(&wire_wake),
         )
         .await?;
         let Some(connected) = connected else {
@@ -1807,10 +1997,14 @@ impl ClientDbInner {
             permits_delegated_sessions,
             terminal,
         } = connected;
+        let queued_wire = ClientQueuedWire {
+            queues: Rc::new(RefCell::new(ClientWireQueues::default())),
+            wake: wire_wake,
+        };
         let connection = db
             .connect_upstream(Box::new(
                 WireTransportAdapter::new_with_session_context_and_delegated_sessions(
-                    transport,
+                    queued_wire.clone(),
                     protocol_version,
                     features,
                     None,
@@ -1820,7 +2014,9 @@ impl ClientDbInner {
             ))
             .await;
 
+        let pump = connection.lock().await.io_pump();
         let Some(inner) = inner.upgrade() else {
+            pump.disconnect();
             db.detach_connection(&connection);
             return Ok(false);
         };
@@ -1843,12 +2039,23 @@ impl ClientDbInner {
             inner_state.upstream_state_notify.notify_waiters();
             inner_state.upstream_generation
         };
-        ClientDb::spawn_native_terminal_watcher(
+        let task = ClientDb::spawn_native_terminal_watcher(
             Rc::downgrade(&inner),
-            scheduler,
+            Rc::clone(&scheduler),
             generation,
-            terminal,
+            drive_native_client_wire(
+                transport,
+                terminal,
+                queued_wire.clone(),
+                pump.clone(),
+                scheduler,
+            ),
         );
+        inner.borrow_mut().upstream_io = Some(ClientNativeIo {
+            pump,
+            transport: queued_wire,
+            task,
+        });
         Ok(true)
     }
 
@@ -1859,6 +2066,7 @@ impl ClientDbInner {
         scheduler: Rc<TickSchedulerImpl>,
         config: ConnectConfig,
         state_notify: Arc<tokio::sync::Notify>,
+        wire_wake: Arc<tokio::sync::Notify>,
     ) -> Result<Option<ConnectedNativeTransport>> {
         let wake = scheduler.wake_handle();
         let admission = config.connector.connect(NativeTransportRequest {
@@ -1869,6 +2077,7 @@ impl ClientDbInner {
             peer_identity: identity.author,
             auth: config.auth,
             wake: Arc::new(move || {
+                wire_wake.notify_one();
                 wake.immediate.store(true, Ordering::Release);
                 wake.notify.notify_one();
             }),
