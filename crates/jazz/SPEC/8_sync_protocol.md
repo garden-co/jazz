@@ -698,9 +698,9 @@ MAX_LOGICAL_MESSAGE_BYTES` is the decoded semantic payload ceiling, checked
   level and are protocol-admission limits: over-limit input is rejected before
   semantic application (`INV-SYNC-28`).
 
-This is a resource-policy correction within wire-protocol v2. It introduces no
+This is a resource-policy correction within wire-protocol v3. It introduces no
 framing, codec, version, compatibility negotiation, or fallback path. An older
-v2 receiver that still applies `D` to encoded payloads may reject a newly legal
+v3 receiver that still applies `D` to encoded payloads may reject a newly legal
 encoded-edge message whose size is in `(D, E]`; senders do not retry it through
 an alternate codec or framing path.
 

@@ -65,9 +65,9 @@ LZ4 worst-case output plus its four-byte decoded-size prefix and the installed
 zstd worst-case output. Its addition/division form is wasm32-safe and avoids
 intermediate multiplication overflow.
 
-This is a resource-policy correction within wire-protocol v2 and introduces no
+This is a resource-policy correction within wire-protocol v3 and introduces no
 framing, codec, version, compatibility negotiation, or fallback path. An older
-v2 receiver that still applies `D` to encoded payloads may reject a newly legal
+v3 receiver that still applies `D` to encoded payloads may reject a newly legal
 encoded-edge message whose size is in `(D, E]`; senders do not retry it through
 an alternate codec or framing path.
 
