@@ -360,6 +360,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
             ChannelClass::Control => Some(0),
             ChannelClass::Requests => Some(1),
             ChannelClass::Writes => Some(2),
+            ChannelClass::Progress => Some(crate::wire::channels::PROGRESS_CHANNEL),
             _ => None,
         };
         if let Some(slot) = fixed {
@@ -369,7 +370,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
         if let Some(&(slot, generation)) = self.routes.get(&key) {
             return Ok((slot, generation, class, barrier));
         }
-        let slot = (3..crate::wire::channels::AUXILIARY_CHANNEL)
+        let slot = (3..crate::wire::channels::PROGRESS_CHANNEL)
             .find(|slot| self.endpoint.is_idle(*slot))
             .ok_or(TransportError::Backpressure)?;
         let generation = self
@@ -620,7 +621,7 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
             let (slot, generation, class, barrier) = self.route(&message)?;
             self.endpoint
                 .enqueue(slot, generation, class, &message, barrier)?;
-            if slot >= 3 {
+            if (3..crate::wire::channels::PROGRESS_CHANNEL).contains(&slot) {
                 self.routes.retain(|_, (existing, _)| *existing != slot);
                 self.routes
                     .insert(delivery_route_key(&message), (slot, generation));

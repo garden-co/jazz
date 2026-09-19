@@ -21,11 +21,12 @@ pub fn channel_frame_credit_cost(encoded_len: usize) -> usize {
 /// Connection-scoped flow-control state shared with the independent I/O pump.
 pub type SharedChannelCredits = Arc<Mutex<ChannelCredits>>;
 
-const WINDOWS: [usize; 5] = [
+const WINDOWS: [usize; 6] = [
     256 * 1024,
     512 * 1024,
     1024 * 1024,
     4 * 1024 * 1024,
+    1024 * 1024,
     1024 * 1024,
 ];
 fn bucket(class: ChannelClass) -> usize {
@@ -35,6 +36,7 @@ fn bucket(class: ChannelClass) -> usize {
         ChannelClass::Delivery => 2,
         ChannelClass::Writes | ChannelClass::LargeValue => 3,
         ChannelClass::Auxiliary => 4,
+        ChannelClass::Progress => 5,
     }
 }
 fn bucket_class(index: usize) -> ChannelClass {
@@ -44,12 +46,14 @@ fn bucket_class(index: usize) -> ChannelClass {
         ChannelClass::Delivery,
         ChannelClass::Writes,
         ChannelClass::Auxiliary,
+        ChannelClass::Progress,
     ][index]
 }
 
 fn buffer_bucket(class: ChannelClass, bytes: usize) -> usize {
     match class {
         ChannelClass::Auxiliary => 3,
+        ChannelClass::Progress => 5,
         ChannelClass::Control if bytes > CHANNEL_CHUNK_BYTES => 4,
         ChannelClass::Control => 0,
         _ if bytes > CHANNEL_CHUNK_BYTES => 2,
@@ -103,14 +107,14 @@ impl Drop for BufferLeaseInner {
 /// while bulk bytes await the canonical consumer.
 pub struct ChannelCredits {
     context: WireInboundContext,
-    outstanding: [usize; 5],
-    pending_grants: [usize; 5],
+    outstanding: [usize; 6],
+    pending_grants: [usize; 6],
     next_sent: u64,
     next_received: u64,
     pending: Option<(Vec<u8>, usize, usize, WireCreditKind)>,
-    sent_buffers: [BufferCost; 5],
-    received_buffers: [BufferCost; 5],
-    buffer_grants: [BufferCost; 5],
+    sent_buffers: [BufferCost; 6],
+    received_buffers: [BufferCost; 6],
+    buffer_grants: [BufferCost; 6],
     closed: bool,
     waker: Option<Waker>,
 }
@@ -121,25 +125,30 @@ impl ChannelCredits {
     pub fn new(context: WireInboundContext) -> Self {
         Self {
             context,
-            outstanding: [0; 5],
-            pending_grants: [0; 5],
+            outstanding: [0; 6],
+            pending_grants: [0; 6],
             next_sent: 0,
             next_received: 0,
             pending: None,
-            sent_buffers: [BufferCost::default(); 5],
-            received_buffers: [BufferCost::default(); 5],
-            buffer_grants: [BufferCost::default(); 5],
+            sent_buffers: [BufferCost::default(); 6],
+            received_buffers: [BufferCost::default(); 6],
+            buffer_grants: [BufferCost::default(); 6],
             closed: false,
             waker: None,
         }
     }
-    fn buffer_can_add(costs: &[BufferCost; 5], index: usize, bytes: usize) -> bool {
-        if index == 3 {
-            return costs[3]
+    fn buffer_can_add(costs: &[BufferCost; 6], index: usize, bytes: usize) -> bool {
+        if index == 3 || index == 5 {
+            return costs[index]
                 .bytes
                 .checked_add(bytes)
                 .is_some_and(|n| n <= MAX_LOGICAL_MESSAGE_BYTES)
-                && costs[3].count < MAX_CHANNEL_QUEUED_MESSAGES;
+                && costs[index].count
+                    < if index == 5 {
+                        CONTROL_RESERVE_MESSAGES
+                    } else {
+                        MAX_CHANNEL_QUEUED_MESSAGES
+                    };
         }
         let canonical = [0, 1, 2, 4];
         let total_bytes: usize = canonical.iter().map(|i| costs[*i].bytes).sum();
@@ -188,8 +197,8 @@ impl ChannelCredits {
     pub fn close(&mut self) {
         self.closed = true;
         self.pending = None;
-        self.pending_grants = [0; 5];
-        self.buffer_grants = [BufferCost::default(); 5];
+        self.pending_grants = [0; 6];
+        self.buffer_grants = [BufferCost::default(); 6];
         if let Some(waker) = self.waker.take() {
             waker.wake();
         }
@@ -297,6 +306,7 @@ impl ChannelCredits {
                         ChannelClass::Writes,
                         ChannelClass::Auxiliary,
                         ChannelClass::Control,
+                        ChannelClass::Progress,
                     ][index],
                     WireCreditKind::Messages {
                         count: cost.count as u32,
@@ -384,6 +394,54 @@ mod tests {
     }
     // Internal tests pin physical-byte credit and fixed postcard bytes, neither
     // of which can be asserted through the semantic row-query API.
+    #[test]
+    fn retained_view_capacity_cannot_block_bounded_progress_reply() {
+        let credits = Arc::new(Mutex::new(ChannelCredits::new(context())));
+        let view = ChannelCredits::receive_message(
+            &credits,
+            ChannelClass::Delivery,
+            MAX_LOGICAL_MESSAGE_BYTES,
+        )
+        .unwrap();
+        assert!(
+            ChannelCredits::receive_message(
+                &credits,
+                ChannelClass::Delivery,
+                CHANNEL_CHUNK_BYTES + 1
+            )
+            .is_err()
+        );
+        let repair = ChannelCredits::receive_message(
+            &credits,
+            ChannelClass::Progress,
+            MAX_LOGICAL_MESSAGE_BYTES,
+        )
+        .unwrap();
+        assert!(ChannelCredits::receive_message(&credits, ChannelClass::Progress, 1).is_err());
+        drop(repair);
+        assert!(
+            ChannelCredits::receive_message(
+                &credits,
+                ChannelClass::Progress,
+                MAX_LOGICAL_MESSAGE_BYTES
+            )
+            .is_ok()
+        );
+        credits.lock().unwrap().close();
+        drop(view);
+        assert_eq!(
+            credits
+                .lock()
+                .unwrap()
+                .received_buffers
+                .iter()
+                .map(|cost| cost.bytes)
+                .sum::<usize>(),
+            0
+        );
+        assert!(credits.lock().unwrap().peek_grant().unwrap().is_none());
+    }
+
     #[test]
     fn credit_byte_fixture_retry_sequence_and_unearned_grants_are_checked() {
         let mut sender = ChannelCredits::new(context());

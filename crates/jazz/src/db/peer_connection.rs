@@ -825,6 +825,7 @@ pub(super) struct UpstreamConnectionState {
     /// version and recording the ViewUpdate that needs it.
     pub(super) pending_row_version_fetches: VecDeque<PendingRowVersionFetch>,
     pub(super) pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
+    pub(super) deferred_repair_fates: VecDeque<StagedInboundMessage>,
     pub(super) scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
     pub(super) scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
     pub(super) expected_scope_authority: Option<AuthorityContext>,
@@ -982,6 +983,7 @@ pub(super) struct PendingCatalogueSubscription {
 
 pub(super) struct PendingRowVersionRepair {
     pub(super) update: SyncMessage,
+    pub(super) lease: Option<crate::wire::channel_credit::BufferLease>,
     pub(super) authority_receipt_eligible: bool,
     /// A later complete set has arrived for this exact usage. Its immutable
     /// bodies may still be useful, but this older set must never be installed.
@@ -1917,12 +1919,16 @@ where
 
         if let ConnectionLink::Upstream(UpstreamConnectionState {
             pending_row_version_repairs,
+            deferred_repair_fates,
             sent_subscriptions,
             awaiting_support_snapshots,
             pending,
             ..
         }) = &mut self.link
         {
+            for staged in deferred_repair_fates {
+                staged.authority_receipt_eligible = false;
+            }
             for repair in pending_row_version_repairs {
                 repair.authority_receipt_eligible = false;
             }
@@ -2090,6 +2096,7 @@ where
                 failed_large_value_uploads,
                 pending_row_version_fetches,
                 pending_row_version_repairs,
+                deferred_repair_fates,
                 scope_view_cuts,
                 scope_receipts,
                 expected_scope_authority,
@@ -2708,7 +2715,10 @@ where
                     let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
                     let mut deferred_stop = false;
                     loop {
-                        let next = match self.staged_inbound.pop_front() {
+                        let resumed_fate = if pending_row_version_repairs.is_empty() {
+                            deferred_repair_fates.pop_front()
+                        } else { None };
+                        let next = match resumed_fate.or_else(|| self.staged_inbound.pop_front()) {
                             Some(staged) => Some(staged),
                             None => match self.transport.try_recv_owned_result() {
                                 Ok(Some(message)) => Some(StagedInboundMessage {
@@ -2743,6 +2753,17 @@ where
                             break;
                         };
                         if let Some(lease)=&lease { received_leases.push(lease.clone()); }
+                        if matches!(&message, SyncMessage::FateUpdate { tx_id, .. }
+                            if pending_row_version_repairs.iter().any(|repair|
+                                view_update_mentions_transaction(&repair.update, *tx_id))) {
+                            if deferred_repair_fates.len() >= crate::wire::channels::MAX_CHANNEL_QUEUED_MESSAGES {
+                                return Err(Error::new(ErrorCode::Protocol, "deferred repair fate queue exceeded"));
+                            }
+                            deferred_repair_fates.push_back(StagedInboundMessage {
+                                message, lease, authority_receipt_eligible,
+                            });
+                            continue;
+                        }
                         let write_state_tx_id = write_state_update_tx_id(&message);
                         #[cfg(feature = "sync-autopsy")]
                         sync_autopsy::record(format!(
@@ -2999,6 +3020,7 @@ where
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 }
                                 let repair = pending_row_version_repairs.pop_front().expect("active repair");
+                                if let Some(lease) = repair.lease { received_leases.push(lease); }
                                 if !repair.superseded {
                                 let (subscription, settled_through) = match &repair.update {
                                     SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -3027,6 +3049,7 @@ where
                                 {
                                     pending_row_version_fetches.pop_front();
                                     let successor = pending_row_version_repairs.pop_front().expect("paired pending successor");
+                                    if let Some(lease) = successor.lease { received_leases.push(lease); }
                                     if successor.superseded { continue; }
                                     stage_initial_coverage_clear_for_update(&successor.update,
                                         &self.latest_coverage_subscriptions, &mut pending_initial_coverage_clears);
@@ -3190,6 +3213,7 @@ where
                                     pending_row_version_repairs.push_back(
                                         PendingRowVersionRepair {
                                             update: message,
+                                            lease: lease.clone(),
                                             authority_receipt_eligible,
                                             superseded: false,
                                         },
@@ -6389,6 +6413,21 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
         },
         _ => unreachable!("expected view update message"),
     }
+}
+
+fn view_update_mentions_transaction(message: &SyncMessage, tx_id: TxId) -> bool {
+    let SyncMessage::ViewUpdate(view) = message else {
+        return false;
+    };
+    view.supporting_rows
+        .added_rows()
+        .iter()
+        .any(|row| row.version.tx == tx_id)
+        || view.version_carriers.iter().any(|carrier| {
+            carrier
+                .bundle_refs()
+                .is_ok_and(|bundles| bundles.iter().any(|bundle| bundle.tx.tx_id == tx_id))
+        })
 }
 
 fn push_view_update_message_for_receiver(

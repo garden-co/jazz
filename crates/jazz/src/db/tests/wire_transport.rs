@@ -1909,13 +1909,34 @@ fn rejected_dynamic_channel_admission_preserves_generation() {
 /// must still install the snapshot before attempting to apply that fate.
 #[test]
 fn reordered_delivery_and_fate_apply_in_dependency_order_to_real_client() {
+    real_client_reordered_delivery_and_fate(false, false);
+}
+
+#[test]
+fn repaired_wire_view_keeps_lease_and_defers_dependent_fate() {
+    real_client_reordered_delivery_and_fate(true, false);
+}
+
+#[test]
+fn disconnect_releases_retained_wire_repair_and_fate() {
+    real_client_reordered_delivery_and_fate(true, true);
+}
+
+fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
     struct Tap {
         inner: WireTransportAdapter<ByteDuplexTransport>,
         sent: Rc<RefCell<Vec<SyncMessage>>>,
+        omit_bodies: bool,
     }
     impl Transport for Tap {
         fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-            self.inner.send(message.clone())?;
+            let mut wire_message = message.clone();
+            if self.omit_bodies {
+                if let SyncMessage::ViewUpdate(view) = &mut wire_message {
+                    view.version_carriers.clear();
+                }
+            }
+            self.inner.send(wire_message)?;
             self.sent.borrow_mut().push(message);
             Ok(())
         }
@@ -1938,19 +1959,50 @@ fn reordered_delivery_and_fate_apply_in_dependency_order_to_real_client() {
         .insert_with_id(
             "todos",
             row(0xc3),
-            cells("dependency ordered", false, alice),
+            cells(
+                &if repair {
+                    "r".repeat(40 * 1024)
+                } else {
+                    "dependency ordered".to_owned()
+                },
+                false,
+                alice,
+            ),
         )
         .unwrap();
+    if repair {
+        server
+            .insert_with_id(
+                "todos",
+                row(0xc5),
+                cells(&"s".repeat(40 * 1024), false, alice),
+            )
+            .unwrap();
+    }
     let client = open_db(0xc4, alice, &schema);
     let (client_bytes, server_bytes) = byte_duplex_raw();
     let inbound = Rc::clone(&client_bytes.inbound);
     let sent = Rc::new(RefCell::new(Vec::new()));
-    let upstream =
-        block_on(client.connect_upstream(Box::new(WireTransportAdapter::current(client_bytes))));
+    let client_adapter = WireTransportAdapter::current(client_bytes);
+    let receiver_credits = client_adapter
+        .shared_auxiliary_endpoint()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .channel_credits();
+    let server_adapter = WireTransportAdapter::current(server_bytes);
+    let sender_credits = server_adapter
+        .shared_auxiliary_endpoint()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .channel_credits();
+    let upstream = block_on(client.connect_upstream(Box::new(client_adapter)));
     let subscriber = server.accept_subscriber(
         Box::new(Tap {
-            inner: WireTransportAdapter::current(server_bytes),
+            inner: server_adapter,
             sent: Rc::clone(&sent),
+            omit_bodies: repair,
         }),
         alice,
     );
@@ -2006,8 +2058,170 @@ fn reordered_delivery_and_fate_apply_in_dependency_order_to_real_client() {
     block_on(async { upstream.lock().await.tick().await })
         .expect("fate cannot run before its snapshot introduces the transaction");
     client.tick().unwrap();
+    if repair {
+        {
+            let upstream = upstream.borrow();
+            let ConnectionLink::Upstream(state) = &upstream.link else {
+                unreachable!()
+            };
+            assert_eq!(state.pending_row_version_repairs.len(), 1);
+            assert!(
+                state.pending_row_version_repairs[0].lease.is_some(),
+                "retained view owns its reservation"
+            );
+            assert_eq!(state.deferred_repair_fates.len(), 1);
+            assert!(
+                state.deferred_repair_fates[0].lease.is_some(),
+                "deferred fate owns its reservation"
+            );
+        }
+        if detach {
+            assert!(client.detach_connection(&upstream));
+            let upstream = upstream.borrow();
+            let ConnectionLink::Upstream(state) = &upstream.link else {
+                unreachable!()
+            };
+            assert!(state.pending_row_version_repairs.is_empty());
+            assert!(state.deferred_repair_fates.is_empty());
+            assert!(upstream.staged_inbound.is_empty());
+            return;
+        }
+        // Model another retained bulk view without allocating D bytes. The
+        // real repair below exceeds one extent and must use progress capacity.
+        use crate::wire::channel_credit::ChannelCredits;
+        use crate::wire::channels::ChannelClass;
+        let held_bulk = ChannelCredits::receive_message(
+            &receiver_credits,
+            ChannelClass::Delivery,
+            crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES,
+        )
+        .unwrap();
+        sender_credits.lock().unwrap().reserve_message(
+            ChannelClass::Delivery,
+            crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES,
+        );
+        for _ in 0..32 {
+            subscriber.borrow_mut().tick().unwrap();
+            client.tick().unwrap();
+        }
+        assert!(
+            sent.borrow().iter().any(|message| matches!(
+                message,
+                SyncMessage::RowVersionPayloads { .. }
+            ) && crate::wire::encode_sync_message(message)
+                .unwrap()
+                .len()
+                > crate::wire::channels::CHANNEL_CHUNK_BYTES),
+            "repair genuinely needs bulk-sized progress capacity"
+        );
+        drop(held_bulk);
+        let upstream = upstream.borrow();
+        let ConnectionLink::Upstream(state) = &upstream.link else {
+            unreachable!()
+        };
+        assert!(state.pending_row_version_repairs.is_empty());
+        assert!(state.deferred_repair_fates.is_empty());
+    }
     assert_eq!(
         row_ids(&prepared_read(&client, &Query::from("todos"))),
-        vec![row(0xc3)]
+        if repair {
+            vec![row(0xc3), row(0xc5)]
+        } else {
+            vec![row(0xc3)]
+        }
+    );
+}
+#[test]
+fn deferred_view_retains_fate_dependency() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xb2, alice, &schema);
+    let row = RowUuid::from_bytes([0xb3; 16]);
+    server
+        .insert_with_id("todos", row, cells("0", false, alice))
+        .unwrap();
+    let (upstream, downstream, _requests, responses) = duplex_with_taps();
+    let upstream = block_on(client.connect_upstream(upstream));
+    let subscriber = server.accept_subscriber(downstream, alice);
+    let mut stream =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    let mut held = Vec::new();
+    let mut introduced = None;
+    let mut snapshot = RelationSnapshot::default();
+    for revision in 0..2 {
+        if revision > 0 {
+            server
+                .update(
+                    "todos",
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
+                )
+                .unwrap();
+        }
+        for _ in 0..8 {
+            subscriber.borrow_mut().tick().unwrap();
+            // Only the first snapshot needs a body fetch. Later deltas carry
+            // their own bodies but must wait behind that predecessor.
+            responses.borrow_mut().retain_mut(|message| {
+                match message {
+                    SyncMessage::ViewUpdate(payload) if payload.supporting_rows.is_snapshot() => {
+                        payload.version_carriers.clear();
+                    }
+                    SyncMessage::ViewUpdate(payload) => {
+                        introduced = payload
+                            .supporting_rows
+                            .added_rows()
+                            .first()
+                            .map(|row| row.version.tx);
+                    }
+                    SyncMessage::RowVersionPayloads { .. } => {
+                        held.push(message.clone());
+                        return false;
+                    }
+                    _ => {}
+                }
+                true
+            });
+            client.tick().unwrap();
+            while let Some(event) = stream.try_next_event() {
+                apply_subscription_event(&mut snapshot, event);
+            }
+        }
+    }
+    responses.borrow_mut().push_back(SyncMessage::FateUpdate {
+        tx_id: introduced.expect("later delta introduces transaction"),
+        fate: Fate::Accepted,
+        global_time: None,
+        durability: Some(DurabilityTier::Edge),
+    });
+    client
+        .tick()
+        .expect("fate following an admitted but body-deferred view must remain valid");
+    let queued = match &upstream.borrow().link {
+        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
+        _ => unreachable!("client upstream"),
+    };
+    assert!(
+        queued == 2,
+        "snapshot and all dependent deltas must remain ordered: {queued}"
+    );
+    assert!(
+        snapshot.rows.is_empty(),
+        "no successor may install before its missing predecessor"
+    );
+    assert!(!held.is_empty(), "the first repair was actually delayed");
+    responses.borrow_mut().extend(held);
+    for _ in 0..24 {
+        subscriber.borrow_mut().tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+    }
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("1".to_owned()))
     );
 }

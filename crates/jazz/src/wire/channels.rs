@@ -20,7 +20,7 @@ pub const CONTROL_RESERVE_BYTES: usize = 1024 * 1024;
 pub const INTERACTIVE_RESERVE_BYTES: usize = 8 * 1024 * 1024;
 /// Aggregate decoded staging budget mirrored by both channel endpoints.
 pub const MAX_CHANNEL_BUFFER_BYTES: usize =
-    MAX_LOGICAL_MESSAGE_BYTES + INTERACTIVE_RESERVE_BYTES + CONTROL_RESERVE_BYTES;
+    2 * MAX_LOGICAL_MESSAGE_BYTES + INTERACTIVE_RESERVE_BYTES + CONTROL_RESERVE_BYTES;
 /// Maximum retained logical messages, independently of their byte sizes.
 pub const MAX_CHANNEL_QUEUED_MESSAGES: usize = 1024;
 /// Slots unavailable to data traffic so tiny messages cannot starve control.
@@ -32,6 +32,8 @@ pub const CHANNEL_HEADER_BYTES: usize = 64;
 pub const CONTROL_CHANNEL: u16 = 0;
 /// Fixed auxiliary lane shared with the lock-independent chunk pump.
 pub const AUXILIARY_CHANNEL: u16 = 63;
+/// Reserved stream for bounded dependency-resolution traffic.
+pub const PROGRESS_CHANNEL: u16 = 62;
 
 /// Stable scheduling class. Its value is explicitly encoded as one byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -49,6 +51,8 @@ pub enum ChannelClass {
     LargeValue = 4,
     /// Immutable chunk lookup/response traffic without semantic authority.
     Auxiliary = 5,
+    /// Replies needed to release buffers retained by ordinary traffic.
+    Progress = 6,
 }
 
 /// Physical channel extent. `sequence` is contiguous within one generation;
@@ -84,6 +88,9 @@ impl ChannelFrame {
         }
         if (self.channel == AUXILIARY_CHANNEL) != (self.class == ChannelClass::Auxiliary) {
             return Err("auxiliary class must use reserved auxiliary channel".into());
+        }
+        if (self.channel == PROGRESS_CHANNEL) != (self.class == ChannelClass::Progress) {
+            return Err("progress class must use reserved progress channel".into());
         }
         if (self.channel == CONTROL_CHANNEL) != (self.class == ChannelClass::Control) {
             return Err("control class must use the reserved channel".into());
@@ -175,13 +182,15 @@ pub struct ScheduledChunk<'a> {
 pub struct ChannelScheduler {
     channels: BTreeMap<u16, OutboundChannel>,
     round_cursor: usize,
-    class_cursor: [u16; 6],
+    class_cursor: [u16; 7],
     selected: Option<u16>,
     bytes: usize,
     data_bytes: usize,
     messages: usize,
     data_messages: usize,
     bulk_bytes: usize,
+    progress_bytes: usize,
+    progress_messages: usize,
 }
 
 impl ChannelScheduler {
@@ -197,6 +206,7 @@ impl ChannelScheduler {
         if usize::from(channel) >= MAX_CHANNELS
             || (channel == CONTROL_CHANNEL) != (class == ChannelClass::Control)
             || (channel == AUXILIARY_CHANNEL) != (class == ChannelClass::Auxiliary)
+            || (channel == PROGRESS_CHANNEL) != (class == ChannelClass::Progress)
         {
             return Err("invalid channel slot or class".into());
         }
@@ -204,17 +214,22 @@ impl ChannelScheduler {
         if len == 0 || len > MAX_LOGICAL_MESSAGE_BYTES {
             return Err("invalid logical message size".into());
         }
-        if self.messages == MAX_CHANNEL_QUEUED_MESSAGES
+        if class == ChannelClass::Progress {
+            if self.progress_messages >= CONTROL_RESERVE_MESSAGES
+                || self.progress_bytes + len > MAX_LOGICAL_MESSAGE_BYTES
+            {
+                return Err("progress channel queue backpressure".into());
+            }
+        } else if self.messages - self.progress_messages >= MAX_CHANNEL_QUEUED_MESSAGES
             || (class != ChannelClass::Control
                 && self.data_messages >= MAX_CHANNEL_QUEUED_MESSAGES - CONTROL_RESERVE_MESSAGES)
-            || self.bytes + len > MAX_CHANNEL_BUFFER_BYTES
+            || self.bytes - self.progress_bytes + len
+                > MAX_CHANNEL_BUFFER_BYTES - MAX_LOGICAL_MESSAGE_BYTES
             || (class != ChannelClass::Control
                 && self.data_bytes + len > MAX_LOGICAL_MESSAGE_BYTES + INTERACTIVE_RESERVE_BYTES)
+            || (len > CHANNEL_CHUNK_BYTES && self.bulk_bytes + len > MAX_LOGICAL_MESSAGE_BYTES)
         {
             return Err("channel queue backpressure".into());
-        }
-        if len > CHANNEL_CHUNK_BYTES && self.bulk_bytes + len > MAX_LOGICAL_MESSAGE_BYTES {
-            return Err("bulk channel queue backpressure".into());
         }
         if let Some(state) = self.channels.get(&channel) {
             if (state.generation != generation || state.class != class)
@@ -247,10 +262,13 @@ impl ChannelScheduler {
             offset: 0,
         });
         self.bytes += len;
-        if len > CHANNEL_CHUNK_BYTES {
+        if class == ChannelClass::Progress {
+            self.progress_bytes += len;
+            self.progress_messages += 1;
+        } else if len > CHANNEL_CHUNK_BYTES {
             self.bulk_bytes += len;
         }
-        if class != ChannelClass::Control {
+        if !matches!(class, ChannelClass::Control | ChannelClass::Progress) {
             self.data_bytes += len;
             self.data_messages += 1;
         }
@@ -274,7 +292,7 @@ impl ChannelScheduler {
             // Weight classes, then round-robin within each class: a newly
             // admitted request waits at most one finite 18-frame class round,
             // independent of how many large transfers are already active.
-            const ROUND: [ChannelClass; 18] = [
+            const ROUND: [ChannelClass; 20] = [
                 ChannelClass::Control,
                 ChannelClass::Control,
                 ChannelClass::Control,
@@ -293,6 +311,8 @@ impl ChannelScheduler {
                 ChannelClass::Writes,
                 ChannelClass::LargeValue,
                 ChannelClass::Auxiliary,
+                ChannelClass::Progress,
+                ChannelClass::Progress,
             ];
             for _ in 0..ROUND.len() {
                 let class = ROUND[self.round_cursor];
@@ -356,10 +376,13 @@ impl ChannelScheduler {
             state.messages.pop_front();
             state.bytes -= len;
             self.bytes -= len;
-            if len > CHANNEL_CHUNK_BYTES {
+            if state.class == ChannelClass::Progress {
+                self.progress_bytes -= len;
+                self.progress_messages -= 1;
+            } else if len > CHANNEL_CHUNK_BYTES {
                 self.bulk_bytes -= len;
             }
-            if state.class != ChannelClass::Control {
+            if !matches!(state.class, ChannelClass::Control | ChannelClass::Progress) {
                 self.data_bytes -= len;
                 self.data_messages -= 1;
             }

@@ -88,12 +88,18 @@ the single canonical FIFO. It enters that FIFO next and opens the following
 epoch; complete messages received early from that epoch remain bounded staged
 inputs. This is not a global reorder of every message.
 
-The canonical consumer preserves that FIFO, including front deferral during
-catalogue activation. FIFO admission is therefore sufficient for dependencies;
+The canonical consumer preserves that FIFO across catalogue front deferral.
+Views parked for body repair retain their reservation, and fates referring to
+those views wait in a bounded semantic queue while repair replies continue.
+FIFO admission plus these consumer dependency rules preserve ordering;
 it is not an acknowledgement of query completion, durability or transaction
 settlement. There is no round trip per barrier. Immutable auxiliary reads and
 transport credits bypass canonical epochs so an operation waiting for storage
 chunks can still finish.
+
+RowVersionPayloads replies use the reserved progress stream 62. They retain
+ordinary epoch ordering but have independent byte capacity so a view holding
+ordinary capacity can receive the body needed to release it.
 
 ### Resource and scheduling contract
 
@@ -114,12 +120,18 @@ Receiver leases begin at the first extent and survive upper-layer staging,
 canonical FIFO dequeue, batching and front deferral. Thus moving a message
 between queues cannot evade the bound or starve an earlier predecessor of
 already-reserved capacity. Auxiliary buffers have their independent D-byte
-window. Closing a connection retires its credit state; old lease drops cannot
+window. A view waiting for missing row bodies retains its lease in the repair
+queue. A later fate referring to a transaction in that view retains its own
+lease and waits for repair/application; unrelated authored transaction fates
+continue normally. Repair responses remain receivable and apply before the
+deferred fates. This semantic repair queue is distinct from catalogue front
+deferral, so FIFO admission alone is not claimed to complete a parked view.
+Detaching a connection drops repair and fate queues. Closing a connection retires its credit state; old lease drops cannot
 fund a new connection.
 
 Scheduling weights apply to classes, then round-robin among channels within a
 class. Each finite canonical round assigns control eight frames, requests four,
-delivery two, writes two and large values one. The independent auxiliary owner
+delivery two, writes two, large values one and progress replies two. The independent auxiliary owner
 uses its bounded output pump; without an external binding owner, the adapter
 admits a ready auxiliary extent after at most four canonical extents. A newly admitted request
 therefore does not wait behind a full round for every busy bulk channel. A class
@@ -159,6 +171,12 @@ for control. Bulk buffers, including large catalogue messages, share the D-byte
 bulk limit; the control reserve is not a maximum catalogue size. Auxiliary
 buffers have a separate D-byte limit. The canonical count limit is
 1,024, with eight slots reserved for control; auxiliary has its own 1,024 limit.
+Progress replies have a separate D-byte/eight-message reservation and a fixed
+stream (slot 62); dynamic delivery slots stop before that slot. Only Jazz's
+RowVersionPayloads is routed to this generic byte priority. This extra maximum
+message is necessary when a retained maximum-size view needs a maximum-size
+repair response. A second such response cannot be retained simultaneously.
+The raw scheduler also preserves progress admission beside a full ordinary queue.
 Frame grants and buffer grants share the same reliable ordered control stream
 and grant sequence. Holding a decoded buffer does not hold physical-frame
 credit, and releasing physical-frame credit does not release the decoded lease.
@@ -175,8 +193,8 @@ length-prefixed payload bytes. The first extent carries a nonzero semantic size;
 continuations carry zero. Unsigned integers and enum tags use unsigned LEB128;
 booleans are exactly 0 or 1. There are no native-width wire integers.
 
-Class tags are control 0, requests 1, delivery 2, writes 3, large value 4 and
-auxiliary 5. Credit fields are protocol version (u16), features (u64), optional
+Class tags are control 0, requests 1, delivery 2, writes 3, large value 4,
+auxiliary 5 and progress 6. Credit fields are protocol version (u16), features (u64), optional
 WireSession, class, grant sequence (u64), consumed byte charges (u64), and scope.
 Scope tag 0 releases physical frames; tag 1 additionally carries a released
 message count (u32) and bulk flag (bool). A shared bulk grant canonically names
