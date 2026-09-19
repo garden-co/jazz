@@ -296,7 +296,8 @@ where
     pub(super) chunk_resolver: PeerChunkResolver,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
     pub(super) observed_chunk_completion_generation: Cell<u64>,
-    local_availability_dirty: Cell<bool>,
+    local_subscription_dirty_generation: Cell<u64>,
+    observed_local_subscription_dirty_generation: Cell<u64>,
 }
 
 impl<S> Node<S>
@@ -434,7 +435,8 @@ where
             chunk_resolver,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
-            local_availability_dirty: Cell::new(false),
+            local_subscription_dirty_generation: Cell::new(0),
+            observed_local_subscription_dirty_generation: Cell::new(0),
         }
     }
 
@@ -1080,6 +1082,11 @@ where
             .query_runtime_wake_pending
             .swap(false, Ordering::AcqRel)
         {
+            self.local_subscription_dirty_generation.set(
+                self.local_subscription_dirty_generation
+                    .get()
+                    .wrapping_add(1),
+            );
             self.mark_subscriber_connections_dirty();
         }
     }
@@ -3298,7 +3305,12 @@ where
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
-        if self.local_availability_dirty.replace(false)
+        // Another query can finish a local subscription's first terminal batch
+        // before this turn. Groove is then idle, but the queued terminal still
+        // needs to be folded into the application stream. Preserve its wake as
+        // local delivery work as well as downstream peer publication work.
+        let local_dirty_generation = self.local_subscription_dirty_generation.get();
+        if local_dirty_generation != self.observed_local_subscription_dirty_generation.get()
             || self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
             || self.node.lock().await.has_pending_query_runtime()
@@ -3310,6 +3322,10 @@ where
                 progress_waker.as_ref(),
             ))
             .await?;
+            // Acknowledge only completed delivery. Cancellation/error retains
+            // this generation, and wakes consumed during refresh remain dirty.
+            self.observed_local_subscription_dirty_generation
+                .set(local_dirty_generation);
             self.observed_chunk_completion_generation
                 .set(chunk_completion_generation);
         }
@@ -3617,7 +3633,11 @@ where
                             drop(owner);
                             self.subscriber_dirty_epoch
                                 .set(self.subscriber_dirty_epoch.get().wrapping_add(1));
-                            self.local_availability_dirty.set(true);
+                            self.local_subscription_dirty_generation.set(
+                                self.local_subscription_dirty_generation
+                                    .get()
+                                    .wrapping_add(1),
+                            );
                             self.schedule_tick(TickUrgency::Immediate);
                         }
                     }
