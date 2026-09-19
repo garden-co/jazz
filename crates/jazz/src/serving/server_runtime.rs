@@ -2009,6 +2009,7 @@ fn notify_shell_activity(activity_tx: &watch::Sender<u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::WireTransportAdapter;
     use crate::protocol::{ReadViewKey, Subscribe, SubscriptionKey};
     use crate::query::{BindingId, Query, ShapeId};
     use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -2022,6 +2023,7 @@ mod tests {
     #[derive(Default)]
     struct QueuedWireTransport {
         inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        outbound: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     impl QueuedWireTransport {
@@ -2031,7 +2033,8 @@ mod tests {
     }
 
     impl WireTransport for QueuedWireTransport {
-        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+            self.outbound.lock().unwrap().push(frame);
             Ok(())
         }
 
@@ -2261,47 +2264,32 @@ mod tests {
         let session = shell
             .accept_subscriber_session(AuthorSubject::for_test_bytes([0x77; 16]))
             .unwrap();
-        let mut sequence = 0;
-        let mut encode_request = |message: SyncMessage| {
-            let payload = encode_sync_message(&message).unwrap();
-            let frame = encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
-                protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
-                features: crate::wire::FEATURE_NONE,
-                session: None,
-                extent: crate::wire::channels::ChannelFrame {
-                    channel: 1,
-                    generation: 0,
-                    sequence,
-                    class: crate::wire::channels::ChannelClass::Requests,
-                    first: true,
-                    last: true,
-                    message_len: payload.len() as u32,
-                    decoded_len: payload.len() as u32,
-                    payload,
-                },
+        let wire = QueuedWireTransport::default();
+        let outbound = Arc::clone(&wire.outbound);
+        let mut client = WireTransportAdapter::new(
+            wire,
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+        client
+            .send(SyncMessage::RegisterShape {
+                shape_id: shape.shape_id(),
+                ast: crate::protocol::ShapeAst::from_validated(&shape),
+                opts: crate::protocol::RegisterShapeOptions::default(),
+            })
+            .unwrap();
+        client
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
             }))
             .unwrap();
-            sequence += 1;
-            frame
-        };
         shell
-            .receive_frames(
-                session,
-                [
-                    encode_request(SyncMessage::RegisterShape {
-                        shape_id: shape.shape_id(),
-                        ast: crate::protocol::ShapeAst::from_validated(&shape),
-                        opts: crate::protocol::RegisterShapeOptions::default(),
-                    }),
-                    encode_request(SyncMessage::Subscribe(Subscribe {
-                        shape_id: shape.shape_id(),
-                        subscription,
-                        values: Vec::new(),
-                        known_state: None,
-                        delegated_session: None,
-                    })),
-                ],
-            )
+            .receive_frames(session, std::mem::take(&mut *outbound.lock().unwrap()))
             .unwrap();
         shell.tick().unwrap();
         assert_eq!(
@@ -2741,7 +2729,16 @@ mod tests {
         .await
         .expect("timer alone must retire the failed persistent output stream");
         let mut healthy_stream = runtime.open_wire_stream(healthy).unwrap();
-        let requests = [
+        let wire = QueuedWireTransport::default();
+        let inbound = Arc::clone(&wire.inbound);
+        let outbound = Arc::clone(&wire.outbound);
+        let mut client = WireTransportAdapter::new(
+            wire,
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+        for message in [
             SyncMessage::RegisterShape {
                 shape_id: shape.shape_id(),
                 ast: crate::protocol::ShapeAst::from_validated(&shape),
@@ -2754,31 +2751,12 @@ mod tests {
                 known_state: None,
                 delegated_session: None,
             }),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(sequence, message)| {
-            let payload = encode_sync_message(&message).unwrap();
-            encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
-                protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
-                features: crate::wire::FEATURE_NONE,
-                session: None,
-                extent: crate::wire::channels::ChannelFrame {
-                    channel: 1,
-                    generation: 0,
-                    sequence: sequence as u64,
-                    class: crate::wire::channels::ChannelClass::Requests,
-                    first: true,
-                    last: true,
-                    message_len: payload.len() as u32,
-                    decoded_len: payload.len() as u32,
-                    payload,
-                },
-            }))
-            .unwrap()
-        })
-        .collect();
-        runtime.receive_wire_frames(healthy, requests).unwrap();
+        ] {
+            client.send(message).unwrap();
+        }
+        runtime
+            .receive_wire_frames(healthy, std::mem::take(&mut *outbound.lock().unwrap()))
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let frames = tokio::select! {
@@ -2789,16 +2767,16 @@ mod tests {
                         continue;
                     }
                 };
-                for bytes in frames {
-                    if let WireFrame::Channel(frame) = crate::wire::decode_frame(&bytes).unwrap() {
-                        assert!(frame.extent.first && frame.extent.last);
-                        if let SyncMessage::ViewUpdate(update) =
-                            crate::wire::decode_sync_message(&frame.extent.payload).unwrap()
-                        {
-                            assert_eq!(update.subscription, subscription);
-                            return;
-                        }
+                inbound.lock().unwrap().extend(frames);
+                while let Some(message) = client.try_recv_strict().unwrap() {
+                    if let SyncMessage::ViewUpdate(update) = message {
+                        assert_eq!(update.subscription, subscription);
+                        return;
                     }
+                }
+                let credits = std::mem::take(&mut *outbound.lock().unwrap());
+                if !credits.is_empty() {
+                    runtime.receive_wire_frames(healthy, credits).unwrap();
                 }
             }
         })
