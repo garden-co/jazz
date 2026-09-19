@@ -12,7 +12,7 @@ fixture data, not an adopter schema. See
 [#2985](https://github.com/garden-co/jazz/issues/2985) and the performance log
 [#2913](https://github.com/garden-co/jazz/issues/2913).
 
-## Measurement contract (fixture revision 1)
+## Measurement contract (fixture revision 2)
 
 Each sample reads the first page of 50 documents ordered by descending
 `updated_at`, with a literal equality on `owner_id` or `org_id`. All reads use
@@ -21,10 +21,19 @@ updates, LocalOnly propagation, and exclude deleted rows. The database is
 history-complete. The original one-shot cases measure no transport or
 subscription delivery.
 
-Compare identical data, indexes and queries across no document policy,
+Compare identical data, indexes and queries across an explicit unrestricted SELECT policy,
 owner-only policy, and owner OR inherited organization membership. The owner
-query returns 50 rows in all three arms; the org query has a matched policy-free
+query returns 50 rows in all three arms; the org query has a matched unrestricted
 and inherited-policy pair. Organization membership is fixed as scale grows.
+The unrestricted control uses `PolicyExpr::True`: omitted policies now deny
+non-SYSTEM reads under `INV-RLS-15`. Historical `policy_free_*` benchmark IDs
+remain stable, but their intended contract is an unrestricted result, never an
+empty denied read. Revision 2 adapts the fixture to current authorization semantics;
+data, queries, identities, expected rows and timing boundaries are unchanged.
+Retain the explicit revision boundary when comparing to revision 1: the control
+now compiles an allow-all policy instead of relying on an implicit grant. Do not
+compare a missing-policy empty result as an equivalent workload.
+
 Owner 3 owns the newest documents in organization 0, so the measured organization
 page requires inherited access; it cannot pass through ownership alone.
 The declared indexes on owner, organization and timestamp are independent

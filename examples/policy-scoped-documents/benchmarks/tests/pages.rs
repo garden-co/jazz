@@ -4,7 +4,7 @@ use jazz_example_policy_scoped_documents_benchmark::{
 
 #[test]
 fn subscription_hydration_has_the_exact_independently_expected_page() {
-    for policy in [Policy::None, Policy::Owner, Policy::OwnerOrOrg] {
+    for policy in [Policy::Unrestricted, Policy::Owner, Policy::OwnerOrOrg] {
         let fixture = Fixture::new(1_000, policy);
         for (page, expected) in [
             (
@@ -59,7 +59,7 @@ fn timed_organization_page_cannot_be_satisfied_by_direct_ownership() {
 // branches, non-members, exact descending order, empty and oversized pages.
 #[test]
 fn pages_match_exact_authorized_membership_and_order() {
-    for policy in [Policy::None, Policy::Owner, Policy::OwnerOrOrg] {
+    for policy in [Policy::Unrestricted, Policy::Owner, Policy::OwnerOrOrg] {
         let fixture = Fixture::new(1_000, policy);
         for identity in [1, 2] {
             for page in [
@@ -82,7 +82,7 @@ fn pages_match_exact_authorized_membership_and_order() {
                                 Page::Org(requested) => org == requested,
                             };
                             let allowed = match policy {
-                                Policy::None => true,
+                                Policy::Unrestricted => true,
                                 Policy::Owner => owner == identity,
                                 Policy::OwnerOrOrg => {
                                     owner == identity || org * OWNERS_PER_ORG + 2 == identity

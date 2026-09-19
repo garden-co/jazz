@@ -3,8 +3,8 @@ import type { BenchmarkMetadata } from "../../../dev/benchmarks/metadata/types.t
 const cases = [
   [
     "policy_free_owner_page50",
-    "Policy-free owner page",
-    "literal owner equality; no document policy",
+    "Unrestricted owner page",
+    "literal owner equality; explicit allow-all document SELECT policy",
   ],
   ["owner_policy_page50", "Permissioned owner page", "literal owner equality; owner policy"],
   [
@@ -14,8 +14,8 @@ const cases = [
   ],
   [
     "policy_free_org_page50",
-    "Policy-free organization page",
-    "literal organization equality; no document policy",
+    "Unrestricted organization page",
+    "literal organization equality; explicit allow-all document SELECT policy",
   ],
   [
     "owner_or_org_policy_org_page50",
@@ -31,7 +31,7 @@ export const policyDocumentBenchmarks: BenchmarkMetadata[] = cases.flatMap(
         name: `${subscription ? "subscribe_" : ""}${name}[${rows}]`,
         title: `${subscription ? "Subscription: " : ""}${title}`,
         description: `First descending-timestamp page of 50 documents: ${predicate}. Admitted non-SYSTEM identity, ${subscription ? "Local subscription first result" : "Global one-shot"}, no network.`,
-        fixture: `Revision 1: ${rows.toLocaleString("en-US")} documents, 100 owners, 25 organizations; ${rows / 100} documents per owner. Separate single-column indexes, not a compound ordering.`,
+        fixture: `Revision 2 (explicit unrestricted SELECT control): ${rows.toLocaleString("en-US")} documents, 100 owners, 25 organizations; ${rows / 100} documents per owner. Separate single-column indexes, not a compound ordering.`,
         storage: "RocksDB WalNoSync; fresh runtime over seeded store, OS cache not flushed",
         includes: [
           subscription

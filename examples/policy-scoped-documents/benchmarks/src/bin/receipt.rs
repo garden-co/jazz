@@ -11,7 +11,7 @@ fn main() {
         .unwrap_or_else(|| "10000".into())
         .parse()
         .expect("first argument: row count, positive multiple of 100");
-    for policy in [Policy::None, Policy::Owner, Policy::OwnerOrOrg] {
+    for policy in [Policy::Unrestricted, Policy::Owner, Policy::OwnerOrOrg] {
         let fixture = Fixture::new(rows, policy);
         for page in [Page::Owner(QUERY_OWNER), Page::Org(0)] {
             for limit in [1, 10, 50] {
@@ -28,7 +28,7 @@ fn main() {
                 println!(
                     "{}",
                     serde_json::json!({
-                        "fixture_revision": 1, "table_rows": rows,
+                        "fixture_revision": 2, "table_rows": rows,
                         "policy": format!("{policy:?}"), "page": format!("{page:?}"),
                         "limit": limit, "result_rows": result.len(),
                         "allocator": jazz_benchmark_guard::ALLOCATOR_NAME,

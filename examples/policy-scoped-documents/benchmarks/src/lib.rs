@@ -24,7 +24,7 @@ pub const QUERY_OWNER: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
-    None,
+    Unrestricted,
     Owner,
     OwnerOrOrg,
 }
@@ -74,7 +74,11 @@ pub fn schema(policy: Policy) -> JazzSchema {
         // Separate single-column indexes, NOT a compound ordered index.
         .index_only(["owner_id", "org_id", "updated_at"]);
     documents = match policy {
-        Policy::None => documents,
+        // Missing policies deny reads; this control explicitly permits all
+        // document rows while retaining the same non-SYSTEM identity.
+        Policy::Unrestricted => {
+            documents.policies(TablePolicies::new().with_select(PolicyExpr::True))
+        }
         Policy::Owner => documents.policies(TablePolicies::new().with_select(account("owner_id"))),
         Policy::OwnerOrOrg => {
             documents.policies(TablePolicies::new().with_select(PolicyExpr::or(vec![

@@ -15,9 +15,16 @@ fn page(bencher: divan::Bencher, rows: usize, policy: Policy, page: Page) {
         .bench_local_refs(|session| divan::black_box(session.read()));
 }
 
+// Historical policy_free IDs retain the unrestricted-read comparison series.
+// The fixture now expresses that permission with an explicit allow-all policy.
 #[divan::bench(args = [10_000, 100_000], sample_count = 3, sample_size = 1)]
 fn policy_free_owner_page50(bencher: divan::Bencher, rows: usize) {
-    page(bencher, rows, Policy::None, Page::Owner(QUERY_OWNER));
+    page(
+        bencher,
+        rows,
+        Policy::Unrestricted,
+        Page::Owner(QUERY_OWNER),
+    );
 }
 
 #[divan::bench(args = [10_000, 100_000], sample_count = 3, sample_size = 1)]
@@ -32,7 +39,7 @@ fn owner_or_org_policy_owner_page50(bencher: divan::Bencher, rows: usize) {
 
 #[divan::bench(args = [10_000, 100_000], sample_count = 3, sample_size = 1)]
 fn policy_free_org_page50(bencher: divan::Bencher, rows: usize) {
-    page(bencher, rows, Policy::None, Page::Org(0));
+    page(bencher, rows, Policy::Unrestricted, Page::Org(0));
 }
 
 #[divan::bench(args = [10_000, 100_000], sample_count = 3, sample_size = 1)]
@@ -49,7 +56,12 @@ fn subscribe_page(bencher: divan::Bencher, rows: usize, policy: Policy, page: Pa
 
 #[divan::bench(args = [10_000, 100_000], sample_count = 3, sample_size = 1)]
 fn subscribe_policy_free_owner_page50(bencher: divan::Bencher, rows: usize) {
-    subscribe_page(bencher, rows, Policy::None, Page::Owner(QUERY_OWNER));
+    subscribe_page(
+        bencher,
+        rows,
+        Policy::Unrestricted,
+        Page::Owner(QUERY_OWNER),
+    );
 }
 
 #[divan::bench(args = [10_000, 100_000], sample_count = 3, sample_size = 1)]
@@ -64,7 +76,7 @@ fn subscribe_owner_or_org_policy_owner_page50(bencher: divan::Bencher, rows: usi
 
 #[divan::bench(args = [10_000, 100_000], sample_count = 3, sample_size = 1)]
 fn subscribe_policy_free_org_page50(bencher: divan::Bencher, rows: usize) {
-    subscribe_page(bencher, rows, Policy::None, Page::Org(0));
+    subscribe_page(bencher, rows, Policy::Unrestricted, Page::Org(0));
 }
 
 #[divan::bench(args = [10_000, 100_000], sample_count = 3, sample_size = 1)]
