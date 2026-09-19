@@ -367,10 +367,8 @@ impl<T: WireTransport> WireTransportAdapter<T> {
             .ok_or(TransportError::Backpressure)?;
         let generation = self
             .endpoint
-            .reset_idle(slot, class)
+            .next_idle_generation(slot)
             .map_err(TransportError::Failed)?;
-        self.routes.retain(|_, (existing, _)| *existing != slot);
-        self.routes.insert(key, (slot, generation));
         Ok((slot, generation, class, barrier))
     }
 
@@ -605,6 +603,11 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
             let (slot, generation, class, barrier) = self.route(&message)?;
             self.endpoint
                 .enqueue(slot, generation, class, &message, barrier)?;
+            if slot >= 3 {
+                self.routes.retain(|_, (existing, _)| *existing != slot);
+                self.routes
+                    .insert(delivery_route_key(&message), (slot, generation));
+            }
         }
         // Semantic ownership is now accepted. A rejected physical extent is
         // retained exactly and must never be retried by the semantic caller.

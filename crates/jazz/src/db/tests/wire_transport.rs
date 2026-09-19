@@ -1804,3 +1804,54 @@ fn standalone_adapter_services_auxiliary_after_four_canonical_extents() {
     assert!(frames[4].first && frames[4].last);
     drop(right);
 }
+
+// Review regression: physical generations must survive ordinary admission refusal.
+// An internal seam is needed because row APIs hide transport queue capacity.
+#[test]
+fn rejected_dynamic_channel_admission_preserves_generation() {
+    struct GatedWire {
+        inner: ByteDuplexTransport,
+        blocked: Rc<Cell<bool>>,
+    }
+    impl WireTransport for GatedWire {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+            if self.blocked.get() {
+                Err(TransportError::Backpressure)
+            } else {
+                self.inner.send_frame(frame)
+            }
+        }
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            self.inner.try_recv_frame()
+        }
+    }
+    let reply = |byte| SyncMessage::PermissionAdviceResponse {
+        request_id: crate::protocol::PermissionAdviceRequestId([byte; 16]),
+        advice: crate::protocol::PermissionAdvice::Unknown,
+    };
+    let (left, right) = byte_duplex_raw();
+    let blocked = Rc::new(Cell::new(false));
+    let mut sender = WireTransportAdapter::current(GatedWire {
+        inner: left,
+        blocked: Rc::clone(&blocked),
+    });
+    let mut receiver = WireTransportAdapter::current(right);
+    sender.send(reply(1)).unwrap();
+    assert_eq!(receive_after_pumping(&mut sender, &mut receiver), reply(1));
+    blocked.set(true);
+    for _ in 0..crate::wire::channels::MAX_CHANNEL_QUEUED_MESSAGES {
+        sender.send(test_catalogue_ack()).unwrap();
+    }
+    for byte in [2, 3] {
+        assert_eq!(sender.send(reply(byte)), Err(TransportError::Backpressure));
+    }
+    blocked.set(false);
+    for _ in 0..crate::wire::channels::MAX_CHANNEL_QUEUED_MESSAGES {
+        assert_eq!(
+            receive_after_pumping(&mut sender, &mut receiver),
+            test_catalogue_ack()
+        );
+    }
+    sender.send(reply(4)).unwrap();
+    assert_eq!(receive_after_pumping(&mut sender, &mut receiver), reply(4));
+}

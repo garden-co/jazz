@@ -931,6 +931,7 @@ async fn handle_ws_connection(
         .await;
         let _ = writer_stopped.send(result);
     });
+    let _writer_guard = SocketWriterGuard(writer.abort_handle());
     let _ = core_server_shell.request_wire_tick(session);
 
     'connection: loop {
@@ -1045,8 +1046,8 @@ async fn handle_ws_connection(
 const BOOTSTRAP_DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // A cancelled socket task must not leave its writer owning the socket or queued catalogue.
-struct BootstrapWriterGuard(tokio::task::AbortHandle);
-impl Drop for BootstrapWriterGuard {
+struct SocketWriterGuard(tokio::task::AbortHandle);
+impl Drop for SocketWriterGuard {
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -1108,7 +1109,7 @@ async fn stream_bootstrap_catalogue(
         let _ = stopped_tx.send(());
         result
     });
-    let _writer_guard = BootstrapWriterGuard(writer.abort_handle());
+    let _writer_guard = SocketWriterGuard(writer.abort_handle());
     let deadline = tokio::time::Instant::now() + BOOTSTRAP_DELIVERY_TIMEOUT;
     let result = async {
         let mut pending = None;
@@ -1767,7 +1768,7 @@ mod tests {
             let _ = started_tx.send(());
             std::future::pending::<()>().await;
         });
-        let guard = BootstrapWriterGuard(writer.abort_handle());
+        let guard = SocketWriterGuard(writer.abort_handle());
         started_rx.await.unwrap();
         drop(guard);
         tokio::time::timeout(Duration::from_secs(2), released_rx)

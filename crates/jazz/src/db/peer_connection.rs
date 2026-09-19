@@ -1045,6 +1045,9 @@ where
 
     /// Clone the binding-driven auxiliary I/O endpoint for this peer link.
     pub fn io_pump(&self) -> PeerIoPump {
+        // A plain byte-adapter connection drives its own credits/auxiliary
+        // frames. Transfer output only when a binding actually takes the pump.
+        self.auxiliary_pump.claim_binding_output();
         self.auxiliary_pump.clone()
     }
     /// Replace the claims authenticated by the host for this subscriber link.

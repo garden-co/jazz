@@ -221,7 +221,9 @@ impl ChannelScheduler {
             return Err("bulk channel queue backpressure".into());
         }
         if let Some(state) = self.channels.get(&channel) {
-            if state.generation != generation || state.class != class {
+            if (state.generation != generation || state.class != class)
+                && !(self.is_idle(channel) && state.generation.checked_add(1) == Some(generation))
+            {
                 return Err("channel generation or class changed without reset".into());
             }
             if state.bytes + len > MAX_LOGICAL_MESSAGE_BYTES {
@@ -240,6 +242,11 @@ impl ChannelScheduler {
                 bytes: 0,
                 messages: VecDeque::new(),
             });
+        if state.generation != generation {
+            state.generation = generation;
+            state.sequence = 0;
+            state.class = class;
+        }
         state.bytes += len;
         state.messages.push_back(Message {
             bytes: payload.into_boxed_slice(),
@@ -389,24 +396,18 @@ impl ChannelScheduler {
         Ok(())
     }
 
-    /// Reuse only a completely drained slot, explicitly advancing its generation.
-    pub fn reset_idle(&mut self, channel: u16, class: ChannelClass) -> Result<u64, String> {
-        if self.selected == Some(channel) {
-            return Err("channel still owns selected extent".into());
+    /// Preview a drained slot's next generation without consuming it. Admission
+    /// commits the reset only after every queue/size check has succeeded.
+    pub fn next_idle_generation(&self, channel: u16) -> Result<u64, String> {
+        if !self.is_idle(channel) {
+            return Err("channel still owns queued or selected messages".into());
         }
-        let Some(state) = self.channels.get_mut(&channel) else {
-            return Ok(0);
-        };
-        if !state.messages.is_empty() {
-            return Err("channel still owns queued messages".into());
-        }
-        state.generation = state
-            .generation
-            .checked_add(1)
-            .ok_or("channel generation exhausted")?;
-        state.sequence = 0;
-        state.class = class;
-        Ok(state.generation)
+        self.channels.get(&channel).map_or(Ok(0), |state| {
+            state
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| "channel generation exhausted".into())
+        })
     }
 
     /// A drained channel can be reassigned only after all accepted frames remain

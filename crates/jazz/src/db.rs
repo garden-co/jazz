@@ -792,13 +792,18 @@ impl PeerIoPump {
         endpoint: Option<SharedAuxiliaryEndpoint>,
     ) -> Self {
         if let Some(endpoint) = endpoint {
+            self.auxiliary_endpoint = Some(endpoint);
+        }
+        self
+    }
+
+    fn claim_binding_output(&self) {
+        if let Some(endpoint) = &self.auxiliary_endpoint {
             endpoint
                 .lock()
                 .expect("auxiliary endpoint lock poisoned")
                 .set_pump_owned();
-            self.auxiliary_endpoint = Some(endpoint);
         }
-        self
     }
 
     fn wire_inbound_context(&self) -> Result<&crate::wire::WireInboundContext, String> {

@@ -153,7 +153,15 @@ impl ChannelEndpoint {
                 } else {
                     TransportError::Failed(error)
                 }
-            })
+            })?;
+        if self
+            .encoders
+            .get(&channel)
+            .is_some_and(|(old, _)| *old != generation)
+        {
+            self.encoders.remove(&channel);
+        }
+        Ok(())
     }
 
     pub(super) fn channel_credits(&self) -> SharedChannelCredits {
@@ -163,10 +171,8 @@ impl ChannelEndpoint {
     pub(super) fn is_idle(&self, channel: u16) -> bool {
         self.scheduler.is_idle(channel)
     }
-    pub(super) fn reset_idle(&mut self, channel: u16, class: ChannelClass) -> Result<u64, String> {
-        let generation = self.scheduler.reset_idle(channel, class)?;
-        self.encoders.remove(&channel);
-        Ok(generation)
+    pub(super) fn next_idle_generation(&self, channel: u16) -> Result<u64, String> {
+        self.scheduler.next_idle_generation(channel)
     }
     pub(super) fn has_pending(&self) -> bool {
         self.scheduler.queued_messages() != 0
