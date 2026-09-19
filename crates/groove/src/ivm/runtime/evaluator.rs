@@ -1123,9 +1123,26 @@ impl TickEvaluator<'_> {
         let signature = self.input_signature(node)?;
         let memo_key = self.memo_key(node, &signature)?;
         let current_watermark = self.input_generation(node);
-        let requires_state_rebuild = (self.context.hydrate_arrangements
-            && self.node_depends_on_aggregate(node)?
-            && !self.aggregate_arrangements_are_current(node)?)
+        // A cached record batch is not proof that its producer-owned physical
+        // index exists in this scope. Hydration can reuse records from a probe,
+        // and recursive child state may have been retired independently.
+        let requires_producer = if matches!(
+            self.graph.node(node).map(|node| &node.descriptor.operator),
+            Some(OpType::Arrange(_))
+        ) && self.arrangement_needs_index(node)
+        {
+            let key = ArrangementKey {
+                scope: self.operator_scope(node)?,
+                input: node,
+            };
+            !self.arrangement_states.contains_key(&key)
+        } else {
+            false
+        };
+        let requires_state_rebuild = requires_producer
+            || (self.context.hydrate_arrangements
+                && self.node_depends_on_aggregate(node)?
+                && !self.aggregate_arrangements_are_current(node)?)
             || (self.context.eval_mode == EvalMode::Tick
                 && self.context.arrangement_update_mode == ArrangementUpdateMode::Replace);
         if !requires_state_rebuild
@@ -1416,12 +1433,13 @@ impl TickEvaluator<'_> {
                     self.update_top_by(node, top_by, output_desc, &input)
                 }
                 OpType::CollectBy(collect_by) => {
-                    let input = self.update_unary_input(graph_node, node).await?;
-                    let input = self.materialize_indirect_input(&input)?;
-                    self.update_collect_by(node, collect_by, output_desc, &input)
+                    let canonical = self.update_unary_input(graph_node, node).await?;
+                    let input = self.materialize_indirect_input(&canonical)?;
+                    self.update_collect_by(node, collect_by, output_desc, &input, &canonical)
                 }
                 OpType::Aggregate(aggregate) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let canonical = Arc::clone(&input);
                     // COUNT(*) without grouping observes only row weights. Its
                     // exact result cannot depend on any scalar bytes, so retain
                     // indirect columns and issue no chunk requests.
@@ -1456,7 +1474,7 @@ impl TickEvaluator<'_> {
                     } else {
                         input
                     };
-                    self.update_aggregate(node, aggregate, output_desc, &input)
+                    self.update_aggregate(node, aggregate, output_desc, &input, &canonical)
                 }
                 OpType::IndexBy(index_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
@@ -1513,19 +1531,8 @@ impl TickEvaluator<'_> {
                     };
                     let left = self.update_node(*left_input).await?;
                     let right = self.update_node(*right_input).await?;
-                    let (left, right) = if join.residual_predicate.is_some() {
-                        (
-                            self.materialize_indirect_input(&left)?,
-                            self.materialize_indirect_input(&right)?,
-                        )
-                    } else {
-                        let left_fields = plan_expr_fields(&join.left_key);
-                        let right_fields = plan_expr_fields(&join.right_key);
-                        (
-                            self.materialize_indirect_fields(&left, &left_fields)?,
-                            self.materialize_indirect_fields(&right, &right_fields)?,
-                        )
-                    };
+                    // Arrange already materialized join keys. Keep both the
+                    // delta and indexed payload in the producer's representation.
                     self.update_join(
                         node,
                         join,
@@ -2220,6 +2227,7 @@ impl TickEvaluator<'_> {
         collect_by: &CollectByOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
+        canonical: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if self.context.eval_mode == EvalMode::Hydrate {
             // Hydration supplies a complete snapshot, including when another
@@ -2325,15 +2333,16 @@ impl TickEvaluator<'_> {
                 &input.deltas,
                 ArrangementUpdateMode::Replace,
             )?;
-            &snapshot_arrangement
+            snapshot_arrangement
         } else {
             self.arrangement_states
                 .get(&arrangement_key)
+                .cloned()
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(*input_node))?
         };
 
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
-        for delta in &input.deltas {
+        for delta in &canonical.deltas {
             let group_key =
                 encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
             touched_groups
@@ -2345,7 +2354,16 @@ impl TickEvaluator<'_> {
         let mut output = Vec::new();
         for (group_prefix, group_deltas) in touched_groups {
             let after_records = arrangement.value().records_for_key(&group_prefix);
-            let before_records = records_before_deltas(after_records.clone(), &group_deltas);
+            let before_records =
+                if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
+                    Vec::new()
+                } else {
+                    records_before_deltas(after_records.clone(), &group_deltas)
+                };
+            let after_records =
+                self.materialize_arranged_records(input_desc, after_records, None)?;
+            let before_records =
+                self.materialize_arranged_records(input_desc, before_records, None)?;
             match collect_by.mode {
                 CollectByMode::Collect | CollectByMode::Root => {
                     let render = |records: &[(Bytes, i64)]| {
@@ -2439,6 +2457,7 @@ impl TickEvaluator<'_> {
         aggregate: &AggregateOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
+        canonical: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let [input_node] = self
             .graph
@@ -2469,11 +2488,6 @@ impl TickEvaluator<'_> {
             if should_seed_empty_group {
                 let record = aggregate_row_from_records(input_desc, output_desc, aggregate, &[])?
                     .ok_or(IvmRuntimeError::UnsupportedOperator)?;
-                if !self.arrangement_states.contains_key(&arrangement_key) {
-                    let mut arrangement = AsOf::<ArrangementState, SubTick>::default();
-                    arrangement.mark_forward_as_of(self.arrangement_sub_tick(&arrangement_key))?;
-                    self.insert_arrangement(arrangement_key, arrangement);
-                }
                 return Ok(RecordDeltas {
                     descriptor: output_desc,
                     deltas: vec![RecordDelta { record, weight: 1 }],
@@ -2508,7 +2522,7 @@ impl TickEvaluator<'_> {
             });
         }
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
-        for delta in &input.deltas {
+        for delta in &canonical.deltas {
             let group_key =
                 encoded_record_key_part(input_desc, delta.raw(), &aggregate.group_field_indices)?;
             touched_groups
@@ -2519,20 +2533,40 @@ impl TickEvaluator<'_> {
         let arrangement = self
             .arrangement_states
             .get(&arrangement_key)
+            .cloned()
             .ok_or(IvmRuntimeError::GraphNodeNotFound(*input_node))?;
+
+        let mut fields = aggregate.group_field_indices.clone();
+        let expressions = aggregate
+            .aggregates
+            .iter()
+            .filter_map(|expr| expr.expression.clone())
+            .collect::<Vec<_>>();
+        for field in plan_expr_fields(&expressions) {
+            fields.push(
+                resolve_field_name(&input_desc, &field)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))?,
+            );
+        }
+        fields.sort_unstable();
+        fields.dedup();
 
         let mut output = Vec::new();
         for group_prefix in touched_groups.keys() {
             let after_records = arrangement.value().records_for_key(group_prefix);
-            let after =
-                aggregate_row_from_records(input_desc, output_desc, aggregate, &after_records)?;
             let before_records = records_before_from_deltas(
-                after_records,
+                after_records.clone(),
                 touched_groups
                     .get(group_prefix)
                     .cloned()
                     .unwrap_or_default(),
             );
+            let after_records =
+                self.materialize_arranged_records(input_desc, after_records, Some(&fields))?;
+            let before_records =
+                self.materialize_arranged_records(input_desc, before_records, Some(&fields))?;
+            let after =
+                aggregate_row_from_records(input_desc, output_desc, aggregate, &after_records)?;
             let before =
                 aggregate_row_from_records(input_desc, output_desc, aggregate, &before_records)?;
             if before == after {
@@ -3036,6 +3070,35 @@ impl TickEvaluator<'_> {
             descriptor: output_desc,
             deltas: completed.output,
         })
+    }
+
+    /// Index identity stays in producer representation. Consumers decode only
+    /// after reconstructing before/after multisets using those exact bytes.
+    fn materialize_arranged_records(
+        &mut self,
+        descriptor: RecordDescriptor,
+        records: Vec<(Bytes, i64)>,
+        fields: Option<&[usize]>,
+    ) -> Result<Vec<(Bytes, i64)>, IvmRuntimeError> {
+        if self.evaluation_inputs.is_none() || fields.is_some_and(|fields| fields.is_empty()) {
+            return Ok(records);
+        }
+        let input = Arc::new(RecordDeltas {
+            descriptor,
+            deltas: records
+                .into_iter()
+                .map(|(record, weight)| RecordDelta { record, weight })
+                .collect(),
+        });
+        let output = match fields {
+            Some(fields) => self.materialize_indirect_field_indices(&input, fields)?,
+            None => self.materialize_indirect_input(&input)?,
+        };
+        Ok(output
+            .deltas
+            .iter()
+            .map(|delta| (delta.record.clone(), delta.weight))
+            .collect())
     }
 
     pub(super) fn materialize_indirect_input(

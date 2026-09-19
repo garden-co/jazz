@@ -2001,7 +2001,6 @@ async fn input_source_deltas_are_atomic_and_proportional_to_changed_records() {
     );
 }
 
-/// Ungrouped aggregates own one empty group. This stays in the ordinary Groove
 /// Shared arrangements are advanced by their producer, while four distinct
 /// consumers independently publish the same atomic left/right transition.
 #[futures_test::test]
@@ -2145,6 +2144,131 @@ async fn shared_arrangement_transitions_preserve_all_consumers_and_simultaneous_
         assert_eq!(
             expect_recv_vals(subscription),
             [expected(3, -1), expected(4, -1)]
+        );
+    }
+}
+
+/// Consumers may decode different columns without changing the shared
+/// arrangement's record identity when reconstructing previous input rows.
+#[futures_test::test]
+async fn shared_arrangement_keeps_large_value_identity_across_aggregate_updates() {
+    use bytes::Bytes;
+    struct Resolver(std::collections::BTreeMap<crate::chunks::ChunkRequest, Bytes>);
+    impl crate::chunks::MissingChunkResolver for Resolver {
+        fn resolve(
+            &self,
+            request: crate::chunks::ChunkRequest,
+        ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
+            Box::pin(async move {
+                self.0
+                    .get(&request)
+                    .cloned()
+                    .ok_or(crate::chunks::ChunkError::Unavailable)
+            })
+        }
+    }
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_auto_direct_family_enabled(false);
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let text = "a".repeat(crate::large_values::INLINE_VALUE_MAX_BYTES * 2);
+    let prepared =
+        crate::large_values::prepare(crate::large_values::LargeValueKind::String, text.as_bytes())
+            .unwrap();
+    database.set_missing_chunk_resolver(Rc::new(Resolver(
+        prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    crate::chunks::ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator,
+                    },
+                    Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect(),
+    )));
+    let descriptor =
+        RecordDescriptor::new([("id", ColumnType::U64), ("payload", ColumnType::String)]);
+    let source = database.allocate_input_source(descriptor);
+    let make_graph = |count_rows: bool| {
+        GraphBuilder::aggregate(
+            GraphBuilder::input_source(source, descriptor),
+            Vec::<String>::new(),
+            [AggregateExpr {
+                function: AggregateFunction::Count,
+                expression: (!count_rows).then(|| PlanExpr::Field("payload".into())),
+                distinct: false,
+                output_name: Some("count".into()),
+                output_identity: None,
+            }],
+        )
+    };
+    let count = database
+        .subscribe_one_sink(make_graph(false))
+        .await
+        .unwrap();
+    assert_eq!(expect_recv_vals(&count), [(vec![Value::U64(0)], 1)]);
+    let rows = database.subscribe_one_sink(make_graph(true)).await.unwrap();
+    assert_eq!(expect_recv_vals(&rows), [(vec![Value::U64(0)], 1)]);
+    let row = |id| {
+        descriptor
+            .create(&[
+                Value::U64(id),
+                Value::Large(Box::new(prepared.value_ref.clone())),
+            ])
+            .unwrap()
+    };
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: source,
+            descriptor,
+            adds: vec![row(1), row(2)],
+            removes: vec![],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&count),
+        [(vec![Value::U64(0)], -1), (vec![Value::U64(2)], 1)]
+    );
+    assert_eq!(
+        expect_recv_vals(&rows),
+        [(vec![Value::U64(0)], -1), (vec![Value::U64(2)], 1)]
+    );
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: source,
+            descriptor,
+            adds: vec![],
+            removes: vec![row(1)],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&count),
+        [(vec![Value::U64(1)], 1), (vec![Value::U64(2)], -1)]
+    );
+    assert_eq!(
+        expect_recv_vals(&rows),
+        [(vec![Value::U64(1)], 1), (vec![Value::U64(2)], -1)]
+    );
+    database
+        .apply_input_source_deltas([InputSourceDelta {
+            id: source,
+            descriptor,
+            adds: vec![],
+            removes: vec![row(2)],
+        }])
+        .await
+        .unwrap();
+    for subscription in [&count, &rows] {
+        assert_eq!(
+            expect_recv_vals(subscription),
+            [(vec![Value::U64(0)], 1), (vec![Value::U64(1)], -1)]
         );
     }
 }
