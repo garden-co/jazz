@@ -708,3 +708,32 @@ silently leave a persisted denial paired with still-visible runtime inputs.
 The normative pilot invariants are INV-SYNC-37 through INV-SYNC-43 in chapter 8;
 implementation and acceptance progress are tracked in #2660 and its PR, not
 inferred from the presence of these building blocks.
+
+### Short-lived Inspector authority
+
+`INV-INSPECTOR-1`: An Inspector credential MUST bind issuer, exact app, operator,
+Inspector audience, bounded expiry and an explicit operation capability set.
+Account JWTs, backend credentials and Inspector credentials MUST remain distinct
+admission paths. Default authority is protected data/catalogue read. Data edit
+and catalogue administration require separate explicit capabilities.
+
+`INV-INSPECTOR-2`: Inspector admission MUST NOT confer replication, account
+administration, arbitrary policy-subject delegation, trusted catalogue bootstrap
+or authority-publication admission. Data reads use a server-selected SYSTEM
+policy subject; allowed edits retain the established SYSTEM durable provenance.
+An Edge may forward that server-selected query through its own authenticated
+upstream link. Browser-provided delegated bindings remain forbidden.
+
+`INV-INSPECTOR-3`: Credential expiry MUST end authorization on existing
+connections, including idle sockets and outbound live updates. Renewal requires
+fresh administrative authorization and a new client connection. Stateless access
+credentials have a documented maximum revocation window; logout MUST discard
+browser authority and MUST NOT silently reconnect. Root/access credentials MUST
+NOT persist in browser storage or appear in launch URLs.
+
+The exact Cloud adapter, token encoding, self-host exchange and rollout contract
+is [Inspector sessions](../../../docs/engineering/inspector-sessions.md). Server
+expiry wraps all authorized socket activity, including nested response streams
+and blocked sends. Connection accounting partitions Inspector sessions by app
+and an opaque operator digest; SYSTEM query identity does not exempt them from
+the public connection cap.
