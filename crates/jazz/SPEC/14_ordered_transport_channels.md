@@ -18,12 +18,18 @@ An admitted connection direction owns 64 slots: control 0, requests 1, writes 2,
 dynamic deliveries/transfers 3–62, and immutable auxiliary chunk traffic 63.
 Generation and contiguous frame sequence are scoped to that connection and
 direction. Reusing a completely drained dynamic slot explicitly increments its
-generation and starts sequence zero with a new codec. A stale generation,
+generation and starts sequence zero with a new codec. The generation advances
+only when semantic queue admission succeeds: an ordinary backpressure rejection
+must not consume a generation or discard its old codec. A stale generation,
 sequence gap, duplicate compressed extent, or reset over an incomplete message
 fails closed.
 Incomplete messages retain the 30-second idle and five-minute absolute bounds.
-Timeout releases partial storage and terminates the connection: skipping
-compressed bytes and continuing is forbidden. This slice cancels subscriptions
+Receiving an incomplete extent arms a real host deadline even if the sender
+never sends another byte. Canonical ticks re-arm the earliest remaining bound;
+hosts coalesce at their earliest deadline and accept earlier replacements.
+Independent auxiliary drivers service their own receive deadline while the
+semantic node is blocked. Timeout releases partial storage and terminates the
+connection: skipping compressed bytes and continuing is forbidden. This slice cancels subscriptions
 semantically while draining ordered bytes; it does not add mid-message reset. Reconnect discards every prior generation and codec.
 
 Each channel owns an independent streaming codec in each direction. LZ4 uses
@@ -85,8 +91,10 @@ slots reserved for control. Receiver declared-message reservations are bounded
 by the same aggregate ceiling before accumulation.
 
 Scheduling weights apply to classes, then round-robin among channels within a
-class. Each finite round assigns control eight frames, requests four, delivery
-two, writes two, large values one and auxiliary one. A newly admitted request
+class. Each finite canonical round assigns control eight frames, requests four,
+delivery two, writes two and large values one. The independent auxiliary owner
+uses its bounded output pump; without an external binding owner, the adapter
+admits a ready auxiliary extent after at most four canonical extents. A newly admitted request
 therefore does not wait behind a full round for every busy bulk channel. A class
 without receiver credit is excluded before selecting or advancing a codec.
 Actual lower-transport backpressure retains the exact selected encoded extent.
