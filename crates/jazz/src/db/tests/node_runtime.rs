@@ -4547,8 +4547,8 @@ fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
     assert!(wake.0.load(Ordering::SeqCst));
     // Native relay may consume the cross-thread wake before the owner tick.
     db.mark_subscriber_connections_dirty_after_query_runtime_wake();
-    // Cancellation while waiting for the node must not acknowledge delivery.
-    let held_node = block_on(db.node.node.lock());
+    // Cancellation inside refresh must not acknowledge undelivered work.
+    let pause = crate::db::node_runtime::pause_subscription_refresh_after_detach_for_test();
     let mut interrupted = Box::pin(db.node.tick());
     let host_waker = futures::task::waker(wake.clone());
     let mut cx = std::task::Context::from_waker(&host_waker);
@@ -4556,8 +4556,9 @@ fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
         interrupted.as_mut().poll(&mut cx),
         std::task::Poll::Pending
     ));
+    assert!(pause.entered(), "tick must suspend inside refresh");
     drop(interrupted);
-    drop(held_node);
+    drop(pause);
     for _ in 0..16 {
         if !wake.0.swap(false, Ordering::SeqCst) {
             break;
@@ -4587,4 +4588,38 @@ fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
     assert!(first.try_next_event().is_none());
     assert!(second.try_next_event().is_none());
     assert!(!wake.0.load(Ordering::SeqCst));
+
+    // Consume a newer wake while refresh owns an older generation.
+    db.node.query_runtime_waker().unwrap().wake_by_ref();
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+    let pause = crate::db::node_runtime::pause_subscription_refresh_after_detach_for_test();
+    let mut refresh = Box::pin(db.node.tick());
+    assert!(matches!(
+        refresh.as_mut().poll(&mut cx),
+        std::task::Poll::Pending
+    ));
+    assert!(pause.entered(), "tick must suspend inside refresh");
+    db.node.query_runtime_waker().unwrap().wake_by_ref();
+    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+    pause.release();
+    assert!(matches!(
+        refresh.as_mut().poll(&mut cx),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    drop(refresh);
+    drop(pause);
+    crate::db::node_runtime::reset_subscription_refresh_visits_for_test();
+    db.tick().unwrap();
+    assert_eq!(
+        crate::db::node_runtime::subscription_refresh_visits_for_test(),
+        2,
+        "newer wake consumed during await must survive older generation acknowledgment"
+    );
+    crate::db::node_runtime::reset_subscription_refresh_visits_for_test();
+    db.tick().unwrap();
+    assert_eq!(
+        crate::db::node_runtime::subscription_refresh_visits_for_test(),
+        0,
+        "successful refresh must acknowledge the retained generation"
+    );
 }
