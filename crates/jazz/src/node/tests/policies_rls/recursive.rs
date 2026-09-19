@@ -1126,7 +1126,7 @@ fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
 }
 
 #[test]
-fn policy_free_table_is_open_for_reads_and_writes() {
+fn policy_free_table_denies_reads_and_writes() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -1143,19 +1143,29 @@ fn policy_free_table_is_open_for_reads_and_writes() {
                 .cells(owner_cells(user(0xb2), "public write")),
         )
         .unwrap();
-    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
-            fate: Fate::Accepted,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
             ..
         }
     ));
 
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x85), 10)
+            .cells(owner_cells(user(0xa1), "privileged seed")),
+    );
+
     let mut edge = PeerState::edge_client(user(0xcc));
     assert_view_update_only_references_rows(
         &edge.current_rows_update(&mut core, "todos").unwrap(),
-        BTreeSet::from([row(0x85)]),
+        BTreeSet::new(),
     );
 
     for (index, commit) in [
@@ -1169,20 +1179,25 @@ fn policy_free_table_is_open_for_reads_and_writes() {
     .into_iter()
     .enumerate()
     {
-        let (_writer_dir, mut writer) = open_node_with_schema(node(2 + index as u8), schema.clone());
+        let (_writer_dir, mut writer) =
+            open_node_with_schema(node(2 + index as u8), schema.clone());
         let (_tx_id, unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
-        let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+        let [fate] = core
+            .apply_sync_message_settled(unit)
+            .unwrap()
+            .try_into()
+            .unwrap();
         assert!(matches!(
             fate,
             SyncMessage::FateUpdate {
-                fate: Fate::Accepted,
+                fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
                 ..
             }
         ));
     }
 }
 
-/// A table starts open, but the first policy clause closes every other action.
+/// A declared policy grants only its operation; all other actions stay closed.
 /// This deliberately sends each forged action through a distinct untrusted
 /// writer and the fate authority: changing a missing-clause branch back to
 /// `Ok(true)` makes one of these receipts Accepted.

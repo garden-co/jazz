@@ -840,6 +840,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
 
 #[test]
 fn client_settled_file_member_reads_bytes_for_bound_id_read() {
+    use crate::tools::test_support::AllowAll;
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -847,7 +848,8 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
                     .column("mime_type", PublicColumnType::Text)
                     .column("data", PublicColumnType::Bytea),
             )
-            .table(PublicTableSchemaBuilder::new("attachments").fk_column("file_id", "files")),
+            .table(PublicTableSchemaBuilder::new("attachments").fk_column("file_id", "files"))
+            .allow_all(),
     );
     let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
     let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);

@@ -21,7 +21,7 @@ use crate::protocol_limits::{
 /// This is the sole supported wire version. It is independent of the v1
 /// storage, catalogue, and binding formats: those labels name their own
 /// formats and are not wire-protocol compatibility aliases.
-pub const WIRE_PROTOCOL_VERSION: u16 = 2;
+pub const WIRE_PROTOCOL_VERSION: u16 = 3;
 
 /// Frozen v1 full-frame artifact rejection corpus. NAPI and WASM execute every
 /// frame in the complete Rust message/Hello fixtures, plus these explicit
@@ -2339,10 +2339,10 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_requires_an_exact_v2_advertisement_and_intersects_features() {
+    fn negotiation_requires_an_exact_v3_advertisement_and_intersects_features() {
         let remote = WireHello {
-            min_protocol_version: 2,
-            max_protocol_version: 2,
+            min_protocol_version: 3,
+            max_protocol_version: 3,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
             role: WirePeerRole::Relay,
             authority: None,
@@ -2406,8 +2406,8 @@ mod tests {
     }
 
     #[test]
-    fn negotiation_rejects_version_ranges_even_when_they_include_v2() {
-        for (min_protocol_version, max_protocol_version) in [(0, 2), (1, 2), (2, 15)] {
+    fn negotiation_rejects_version_ranges_even_when_they_include_v3() {
+        for (min_protocol_version, max_protocol_version) in [(0, 3), (2, 3), (3, 15)] {
             let remote = WireHello {
                 min_protocol_version,
                 max_protocol_version,
@@ -2423,9 +2423,33 @@ mod tests {
         }
     }
 
+    /// Alice's v3 Core rejects Bob's v2 Core before policy snapshot decoding.
+    /// This internal boundary test pins negotiation, which row equality cannot observe.
     #[test]
-    fn wire_v2_rejects_v14_without_compatibility_negotiation() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 2);
+    fn wire_v3_rejects_v2_before_policy_snapshot_decode() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 3);
+        let remote = WireHello {
+            min_protocol_version: 2,
+            max_protocol_version: 2,
+            features: current_wire_features(),
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+        let error = negotiate_wire(&remote, current_wire_features()).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+        let current = WireHello::current(WirePeerRole::Core, current_wire_features());
+        assert_eq!(
+            negotiate_wire(&current, current_wire_features())
+                .unwrap()
+                .protocol_version,
+            3
+        );
+    }
+
+    #[test]
+    fn wire_v3_rejects_v14_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 3);
         let remote = WireHello {
             min_protocol_version: 14,
             max_protocol_version: 14,
@@ -2442,7 +2466,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_v2_rejects_v15_peer_before_payload_decode() {
+    fn wire_v3_rejects_v15_peer_before_payload_decode() {
         let v15_peer = WireHello {
             min_protocol_version: 15,
             max_protocol_version: 15,
@@ -2452,9 +2476,9 @@ mod tests {
         };
 
         let error = negotiate_wire(&v15_peer, current_wire_features())
-            .expect_err("v15 encoding must fail during the v1 handshake");
+            .expect_err("v15 encoding must fail during the v3 handshake");
 
-        assert_eq!(WIRE_PROTOCOL_VERSION, 2);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 3);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }

@@ -113,7 +113,7 @@ Provider claims remain under `session.claims`. They cannot override `session.use
 
 ## Backend request contexts
 
-Create a Node owner with `await createJazzSession({ appId, app, driver, serverUrl, initial: { backendSecret } })` from `jazz-tools/backend`. Backend admission requires a live core check; the secret is private, ephemeral handle material. The ready snapshot's `client.db` performs backend work.
+Create a Node owner with `await createJazzSession({ appId, app, permissions, driver, serverUrl, initial: { backendSecret } })` from `jazz-tools/backend`. Backend admission requires a live core check; the secret is private, ephemeral handle material. The ready snapshot's `client.db` performs backend work.
 
 `await client.forRequest(request)` verifies the original bearer and resolves its active account through the core before opening an immutable requester scope. Configure JWT verification for external providers. By default, external identities must already be registered; local-first proofs can establish their deterministic founding account. Auth-required server routes can opt into `client.forRequest(request, { account: "login-or-register" })` to atomically create a fresh external assignment after verifying the bearer. The option applies only to that immutable request scope; it never changes the backend account or accepts revoked identities. Keep the default strict mode on hybrid routes where a fresh identity must be linked first.
 

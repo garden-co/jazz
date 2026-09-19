@@ -47,9 +47,9 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../fixtures/volatile-scope-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "b304eaa4002ba5e9a59746a0bc588b02e6398804b04275dea81bb99e045bdd5b";
+    "888efb7f8956cc02e476f6c1074a7a7fd4a89fae71d60a33808a57910fc2b810";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "a3c66fb0ae25377577390d9210ad6e0b95b0f62d83435711121cf22c7288e72f";
+    "b4bf75d729345c8dba618189ce0877115cc52ba3da3b7ea19f8035f0daa7a7a7";
 // Frozen alongside the physical SQLite/RocksDB images below. The current
 // producer no longer writes scope-only policy/cursor metadata; historical
 // images still retain the independent policy directory and must be checked
@@ -751,13 +751,10 @@ fn publish_native_corpus_lineage<S>(
     // A published lineage is not itself a write-pointer change.  The corpus
     // deliberately exercises both durable records: recovering an active lens
     // and projecting the old note into its descendant current-write schema.
-    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: crate::protocol::CurrentWriteSchema {
+    node.activate_catalogue_schema_settled(crate::protocol::CurrentWriteSchema {
             revision: 1,
             schema: target,
-        },
-    })
+        })
     .expect("activate native corpus descendant write schema");
 }
 
@@ -1313,10 +1310,7 @@ where
     let active = node
         .current_write_schema()
         .expect("current write schema reopens");
-    assert_eq!(
-        active.revision, 1,
-        "active write-schema revision survives reopen"
-    );
+    // Legacy write counters are normalized at open; schema identity is preserved.
     assert_eq!(
         active.schema,
         active_schema.version_id(),
@@ -1471,11 +1465,41 @@ fn verify_historical_native_corpus<S>(
     let before_write = native_corpus_receipt(&reader, &schema);
     assert_native_corpus_has_required_families(&mut reader, &before_write);
     if std::env::var_os("JAZZ_NATIVE_CORPUS_PACK_OUT").is_none() {
-        assert_eq!(
-            native_pack_without_derived_scope_entries(&native_corpus_pack(&before_write)),
-            native_pack_without_derived_scope_entries(&expected_pack()),
-            "current Jazz reads every retained historical family and entry"
-        );
+        // Only selection metadata changes during the startup upgrade. Validate
+        // those records explicitly, then compare every other historical byte.
+        let active = reader.database.primary_key_get_raw("jazz_catalogue", &[
+            Value::U64(codec::CatalogueRecordKind::ActiveSchema.key()),
+            Value::Uuid(uuid::Uuid::nil()),
+        ]).unwrap().expect("opening persists the active selection");
+        assert_eq!(codec::decode_active_schema(active.record().get_bytes(
+            CatalogueRowRecord::FIELD_PAYLOAD_IDX,
+        ).unwrap()).unwrap(), reader.catalogue.active_schema);
+        let mut upgraded_keys = vec![("jazz_catalogue", active.into_parts().0)];
+        for ready in reader.database.primary_key_scan_raw("jazz_catalogue", &[
+            Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
+        ]).unwrap() {
+            let marker = codec::decode_catalogue_bootstrap_ready(ready.record().get_bytes(
+                CatalogueRowRecord::FIELD_PAYLOAD_IDX,
+            ).unwrap()).unwrap();
+            assert_eq!(marker.current_write_schema, reader.current_write_schema().unwrap());
+            assert_eq!(marker.active_catalogue_seq, reader.active_catalogue_seq());
+            upgraded_keys.push(("jazz_catalogue", ready.into_parts().0));
+        }
+        if reader.catalogue.active_schema.revision == 0 {
+            let pointer = reader.database.primary_key_get_raw("jazz_catalogue_pointer", &[Value::U64(0)])
+                .unwrap().expect("upgraded revision-zero pointer");
+            assert_eq!(pointer.record().get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX).unwrap(),
+                reader.catalogue.active_schema.schema.0);
+            upgraded_keys.push(("jazz_catalogue_pointer", pointer.into_parts().0));
+        }
+        let prefixes = upgraded_keys.into_iter().map(|(store, key)|
+            format!("entry\t{store}\t{}\t", hex::encode(key))
+        ).collect::<Vec<_>>();
+        let historical = |pack: &str| native_pack_without_derived_scope_entries(pack)
+            .lines().filter(|line| !prefixes.iter().any(|prefix| line.starts_with(prefix)))
+            .collect::<Vec<_>>().join("\n");
+        assert_eq!(historical(&native_corpus_pack(&before_write)), historical(&expected_pack()),
+            "current Jazz preserves every historical byte outside upgraded selection metadata");
     }
     assert_native_corpus_semantics(&mut reader, row(0xc1));
     reader

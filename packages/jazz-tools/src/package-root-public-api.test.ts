@@ -219,6 +219,8 @@ void (null as unknown as PackageRootBeginBatch);
 void (null as unknown as PackageRootBatch);
 
 const internalRuntimeExports = [
+  "publishStoredSchema",
+  "publishStoredPermissions",
   "RowChangeKind",
   "NativeRuntimeAdapter",
   "WebSocketCarrier",
@@ -357,7 +359,6 @@ describe("package root public API", () => {
       "fetchStoredWasmSchema",
       "generateAuthSecret",
       "loadWasmModule",
-      "publishStoredPermissions",
     ]) {
       expect(runtime, `runtime export ${publicRuntimeExport}`).toHaveProperty(publicRuntimeExport);
       expect(packageRoot, `package root export ${publicRuntimeExport}`).toHaveProperty(

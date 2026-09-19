@@ -57,6 +57,12 @@ function setStdoutIsTTY(isTTY: boolean): void {
 function deployed(hash = "abc123def4567890") {
   return {
     schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    permissions: {
+      schemaHash: hash,
+      permissionsFile: "permissions.ts",
+      previousHead: null,
+      head: null,
+    },
     warnings: [],
   };
 }

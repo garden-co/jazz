@@ -50,6 +50,7 @@ import {
   parseMutationFieldValue,
 } from "./row-mutation-form.js";
 import { buildRelationFilterHref } from "./relation-navigation.js";
+import { stringifyForPresentation } from "../../utility/presentation-serialization.js";
 import styles from "./TableDataGrid.module.css";
 
 const NULL_CELL_MARKER = "<null>";
@@ -60,7 +61,9 @@ function formatCellValue(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (typeof value === "object") return JSON.stringify(value);
+  if (typeof value === "object") {
+    return stringifyForPresentation(value, undefined, { bigint: "raw" });
+  }
   return String(value);
 }
 
@@ -535,12 +538,7 @@ function createInitialStagedInsertEdits(schemaColumns: ColumnDescriptor[]): Queu
       continue;
     }
 
-    if (column.nullable) {
-      edits[column.name] = {
-        text: "",
-        isNull: true,
-      };
-    } else if (column.column_type.type === "Boolean") {
+    if (!column.nullable && column.column_type.type === "Boolean") {
       edits[column.name] = {
         text: "false",
         isNull: false,

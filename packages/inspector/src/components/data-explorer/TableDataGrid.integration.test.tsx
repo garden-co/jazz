@@ -19,6 +19,9 @@ const inspectorSaveApp = s.defineApp({
       owner_id: s.uuid(),
       rank: s.bigint().optional(),
       payload: s.bytes().optional(),
+      largeCounts: s.array(s.bigint()).optional(),
+      textNumber: s.string().optional().default("restored-default"),
+      jsonNumber: s.json().optional(),
     },
     {},
   ),
@@ -345,6 +348,61 @@ describe("TableDataGrid real Db save retries", () => {
     ]);
   }, 30_000);
 
+  it("persists an explicitly selected NULL over a non-null default through the real Db", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    currentDb = setup.db;
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    editStagedTextColumn(1, "title", "explicit-null");
+    editStagedTextColumn(2, "owner_id", permittedOwner);
+    const stagedRow = screen.getByText("staged").closest('[role="row"], tr');
+    expect(stagedRow).not.toBeNull();
+    const cells = within(stagedRow as HTMLElement).getAllByRole("gridcell");
+    fireEvent.doubleClick(cells[5]!);
+    fireEvent.click(screen.getByRole("button", { name: "Set textNumber to NULL" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(async () => {
+      const rows = await setup.db.all(inspectorSaveApp.todos.where({ title: "explicit-null" }), {
+        tier: "edge",
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.textNumber).toBeNull();
+    });
+  }, 30_000);
+
+  it("uses the schema default when a staged insert leaves textNumber untouched", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    currentDb = setup.db;
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    editStagedTextColumn(1, "title", "untouched-default");
+    editStagedTextColumn(2, "owner_id", permittedOwner);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+    await expect(
+      setup.db.all(inspectorSaveApp.todos.where({ title: "untouched-default" }), {
+        tier: "edge",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        title: "untouched-default",
+        owner_id: permittedOwner,
+        textNumber: "restored-default",
+      }),
+    ]);
+  }, 30_000);
+
   it("persists unsafe-range BigInt mutations exactly through the real Db", async () => {
     const setup = await createInspectorDb();
     policyApp = setup.app;
@@ -372,6 +430,45 @@ describe("TableDataGrid real Db save retries", () => {
           title: "exact bigint",
           owner_id: permittedOwner,
           rank: exactValue,
+        }),
+      ]),
+    );
+  }, 30_000);
+  it("round-trips nested BigInts while preserving decimal strings in Text", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    const instrumented = instrumentDb(setup.db);
+    currentDb = instrumented.db;
+    const exactValues = [-(1n << 63n), 9007199254740993n];
+    const decimalString = "9007199254740993";
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    editStagedTextColumn(1, "title", "nested bigint");
+    editStagedTextColumn(2, "owner_id", permittedOwner);
+    editStagedTextColumn(
+      4,
+      "largeCounts",
+      JSON.stringify(exactValues, (_, value) =>
+        typeof value === "bigint" ? value.toString() : value,
+      ),
+    );
+    editStagedTextColumn(5, "textNumber", decimalString);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "edge" })).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "nested bigint",
+          owner_id: permittedOwner,
+          largeCounts: exactValues,
+          textNumber: decimalString,
         }),
       ]),
     );

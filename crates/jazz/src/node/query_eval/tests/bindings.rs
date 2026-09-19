@@ -262,7 +262,7 @@ fn nested_read_policies_reuse_an_outer_equivalent_claim_slot() {
     for table in ["public_profiles", "private_chats"] {
         let request = node
             .table_read_policy_authorization_request(
-                node.catalogue.current_schema_version_id,
+                node.catalogue.local_schema_version_id,
                 table,
                 identity,
                 ParamBindingMode::RetainAllParams,

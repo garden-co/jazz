@@ -33,12 +33,13 @@ describe("finite concurrent local write convergence", () => {
           backendSecret: randomUUID(),
           allowLocalFirstAuth: true,
         };
-        let server = await startLocalJazzServer({ ...settings, schema: app });
+        let server = await startLocalJazzServer({ ...settings, schema: app, permissions });
         const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
         async function open(name: string) {
           const session = await createJazzSession({
             appId: settings.appId,
             app,
+            permissions,
             serverUrl: server.url,
             driver: { type: "persistent", dataPath: join(directory, name) },
             initial: { backendSecret: settings.backendSecret },

@@ -13,6 +13,7 @@ use jazz_server::JazzServer;
 use support::TestingClient;
 
 fn todos_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
@@ -20,6 +21,7 @@ fn todos_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("done", ColumnType::Boolean),
         )
+        .allow_all()
         .build()
 }
 

@@ -32,12 +32,14 @@ static MERGED_REDELIVERY_SUITE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 fn test_schema() -> jazz::tools::Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("tasks")
                 .column("status", ColumnType::Text)
                 .column("assignee", ColumnType::Text),
         )
+        .allow_all()
         .build()
 }
 
