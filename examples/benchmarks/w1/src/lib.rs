@@ -923,6 +923,18 @@ fn open_memory_node(schema: JazzSchema, node: u8, history_complete: bool) -> Db<
 }
 
 fn byte_duplex(epoch: u64) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>) {
+    if std::env::var_os("JAZZ_W1_TRACE").is_some() {
+        let phase = match epoch {
+            1 => "seed writer to authority",
+            2 => "initial client snapshot",
+            3 => "disconnected writer update",
+            4 => "client resume",
+            5 => "fresh control writer",
+            6 => "fresh control snapshot",
+            _ => "unknown",
+        };
+        eprintln!("W1 byte duplex epoch={epoch} phase={phase}");
+    }
     let left = Rc::new(RefCell::new(VecDeque::new()));
     let right = Rc::new(RefCell::new(VecDeque::new()));
     let left_transport = ByteDuplexTransport {

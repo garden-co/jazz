@@ -260,7 +260,13 @@ impl ChannelCredits {
         }
         match grant.kind {
             WireCreditKind::Frames if amount > self.outstanding[index] => {
-                return Err("channel credit exceeds outstanding balance".into());
+                return Err(format!(
+                    "channel credit exceeds outstanding balance: epoch={:?} sequence={} class={:?} granted={amount} outstanding={}",
+                    self.context.expected_session().map(|session| session.epoch),
+                    grant.sequence,
+                    grant.class,
+                    self.outstanding[index],
+                ));
             }
             WireCreditKind::Messages { count, bulk } => {
                 let index = grant_buffer_bucket(grant.class, bulk);
