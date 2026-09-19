@@ -301,9 +301,8 @@ fn receive_poll_reports_permanent_failure_while_flushing_accepted_backlog() {
     );
 
     // Live peers use `Transport::try_recv_result` to observe receive failures.
-    // Exercise the concrete adapter's fallible receive
-    // path here until the production transport interface can expose terminal
-    // failures to its callers.
+    // Exercise the concrete adapter's fallible receive path here to ensure
+    // terminal errors remain observable.
     let first = adapter
         .try_recv_strict()
         .expect_err("receive polling must report a permanent flush failure");
