@@ -79,7 +79,35 @@
             "name": "title",
             "nullable": false
           }
-        ]
+        ],
+        "policies": {
+          "delete": {
+            "using": {
+              "type": "True"
+            },
+            "with_check": null
+          },
+          "insert": {
+            "using": null,
+            "with_check": {
+              "type": "True"
+            }
+          },
+          "select": {
+            "using": {
+              "type": "True"
+            },
+            "with_check": null
+          },
+          "update": {
+            "using": {
+              "type": "True"
+            },
+            "with_check": {
+              "type": "True"
+            }
+          }
+        }
       }
     }
   },
