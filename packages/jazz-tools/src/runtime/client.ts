@@ -322,6 +322,7 @@ export interface AuthConfig {
   backend_secret?: string;
   /** Admin secret for privileged sync and `/admin/*` catalogue operations. */
   admin_secret?: string;
+  inspector_token?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
 }
@@ -914,15 +915,28 @@ export class JazzClient {
   private buildTransportAuthPayload(): {
     jwt_token: string | null;
     admin_secret?: string;
+    inspector_token?: string;
     backend_secret?: string;
     backend_session?: Session;
   } {
     const payload: {
       jwt_token: string | null;
       admin_secret?: string;
+      inspector_token?: string;
       backend_secret?: string;
       backend_session?: Session;
     } = { jwt_token: this.context.backendSecret ? null : (this.context.jwtToken ?? null) };
+    if (this.context.inspectorToken) {
+      if (
+        this.context.adminSecret ||
+        this.context.backendSecret ||
+        this.context.jwtToken ||
+        this.context.cookieSession
+      ) {
+        throw new Error("Inspector credentials cannot be combined with other authority");
+      }
+      return { jwt_token: null, inspector_token: this.context.inspectorToken };
+    }
     // A backend open is a separate trusted-serving credential. Do not send an
     // incidental admin secret alongside it: server admission gives admin
     // precedence, which would turn this runtime's SYSTEM backend authority

@@ -47,6 +47,7 @@ export type JazzSessionConfig = Omit<
   | "jwtToken"
   | "cookieSession"
   | "adminSecret"
+  | "inspectorToken"
   | "serverUrl"
 > & {
   app: BackendSchemaInput;
@@ -160,7 +161,13 @@ function memoryAccountStore(): AccountStore {
 export async function createJazzSession(
   config: JazzSessionConfig,
 ): Promise<JazzSession<JazzClient>> {
-  for (const key of ["backendSecret", "jwtToken", "cookieSession", "adminSecret"]) {
+  for (const key of [
+    "backendSecret",
+    "jwtToken",
+    "cookieSession",
+    "adminSecret",
+    "inspectorToken",
+  ]) {
     if (Object.hasOwn(config, key))
       throw new Error(`Use session account actions instead of ${key}`);
   }

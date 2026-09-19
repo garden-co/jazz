@@ -118,14 +118,14 @@ function runtimeAuthorFromConfig(config: DbConfig) {
   // raw config still needs a syntactically valid, untrusted author because the
   // native constructor validates that input before its separate admin ABI
   // derives SYSTEM. This placeholder never becomes the runtime's author.
-  if (config.adminSecret) {
+  if (config.adminSecret || config.inspectorToken) {
     return { issuer: "https://jazz.invalid", user_id: "backend-open" };
   }
   throw new Error("Default runtime requires a verified session or admin credential");
 }
 
 function isBackendRuntime(config: DbConfig): boolean {
-  return !sessionFromConfig(config) && Boolean(config.adminSecret);
+  return !sessionFromConfig(config) && Boolean(config.adminSecret || config.inspectorToken);
 }
 
 export function selfSignedClientProofFromConfig(
@@ -240,6 +240,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       jwtToken: config.jwtToken,
       cookieSession: config.cookieSession,
       adminSecret: config.adminSecret,
+      inspectorToken: config.inspectorToken,
       tier: "local",
     };
     setTrustedReservedSession(context, getTrustedReservedSession(config));
