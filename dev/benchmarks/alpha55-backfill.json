@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "kind": "historical-harness-backfill",
+  "releaseTag": "v2.0.0-alpha.55",
+  "engineSha": "11738be1b2b442ffb0ea37c3c3891d538ec02251",
+  "harnessSourceSha": "1a5add74c7da1509049ffedaf7f663b2cbd36c6e",
+  "effectiveDate": "2026-09-15T22:33:17.491Z",
+  "effectiveDateSource": "npm jazz-tools time[2.0.0-alpha.55]",
+  "measurementMode": "walltime",
+  "runner": "codspeed-macro",
+  "rustToolchain": "1.93.1",
+  "cargoCodspeedVersion": "5.0.1",
+  "allocator": "mimalloc",
+  "benchmarks": [
+    "policy_free_owner_page50",
+    "owner_policy_page50",
+    "owner_or_org_policy_owner_page50",
+    "policy_free_org_page50",
+    "owner_or_org_policy_org_page50",
+    "subscribe_policy_free_owner_page50",
+    "subscribe_owner_policy_page50",
+    "subscribe_owner_or_org_policy_owner_page50",
+    "subscribe_policy_free_org_page50",
+    "subscribe_owner_or_org_policy_org_page50"
+  ],
+  "rowCounts": [
+    10000,
+    100000
+  ]
+}
