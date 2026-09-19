@@ -33,6 +33,24 @@ const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy
   policy.todos.allowDelete.where({ owner_id: session.user.account });
 });
 
+// Keep the BYTEA regression independent of unrelated nullable JSON semantics
+// tracked in #2733, while exercising the complete grid query against a real Db.
+const inspectorByteaApp = s.defineApp({
+  todos: s.table(
+    {
+      title: s.string(),
+      owner_id: s.uuid(),
+      payload: s.bytes().optional(),
+    },
+    {},
+  ),
+});
+const inspectorByteaPermissions = s.definePermissions(inspectorByteaApp, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowInsert.where({ owner_id: session.user.account });
+});
+
+let currentSchema = inspectorSaveApp.wasmSchema;
 let latestQuery: GenericQueryBuilder | null = null;
 
 vi.mock("jazz-tools/react", () => ({
@@ -50,7 +68,7 @@ let currentDb: Db | null = null;
 
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
-    wasmSchema: inspectorSaveApp.wasmSchema,
+    wasmSchema: currentSchema,
     runtime: "standalone",
   }),
 }));
@@ -163,8 +181,12 @@ function editStagedTextColumn(columnIndex: number, label: string, value: string)
   fireEvent.blur(editor);
 }
 
-async function createInspectorDb(): Promise<{ app: PolicyTestApp; db: Db }> {
-  const app = await createPolicyTestApp(inspectorSaveApp, inspectorSavePermissions, expect);
+async function createInspectorDb(
+  appSchema: Parameters<typeof createPolicyTestApp>[0] = inspectorSaveApp,
+  permissions: Parameters<typeof createPolicyTestApp>[1] = inspectorSavePermissions,
+): Promise<{ app: PolicyTestApp; db: Db }> {
+  const app = await createPolicyTestApp(appSchema, permissions, expect);
+  currentSchema = appSchema.wasmSchema;
   const db = app.as({
     issuer,
     user_id: userId,
@@ -182,6 +204,7 @@ describe("TableDataGrid real Db save retries", () => {
     cleanup();
     latestQuery = null;
     currentDb = null;
+    currentSchema = inspectorSaveApp.wasmSchema;
     await policyApp?.shutdown();
     policyApp = null;
   });
@@ -518,18 +541,18 @@ describe("TableDataGrid real Db save retries", () => {
     ]);
   }, 30_000);
   it("round-trips a BYTEA equality filter through the grid URL and query runtime", async () => {
-    const setup = await createInspectorDb();
+    const setup = await createInspectorDb(inspectorByteaApp, inspectorByteaPermissions);
     policyApp = setup.app;
     const exactPayload = new Uint8Array([0, 255]);
     await setup.db
-      .insert(inspectorSaveApp.todos, {
+      .insert(inspectorByteaApp.todos, {
         title: "exact payload",
         owner_id: permittedOwner,
         payload: exactPayload,
       })
       .wait({ tier: "edge" });
     await setup.db
-      .insert(inspectorSaveApp.todos, {
+      .insert(inspectorByteaApp.todos, {
         title: "nearby payload",
         owner_id: permittedOwner,
         payload: new Uint8Array([0, 254]),
@@ -547,9 +570,13 @@ describe("TableDataGrid real Db save retries", () => {
     await waitFor(() => {
       const query = latestQuery;
       if (!query) throw new Error("TableDataGrid did not issue a query");
-      expect(JSON.parse(query._build()).conditions).toEqual([
-        { column: "payload", op: "eq", value: [0, 255] },
-      ]);
+      expect(JSON.parse(query._build())).toMatchObject({
+        conditions: [{ column: "payload", op: "eq", value: [0, 255] }],
+        select: ["*", "$createdAt", "$updatedAt"],
+        orderBy: [["id", "asc"]],
+        limit: 26,
+        offset: 0,
+      });
     });
 
     const query = latestQuery;
