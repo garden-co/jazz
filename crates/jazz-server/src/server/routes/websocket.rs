@@ -4522,12 +4522,26 @@ mod tests {
     async fn inspector_expiry_closes_connection_before_wire_hello() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let token = inspector_test_token(addr, &state, false, 2).await;
+        // Start just after a wall-clock second so this one-second credential
+        // cannot accidentally expire before its prelude is actually admitted.
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_millis();
+        tokio::time::sleep(Duration::from_millis(u64::from(1050 - millis))).await;
+        let token = inspector_test_token(addr, &state, false, 1).await;
+        let claims = super::super::inspector::verify(&token, &state).unwrap();
+        let key = WebSocketAdmissionKey {
+            app_id: state.app_id,
+            identity: AuthorSubject::SYSTEM,
+            inspector_operator: Some(claims.operator_key()),
+        };
         let (mut ws, _) = connect_async(ws_url(addr, state.app_id)).await.unwrap();
         ws.send(WsMessage::Binary(inspector_test_prelude(&token).into()))
             .await
             .unwrap();
-        let closed = tokio::time::timeout(Duration::from_secs(3), ws.next())
+        wait_for_ws_live_admissions(key, |count| count == 1).await;
+        let closed = tokio::time::timeout(Duration::from_millis(1400), ws.next())
             .await
             .expect("Inspector lifetime also bounds the pre-Hello handshake");
         assert!(

@@ -75,10 +75,13 @@ dashboard session. `GET /inspector/session` with `credentials: include` returns
 `POST /inspector/renew` with credentials, JSON `{ "appId": "...",
 "capabilities": ["inspector:read"] }`, and `X-Inspector-CSRF` rechecks the
 current dashboard login and current app administration permission, then returns
-the same token response (including canonical `serverUrl`). Both endpoints require
-an exact allowed Inspector Origin, `Vary: Origin`, exact
-`Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials: true`, and
-no-store. Preflight allows only GET/POST and Content-Type/X-Inspector-CSRF.
+the same token response (including canonical `serverUrl`). For cross-origin
+requests both endpoints require an exact allowed Inspector Origin, `Vary: Origin`,
+exact `Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials: true`, and
+no-store. Same-origin GET requests may omit Origin: allow that case only with
+an authenticated session, `Sec-Fetch-Site: same-origin` and trusted-host/SOP
+checks; never return wildcard CORS. POST renewal still requires exact Origin and
+the session-bound CSRF header. Preflight allows only GET/POST and Content-Type/X-Inspector-CSRF.
 The CSRF token is bound to the login session, remains memory-only, and is not
 itself authority without the HttpOnly cookie. Missing login returns 401
 `{ "error": "login_required" }`; revoked permission or invalid CSRF returns 403
@@ -105,9 +108,14 @@ in callback URLs, or credential/error body logging.
 ## CLI handoff and rollout
 
 CLI uses configured root authority to exchange a short-lived session, then
-serves a loopback-only one-shot browser handoff. The browser handoff must verify
-its initiating Inspector origin and browser-generated challenge; root/access
-tokens must not be placed in the launch URL. Only connection metadata may be
+serves a loopback-only one-shot browser handoff. The launch fragment contains a
+random 32-byte one-time bootstrap code, app metadata and loopback address. This
+code is distinct from a bearer access/root token: the challenge endpoint consumes
+it once while binding the browser-generated S256 proof, and the token endpoint
+requires the matching verifier. Inspector immediately scrubs the fragment and
+never persists the bootstrap code. Exact Origin and loopback Host checks remain
+mandatory, but Origin alone is not proof that a caller owns the CLI launch.
+Root/access tokens must not be placed in the launch URL. Only connection metadata may be
 persisted by Inspector. CLI listener closes after successful redemption or a
 short timeout.
 
@@ -143,3 +151,44 @@ session, preventing timed-out upgrades from leaking server sessions. A frame
 accepted before expiry may finish its durable transaction; expiry is not a
 rollback mechanism. Dropping the outbound stream stops later frames in that
 already-queued batch and suppresses all subsequent protected output.
+
+## HTTP examples for tenant-manager implementation
+
+Exchange (server-to-server):
+
+```http
+POST /apps/<canonical-app-id>/admin/inspector/sessions
+Content-Type: application/json
+X-Jazz-Admin-Secret: <server-held-root>
+
+{"operator":"opaque-operator-id","capabilities":["inspector:read"],"expiresIn":900}
+```
+
+Successful exchange/renewal responses use the following shape; Cloud token and
+renewal responses additionally include the app's canonical `serverUrl`:
+
+```json
+{
+  "accessToken": "<short-lived-token>",
+  "expiresAt": 1800000900,
+  "appId": "<canonical-app-id>",
+  "capabilities": ["inspector:read"],
+  "serverUrl": "https://sync.example"
+}
+```
+
+Jazz exchange uses `401 {"error":"invalid_admin_credential"}` for missing or
+invalid root authority, `400 {"error":"invalid_request"}` for unsupported scopes,
+operator/TTL bounds or malformed JSON request shapes, and
+`500 {"error":"exchange_failed"}` for signing failure. These responses and tokens
+use `Cache-Control: no-store`; errors never echo submitted credential material.
+Wrong app routes return 404. Inspector HTTP admission uses
+`401 {"error":"invalid_inspector_credential"}` for signature/claim/expiry failure,
+`403 {"error":"inspector_capability_denied"}` for an absent required capability,
+and `403 {"error":"inspector_operation_denied"}` for operations outside the
+Inspector allowlist. Mixing root and Inspector headers is 400
+`{"error":"ambiguous_credentials"}`. Existing catalogue-handler payload errors
+retain their existing response contract after successful capability admission.
+
+The browser adapter and CLI request shapes, configured dashboard origin and
+callback setup are detailed in [Inspector session client](inspector-session-client.md).
