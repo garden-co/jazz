@@ -639,6 +639,9 @@ where
     #[cfg(any(test, feature = "testing"))]
     pub(super) fail_next_subscription_refresh: Cell<bool>,
     pub(super) observed_subscriber_dirty_epoch: Cell<u64>,
+    /// Dirty epoch observed by replay recovery. Retries only after a peer
+    /// contributes new dependency state, never on every idle tick.
+    pub(super) local_replay_epoch: u64,
     pub(super) observed_session_claim_revision: Cell<u64>,
     pub(super) inbound_authority_receipt_quarantine: bool,
     /// Fresh non-resumable epoch binding authorization receipts to this link.
@@ -1972,6 +1975,36 @@ where
         result
     }
 
+    async fn retry_local_replay_after_progress(&mut self) -> Result<(), Error> {
+        let epoch = self.subscriber_dirty_epoch.get();
+        if self.local_replay_epoch == epoch {
+            return Ok(());
+        }
+        self.local_replay_epoch = epoch;
+        let (author, outbox) = match &self.link {
+            ConnectionLink::Subscriber(state) if state.local_receiver => {
+                (state.ingest_context.identity, Rc::clone(&state.outbox))
+            }
+            _ => return Ok(()),
+        };
+        let blocked = self.local_fate_routes.borrow().values().any(|routes| {
+            routes
+                .iter()
+                .any(|route| !route.replay_ready && route.replay_author == Some(author))
+        });
+        if blocked {
+            super::restore_local_subscriber_replay(
+                &self.node,
+                &outbox,
+                &self.local_fate_routes,
+                author,
+                &self.downstream_fates,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn tick_inner(&mut self) -> Result<DbTickStats, Error> {
         if let Some(error) = self.startup_error.take() {
             return Err(error);
@@ -2003,6 +2036,7 @@ where
         let permits_delegated_sessions = self.transport.permits_delegated_sessions()
             || self.node.borrow().client_relay_scope().is_some();
         self.observe_shared_subscriber_dirty_epoch();
+        self.retry_local_replay_after_progress().await?;
         let session_claim_binding = self.subscriber_session_claim_binding();
         self.bind_subscriber_session_claims();
         self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())

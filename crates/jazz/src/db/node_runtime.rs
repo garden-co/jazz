@@ -1048,40 +1048,14 @@ where
         author: AuthorSubject,
         downstream_fates: &PendingDownstreamFates,
     ) -> Result<(), Error> {
-        let mut node = self.node.lock().await;
-        let pending = node.pending_transaction_ids_for_author(author).await?;
-        let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
-        let mut replay_units = Vec::new();
-        let mut visited = BTreeSet::new();
-        for tx_id in &pending {
-            collect_local_replay_commit_units(&mut node, *tx_id, &mut visited, &mut replay_units)
-                .await?;
-        }
-        drop(node);
-        for (tx_id, unit) in replay_units {
-            // A reopened main-thread runtime has no transaction history. Send
-            // accepted causal ancestors before each pending unit so the latter
-            // can be ingested before its Local ack or later authority fate.
-            downstream_fates.borrow_mut().push(unit.clone());
-            if pending_set.contains(&tx_id) {
-                // Durable recovery omits exclusive snapshot/read evidence. A
-                // live sibling may already retain the exact authored unit;
-                // never replace that unit with its redacted history replay.
-                let retained_unit = self
-                    .outbox
-                    .borrow()
-                    .iter()
-                    .any(|pending| pending.tx_id == tx_id && pending.unit.is_some());
-                if !retained_unit {
-                    self.queue_pending_upload(tx_id, Some(unit));
-                }
-            }
-        }
-        for tx_id in pending {
-            register_local_fate_route(&self.local_fate_routes, tx_id, downstream_fates);
-        }
-        queue_local_acknowledgements(&self.local_fate_routes, &self.node).await;
-        Ok(())
+        restore_local_subscriber_replay(
+            &self.node,
+            &self.outbox,
+            &self.local_fate_routes,
+            author,
+            downstream_fates,
+        )
+        .await
     }
 
     pub(super) fn mark_subscriber_connections_dirty(&self) {
@@ -2362,6 +2336,7 @@ where
                 #[cfg(any(test, feature = "testing"))]
                 fail_next_subscription_refresh: Cell::new(false),
                 observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
+                local_replay_epoch: self.subscriber_dirty_epoch.get(),
                 observed_session_claim_revision: Cell::new(0),
                 inbound_authority_receipt_quarantine: false,
                 connection_epoch,
@@ -2788,6 +2763,7 @@ where
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             #[cfg(any(test, feature = "testing"))]
             fail_next_subscription_refresh: Cell::new(false),
+            local_replay_epoch: self.subscriber_dirty_epoch.get(),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
             inbound_authority_receipt_quarantine: false,
