@@ -4540,7 +4540,7 @@ mod tests {
         ws.send(WsMessage::Binary(inspector_test_prelude(&token).into()))
             .await
             .unwrap();
-        wait_for_ws_live_admissions(key, |count| count == 1).await;
+        wait_for_ws_live_admissions(&state, key, |count| count == 1).await;
         let closed = tokio::time::timeout(Duration::from_millis(1400), ws.next())
             .await
             .expect("Inspector lifetime also bounds the pre-Hello handshake");
