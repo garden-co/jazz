@@ -1284,7 +1284,7 @@ mod tests {
     use futures::stream::FuturesUnordered;
     use jazz::db::{
         Db, DbConfig, DbIdentity, PreparedQuery, QueryAttachment, ReadOpts, RowCells,
-        SeededRowIdSource, WireTransportAdapter, WriteHandle, WriteState,
+        SeededRowIdSource, Transport, WireTransportAdapter, WriteHandle, WriteState,
     };
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{NodeUuid, RowAuthor};
@@ -1292,11 +1292,11 @@ mod tests {
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
     use jazz::schema::{JazzSchema, TableSchema};
     use jazz::tx::{DurabilityTier, Fate, RejectionReason, TxId};
+    use jazz::wire::decode_frame;
     use jazz::wire::{
         FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
         WIRE_PROTOCOL_VERSION, WireMessageFragment, WireTransport,
     };
-    use jazz::wire::{WireStreamDecoder, decode_frame, decode_sync_message};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     use crate::middleware::AuthConfig;
@@ -3137,37 +3137,6 @@ mod tests {
             .collect()
     }
 
-    fn fate_tx_ids(decoder: &mut WireStreamDecoder, message: &WsMessage) -> Vec<TxId> {
-        decode_ws_message(message)
-            .into_iter()
-            .filter_map(|frame| match frame {
-                WireFrame::Message(envelope) => decoder
-                    .decode_message(&envelope.payload, envelope.features)
-                    .ok()
-                    .and_then(|payload| decode_sync_message(&payload).ok())
-                    .and_then(|message| match message {
-                        SyncMessage::FateUpdate { tx_id, .. } => Some(tx_id),
-                        _ => None,
-                    }),
-                WireFrame::Channel(envelope) if envelope.extent.first && envelope.extent.last => {
-                    decoder
-                        .decode_message(&envelope.extent.payload, envelope.features)
-                        .ok()
-                        .and_then(|payload| decode_sync_message(&payload).ok())
-                        .and_then(|message| match message {
-                            SyncMessage::FateUpdate { tx_id, .. } => Some(tx_id),
-                            _ => None,
-                        })
-                }
-                WireFrame::Hello(_)
-                | WireFrame::Error(_)
-                | WireFrame::MessageFragment(_)
-                | WireFrame::Channel(_)
-                | WireFrame::ChannelCredit(_) => None,
-            })
-            .collect()
-    }
-
     #[derive(Clone, Default)]
     struct TestWireTransport {
         queues: Rc<RefCell<TestWireQueues>>,
@@ -3200,10 +3169,68 @@ mod tests {
         }
     }
 
+    // Observe semantic messages after the real persistent adapter has decoded
+    // channel envelopes and applied credits; never infer message boundaries
+    // from a WebSocket batch.
+    struct ObservedTransport {
+        adapter: WireTransportAdapter<TestWireTransport>,
+        received: Rc<RefCell<Vec<SyncMessage>>>,
+    }
+
+    impl Transport for ObservedTransport {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            self.adapter.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.try_recv_result().expect("valid test wire")
+        }
+        fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+            let message = self.adapter.try_recv_result()?;
+            if let Some(message) = &message {
+                self.received.borrow_mut().push(message.clone());
+            }
+            Ok(message)
+        }
+        fn try_recv_owned_result(
+            &mut self,
+        ) -> Result<Option<jazz::db::ReceivedSyncMessage>, TransportError> {
+            let message = self.adapter.try_recv_owned_result()?;
+            if let Some(message) = &message {
+                self.received.borrow_mut().push(message.message.clone());
+            }
+            Ok(message)
+        }
+        fn poll_flush(&mut self) -> Result<jazz::db::WireFlushStatus, TransportError> {
+            self.adapter.poll_flush()
+        }
+        fn has_terminal_failure(&self) -> bool {
+            self.adapter.has_terminal_failure()
+        }
+        fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+            self.adapter.incomplete_receive_timeout_ms()
+        }
+        fn shared_auxiliary_endpoint(&self) -> Option<jazz::db::SharedAuxiliaryEndpoint> {
+            self.adapter.shared_auxiliary_endpoint()
+        }
+        fn set_trusted_encoder(&mut self, trusted: bool) {
+            self.adapter.set_trusted_encoder(trusted);
+        }
+        fn wire_inbound_context(&self) -> Option<jazz::wire::WireInboundContext> {
+            self.adapter.wire_inbound_context()
+        }
+        fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
+            self.adapter.connection_session_context()
+        }
+        fn permits_delegated_sessions(&self) -> bool {
+            self.adapter.permits_delegated_sessions()
+        }
+    }
+
     struct TestClient {
         db: Db<CoreMemoryStorage>,
         transport: TestWireTransport,
         todos_table: TableSchema,
+        received: Rc<RefCell<Vec<SyncMessage>>>,
     }
 
     impl TestClient {
@@ -3246,17 +3273,22 @@ mod tests {
             // Scoped semantics are not installed without an admitted remote
             // endpoint, even though a browser may accept the server endpoint
             // from its response Hello.
-            db.connect_upstream(Box::new(WireTransportAdapter::new(
-                transport.clone(),
-                WIRE_PROTOCOL_VERSION,
-                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-                None,
-            )))
+            let received = Rc::new(RefCell::new(Vec::new()));
+            db.connect_upstream(Box::new(ObservedTransport {
+                received: Rc::clone(&received),
+                adapter: WireTransportAdapter::new(
+                    transport.clone(),
+                    WIRE_PROTOCOL_VERSION,
+                    FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+                    None,
+                ),
+            }))
             .await;
             Self {
                 db,
                 transport,
                 todos_table: ws_todos_table_schema(),
+                received,
             }
         }
 
@@ -3572,27 +3604,6 @@ mod tests {
         ws.send(WsMessage::Binary(ws_frame_batch(&initial_outbound).into()))
             .await
             .expect("send initial websocket query setup");
-        let initial_inbound = receive_required_ws_encoded_frames(ws).await;
-        let mut decoder = WireStreamDecoder::new(current_wire_features())
-            .expect("current wire compression must be available");
-        let saw_catalogue = initial_inbound.iter().any(|frame| {
-            let Ok(WireFrame::Message(envelope)) = decode_frame(frame) else {
-                return false;
-            };
-            decoder
-                .decode_message(&envelope.payload, envelope.features)
-                .ok()
-                .and_then(|payload| decode_sync_message(&payload).ok())
-                .is_some_and(|message| matches!(message, SyncMessage::CatalogueSnapshot(_)))
-        });
-        assert!(
-            saw_catalogue,
-            "the first query setup response must carry the authority catalogue"
-        );
-        // Keep this exact observed setup response queued for the ordinary
-        // client tick. The following pump therefore exercises the same
-        // catalogue-then-query transition as a real connected client.
-        client.transport.push_inbound(initial_inbound);
         let deadline = tokio::time::Instant::now() + WS_PUMP_DEADLINE;
         while !client.edge_attachment_is_covered(&attachment)
             && tokio::time::Instant::now() < deadline
@@ -3603,6 +3614,14 @@ mod tests {
         assert!(
             client.edge_attachment_is_covered(&attachment),
             "websocket setup must settle the initial query before testing a later operation"
+        );
+        assert!(
+            client
+                .received
+                .borrow()
+                .iter()
+                .any(|message| matches!(message, SyncMessage::CatalogueSnapshot(_))),
+            "query setup must receive the authority catalogue through the wire adapter"
         );
         (query, attachment)
     }
@@ -3765,33 +3784,48 @@ mod tests {
             .await
             .expect("send one batched import message");
 
-        let first_response = ws
-            .next()
-            .await
-            .expect("server response while later frames remain")
-            .expect("valid websocket response");
-        let mut decoder = WireStreamDecoder::new(current_wire_features())
-            .expect("current wire compression must be available");
-        let first_fates = fate_tx_ids(&mut decoder, &first_response);
-        assert!(
-            first_fates.contains(&early_tx),
-            "the first server response must include the already-global early transaction; frames={:?}",
-            decode_ws_message(&first_response)
-        );
-        assert!(
-            !first_fates.contains(&final_tx),
-            "the final transaction must not be ingested before the early fate is flushed"
-        );
-
-        let mut observed_final = false;
-        while !observed_final {
-            let response = ws
-                .next()
-                .await
-                .expect("server continues ingesting the batch")
-                .expect("valid websocket response");
-            observed_final = fate_tx_ids(&mut decoder, &response).contains(&final_tx);
-        }
+        client.received.borrow_mut().clear();
+        tokio::time::timeout(WS_PUMP_DEADLINE, async {
+            let mut saw_early = false;
+            loop {
+                let frames = receive_required_ws_encoded_frames(&mut ws).await;
+                let outgoing = client.receive_tick_take(frames);
+                let fates = client
+                    .received
+                    .borrow_mut()
+                    .drain(..)
+                    .filter_map(|message| {
+                        if let SyncMessage::FateUpdate { tx_id, .. } = message {
+                            Some(tx_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !fates.is_empty() && !saw_early {
+                    assert!(
+                        fates.contains(&early_tx),
+                        "first semantic fate response must contain the early transaction"
+                    );
+                    assert!(
+                        !fates.contains(&final_tx),
+                        "final transaction must not be ingested before early fate is flushed"
+                    );
+                    saw_early = true;
+                }
+                if !outgoing.is_empty() {
+                    ws.send(WsMessage::Binary(ws_frame_batch(&outgoing).into()))
+                        .await
+                        .expect("return transport credits");
+                }
+                if fates.contains(&final_tx) {
+                    assert!(saw_early);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("server continues ingesting the batch through final fate");
     }
 
     // Internal route-boundary test: this exercises the public websocket
