@@ -2906,3 +2906,36 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
     }
 }
+
+#[test]
+fn discarded_pending_identity_accepts_redacted_exclusive_read_sets() {
+    let (_dir, mut reader) = open_node_with_uuid(node(3));
+    let tx_id = TxId::new(TxTime::from(11), node(1));
+    let mut tx = reset_scope_tx(tx_id, 1);
+    tx.kind = TxKind::Exclusive;
+    tx.row_read_set = Some(Vec::new());
+    tx.absent_read_set = Some(Vec::new());
+    tx.predicate_read_set = Some(Vec::new());
+    let full = VersionCarrier::Bundle(VersionBundle {
+        scope: crate::protocol::VersionBundleScope::ViewScoped,
+        tx: tx.clone(), versions: Vec::new(), fate: Fate::Pending,
+        global_time: None, durability: DurabilityTier::Local,
+    });
+    tx.row_read_set = None;
+    tx.absent_read_set = None;
+    tx.predicate_read_set = None;
+    let redacted = VersionCarrier::Bundle(VersionBundle {
+        scope: crate::protocol::VersionBundleScope::ViewScoped,
+        tx, versions: Vec::new(), fate: Fate::Pending,
+        global_time: None, durability: DurabilityTier::Local,
+    });
+    // Both duplicate entries in a delivery and later redacted deliveries use
+    // the ordinary transaction-identity contract.
+    reader.remember_discarded_pending_view_transactions(&[full.clone(), redacted.clone()]).unwrap();
+    reader.remember_discarded_pending_view_transactions(&[full]).unwrap();
+    reader.remember_discarded_pending_view_transactions(&[redacted.clone()]).unwrap();
+    let mut conflict = redacted;
+    let VersionCarrier::Bundle(bundle) = &mut conflict else { unreachable!() };
+    bundle.tx.user_metadata_json = Some("true".to_owned());
+    assert!(matches!(crate::db::block_on(reader.remember_discarded_pending_view_transactions(&[conflict])), Err(Error::ConflictingCommitUnit(id)) if id == tx_id));
+}

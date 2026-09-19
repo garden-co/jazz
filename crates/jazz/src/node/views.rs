@@ -1695,7 +1695,7 @@ where
                 self.admit_contribution_merge_for_storage(&tx)?;
                 if headers
                     .get(&tx.tx_id)
-                    .is_some_and(|previous| previous != &tx)
+                    .is_some_and(|previous| !known_transaction_payload_matches(previous, &tx))
                 {
                     return Err(Error::ConflictingCommitUnit(tx.tx_id));
                 }
@@ -1707,7 +1707,7 @@ where
             if let Some(stored) = self.query_transaction(tx_id).await? {
                 let mut identity = transaction_without_permission_subject(&stored.tx);
                 identity.n_total_writes = 0;
-                if identity != tx {
+                if !known_transaction_payload_matches(&identity, &tx) {
                     return Err(Error::ConflictingCommitUnit(tx_id));
                 }
             } else {
