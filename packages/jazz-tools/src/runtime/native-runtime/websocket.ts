@@ -79,7 +79,7 @@ export type BrowserWebSocket = {
  * The sole Jazz wire-protocol version. This is distinct from independently
  * versioned v1 storage, catalogue, and binding formats.
  */
-export const WIRE_PROTOCOL_VERSION = 2;
+export const WIRE_PROTOCOL_VERSION = 3;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
@@ -542,25 +542,25 @@ export function policyClaimsForAdmittedWebSocket(authJson: string): Record<strin
  * retains its account only when that pair matches; the server independently
  * verifies the registry assignment.
  *
- * A credential without a usable session subject (for example an admin-only
- * connection) retains the caller's transport identity. It cannot accidentally
- * fall back to the historical bare-sub wire representation.
+ * An admin credential is the sessionless SYSTEM authority. Other credentials
+ * without a usable session subject retain the caller's transport identity and
+ * cannot accidentally fall back to the historical bare-sub wire representation.
  */
 export function peerIdentityForWebSocketAuth(
   authJson: string,
   fallbackIdentity: Uint8Array,
 ): Uint8Array {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
-  // A credential-only backend connection is the trusted SYSTEM serving
-  // authority. Its raw-core backend open already uses this identity, and the
-  // WebSocket prelude must agree: otherwise the server attaches remote query
+  // Admin and credential-only backend connections are trusted SYSTEM serving
+  // authorities. Their raw-core backend opens already use this identity, and
+  // the WebSocket prelude must agree: otherwise the server attaches remote query
   // coverage as the adapter's incidental local fallback author and evaluates
-  // row policies for that author. A backend session remains an explicit
-  // end-user serving subject and is handled by `canonicalAuthorForWebSocketAuth`.
+  // row policies for that author. Admin admission is always sessionless; a
+  // backend session remains an explicit end-user serving subject and is handled
+  // by `canonicalAuthorForWebSocketAuth`.
   if (
-    typeof auth.backend_secret === "string" &&
-    !auth.admin_secret &&
-    !hasUsableBackendSession(auth)
+    typeof auth.admin_secret === "string" ||
+    (typeof auth.backend_secret === "string" && !hasUsableBackendSession(auth))
   ) {
     return new TextEncoder().encode(canonicalAuthorSubject("urn:jazz:system", "system"));
   }

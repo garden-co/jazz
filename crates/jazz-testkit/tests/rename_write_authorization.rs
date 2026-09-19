@@ -9,9 +9,7 @@ use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
-use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens,
-};
+use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens};
 use jazz::row_input;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::SchemaHash;
@@ -235,19 +233,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
         authority.persist_and_settle_outcome(outcome).await
     })
     .expect("publish v2 rename lineage");
-    block_on(async {
-        let outcome = authority
-            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-                author: AuthorSubject::SYSTEM,
-                pointer: CurrentWriteSchema {
-                    revision: 1,
-                    schema: v2.id,
-                },
-            })
-            .await?;
-        authority.persist_and_settle_outcome(outcome).await
-    })
-    .expect("select v2 write schema");
+    block_on(authority.activate_schema_for_test(1, v2.schema.clone())).expect("activate v2 schema");
 
     let mallory = author(0xa2);
     let mut non_owner_writer_v2 = open_node(node(0x11), v2.schema.clone());
@@ -409,4 +395,215 @@ async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
             server.shutdown().await;
         })
         .await;
+}
+
+/// B -> A -> C projects old rows and checks new B writes against C's policies.
+#[tokio::test(flavor = "current_thread")]
+async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies() {
+    tokio::task::LocalSet::new()
+        .run_until(sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner())
+        .await;
+}
+
+async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner() {
+    use jazz::query::Query;
+    use jazz::tools::{ReadTier, TableName, Value as PublicValue};
+    let schema = |table: &str, owner: &str, extra: Option<&str>| {
+        let mut table = TableSchemaBuilder::new(table)
+            .column("title", ColumnType::Text)
+            .column(owner, ColumnType::Text);
+        if let Some(extra) = extra {
+            table = table.column(extra, ColumnType::Text);
+        }
+        SchemaBuilder::new().table(table).build()
+    };
+    let base = schema("notes", "owner", None);
+    let left = schema("left_notes", "left_owner", Some("tag"));
+    let right = schema("right_notes", "right_owner", Some("category"));
+    let server = JazzServer::start_with_schema(base.clone()).await.unwrap();
+    for (target, table, owner, extra) in [
+        (&left, "left_notes", "left_owner", "tag"),
+        (&right, "right_notes", "right_owner", "category"),
+    ] {
+        let lens = Lens::new(
+            SchemaHash::compute(&base),
+            SchemaHash::compute(target),
+            LensTransform::with_ops(vec![
+                jazz::tools::LensOp::RenameColumn {
+                    table: "notes".into(),
+                    old_name: "owner".into(),
+                    new_name: owner.into(),
+                },
+                jazz::tools::LensOp::AddColumn {
+                    table: "notes".into(),
+                    column: extra.into(),
+                    column_type: ColumnType::Text,
+                    default: PublicValue::Text(extra.into()),
+                },
+                jazz::tools::LensOp::RenameTable {
+                    old_name: "notes".into(),
+                    new_name: table.into(),
+                },
+            ]),
+        );
+        push_catalogue_in_memory(
+            server.server_state(),
+            server.app_id(),
+            "dev",
+            std::slice::from_ref(target),
+            &[lens],
+        )
+        .await
+        .unwrap();
+    }
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &left,
+    )
+    .await;
+    let alice = support::connect_ready_user(
+        &server,
+        &left,
+        "alice",
+        "left_notes",
+        Duration::from_secs(30),
+    )
+    .await;
+    let (id, _, tx) = alice
+        .insert(
+            "left_notes",
+            row_input!("title" => "before", "left_owner" => "alice", "tag" => "left-only"),
+        )
+        .unwrap();
+    support::wait_for_edge_txs(&alice, &[tx.unwrap()]).await;
+
+    let owner = PolicyExpr::eq_session(
+        "right_owner",
+        vec!["user".into(), "identity".into(), "subject".into()],
+    );
+    support::publish_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &right,
+        [(
+            TableName::new("right_notes"),
+            TablePolicies::new()
+                .with_select(owner.clone())
+                .with_insert(owner.clone())
+                .with_update(Some(owner.clone()), owner.clone())
+                .with_delete(owner),
+        )],
+        None,
+    )
+    .await;
+    let reader = support::connect_ready_user(
+        &server,
+        &right,
+        "alice",
+        "right_notes",
+        Duration::from_secs(30),
+    )
+    .await;
+    let rows = support::wait_for_query(
+        &reader,
+        Query::from("right_notes").select(["title", "category"]),
+        ReadTier::Remote,
+        Duration::from_secs(30),
+        "project B through A to C",
+        |rows| (rows.len() == 1).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        rows,
+        vec![(
+            id,
+            vec![
+                PublicValue::Text("before".into()),
+                PublicValue::Text("category".into())
+            ]
+        )]
+    );
+
+    let tx = alice
+        .update(
+            "left_notes",
+            id,
+            row_input!("title" => "after").into_iter().collect(),
+        )
+        .unwrap()
+        .unwrap();
+    support::wait_for_edge_txs(&alice, &[tx]).await;
+    support::wait_for_query(
+        &reader,
+        Query::from("right_notes").select(["title"]),
+        ReadTier::Remote,
+        Duration::from_secs(30),
+        "C observes authorized B update",
+        |rows| (rows == vec![(id, vec![PublicValue::Text("after".into())])]).then_some(()),
+    )
+    .await;
+    let (reverse_id, _, tx) = reader
+        .insert(
+            "right_notes",
+            row_input!("title" => "reverse", "right_owner" => "alice", "category" => "right-only"),
+        )
+        .unwrap();
+    support::wait_for_edge_txs(&reader, &[tx.unwrap()]).await;
+    // Select B again so its renamed table is governed by explicit current grants.
+    let owner = PolicyExpr::eq_session(
+        "left_owner",
+        vec!["user".into(), "identity".into(), "subject".into()],
+    );
+    support::publish_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &left,
+        [(
+            TableName::new("left_notes"),
+            TablePolicies::new()
+                .with_select(owner.clone())
+                .with_insert(owner),
+        )],
+        None,
+    )
+    .await;
+    // C -> A -> B drops C's extra column and supplies B's default.
+    let reverse = support::wait_for_query(
+        &alice,
+        Query::from("left_notes").select(["title", "tag"]),
+        ReadTier::Remote,
+        Duration::from_secs(30),
+        "project C through A to B",
+        |rows| rows.into_iter().find(|(id, _)| *id == reverse_id),
+    )
+    .await;
+    assert_eq!(
+        reverse.1,
+        vec![
+            PublicValue::Text("reverse".into()),
+            PublicValue::Text("tag".into())
+        ]
+    );
+    let (_, _, denied) = reader
+        .insert(
+            "right_notes",
+            row_input!("title" => "denied", "right_owner" => "bob", "category" => "category"),
+        )
+        .unwrap();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            reader.wait_for_transaction(denied.unwrap(), jazz::tools::DurabilityTier::EdgeServer),
+        )
+        .await
+        .expect("denied sibling write should receive a rejection")
+        .is_err()
+    );
+    alice.shutdown().await.unwrap();
+    reader.shutdown().await.unwrap();
+    server.shutdown().await;
 }

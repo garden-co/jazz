@@ -24,8 +24,10 @@ mod relay_topology {
     use jazz_testkit::duplex_transport::duplex;
 
     fn schema() -> JazzSchema {
+        use jazz::tools::test_support::AllowAll;
         let source = SchemaBuilder::new()
             .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+            .allow_all()
             .build();
         JazzSchema::new(&source).expect("replica settlement public schema compiles")
     }
@@ -679,8 +681,10 @@ mod client_transport {
     const HOLD_WINDOW: Duration = Duration::from_millis(1200);
 
     fn document_schema() -> Schema {
+        use jazz::tools::test_support::AllowAll;
         SchemaBuilder::new()
             .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+            .allow_all()
             .build()
     }
 

@@ -1445,12 +1445,9 @@ mod variant_case_tests {
             publication: Box::new(publication),
         })
         .expect("publish wide payload lineage");
-        node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        node.activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .expect("select evolved write schema");
 
@@ -1604,12 +1601,9 @@ mod variant_case_tests {
             publication: Box::new(publication),
         })
         .expect("publish canonical scalar lineage");
-        node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: evolved.id,
-            },
+        node.activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
         })
         .expect("select evolved scalar write schema");
         let physical = &node.catalogue.physical_mappings[&evolved.id].tables["events"];

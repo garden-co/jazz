@@ -2493,7 +2493,7 @@ where
         let register_table = self
             .node
             .physical_register_table_for_schema(
-                self.node.catalogue.current_schema_version_id,
+                self.node.catalogue.local_schema_version_id,
                 &table.name,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
@@ -3064,7 +3064,7 @@ where
     }
 
     pub(crate) fn can_use_bounded_historical_source(&self, table: &str) -> bool {
-        if self.read_view.read_schema != self.node.catalogue.current_schema_version_id {
+        if self.read_view.read_schema != self.node.catalogue.local_schema_version_id {
             return false;
         }
         self.node

@@ -78,6 +78,22 @@ const defaultedSchema = {
 };
 type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
 const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
+const payloadEnumSchema = {
+  events: s.table(
+    {
+      event: s.enum({
+        message: {
+          requiredText: s.string(),
+          nullableText: s.string().optional(),
+          defaultedText: s.string().default("default"),
+        },
+      }),
+    },
+    {},
+  ),
+};
+type PayloadEnumAppSchema = s.Schema<typeof payloadEnumSchema>;
+const payloadEnumApp: s.App<PayloadEnumAppSchema> = s.defineApp(payloadEnumSchema);
 
 type Urgency = "low" | "high";
 
@@ -201,6 +217,31 @@ const largeSchema = {
 };
 
 describe("typed app prototype", () => {
+  it.each(["union", "wasmSchema", "schemaAst"])(
+    "rejects a table named %s instead of masking an app control",
+    (tableName) => {
+      expect(() =>
+        s.defineApp({
+          [tableName]: s.table({ value: s.string() }, {}),
+        } as never),
+      ).toThrow(/reserved/i);
+    },
+  );
+
+  it("rejects a table named exists instead of masking the policy control", () => {
+    expect(() => {
+      const reservedApp = s.defineApp({
+        exists: s.table({ value: s.string() }, {}),
+      } as never);
+      s.definePermissions(reservedApp, ({ policy }) => {
+        const existsPolicy = policy.exists as unknown as {
+          where(input: unknown): unknown;
+        };
+        existsPolicy.where({ value: "present" });
+      });
+    }).toThrow(/reserved/i);
+  });
+
   it("allows a table-inferred variable to be reassigned to a refined query", () => {
     let query = app.todos;
 
@@ -611,6 +652,40 @@ describe("typed app prototype", () => {
         done: null,
       };
       void invalidDefaultedNull;
+    }
+  });
+  it("preserves nullable and defaulted fields inside payload enum init values", () => {
+    type EventInsert = s.InsertOf<typeof payloadEnumApp.events>;
+    const omittedNullableAndDefaulted: EventInsert = {
+      event: {
+        type: "message",
+        requiredText: "required",
+      },
+    };
+    const explicitNullable: EventInsert = {
+      event: {
+        type: "message",
+        requiredText: "required",
+        nullableText: null,
+      },
+    };
+
+    expectTypeOf<EventInsert["event"]>().branded.toEqualTypeOf<{
+      type: "message";
+      requiredText: string;
+      nullableText?: string | null;
+      defaultedText?: string;
+    }>();
+    expectTypeOf(omittedNullableAndDefaulted.event.requiredText).toEqualTypeOf<string>();
+    expectTypeOf(explicitNullable.event.nullableText).toEqualTypeOf<string | null | undefined>();
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // @ts-expect-error required payload fields cannot be omitted
+      const missingRequired: EventInsert = { event: { type: "message" } };
+      // @ts-expect-error required payload fields cannot be null
+      const nullRequired: EventInsert = { event: { type: "message", requiredText: null } };
+      void missingRequired;
+      void nullRequired;
     }
   });
 

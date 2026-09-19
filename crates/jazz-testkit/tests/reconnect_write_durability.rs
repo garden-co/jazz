@@ -15,8 +15,10 @@ use support::{TestingClient, has_row, wait_for_rows};
 const NOT_REACHED_WINDOW: Duration = Duration::from_millis(1200);
 
 fn document_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+        .allow_all()
         .build()
 }
 
@@ -139,8 +141,10 @@ fn detaching_the_upstream_keeps_global_wait_pending_until_reconnected_authority_
     use jazz::tx::{DurabilityTier, Fate};
     use jazz_testkit::duplex_transport::duplex;
 
+    use jazz::tools::test_support::AllowAll;
     let source = SchemaBuilder::new()
         .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+        .allow_all()
         .build();
     let schema = JazzSchema::new(&source).expect("reconnect durability public schema compiles");
     let column_families = schema.column_families();

@@ -1046,7 +1046,7 @@ export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<a
  * so older clients can still read data written under the new schema.
  *
  * Migration stubs can be generated with the `jazz-tools@alpha migrations create` command
- * and published with the `jazz-tools@alpha migrations push` command.
+ * and published with the `jazz-tools@alpha deploy` command.
  *
  * @example
  * ```typescript

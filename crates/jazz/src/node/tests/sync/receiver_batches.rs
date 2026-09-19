@@ -13,7 +13,7 @@ fn todos_physical_table() -> crate::ids::GlobalPhysicalTableId {
         let fixture =
             NodeState::new_with_shared_test_catalogue(node(0xf8), schema, storage).unwrap();
         fixture
-            .scope_physical_table(fixture.catalogue.current_schema_version_id, "todos")
+            .scope_physical_table(fixture.catalogue.local_schema_version_id, "todos")
             .unwrap()
     })
 }

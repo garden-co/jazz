@@ -788,12 +788,9 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: renamed.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: renamed.id,
     })
     .unwrap();
     core.commit_mergeable_settled(
@@ -870,7 +867,7 @@ fn ancestry_lookup_avoids_transaction_wide_reads_resident_and_cold() {
             .cells(BTreeMap::from([("title".to_owned(), "second".to_owned())])),
     ).unwrap();
     let table_id = writer.physical_table_id_for_schema(
-        writer.catalogue.current_write_schema.schema, "todos",
+        writer.catalogue.active_schema.schema, "todos",
     ).unwrap();
     // Force the resident branch, then repeat against cold persisted history.
     let versions = writer.query_versions_for_tx(child).unwrap();

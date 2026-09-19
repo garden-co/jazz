@@ -381,10 +381,6 @@ where
                     .apply_publish_lens(author, ingest_context, lens)
                     .await
                     .map(PublicationOutcome::settled),
-                SyncMessage::SetCurrentWriteSchema { author, pointer } => self
-                    .apply_set_current_write_schema(author, ingest_context, pointer)
-                    .await
-                    .map(PublicationOutcome::settled),
                 SyncMessage::CatalogueAck(_) => Ok(PublicationOutcome::settled(Vec::new())),
                 SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_) => Err(
                     Error::UnsupportedSyncMessage("chunk traffic requires peer link context"),
@@ -429,12 +425,7 @@ where
                 "non-genesis schema requires lineage publication",
             ));
         }
-        let active_schema_changed = schema.id == self.catalogue.current_write_schema.schema
-            && self
-                .catalogue
-                .catalogue_schemas
-                .get(&schema.id)
-                .is_some_and(|current| current.schema != schema.schema);
+        let schema = SchemaVersion::new(schema.schema.without_permissions());
         self.catalogue
             .catalogue_schemas
             .insert(schema.id, schema.clone());
@@ -442,20 +433,18 @@ where
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
-        if schema.id == self.catalogue.current_schema_version_id {
-            self.catalogue.schema = schema.schema.clone();
-        }
         self.persist_catalogue_schema(&schema).await?;
+        if schema.id == self.catalogue.active_schema.schema {
+            let mut active = self.catalogue.active_schema.clone();
+            active.compiled = schema.schema.with_permissions_from(&active.compiled);
+            self.persist_active_schema(&active).await?;
+            self.install_active_schema(active);
+        } else if schema.id == self.catalogue.local_schema_version_id {
+            self.catalogue.schema = schema.schema.with_permissions_from(&self.catalogue.schema);
+        }
         self.ensure_provisional_physical_mapping(schema.id).await?;
         self.ensure_schema_version_alias(schema.id).await?;
         self.synchronize_physical_version_tables().await?;
-        if active_schema_changed {
-            // Policy declarations are intentionally outside the schema version
-            // identity. Invalidate maintained handles when that same-version
-            // payload changes so live subscriptions rebuild their authorization
-            // graph without reopening storage through the old catalogue row.
-            self.groove_runtime_token = next_groove_runtime_token();
-        }
         let mut outcome = self.drain_parked_commit_units().await?;
         self.drain_parked_relay_commit_units().await?;
         self.drain_parked_shape_registrations()?;
@@ -842,9 +831,6 @@ where
                 outcome.extend(self.drain_parked_commit_units().await?);
                 self.drain_parked_relay_commit_units().await?;
                 self.drain_parked_shape_registrations()?;
-                outcome
-                    .value
-                    .extend(self.drain_pending_catalogue_pointers().await?);
             }
         }
         Ok(outcome)
@@ -954,100 +940,6 @@ where
             lens: Some(lens.id),
             applied: true,
         })])
-    }
-
-    async fn apply_set_current_write_schema(
-        &mut self,
-        author: AuthorSubject,
-        ingest_context: Option<CommitUnitIngestContext>,
-        pointer: CurrentWriteSchema,
-    ) -> Result<Vec<SyncMessage>, Error>
-    where
-        S: ReopenableStorage,
-    {
-        self.require_catalogue_admin(author, ingest_context)?;
-        if !self
-            .catalogue
-            .catalogue_schemas
-            .contains_key(&pointer.schema)
-        {
-            self.persist_pending_catalogue_pointer(pointer).await?;
-            self.catalogue
-                .pending_write_pointers
-                .insert(pointer.revision, pointer);
-            return Ok(Vec::new());
-        }
-        Ok(vec![self.apply_active_catalogue_pointer(pointer).await?])
-    }
-
-    async fn apply_active_catalogue_pointer(
-        &mut self,
-        pointer: CurrentWriteSchema,
-    ) -> Result<SyncMessage, Error> {
-        let applied = pointer.revision > self.catalogue.current_write_schema.revision;
-        if applied {
-            self.catalogue.current_write_schema = pointer;
-            self.persist_catalogue_pointer(pointer).await?;
-            self.query.version_storage_sources_cache.clear();
-            self.query.read_policy_authorization_request_cache.clear();
-            self.query.policy_authorization_graph_cache.clear();
-            self.query.policy_authorization_graph_replacements.clear();
-            let active_schema = self
-                .catalogue
-                .catalogue_schemas
-                .get(&pointer.schema)
-                .ok_or(Error::InvalidStoredValue(
-                    "current write schema payload missing",
-                ))?;
-            if pointer.schema == self.catalogue.current_schema_version_id {
-                self.catalogue.schema = active_schema.schema.clone();
-            }
-        }
-        Ok(SyncMessage::CatalogueAck(CatalogueAck {
-            revision: Some(pointer.revision),
-            schema: Some(pointer.schema),
-            lens: None,
-            applied,
-        }))
-    }
-
-    pub(super) async fn recover_pending_catalogue_pointers(&mut self) -> Result<(), Error> {
-        self.apply_pending_catalogue_pointers(CatalogueActivationMode::ColdOpen)
-            .await
-            .map(|_| ())
-    }
-
-    pub(super) async fn drain_pending_catalogue_pointers(
-        &mut self,
-    ) -> Result<Vec<SyncMessage>, Error> {
-        self.apply_pending_catalogue_pointers(CatalogueActivationMode::Live)
-            .await
-    }
-
-    async fn apply_pending_catalogue_pointers(
-        &mut self,
-        mode: CatalogueActivationMode,
-    ) -> Result<Vec<SyncMessage>, Error> {
-        let ready = self
-            .catalogue
-            .pending_write_pointers
-            .iter()
-            .filter(|(_, pointer)| {
-                self.catalogue
-                    .catalogue_schemas
-                    .contains_key(&pointer.schema)
-            })
-            .map(|(revision, pointer)| (*revision, *pointer))
-            .collect::<Vec<_>>();
-        let mut out = Vec::new();
-        for (revision, pointer) in ready {
-            let message = self.apply_active_catalogue_pointer(pointer).await?;
-            if mode == CatalogueActivationMode::Live {
-                out.push(message);
-            }
-            self.catalogue.pending_write_pointers.remove(&revision);
-        }
-        Ok(out)
     }
 
     fn require_catalogue_admin(

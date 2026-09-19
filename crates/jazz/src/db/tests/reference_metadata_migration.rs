@@ -229,7 +229,7 @@ async fn publish_reference_schema<S: OrderedKvStorage + ReopenableStorage + 'sta
         )
         .unwrap();
     db.publish_schema_with_lens(1, publication).await.unwrap();
-    db.set_current_write_schema(CurrentWriteSchema {
+    db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: new.id,
     })
@@ -291,7 +291,7 @@ fn reference_metadata_and_old_rows_survive_rocksdb_reopen() {
         assert_eq!(db.catalogue_schema(old.version_id()), Some(old));
         assert_eq!(
             db.catalogue_schema(schema(true).version_id()),
-            Some(schema(true))
+            Some(schema(true).without_permissions())
         );
         assert_rows(&db, &[2, 3, 4, 6]);
         let old_view = db.register_schema_view(schema(false)).await.unwrap();

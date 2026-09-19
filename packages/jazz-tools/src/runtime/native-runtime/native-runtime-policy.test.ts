@@ -123,10 +123,20 @@ describe("NativeRuntimeAdapter policy source encoding", () => {
       entries: { _rowType: {} as never, where: (_input: unknown) => undefined },
     };
     const permissions = definePermissions(app, ({ policy, allowedTo }) => {
+      policy.resources.allowRead.always();
       policy.entries.allowRead.where(allowedTo.read("resource"));
     });
     const authored: WasmSchema = {
       ...baseSchema,
+      resources: {
+        ...baseSchema.resources,
+        policies: {
+          select: { using: { type: "True" } },
+          insert: {},
+          update: {},
+          delete: {},
+        },
+      },
       entries: {
         ...baseSchema.entries,
         policies: {

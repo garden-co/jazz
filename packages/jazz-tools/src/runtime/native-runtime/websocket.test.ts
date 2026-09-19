@@ -399,8 +399,9 @@ describe("websocket frame carrier", () => {
     expect(actual).toBe('["https://backend.example","backend-subject"]');
   });
 
-  it("keeps admin websocket links sessionless despite accompanying bearer payloads", () => {
+  it("uses SYSTEM for sessionless admin websocket links despite accompanying credentials", () => {
     const fallback = new TextEncoder().encode('["https://jazz.test","admin-cache"]');
+    const system = authorBytes("urn:jazz:system", "system");
     const validJwt = `header.${btoa(
       JSON.stringify({ iss: "https://issuer.example", sub: "provider-subject" }),
     )}.signature`;
@@ -411,7 +412,7 @@ describe("websocket frame carrier", () => {
           JSON.stringify({ admin_secret: "not inspected by the client", jwt_token }),
           fallback,
         ),
-      ).toBe(fallback);
+      ).toEqual(system);
     }
 
     expect(
@@ -426,7 +427,7 @@ describe("websocket frame carrier", () => {
         }),
         fallback,
       ),
-    ).toBe(fallback);
+    ).toEqual(system);
   });
 
   it("uses validated fallback subjects over whitespace raw auth subjects in both handshake shapes", () => {
@@ -571,10 +572,21 @@ describe("websocket frame carrier", () => {
     }
   });
 
+  it("accepts the exact v3 Core advertisement for deployment-aware snapshots", async () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(3);
+    const { carrier, socket } = carrierForTest();
+    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 3)]));
+    await expect(carrier.ready()).resolves.toBeDefined();
+    carrier.close();
+  });
+
   it("rejects non-exact server wire-version advertisements before payload decode", async () => {
     for (const [minProtocolVersion, maxProtocolVersion] of [
       [0, 1],
       [1, 2],
+      [2, 2],
+      [2, 3],
+      [3, 15],
       [1, 15],
       [12, 12],
     ]) {

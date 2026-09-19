@@ -12,7 +12,6 @@ import type {
   PolicyExpr,
   PolicyLiteralValue,
   PolicyValue,
-  Schema,
   TablePolicies,
 } from "./schema.js";
 
@@ -518,8 +517,8 @@ function missingExplicitPolicyMessage(
   return `Warning: table "${tableName}" has a policy set but no explicit ${operation} policy in permissions.ts; ${operation}s will be denied.`;
 }
 
-function fullyOpenTablePolicyMessage(tableName: string): string {
-  return `Warning: table "${tableName}" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.`;
+function missingTablePolicyMessage(tableName: string): string {
+  return `Warning: table "${tableName}" has no policy declarations in permissions.ts; the server denies reads, inserts, updates, and deletes without explicit grants.`;
 }
 
 export function validatePermissionsAgainstSchema(
@@ -542,7 +541,7 @@ export function collectMissingExplicitPolicyDiagnostics(
         {
           tableName,
           operation: "table",
-          message: fullyOpenTablePolicyMessage(tableName),
+          message: missingTablePolicyMessage(tableName),
         },
       ];
     }
@@ -575,30 +574,7 @@ export function normalizePermissionsForWasm(
   return normalized;
 }
 
-export function mergePermissionsIntoSchema(
-  schema: Schema,
-  compiledPermissions: CompiledPermissionsMap,
-): Schema {
-  validatePermissionTables(
-    schema.tables.map((table) => table.name),
-    compiledPermissions,
-  );
-
-  return {
-    tables: schema.tables.map((table) => {
-      const external = compiledPermissions[table.name];
-      if (!external) {
-        return table;
-      }
-
-      return {
-        ...table,
-        policies: external,
-      };
-    }),
-  };
-}
-
+/** Internal native representation. The explicit bundle replaces all embedded policies. */
 export function mergePermissionsIntoWasmSchema(
   schema: WasmSchema,
   compiledPermissions: CompiledPermissionsMap,
@@ -610,7 +586,7 @@ export function mergePermissionsIntoWasmSchema(
   for (const [tableName, table] of Object.entries(schema)) {
     merged[tableName] = {
       ...table,
-      policies: normalizedPermissions[tableName] ?? table.policies,
+      policies: normalizedPermissions[tableName],
     };
   }
   return merged;

@@ -821,17 +821,18 @@ fn lowered_write_policy_covers_deep_inherited_write_chains() {
 
 }
 #[test]
-fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
+fn lowered_write_policy_does_not_restore_removed_grants_after_table_rename() {
     let owner = user(0xe1);
-    let v1 = build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("todos")
-            .column("owner", PublicColumnType::Uuid)
-            .policies(public_write_policies(public_claim_eq("owner", "sub"))),
-    ));
-    let v2 = build_public_test_schema(
+    let v1 = build_public_test_schema(
         PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("tasks").column("owner", PublicColumnType::Uuid),
+            PublicTableSchemaBuilder::new("todos")
+                .column("owner", PublicColumnType::Uuid)
+                .policies(public_write_policies(public_claim_eq("owner", "sub"))),
         ),
+    );
+    let v2 = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("tasks").column("owner", PublicColumnType::Uuid)),
     );
     let v2_payload = SchemaVersion::new(v2.clone());
     let (_dir, mut core) = open_node_with_schema(node(0xe2), v1.clone());
@@ -849,17 +850,15 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
                     to: "tasks".to_owned(),
                 }],
             }],
-        ).expect("valid migration lens"),
+        )
+        .expect("valid migration lens"),
         Vec::<String>::new(),
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: v2_payload.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: v2_payload.id,
     })
     .unwrap();
 
@@ -909,13 +908,14 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
         }
     }
     assert!(
-        core.dry_run_insert_allows(
-            MergeableCommit::new("tasks", row(0xe3), 1)
-                .made_by(owner)
-                .cells(candidate.clone()),
-        )
-        .unwrap(),
-        "the actual v2 write must use that same pinned v1 policy"
+        !core
+            .dry_run_insert_allows(
+                MergeableCommit::new("tasks", row(0xe3), 1)
+                    .made_by(owner)
+                    .cells(candidate.clone()),
+            )
+            .unwrap(),
+        "the actual v2 insert must deny after the grant is removed"
     );
     assert!(
         !core
@@ -940,9 +940,10 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
         .cells(candidate.clone())
         .parents(vec![existing_tx]);
     assert!(
-        core.advisory_mergeable_write_allows(update.clone().made_by(owner))
+        !core
+            .advisory_mergeable_write_allows(update.clone().made_by(owner))
             .unwrap(),
-        "the actual v2 update must use the pinned v1 update clauses"
+        "the actual v2 update must deny after the grant is removed"
     );
     assert!(
         !core
@@ -955,9 +956,10 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
         .parents(vec![existing_tx])
         .deletion(DeletionEvent::Deleted);
     assert!(
-        core.advisory_mergeable_write_allows(delete.clone().made_by(owner))
+        !core
+            .advisory_mergeable_write_allows(delete.clone().made_by(owner))
             .unwrap(),
-        "the actual v2 delete must use the pinned v1 delete clause"
+        "the actual v2 delete must deny after the grant is removed"
     );
     assert!(
         !core

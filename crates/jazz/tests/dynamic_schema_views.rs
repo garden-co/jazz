@@ -281,6 +281,60 @@ fn automatic_schema_view_admission_rejects_non_lens_metadata_changes() {
         assert!(error.message.contains("index metadata conflicts"));
     });
 }
+/// A UUID reference must name a declared table, but schema admission does not
+/// require a referenced row to exist yet.
+#[test]
+fn public_schema_rejects_uuid_reference_to_absent_table() {
+    let schema = SchemaBuilder::new()
+        .table(TableSchemaBuilder::new("roots").fk_column("target_id", "targets"))
+        .build();
+
+    let error = JazzSchema::new(&schema)
+        .expect_err("a UUID reference to an absent table must fail schema admission");
+    let diagnostic = error.to_string();
+    assert!(
+        diagnostic.contains("roots") && diagnostic.contains("target_id"),
+        "diagnostic must identify the source table and column: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("targets"),
+        "diagnostic must identify the absent referenced table: {diagnostic}"
+    );
+}
+
+/// A declared reference is only valid on UUID-shaped source columns; the
+/// conversion diagnostic must identify the particular malformed source.
+#[test]
+fn public_schema_rejects_references_on_non_uuid_columns() {
+    for (column_name, column_type) in [
+        ("text_target", ColumnType::Text),
+        ("integer_target", ColumnType::Integer),
+    ] {
+        let mut schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("roots"))
+            .table(TableSchemaBuilder::new("targets"))
+            .build();
+        schema
+            .get_mut(&TableName::new("roots"))
+            .expect("roots table is declared")
+            .columns
+            .columns
+            .push(ColumnDescriptor::new(column_name, column_type).references("targets"));
+
+        let error = JazzSchema::new(&schema)
+            .expect_err("non-UUID reference metadata must fail schema admission");
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("roots") && diagnostic.contains(column_name),
+            "diagnostic must identify the malformed source column {column_name:?}: {diagnostic}"
+        );
+        assert!(
+            diagnostic.to_ascii_lowercase().contains("reference")
+                || diagnostic.to_ascii_lowercase().contains("uuid"),
+            "diagnostic must identify the UUID/reference mismatch: {diagnostic}"
+        );
+    }
+}
 
 /// A runtime owner may exist before any typed application schema is known;
 /// registering the first typed view must still permit local-first staging.

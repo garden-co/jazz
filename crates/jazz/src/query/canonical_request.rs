@@ -644,47 +644,271 @@ fn canonical_relation_query_key(
     Ok(bytes)
 }
 
-fn canonical_binding_bytes(values: &BTreeMap<String, Value>) -> Vec<u8> {
+fn canonical_binding_bytes(
+    values: &BTreeMap<String, Value>,
+) -> Result<Vec<u8>, QueryError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"jazz-binding-v0");
     put_len(&mut bytes, values.len());
     for (name, value) in values {
         put_str(&mut bytes, name);
-        put_value(&mut bytes, value);
+        put_binding_value(&mut bytes, value)?;
     }
-    bytes
+    Ok(bytes)
 }
 
-fn value_type(value: &Value) -> ColumnType {
+fn put_binding_value(bytes: &mut Vec<u8>, value: &Value) -> Result<(), QueryError> {
     match value {
-        Value::U8(_) => ColumnType::U8,
-        Value::U16(_) => ColumnType::U16,
-        Value::U32(_) => ColumnType::U32,
-        Value::U64(_) => ColumnType::U64,
-        Value::I32(_) => ColumnType::I32,
-        Value::I64(_) => ColumnType::I64,
-        Value::F64(_) => ColumnType::F64,
-        Value::Bool(_) => ColumnType::Bool,
-        Value::String(_) => ColumnType::String,
-        Value::Bytes(_) => ColumnType::Bytes,
-        Value::Uuid(_) => ColumnType::Uuid,
-        Value::EnumTag(_) => ColumnType::U8,
-        Value::Tuple(values) => ColumnType::Tuple(values.iter().map(value_type).collect()),
-        Value::Array(values) => values
-            .first()
-            .map(|value| ColumnType::Array(Box::new(value_type(value))))
-            .unwrap_or_else(|| ColumnType::Array(Box::new(ColumnType::Bytes))),
-        Value::Nullable(Some(value)) => ColumnType::Nullable(Box::new(value_type(value))),
-        Value::Nullable(None) => ColumnType::Nullable(Box::new(ColumnType::Bytes)),
-        Value::Record(record) => ColumnType::Record(Box::new(record.descriptor().clone())),
-        Value::Enum(_) => {
-            panic!("union-valued query bindings are an internal Groove representation")
+        Value::U8(value) => {
+            bytes.push(1);
+            bytes.push(*value);
         }
-        Value::Large(value) => match value.kind {
-            groove::large_values::LargeValueKind::Bytes => ColumnType::Bytes,
-            groove::large_values::LargeValueKind::String
-            | groove::large_values::LargeValueKind::Json => ColumnType::String,
-        },
+        Value::U16(value) => {
+            bytes.push(2);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        Value::U32(value) => {
+            bytes.push(3);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        Value::U64(value) => {
+            bytes.push(4);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        Value::I32(value) => {
+            bytes.push(15);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        Value::I64(value) => {
+            bytes.push(14);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        Value::F64(value) => {
+            bytes.push(5);
+            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
+        }
+        Value::Bool(value) => {
+            bytes.push(6);
+            bytes.push(u8::from(*value));
+        }
+        Value::String(value) => {
+            bytes.push(7);
+            put_str(bytes, value);
+        }
+        Value::Bytes(value) => {
+            bytes.push(8);
+            put_bytes(bytes, value);
+        }
+        Value::Uuid(value) => {
+            bytes.push(9);
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        Value::EnumTag(value) => {
+            bytes.push(10);
+            bytes.push(*value);
+        }
+        Value::Tuple(values) => {
+            bytes.push(11);
+            put_len(bytes, values.len());
+            for value in values {
+                put_binding_value(bytes, value)?;
+            }
+        }
+        Value::Array(values) => {
+            bytes.push(12);
+            put_len(bytes, values.len());
+            for value in values {
+                put_binding_value(bytes, value)?;
+            }
+        }
+        Value::Nullable(None) => {
+            bytes.push(13);
+            bytes.push(0);
+        }
+        Value::Nullable(Some(value)) => {
+            bytes.push(13);
+            bytes.push(1);
+            put_binding_value(bytes, value)?;
+        }
+        Value::Record(record) => {
+            bytes.push(16);
+            put_binding_column_type(
+                bytes,
+                &ColumnType::Record(Box::new(record.descriptor().clone())),
+            )?;
+            put_bytes(bytes, record.raw());
+        }
+        Value::Enum(_) | Value::Large(_) => return Err(QueryError::OperandTypeMismatch),
+    }
+    Ok(())
+}
+
+fn put_binding_column_type(
+    bytes: &mut Vec<u8>,
+    ty: &ColumnType,
+) -> Result<(), QueryError> {
+    match ty {
+        ColumnType::U8 => bytes.push(0),
+        ColumnType::U16 => bytes.push(1),
+        ColumnType::U32 => bytes.push(2),
+        ColumnType::U64 => bytes.push(3),
+        ColumnType::I32 => bytes.push(4),
+        ColumnType::I64 => bytes.push(5),
+        ColumnType::F64 => bytes.push(6),
+        ColumnType::Bool => bytes.push(7),
+        ColumnType::String => bytes.push(8),
+        ColumnType::Bytes => bytes.push(9),
+        ColumnType::Uuid => bytes.push(10),
+        ColumnType::EnumTag(schema) => {
+            bytes.push(11);
+            put_str(bytes, &schema.name);
+            put_len(bytes, schema.variants.len());
+            for variant in &schema.variants {
+                put_str(bytes, variant);
+            }
+        }
+        ColumnType::Tuple(types) => {
+            bytes.push(12);
+            put_len(bytes, types.len());
+            for ty in types {
+                put_binding_column_type(bytes, ty)?;
+            }
+        }
+        ColumnType::Array(member) => {
+            bytes.push(13);
+            put_binding_column_type(bytes, member)?;
+        }
+        ColumnType::Nullable(inner) => {
+            bytes.push(14);
+            put_binding_column_type(bytes, inner)?;
+        }
+        ColumnType::Record(descriptor) => {
+            bytes.push(15);
+            put_len(bytes, descriptor.fields().len());
+            for field in descriptor.fields() {
+                match &field.name {
+                    Some(name) => {
+                        bytes.push(1);
+                        put_str(bytes, name);
+                    }
+                    None => bytes.push(0),
+                }
+                match &field.identity {
+                    None => bytes.push(0),
+                    Some(groove::records::FieldIdentity::Name(name)) => {
+                        bytes.push(1);
+                        put_str(bytes, name);
+                    }
+                    Some(groove::records::FieldIdentity::Slot(slot)) => {
+                        bytes.push(2);
+                        bytes.extend_from_slice(&slot.to_be_bytes());
+                    }
+                    Some(groove::records::FieldIdentity::NamedSlot { name, slot }) => {
+                        bytes.push(3);
+                        put_str(bytes, name);
+                        bytes.extend_from_slice(&slot.to_be_bytes());
+                    }
+                }
+                put_binding_column_type(bytes, &field.value_type)?;
+            }
+        }
+        ColumnType::Enum(schema) => {
+            bytes.push(16);
+            bytes.extend_from_slice(&schema.registry_id.to_be_bytes());
+            put_str(bytes, &schema.name);
+            put_len(bytes, schema.cases.len());
+            for case in &schema.cases {
+                put_str(bytes, &case.name);
+                put_binding_column_type(
+                    bytes,
+                    &ColumnType::Record(Box::new(case.payload.clone())),
+                )?;
+            }
+        }
+        ColumnType::Internal(_) => return Err(QueryError::OperandTypeMismatch),
+    }
+    Ok(())
+}
+
+fn validate_public_column_type(column_type: &ColumnType) -> Result<(), QueryError> {
+    match column_type {
+        ColumnType::Tuple(types) => {
+            for column_type in types {
+                validate_public_column_type(column_type)?;
+            }
+        }
+        ColumnType::Array(inner) | ColumnType::Nullable(inner) => {
+            validate_public_column_type(inner)?;
+        }
+        ColumnType::Record(descriptor) => {
+            for field in descriptor.fields() {
+                validate_public_column_type(&field.value_type)?;
+            }
+        }
+        ColumnType::Enum(schema) => {
+            for case in &schema.cases {
+                for field in case.payload.fields() {
+                    validate_public_column_type(&field.value_type)?;
+                }
+            }
+        }
+        ColumnType::Internal(_) => return Err(QueryError::OperandTypeMismatch),
+        ColumnType::U8
+        | ColumnType::U16
+        | ColumnType::U32
+        | ColumnType::U64
+        | ColumnType::I32
+        | ColumnType::I64
+        | ColumnType::F64
+        | ColumnType::Bool
+        | ColumnType::String
+        | ColumnType::Bytes
+        | ColumnType::Uuid
+        | ColumnType::EnumTag(_) => {}
+    }
+    Ok(())
+}
+
+fn value_type(value: &Value) -> Result<ColumnType, QueryError> {
+    match value {
+        Value::U8(_) => Ok(ColumnType::U8),
+        Value::U16(_) => Ok(ColumnType::U16),
+        Value::U32(_) => Ok(ColumnType::U32),
+        Value::U64(_) => Ok(ColumnType::U64),
+        Value::I32(_) => Ok(ColumnType::I32),
+        Value::I64(_) => Ok(ColumnType::I64),
+        Value::F64(_) => Ok(ColumnType::F64),
+        Value::Bool(_) => Ok(ColumnType::Bool),
+        Value::String(_) => Ok(ColumnType::String),
+        Value::Bytes(_) => Ok(ColumnType::Bytes),
+        Value::Uuid(_) => Ok(ColumnType::Uuid),
+        Value::EnumTag(_) => Ok(ColumnType::U8),
+        Value::Tuple(values) => values
+            .iter()
+            .map(value_type)
+            .collect::<Result<Vec<_>, _>>()
+            .map(ColumnType::Tuple),
+        Value::Array(values) => {
+            // Infer the array type from its first element as before, but walk
+            // every element so an unsupported nested value cannot reach the
+            // infallible canonical encoder.
+            let mut types = values.iter().map(value_type);
+            let first = types.next().transpose()?;
+            for value_type in types {
+                value_type?;
+            }
+            Ok(first
+                .map(|value_type| ColumnType::Array(Box::new(value_type)))
+                .unwrap_or_else(|| ColumnType::Array(Box::new(ColumnType::Bytes))))
+        }
+        Value::Nullable(Some(value)) => Ok(ColumnType::Nullable(Box::new(value_type(value)?))),
+        Value::Nullable(None) => Ok(ColumnType::Nullable(Box::new(ColumnType::Bytes))),
+        Value::Record(record) => {
+            let column_type = ColumnType::Record(Box::new(record.descriptor().clone()));
+            validate_public_column_type(&column_type)?;
+            Ok(column_type)
+        }
+        Value::Enum(_) | Value::Large(_) => Err(QueryError::OperandTypeMismatch),
     }
 }
 
@@ -808,11 +1032,27 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             );
             put_bytes(bytes, record.raw());
         }
-        Value::Enum(_) => {
-            panic!("union-valued query bindings are an internal Groove representation")
+        // These Groove-native arms are rejected by value_type before a
+        // validated query reaches canonicalization. Keep their fallback
+        // encodings total for defensive callers such as binding identities.
+        Value::Enum(value) => {
+            bytes.push(17);
+            bytes.extend_from_slice(&value.tag().to_be_bytes());
+            put_column_type(
+                bytes,
+                &ColumnType::Record(Box::new(value.record().descriptor().clone())),
+            );
+            put_bytes(bytes, value.record().raw());
         }
-        Value::Large(_) => {
-            panic!("indirect descriptors are not public query binding values")
+        Value::Large(value) => {
+            bytes.push(18);
+            bytes.push(match value.kind {
+                groove::large_values::LargeValueKind::Bytes => 0,
+                groove::large_values::LargeValueKind::String => 1,
+                groove::large_values::LargeValueKind::Json => 2,
+            });
+            bytes.push(value.format_version);
+            bytes.extend_from_slice(&value.logical_hash.0);
         }
     }
 }
@@ -885,14 +1125,23 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
                 put_column_type(bytes, &field.value_type);
             }
         }
-        ColumnType::Enum(_) => {
-            panic!(
-                "union column types are internal to Groove and have no Jazz query binding encoding"
-            )
+        ColumnType::Enum(schema) => {
+            bytes.push(16);
+            bytes.extend_from_slice(&schema.registry_id.to_be_bytes());
+            put_str(bytes, &schema.name);
+            put_len(bytes, schema.cases.len());
+            for case in &schema.cases {
+                put_str(bytes, &case.name);
+                put_column_type(
+                    bytes,
+                    &ColumnType::Record(Box::new(case.payload.clone())),
+                );
+            }
         }
-        _ => {
-            panic!("raw stored-scalar backing types are not Jazz query column types")
-        }
+        // Internal physical types cannot be supplied through the public query
+        // interface. Still keep this defensive encoder total if an internal
+        // descriptor is carried by an otherwise supported record literal.
+        ColumnType::Internal(_) => bytes.push(17),
     }
 }
 

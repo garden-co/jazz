@@ -15,12 +15,14 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
 const BIG_SAFE_PLUS_ONE: i64 = 9_007_199_254_740_993;
 
 fn bigint_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("metrics")
                 .column("label", ColumnType::Text)
                 .column("amount", ColumnType::BigInt),
         )
+        .allow_all()
         .build()
 }
 

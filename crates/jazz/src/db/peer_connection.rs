@@ -643,6 +643,7 @@ where
     /// contributes new dependency state, never on every idle tick.
     pub(super) local_replay_epoch: u64,
     pub(super) observed_session_claim_revision: Cell<u64>,
+    pub(super) inbound_authority_receipt_quarantine: bool,
     /// Fresh non-resumable epoch binding authorization receipts to this link.
     pub(super) connection_epoch: u64,
     pub(super) startup_error: Option<Error>,
@@ -1900,6 +1901,10 @@ where
     /// receipt. The next transport arrival is therefore the first receipt
     /// candidate after selection.
     pub(super) fn stage_inbound_without_authority_receipt(&mut self) {
+        for staged in &mut self.staged_inbound {
+            staged.authority_receipt_eligible = false;
+        }
+
         if let ConnectionLink::Upstream(UpstreamConnectionState {
             pending_row_version_repairs,
             sent_subscriptions,
@@ -1930,11 +1935,27 @@ where
                 }
             }
         }
-        while let Some(message) = self.transport.try_recv() {
-            self.staged_inbound.push_back(StagedInboundMessage {
-                message,
-                authority_receipt_eligible: false,
-            });
+        loop {
+            match self.transport.try_recv_result() {
+                Ok(Some(message)) => self.staged_inbound.push_back(StagedInboundMessage {
+                    message,
+                    authority_receipt_eligible: false,
+                }),
+                Ok(None) => {
+                    self.inbound_authority_receipt_quarantine = false;
+                    break;
+                }
+                Err(error)
+                    if handle_transport_backpressure(&self.node, &self.scheduler, &error) =>
+                {
+                    self.inbound_authority_receipt_quarantine = true;
+                    break;
+                }
+                Err(error) => {
+                    self.startup_error = Some(transport_error(error));
+                    break;
+                }
+            }
         }
     }
 
@@ -1989,6 +2010,18 @@ where
             return Err(error);
         }
         let mut stats = DbTickStats::default();
+        // Finish draining the old authority's transport backlog before sending
+        // reissued opens. Otherwise a fast confirming snapshot can join that
+        // backlog and be discarded as an ineligible pre-handoff receipt.
+        if self.inbound_authority_receipt_quarantine {
+            self.stage_inbound_without_authority_receipt();
+            if let Some(error) = self.startup_error.take() {
+                return Err(error);
+            }
+            if self.inbound_authority_receipt_quarantine {
+                return Ok(stats);
+            }
+        }
         let progress_waker = make_query_runtime_waker(
             &self.scheduler,
             &self.query_runtime_wake_pending,
@@ -2643,17 +2676,40 @@ where
                     let mut publications = Vec::new();
                     let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
                     let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
-                    while let Some(StagedInboundMessage {
-                        message,
-                        authority_receipt_eligible,
-                    }) = self.staged_inbound.pop_front().or_else(|| {
-                        self.transport
-                            .try_recv()
-                            .map(|message| StagedInboundMessage {
-                                message,
-                                authority_receipt_eligible: true,
-                            })
-                    }) {
+                    let mut deferred_stop = false;
+                    loop {
+                        let next = match self.staged_inbound.pop_front() {
+                            Some(staged) => Some(staged),
+                            None => match self.transport.try_recv_result() {
+                                Ok(Some(message)) => Some(StagedInboundMessage {
+                                    message,
+                                    authority_receipt_eligible:
+                                        !self.inbound_authority_receipt_quarantine,
+                                }),
+                                Ok(None) => {
+                                    self.inbound_authority_receipt_quarantine = false;
+                                    None
+                                }
+                                Err(error)
+                                    if handle_transport_backpressure(
+                                        &self.node,
+                                        &self.scheduler,
+                                        &error,
+                                    ) =>
+                                {
+                                    deferred_stop = true;
+                                    break;
+                                }
+                                Err(error) => return Err(transport_error(error)),
+                            },
+                        };
+                        let Some(StagedInboundMessage {
+                            message,
+                            authority_receipt_eligible,
+                        }) = next
+                        else {
+                            break;
+                        };
                         let write_state_tx_id = write_state_update_tx_id(&message);
                         #[cfg(feature = "sync-autopsy")]
                         sync_autopsy::record(format!(
@@ -3841,7 +3897,7 @@ where
                         let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                         self.subscriber_dirty_epoch.set(next);
                     }
-                    Ok::<bool, Error>(false)
+                    Ok::<bool, Error>(deferred_stop)
                 })
                 .await?;
                 if stop {
@@ -4018,17 +4074,47 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
-                    let (message, parked_policy_binding) = if let Some(message) = self.staged_inbound.pop_front().map(|staged| staged.message).or_else(|| self.transport.try_recv()) {
-                        (Box::new(message), None)
-                    } else {
-                        let ready = pending_catalogue_subscriptions.iter().find_map(|(key, pending)| {
-                            self.node.borrow().registered_shape(pending.subscribe.shape_id)
-                                .is_some().then_some(*key)
-                        });
-                        let Some(key) = ready else { break; };
-                        let pending = pending_catalogue_subscriptions.remove(&key).expect("selected pending request");
-                        (Box::new(SyncMessage::Subscribe(pending.subscribe)), Some(pending.policy_binding))
-                    };
+                    let (message, parked_policy_binding) =
+                        if let Some(message) =
+                            self.staged_inbound.pop_front().map(|staged| staged.message)
+                        {
+                            (Box::new(message), None)
+                        } else {
+                            match self.transport.try_recv_result() {
+                                Ok(Some(message)) => (Box::new(message), None),
+                                Err(error)
+                                    if handle_transport_backpressure(
+                                        &self.node,
+                                        &self.scheduler,
+                                        &error,
+                                    ) =>
+                                {
+                                    return Ok(true);
+                                }
+                                Err(error) => return Err(transport_error(error)),
+                                Ok(None) => {
+                                    let ready = pending_catalogue_subscriptions.iter().find_map(
+                                        |(key, pending)| {
+                                            self.node
+                                                .borrow()
+                                                .registered_shape(pending.subscribe.shape_id)
+                                                .is_some()
+                                                .then_some(*key)
+                                        },
+                                    );
+                                    let Some(key) = ready else {
+                                        break;
+                                    };
+                                    let pending = pending_catalogue_subscriptions
+                                        .remove(&key)
+                                        .expect("selected pending request");
+                                    (
+                                        Box::new(SyncMessage::Subscribe(pending.subscribe)),
+                                        Some(pending.policy_binding),
+                                    )
+                                }
+                            }
+                        };
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.

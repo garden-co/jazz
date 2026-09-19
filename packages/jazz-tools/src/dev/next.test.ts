@@ -29,6 +29,12 @@ async function resolveWrappedConfig(
 function deployed(hash = "abc123def4567890") {
   return {
     schema: { hash, schemaFile: "schema.ts", status: "published" as const },
+    permissions: {
+      schemaHash: hash,
+      permissionsFile: "permissions.ts",
+      previousHead: null,
+      head: null,
+    },
     warnings: [],
   };
 }
@@ -127,6 +133,8 @@ describe("withJazz", () => {
 
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_APP_ID).toBeUndefined();
     expect(resolved.env?.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_INSPECTOR).toBeUndefined();
+    expect(resolved.rewrites).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_APP_ID).toBeUndefined();
     expect(process.env.NEXT_PUBLIC_JAZZ_SERVER_URL).toBeUndefined();
   });
@@ -164,6 +172,7 @@ describe("withJazz", () => {
   it("starts a local server in development and injects NEXT_PUBLIC_JAZZ_* env vars", async () => {
     const schemaDir = await tempRoots.create("jazz-next-test-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const wrapped = withJazz(
@@ -272,6 +281,7 @@ describe("withJazz", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-next-retry-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const deploy = vi
       .spyOn(catalogueProject, "deploy")
@@ -304,6 +314,7 @@ describe("withJazz", () => {
 
     const schemaDir = await tempRoots.create("jazz-next-fallback-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
     const port = await getAvailablePort();
 
     const resolved = await resolveWrappedConfig(
@@ -327,6 +338,7 @@ describe("withJazz", () => {
     const port = await getAvailablePort();
     const schemaDir = await tempRoots.create("jazz-next-repeat-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const wrapped = withJazz(
       {},
@@ -348,6 +360,7 @@ describe("withJazz", () => {
     const firstPort = await getAvailablePort();
     const firstSchemaDir = await tempRoots.create("jazz-next-conflict-a-");
     await writeFile(join(firstSchemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(firstSchemaDir, "permissions.ts"), "export default {};\n");
 
     const firstWrapped = withJazz(
       {},
@@ -362,6 +375,7 @@ describe("withJazz", () => {
     const secondPort = await getAvailablePort();
     const secondSchemaDir = await tempRoots.create("jazz-next-conflict-b-");
     await writeFile(join(secondSchemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(secondSchemaDir, "permissions.ts"), "export default {};\n");
 
     const secondWrapped = withJazz(
       {},
@@ -398,6 +412,7 @@ describe("withJazz", () => {
     const appRoot = await tempRoots.create("jazz-next-schema-hash-");
     const schemaDir = appRoot;
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const wrapped = withJazz(
       {},
@@ -440,6 +455,7 @@ describe("withJazz", () => {
     const appRoot = await tempRoots.create("jazz-next-alias-");
     const schemaDir = appRoot;
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const wrapped = withJazz(
       {},
@@ -471,6 +487,7 @@ describe("withJazz", () => {
   it("throws when env-driven existing-server config changes in one process", async () => {
     const schemaDir = await tempRoots.create("jazz-next-env-conflict-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
 
     const serverHandle = await devServer.startLocalJazzServer({
       appId: "00000000-0000-0000-0000-000000000101",
@@ -501,6 +518,78 @@ describe("withJazz", () => {
     } finally {
       await serverHandle.stop();
     }
+  }, 30_000);
+
+  it("serves the inspector through a reusable loopback rewrite without replacing app routes", async () => {
+    const schemaDir = await tempRoots.create("jazz-next-inspector-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
+    const appRoutes = {
+      beforeFiles: [{ source: "/api/:path*", destination: "http://localhost:3001/:path*" }],
+      afterFiles: [{ source: "/old", destination: "/new" }],
+      fallback: [{ source: "/:path*", destination: "/fallback/:path*" }],
+    };
+    const wrapped = withJazz(
+      { rewrites: async () => appRoutes },
+      { schemaDir, server: { inMemory: true } },
+    );
+    const resolved = await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
+    const rewrites = await (resolved.rewrites as () => Promise<typeof appRoutes>)();
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_INSPECTOR).toBe("1");
+    expect(rewrites.beforeFiles.slice(1)).toEqual(appRoutes.beforeFiles);
+    expect(rewrites.afterFiles).toEqual(appRoutes.afterFiles);
+    expect(rewrites.fallback).toEqual(appRoutes.fallback);
+    const route = rewrites.beforeFiles[0]!;
+    expect(route.source).toBe("/__jazz/embedded/:path*");
+    const url = route.destination.replace(":path*", "embedded.html");
+    expect(new URL(url).hostname).toBe("127.0.0.1");
+    const response = await fetch(url);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(await response.text()).toContain("<script");
+
+    const repeated = await resolveWrappedConfig(wrapped, DEVELOPMENT_PHASE);
+    const repeatedRoutes = await (repeated.rewrites as () => Promise<typeof appRoutes>)();
+    expect(repeatedRoutes.beforeFiles[0]).toEqual(route);
+    await __resetJazzNextPluginForTests();
+    await expect(fetch(url)).rejects.toThrow();
+  }, 30_000);
+
+  it("keeps array-form application rewrites in the afterFiles phase", async () => {
+    const schemaDir = await tempRoots.create("jazz-next-inspector-array-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
+    const appRoutes = [{ source: "/old", destination: "/new" }];
+    const resolved = await resolveWrappedConfig(
+      withJazz({ rewrites: async () => appRoutes }, { schemaDir, server: { inMemory: true } }),
+      DEVELOPMENT_PHASE,
+    );
+    const routes = await (
+      resolved.rewrites as () => Promise<{
+        beforeFiles: typeof appRoutes;
+        afterFiles: typeof appRoutes;
+        fallback: typeof appRoutes;
+      }>
+    )();
+    expect(routes.beforeFiles[0]?.source).toBe("/__jazz/embedded/:path*");
+    expect(routes.afterFiles).toEqual(appRoutes);
+    expect(routes.fallback).toEqual([]);
+  }, 30_000);
+
+  it("leaves inspector routing disabled when opted out", async () => {
+    const schemaDir = await tempRoots.create("jazz-next-no-inspector-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), "export default {};\n");
+    const appRoutes = [{ source: "/old", destination: "/new" }];
+    const resolved = await resolveWrappedConfig(
+      withJazz(
+        { rewrites: async () => appRoutes },
+        { inspector: false, schemaDir, server: { inMemory: true } },
+      ),
+      DEVELOPMENT_PHASE,
+    );
+    expect(resolved.env?.NEXT_PUBLIC_JAZZ_INSPECTOR).toBeUndefined();
+    expect(await (resolved.rewrites as () => Promise<typeof appRoutes>)()).toEqual(appRoutes);
   }, 30_000);
 });
 
