@@ -955,3 +955,68 @@ fn known_transaction_matching_probes_only_incoming_history_keys() {
     assert_eq!(query_versions_for_tx_call_count(), 1, "only fate processing needs a whole-transaction read");
     assert_eq!(writer.query_versions_for_tx(tx_id).unwrap().len(), 32);
 }
+
+// These internal receipts exercise the row-local ancestry/cache seam: neither
+// traversal work nor retained cache memory is exposed by the public API.
+#[test]
+fn repeated_row_reachability_checks_reuse_complete_ancestry() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xe6), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0xea), schema);
+    let row_uuid = row(0xe7);
+    let (parent, parent_unit) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row_uuid, 10)
+            .cells(BTreeMap::from([("title".to_owned(), "parent".to_owned())])),
+    ).unwrap();
+    let (child, child_unit) = writer.commit_mergeable_unit_settled(
+        MergeableCommit::new("todos", row_uuid, 11).parents(vec![parent])
+            .cells(BTreeMap::from([("title".to_owned(), "child".to_owned())])),
+    ).unwrap();
+    let table_id = writer.physical_table_id_for_schema(writer.catalogue.active_schema.schema, "todos").unwrap();
+    let absent = TxId::new(TxTime(1), node(0xef));
+    let reader_table = reader.physical_table_id_for_schema(reader.catalogue.active_schema.schema, "todos").unwrap();
+    assert!(!reader.content_version_reaches_tx(reader_table, &BranchKey::default(), row_uuid, child, absent).unwrap());
+    assert!(reader.content_version_reachability_cache.is_empty(), "missing transaction history must never establish a complete closure");
+    reader.apply_sync_message_settled(parent_unit).unwrap();
+    reader.apply_sync_message_settled(child_unit).unwrap();
+    assert!(reader.content_version_reaches_tx(reader_table, &BranchKey::default(), row_uuid, child, parent).unwrap(), "newly received history must repair an earlier unknown answer");
+    writer.clear_content_version_reachability_cache();
+    writer.reset_merge_head_reachability_walks_for_test();
+    assert!(!writer.content_version_reaches_tx(table_id, &BranchKey::default(), row_uuid, child, absent).unwrap());
+    let cold_nodes = writer.merge_head_reachability_nodes_for_test();
+    assert!(cold_nodes >= 2);
+    assert!(!writer.content_version_reaches_tx(table_id, &BranchKey::default(), row_uuid, child, absent).unwrap());
+    assert!(writer.content_version_reaches_tx(table_id, &BranchKey::default(), row_uuid, child, parent).unwrap());
+    assert_eq!(writer.merge_head_reachability_nodes_for_test(), cold_nodes, "both positive and negative answers reuse the complete closure");
+    assert!(!writer.content_version_reaches_tx(table_id, &BranchKey::default(), row(0xe8), child, parent).unwrap(), "another row must not inherit the cached ancestry");
+    writer.clear_content_version_reachability_cache();
+    assert!(writer.content_version_reaches_tx(table_id, &BranchKey::default(), row_uuid, child, parent).unwrap());
+    assert!(writer.merge_head_reachability_nodes_for_test() > cold_nodes, "invalidation must force a new walk");
+}
+
+#[test]
+fn ancestry_cache_bounds_entry_count_and_total_transaction_ids() {
+    let (_dir, mut writer) = open_node_with_schema(node(0xe9), two_column_schema());
+    let key = |index| ContentVersionReachabilityCacheKey {
+        table_id: PhysicalTableId(1), branch_key: BranchKey::default(), row_uuid: row(1),
+        start: TxId::new(TxTime(index), node(1)),
+    };
+    for index in 0..65 {
+        writer.cache_content_version_reachability(key(index), [key(index).start].into_iter().collect());
+    }
+    assert_eq!(writer.content_version_reachability_cache.len(), 64);
+    assert_eq!(writer.content_version_reachability_cache_order.len(), 64);
+    assert_eq!(writer.content_version_reachability_cache_tx_ids, 64);
+    assert!(!writer.content_version_reachability_cache.contains_key(&key(0)));
+    writer.clear_content_version_reachability_cache();
+    let ancestors = (0..32_768).map(|index| key(index).start).collect::<FxHashSet<_>>();
+    for index in 0..3 {
+        writer.cache_content_version_reachability(key(index), ancestors.clone());
+    }
+    assert_eq!(writer.content_version_reachability_cache.len(), 2);
+    assert_eq!(writer.content_version_reachability_cache_tx_ids, 65_536);
+    let oversized = (0..65_537).map(|index| key(index).start).collect();
+    writer.cache_content_version_reachability(key(4), oversized);
+    assert_eq!(writer.content_version_reachability_cache.len(), 2);
+    assert_eq!(writer.content_version_reachability_cache_tx_ids, 65_536);
+}
