@@ -110,6 +110,8 @@ impl<V> JoinBucketMap<V> {
 struct JoinBucket {
     base: Rc<JoinBucketMap<i64>>,
     overlay: Rc<JoinBucketMap<Option<i64>>>,
+    total_weight: i64,
+    record_count: usize,
 }
 
 impl JoinBucket {
@@ -123,29 +125,36 @@ impl JoinBucket {
 
     #[cfg(test)]
     fn set(&mut self, record: Bytes, weight: i64) {
-        Rc::make_mut(&mut self.overlay).insert(record, (weight != 0).then_some(weight));
+        let previous = self.get(&record).copied().unwrap_or_default();
+        self.add_weight(&record, weight - previous);
     }
 
     fn add_weight(&mut self, record: &Bytes, delta: i64) -> i64 {
         // An overlay tombstone means zero, not the weight in the base.
         let overlay = Rc::make_mut(&mut self.overlay);
-        if let JoinBucketMap::Many(records) = overlay {
+        let (previous, next) = if let JoinBucketMap::Many(records) = overlay {
             // Preserve one hash probe for the ordinary multi-record path.
             let weight = records
                 .entry(record.clone())
                 .or_insert_with(|| self.base.get(record).copied());
-            let next = weight.unwrap_or_default() + delta;
+            let previous = weight.unwrap_or_default();
+            let next = previous + delta;
             *weight = (next != 0).then_some(next);
-            next
+            (previous, next)
         } else {
             let weight = overlay
                 .get(record)
                 .copied()
                 .unwrap_or_else(|| self.base.get(record).copied());
-            let next = weight.unwrap_or_default() + delta;
+            let previous = weight.unwrap_or_default();
+            let next = previous + delta;
             overlay.insert(record.clone(), (next != 0).then_some(next));
-            next
-        }
+            (previous, next)
+        };
+        self.total_weight += delta;
+        self.record_count += usize::from(previous == 0 && next != 0);
+        self.record_count -= usize::from(previous != 0 && next == 0);
+        next
     }
 
     fn iter(&self) -> impl Iterator<Item = (&Bytes, &i64)> {
@@ -162,7 +171,7 @@ impl JoinBucket {
     }
 
     fn is_empty(&self) -> bool {
-        self.iter().next().is_none()
+        self.record_count == 0
     }
 
     fn commit_overlay(&mut self) {
@@ -184,6 +193,8 @@ impl JoinBucket {
     #[cfg(test)]
     fn from_records(records: HashMap<Bytes, i64>) -> Self {
         Self {
+            total_weight: records.values().sum(),
+            record_count: records.len(),
             base: Rc::new(JoinBucketMap::Many(records)),
             overlay: Rc::default(),
         }
@@ -206,23 +217,51 @@ pub(super) fn touched_join_keys(
 #[derive(Clone, Debug, Default)]
 pub(super) struct JoinState;
 
+/// Operator-local progress contains keys, never retained record buckets.
+#[derive(Clone, Debug, Default)]
+struct VisibilityState {
+    visible: Rc<HashSet<JoinKey>>,
+    changes: HashMap<JoinKey, bool>,
+    consumed: Option<(SubTick, SubTick)>,
+}
+
+impl VisibilityState {
+    fn contains(&self, key: &JoinKey) -> bool {
+        self.changes
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| self.visible.contains(key))
+    }
+
+    fn set(&mut self, key: JoinKey, visible: bool) {
+        if self.contains(&key) != visible {
+            self.changes.insert(key, visible);
+        }
+    }
+
+    fn commit(&mut self) {
+        if self.changes.is_empty() {
+            return;
+        }
+        let visible = Rc::make_mut(&mut self.visible);
+        for (key, present) in self.changes.drain() {
+            if present {
+                visible.insert(key);
+            } else {
+                visible.remove(&key);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct AntiJoinState {
-    // Arrangements are shared by input/key/scope, so their current-tick
-    // contents cannot describe whether *this* anti-join has already emitted
-    // a visible left row. Keep publication ownership at the operator. This
-    // matters when one atomic input batch reaches two consumers of an
-    // arrangement: the second consumer must not retract a row the first
-    // merely arranged but this operator never published.
-    published: ArrangementState,
+    published: VisibilityState,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct SemiJoinState {
-    // Semi-join arrangements are shared by input/key/scope and another
-    // consumer may advance one before this node runs. Keep publication state
-    // per semi-join node so threshold deltas never depend on arrangement order.
-    published: ArrangementState,
+    published: VisibilityState,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -232,6 +271,9 @@ pub(super) struct ArrangementState {
     /// complete join index.
     index: Rc<JoinIndex>,
     overlay: Rc<HashMap<JoinKey, Option<JoinBucket>>>,
+    /// One producer-owned transition, shared read-only by all consumers.
+    /// Released at commit; never a retained publication snapshot.
+    changes: Rc<JoinIndex>,
     /// Identity of the last complete immutable input, not a retained payload.
     /// Any content mutation invalidates this proof. A Weak keeps the Arc
     /// allocation identity from being reused without retaining its row vector.
@@ -280,186 +322,73 @@ impl JoinLookup<'_> {
 
 impl JoinState {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn apply(
+    pub(super) fn evaluate(
         &self,
-        left_arrangement: &mut AsOf<ArrangementState, SubTick>,
-        right_arrangement: &mut AsOf<ArrangementState, SubTick>,
+        left: ArrangementTransition<'_>,
+        right: ArrangementTransition<'_>,
         left_descriptor: &RecordDescriptor,
         right_descriptor: &RecordDescriptor,
         output_descriptor: &RecordDescriptor,
-        // how to map the the fields from the inputs to the ouput
-        // example:
-        // Left album fields:
-        // 0 = id
-        // 1 = artist_id
-        // 2 = title
-        //
-        // Right artist fields:
-        // 0 = id
-        // 1 = name
-        //
-        // Desire output:
-        // 0 = album id
-        // 1 = album title
-        // 2 = artist name
-        //
-        // [
-        //    (0, 0), // output field 0 comes from left field 0
-        //    (0, 2), // output field 1 comes from left field 2
-        //    (1, 1), // output field 2 comes from right field 1
-        // ]
-        //
-        // 0 is left
-        // 1 is right
         output_mapping: &[(usize, usize)],
-        // left fields of join such as `["id"]
-        left_on: &[String],
-        // right fields of join such as `["artist_id"]
-        right_on: &[String],
-        comparison: ValueComparison,
-        // Changed left records with signed weights
-        left_input: JoinInput<'_>,
-        right_input: JoinInput<'_>,
-        left_sub_tick: SubTick,
-        right_sub_tick: SubTick,
-        update_mode: ArrangementUpdateMode,
+        mode: ArrangementUpdateMode,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
-        let left_delta = left_input.records;
-        let right_delta = right_input.records;
-        // Fields have to be the same:
-        // left:  (country_id, artist_id)
-        // right: (country_id, id)
-        // This is ok!
-        //
-        // left:  (country_id, artist_id)
-        // right: (id)
-        // This is not ok
-        if left_on.len() != right_on.len() {
-            return Err(IvmRuntimeError::JoinKeyArityMismatch {
-                left: left_on.len(),
-                right: right_on.len(),
-            });
-        }
-
-        // let's get the deltas left and right, adding the join keys. For example:
-        // Left RecordDelta:
-        // album(13, artist_id=7, "Yellow") -> +1
-        //
-        // Keyed left delta:
-        // key = encode(7)
-        // record = album(13, 7, "Yellow")
-        // weight = +1
-        //
-        // The Key will be use to get throught the right_arrangement.index.get(&left_delta.key) fast the matching raws:
-        let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta, comparison)?;
-        let keyed_right_delta = if reuses_snapshot(
-            right_arrangement,
-            right_input.snapshot,
-            right_sub_tick,
-            update_mode,
-        ) {
-            Vec::new()
-        } else {
-            keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?
-        };
-        let estimated_output_bytes = left_delta
-            .iter()
-            .chain(right_delta)
-            .map(|delta| delta.record.len())
-            .sum::<usize>();
-
         let mut output = JoinOutputBuffer {
-            bytes: BytesMut::with_capacity(estimated_output_bytes),
+            bytes: BytesMut::new(),
             deltas: Vec::new(),
             variable_scratch: Vec::new(),
         };
-
-        // Let's create the context of the Join, with all the descriptors (schema-side description needed to interpret compact record bytes)
         let context = JoinChangeContext {
             left_descriptor,
             right_descriptor,
             output_descriptor,
             output_mapping,
         };
-
-        // Update arrangement
-        advance_arrangement(
-            left_arrangement,
-            &keyed_left_delta,
-            left_sub_tick,
-            update_mode,
-            left_input.snapshot,
-        )?;
-        advance_arrangement(
-            right_arrangement,
-            &keyed_right_delta,
-            right_sub_tick,
-            update_mode,
-            right_input.snapshot,
-        )?;
-
-        // Replace inputs are faithful full snapshots. Once both arrangements
-        // have been rebuilt, one probe produces the complete join result.
-        // The incremental identity below would emit that result twice and
-        // subtract one copy, only for consolidation to cancel it again.
-        if update_mode == ArrangementUpdateMode::Replace {
-            append_join_deltas(
+        if mode == ArrangementUpdateMode::Replace {
+            append_join_index_deltas(
                 &mut output,
                 &context,
-                &keyed_left_delta,
-                &JoinLookup::Arrangement(right_arrangement.value()),
+                left.current.buckets(),
+                &JoinLookup::Arrangement(right.current),
                 JoinProbeSide::LeftDelta,
                 1,
             )?;
-            let output_buffer = output.bytes.freeze();
-            return Ok(consolidate_deltas(
-                output
-                    .deltas
-                    .into_iter()
-                    .map(|(record, weight)| RecordDelta {
-                        record: output_buffer.slice(record),
-                        weight,
-                    })
-                    .collect(),
-            ));
+        } else {
+            append_join_index_deltas(
+                &mut output,
+                &context,
+                left.change_buckets(),
+                &JoinLookup::Arrangement(right.current),
+                JoinProbeSide::LeftDelta,
+                1,
+            )?;
+            append_join_index_deltas(
+                &mut output,
+                &context,
+                right.change_buckets(),
+                &JoinLookup::Arrangement(left.current),
+                JoinProbeSide::RightDelta,
+                1,
+            )?;
+            // Both current indexes include this transition. Remove the repeated
+            // cross term, borrowing the producer batch rather than rebuilding it.
+            if let Some(left_changes) = left.changes {
+                append_join_index_deltas(
+                    &mut output,
+                    &context,
+                    right.change_buckets(),
+                    &JoinLookup::Index(left_changes),
+                    JoinProbeSide::RightDelta,
+                    -1,
+                )?;
+            }
         }
-
-        append_join_deltas(
-            &mut output,
-            &context,
-            &keyed_left_delta,
-            &JoinLookup::Arrangement(right_arrangement.value()),
-            JoinProbeSide::LeftDelta,
-            1,
-        )?;
-        append_join_deltas(
-            &mut output,
-            &context,
-            &keyed_right_delta,
-            &JoinLookup::Arrangement(left_arrangement.value()),
-            JoinProbeSide::RightDelta,
-            1,
-        )?;
-
-        // Both arrangements are now current, so the two probes above each see
-        // same-tick left/right pairs. Remove one copy of that cross term.
-        let left_delta_index = build_join_delta_index(&keyed_left_delta);
-        append_join_deltas(
-            &mut output,
-            &context,
-            &keyed_right_delta,
-            &JoinLookup::Index(&left_delta_index),
-            JoinProbeSide::RightDelta,
-            -1,
-        )?;
-
-        let output_buffer = output.bytes.freeze();
+        let bytes = output.bytes.freeze();
         Ok(consolidate_deltas(
             output
                 .deltas
                 .into_iter()
-                .map(|(record, weight)| RecordDelta {
-                    record: output_buffer.slice(record),
+                .map(|(range, weight)| RecordDelta {
+                    record: bytes.slice(range),
                     weight,
                 })
                 .collect(),
@@ -467,212 +396,289 @@ impl JoinState {
     }
 }
 
-impl SemiJoinState {
-    pub(super) fn commit_published_overlay(&mut self) {
-        self.published.commit_overlay();
+/// A consumer borrows one aligned input version and its producer's delta.
+#[cfg(test)]
+impl JoinState {
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        &self,
+        left: &mut AsOf<ArrangementState, SubTick>,
+        right: &mut AsOf<ArrangementState, SubTick>,
+        ld: &RecordDescriptor,
+        rd: &RecordDescriptor,
+        output: &RecordDescriptor,
+        mapping: &[(usize, usize)],
+        lk: &[String],
+        rk: &[String],
+        comparison: ValueComparison,
+        li: JoinInput<'_>,
+        ri: JoinInput<'_>,
+        lt: SubTick,
+        rt: SubTick,
+        mode: ArrangementUpdateMode,
+    ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+        prepare_arrangement(
+            left,
+            ld,
+            lk,
+            comparison,
+            JoinInput::deltas(li.records),
+            lt,
+            mode,
+        )?;
+        prepare_arrangement(
+            right,
+            rd,
+            rk,
+            comparison,
+            JoinInput::deltas(ri.records),
+            rt,
+            mode,
+        )?;
+        self.evaluate(
+            ArrangementTransition::at(left, lt),
+            ArrangementTransition::at(right, rt),
+            ld,
+            rd,
+            output,
+            mapping,
+            mode,
+        )
+    }
+}
+
+/// A consumer borrows one aligned input version and its producer's delta.
+/// A scoped input not advanced at this frontier contributes no new changes.
+#[derive(Clone, Copy)]
+pub(super) struct ArrangementTransition<'a> {
+    current: &'a ArrangementState,
+    changes: Option<&'a JoinIndex>,
+    frontier: SubTick,
+}
+
+impl<'a> ArrangementTransition<'a> {
+    pub(super) fn at(state: &'a AsOf<ArrangementState, SubTick>, expected: SubTick) -> Self {
+        Self {
+            current: state.value(),
+            changes: (state.as_of() == Some(expected)).then_some(state.value().changes.as_ref()),
+            frontier: expected,
+        }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn apply(
+    fn changed_keys(&self) -> impl Iterator<Item = &JoinKey> {
+        self.changes.into_iter().flat_map(|changes| changes.keys())
+    }
+
+    fn change_buckets(&self) -> impl Iterator<Item = (&JoinKey, &JoinBucket)> {
+        self.changes.into_iter().flat_map(|changes| changes.iter())
+    }
+
+    fn delta_bucket(&self, key: &JoinKey) -> Option<&JoinBucket> {
+        self.changes.and_then(|changes| changes.get(key))
+    }
+}
+
+fn threshold_transition(
+    published: &mut VisibilityState,
+    left: ArrangementTransition<'_>,
+    right: ArrangementTransition<'_>,
+    replace: bool,
+    semi: bool,
+) -> Vec<RecordDelta> {
+    let frontier = (left.frontier, right.frontier);
+    if !replace && published.consumed == Some(frontier) {
+        return Vec::new();
+    }
+    let mut affected = HashSet::default();
+    if replace {
+        *published = VisibilityState::default();
+        affected.extend(left.current.index.keys().cloned());
+        affected.extend(left.current.overlay.keys().cloned());
+    } else {
+        affected.extend(left.changed_keys().cloned());
+        affected.extend(right.changed_keys().cloned());
+    }
+    let mut output = Vec::new();
+    for key in affected {
+        let before = !replace && published.contains(&key);
+        let count = right.current.key_count(&key);
+        let after = if semi { count > 0 } else { count == 0 };
+        match (before, after) {
+            (true, true) => append_bucket(&mut output, left.delta_bucket(&key), 1),
+            (false, false) => {}
+            (false, true) => append_bucket(&mut output, left.current.bucket(&key), 1),
+            (true, false) => {
+                // -L_before = -L_after + delta_L. This also handles simultaneous
+                // additions/retractions on both sides without retaining L_before.
+                append_bucket(&mut output, left.current.bucket(&key), -1);
+                append_bucket(&mut output, left.delta_bucket(&key), 1);
+            }
+        }
+        published.set(key.clone(), after && left.current.bucket(&key).is_some());
+    }
+    published.consumed = Some(frontier);
+    consolidate_deltas(output)
+}
+
+/// The recursive snapshot interpreter has no retained indexes. Produce two
+/// temporary snapshot arrangements, then use the same read-only join kernel.
+pub(super) fn threshold_snapshot(
+    left: &RecordDeltas,
+    right: &RecordDeltas,
+    left_keys: &[String],
+    right_keys: &[String],
+    comparison: ValueComparison,
+    semi: bool,
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    let stamp = SubTick {
+        tick: 0,
+        sub_tick: 0,
+    };
+    let mut l = AsOf::default();
+    let mut r = AsOf::default();
+    prepare_arrangement(
+        &mut l,
+        &left.descriptor,
+        left_keys,
+        comparison,
+        JoinInput::deltas(&left.deltas),
+        stamp,
+        ArrangementUpdateMode::Replace,
+    )?;
+    prepare_arrangement(
+        &mut r,
+        &right.descriptor,
+        right_keys,
+        comparison,
+        JoinInput::deltas(&right.deltas),
+        stamp,
+        ArrangementUpdateMode::Replace,
+    )?;
+    Ok(threshold_transition(
+        &mut VisibilityState::default(),
+        ArrangementTransition::at(&l, stamp),
+        ArrangementTransition::at(&r, stamp),
+        true,
+        semi,
+    ))
+}
+
+impl SemiJoinState {
+    pub(super) fn commit_published_overlay(&mut self) {
+        self.published.commit();
+    }
+
+    pub(super) fn evaluate(
         &mut self,
-        left_arrangement: &mut AsOf<ArrangementState, SubTick>,
-        right_arrangement: &mut AsOf<ArrangementState, SubTick>,
-        left_descriptor: RecordDescriptor,
-        right_descriptor: RecordDescriptor,
-        _output_descriptor: &RecordDescriptor,
-        left_on: &[String],
-        right_on: &[String],
-        comparison: ValueComparison,
-        left_input: JoinInput<'_>,
-        right_input: JoinInput<'_>,
-        left_sub_tick: SubTick,
-        right_sub_tick: SubTick,
-        update_mode: ArrangementUpdateMode,
-    ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
-        let left_delta = left_input.records;
-        let right_delta = right_input.records;
-        if left_on.len() != right_on.len() {
-            return Err(IvmRuntimeError::JoinKeyArityMismatch {
-                left: left_on.len(),
-                right: right_on.len(),
-            });
-        }
-
-        let keyed_left_delta =
-            keyed_join_deltas(&left_descriptor, left_on, left_delta, comparison)?;
-        let keyed_right_delta = if reuses_snapshot(
-            right_arrangement,
-            right_input.snapshot,
-            right_sub_tick,
-            update_mode,
-        ) {
-            Vec::new()
-        } else {
-            keyed_join_deltas(&right_descriptor, right_on, right_delta, comparison)?
-        };
-        let mut affected_keys = HashSet::<JoinKey>::default();
-        if update_mode == ArrangementUpdateMode::Accumulate {
-            affected_keys.extend(keyed_left_delta.iter().map(|delta| delta.key.clone()));
-            affected_keys.extend(keyed_right_delta.iter().map(|delta| delta.key.clone()));
-        }
-        advance_arrangement(
-            left_arrangement,
-            &keyed_left_delta,
-            left_sub_tick,
-            update_mode,
-            left_input.snapshot,
-        )?;
-        advance_arrangement(
-            right_arrangement,
-            &keyed_right_delta,
-            right_sub_tick,
-            update_mode,
-            right_input.snapshot,
-        )?;
-
-        let mut deltas = Vec::new();
-        match update_mode {
-            ArrangementUpdateMode::Accumulate => {
-                for key in affected_keys {
-                    let old_visible = self.published.bucket(&key);
-                    let new_visible = (right_arrangement.value().key_count(&key) > 0)
-                        .then(|| left_arrangement.value().bucket(&key))
-                        .flatten();
-                    append_bucket_diff(&mut deltas, new_visible, old_visible);
-                    if let Some(bucket) = new_visible {
-                        self.published.replace_bucket(key, Some(bucket.clone()));
-                    } else {
-                        self.published.replace_bucket(key, None);
-                    }
-                }
-            }
-            ArrangementUpdateMode::Replace => {
-                self.published.clear();
-                let mut left_keys = HashSet::<JoinKey>::default();
-                for delta in &keyed_left_delta {
-                    let key = &delta.key;
-                    if left_keys.insert(key.clone())
-                        && right_arrangement.value().key_count(key) > 0
-                        && let Some(bucket) = left_arrangement.value().bucket(key)
-                    {
-                        append_bucket(&mut deltas, Some(bucket), 1);
-                        self.published
-                            .replace_bucket(key.clone(), Some(bucket.clone()));
-                    }
-                }
-            }
-        }
-
-        Ok(consolidate_deltas(deltas))
+        left: ArrangementTransition<'_>,
+        right: ArrangementTransition<'_>,
+        mode: ArrangementUpdateMode,
+    ) -> Vec<RecordDelta> {
+        threshold_transition(
+            &mut self.published,
+            left,
+            right,
+            mode == ArrangementUpdateMode::Replace,
+            true,
+        )
     }
 }
 
 impl AntiJoinState {
     pub(super) fn commit_published_overlay(&mut self) {
-        self.published.commit_overlay();
+        self.published.commit();
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn apply(
+    pub(super) fn evaluate(
         &mut self,
-        left_arrangement: &mut AsOf<ArrangementState, SubTick>,
-        right_arrangement: &mut AsOf<ArrangementState, SubTick>,
-        left_descriptor: &RecordDescriptor,
-        right_descriptor: &RecordDescriptor,
-        _output_descriptor: &RecordDescriptor,
-        left_on: &[String],
-        right_on: &[String],
+        left: ArrangementTransition<'_>,
+        right: ArrangementTransition<'_>,
+        mode: ArrangementUpdateMode,
+    ) -> Vec<RecordDelta> {
+        threshold_transition(
+            &mut self.published,
+            left,
+            right,
+            mode == ArrangementUpdateMode::Replace,
+            false,
+        )
+    }
+}
+
+#[cfg(test)]
+impl SemiJoinState {
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        &mut self,
+        left: &mut AsOf<ArrangementState, SubTick>,
+        right: &mut AsOf<ArrangementState, SubTick>,
+        ld: RecordDescriptor,
+        rd: RecordDescriptor,
+        _output: &RecordDescriptor,
+        lk: &[String],
+        rk: &[String],
         comparison: ValueComparison,
-        left_input: JoinInput<'_>,
-        right_input: JoinInput<'_>,
-        left_sub_tick: SubTick,
-        right_sub_tick: SubTick,
-        update_mode: ArrangementUpdateMode,
+        li: JoinInput<'_>,
+        ri: JoinInput<'_>,
+        lt: SubTick,
+        rt: SubTick,
+        mode: ArrangementUpdateMode,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
-        let left_delta = left_input.records;
-        let right_delta = right_input.records;
-        if left_on.len() != right_on.len() {
-            return Err(IvmRuntimeError::JoinKeyArityMismatch {
-                left: left_on.len(),
-                right: right_on.len(),
-            });
-        }
+        prepare_arrangement(left, &ld, lk, comparison, li, lt, mode)?;
+        prepare_arrangement(right, &rd, rk, comparison, ri, rt, mode)?;
+        Ok(self.evaluate(
+            ArrangementTransition::at(left, lt),
+            ArrangementTransition::at(right, rt),
+            mode,
+        ))
+    }
+}
 
-        let keyed_left_delta = keyed_join_deltas(left_descriptor, left_on, left_delta, comparison)?;
-        let keyed_right_delta = if reuses_snapshot(
-            right_arrangement,
-            right_input.snapshot,
-            right_sub_tick,
-            update_mode,
-        ) {
-            Vec::new()
-        } else {
-            keyed_join_deltas(right_descriptor, right_on, right_delta, comparison)?
-        };
-        let mut affected_keys = HashSet::<JoinKey>::default();
-        if update_mode == ArrangementUpdateMode::Accumulate {
-            affected_keys.extend(keyed_left_delta.iter().map(|delta| delta.key.clone()));
-            affected_keys.extend(keyed_right_delta.iter().map(|delta| delta.key.clone()));
-        }
-        advance_arrangement(
-            left_arrangement,
-            &keyed_left_delta,
-            left_sub_tick,
-            update_mode,
-            left_input.snapshot,
-        )?;
-        advance_arrangement(
-            right_arrangement,
-            &keyed_right_delta,
-            right_sub_tick,
-            update_mode,
-            right_input.snapshot,
-        )?;
-
-        let mut deltas = Vec::new();
-        match update_mode {
-            ArrangementUpdateMode::Accumulate => {
-                for key in affected_keys {
-                    let old_visible = self.published.bucket(&key);
-                    let new_visible = if right_arrangement.value().key_count(&key) == 0 {
-                        left_arrangement.value().bucket(&key)
-                    } else {
-                        None
-                    };
-                    append_bucket_diff(&mut deltas, new_visible, old_visible);
-                    if let Some(bucket) = new_visible {
-                        self.published.replace_bucket(key, Some(bucket.clone()));
-                    } else {
-                        self.published.replace_bucket(key, None);
-                    }
-                }
-            }
-            ArrangementUpdateMode::Replace => {
-                self.published.clear();
-                let mut left_keys = HashSet::<JoinKey>::default();
-                for delta in &keyed_left_delta {
-                    let key = &delta.key;
-                    if left_keys.insert(key.clone())
-                        && right_arrangement.value().key_count(key) == 0
-                        && let Some(bucket) = left_arrangement.value().bucket(key)
-                    {
-                        append_bucket(&mut deltas, Some(bucket), 1);
-                        self.published
-                            .replace_bucket(key.clone(), Some(bucket.clone()));
-                    }
-                }
-            }
-        }
-
-        Ok(consolidate_deltas(deltas))
+#[cfg(test)]
+impl AntiJoinState {
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        &mut self,
+        left: &mut AsOf<ArrangementState, SubTick>,
+        right: &mut AsOf<ArrangementState, SubTick>,
+        ld: &RecordDescriptor,
+        rd: &RecordDescriptor,
+        _output: &RecordDescriptor,
+        lk: &[String],
+        rk: &[String],
+        comparison: ValueComparison,
+        li: JoinInput<'_>,
+        ri: JoinInput<'_>,
+        lt: SubTick,
+        rt: SubTick,
+        mode: ArrangementUpdateMode,
+    ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+        prepare_arrangement(left, ld, lk, comparison, li, lt, mode)?;
+        prepare_arrangement(right, rd, rk, comparison, ri, rt, mode)?;
+        Ok(self.evaluate(
+            ArrangementTransition::at(left, lt),
+            ArrangementTransition::at(right, rt),
+            mode,
+        ))
     }
 }
 
 impl ArrangementState {
+    fn buckets(&self) -> impl Iterator<Item = (&JoinKey, &JoinBucket)> {
+        self.index
+            .iter()
+            .filter(|(key, _)| !self.overlay.contains_key(*key))
+            .chain(
+                self.overlay
+                    .iter()
+                    .filter_map(|(key, bucket)| bucket.as_ref().map(|bucket| (key, bucket))),
+            )
+    }
     /// Fold only the touched buckets into the shared base at tick commit.
     /// Callers drop the previous live arrangement before invoking this method,
     /// making both COW maps uniquely owned in the common path.
     pub(super) fn commit_overlay(&mut self) {
+        self.changes = Rc::default();
         if self.overlay.is_empty() {
             return;
         }
@@ -695,15 +701,18 @@ impl ArrangementState {
         }
     }
 
+    #[cfg(test)]
     fn replace_bucket(&mut self, key: JoinKey, bucket: Option<JoinBucket>) {
         self.snapshot = Weak::new();
         Rc::make_mut(&mut self.overlay).insert(key, bucket);
     }
 
+    #[cfg(test)]
     fn clear(&mut self) {
         *self = Self::default();
     }
 
+    #[cfg(test)]
     pub(super) fn clone_keys<'a>(&self, keys: impl IntoIterator<Item = &'a Vec<u8>>) -> Self {
         let mut index = HashMap::default();
         for key in keys {
@@ -715,10 +724,12 @@ impl ArrangementState {
         Self {
             index: Rc::new(index),
             overlay: Rc::default(),
+            changes: Rc::default(),
             snapshot: Weak::new(),
         }
     }
 
+    #[cfg(test)]
     pub(super) fn replace_keys<'a>(
         &mut self,
         keys: impl IntoIterator<Item = &'a Vec<u8>>,
@@ -763,6 +774,7 @@ impl ArrangementState {
         update_mode: ArrangementUpdateMode,
     ) {
         self.snapshot = Weak::new();
+        self.changes = Rc::new(build_join_delta_index(deltas));
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
                 let mut buckets = HashMap::<JoinKey, JoinBucket>::default();
@@ -778,7 +790,7 @@ impl ArrangementState {
                 }
             }
             ArrangementUpdateMode::Replace => {
-                self.index = Rc::new(build_join_delta_index(deltas));
+                self.index = Rc::clone(&self.changes);
                 self.overlay = Rc::default();
             }
         }
@@ -786,7 +798,7 @@ impl ArrangementState {
 
     fn key_count(&self, key: &[u8]) -> i64 {
         self.bucket(key)
-            .map(|bucket| bucket.iter().map(|(_, weight)| weight).sum())
+            .map(|bucket| bucket.total_weight)
             .unwrap_or_default()
     }
 
@@ -830,6 +842,22 @@ fn reuses_snapshot(
         && snapshot.is_some_and(|snapshot| {
             std::ptr::eq(arrangement.value().snapshot.as_ptr(), Arc::as_ptr(snapshot))
         })
+}
+
+pub(super) fn prepare_arrangement(
+    state: &mut AsOf<ArrangementState, SubTick>,
+    descriptor: &RecordDescriptor,
+    fields: &[String],
+    comparison: ValueComparison,
+    input: JoinInput<'_>,
+    stamp: SubTick,
+    mode: ArrangementUpdateMode,
+) -> Result<(), IvmRuntimeError> {
+    if reuses_snapshot(state, input.snapshot, stamp, mode) {
+        return Ok(());
+    }
+    let keyed = keyed_join_deltas(descriptor, fields, input.records, comparison)?;
+    advance_arrangement(state, &keyed, stamp, mode, input.snapshot)
 }
 
 fn advance_arrangement(
@@ -921,45 +949,39 @@ enum JoinProbeSide {
     RightDelta,
 }
 
-fn append_join_deltas(
+fn append_join_index_deltas<'a>(
     output: &mut JoinOutputBuffer,
     context: &JoinChangeContext<'_>,
-    delta_records: &[KeyedRecordDelta<'_>],
+    changes: impl Iterator<Item = (&'a JoinKey, &'a JoinBucket)>,
     stored: &JoinLookup<'_>,
     side: JoinProbeSide,
     sign: i64,
 ) -> Result<(), IvmRuntimeError> {
-    for delta in delta_records {
-        if delta.delta.weight == 0 {
-            continue;
-        }
-        let Some(bucket) = stored.bucket(&delta.key) else {
+    for (key, changed) in changes {
+        let Some(bucket) = stored.bucket(key) else {
             continue;
         };
-        for (stored_record, right_weight) in bucket.iter() {
-            if *right_weight == 0 {
-                continue;
+        for (changed_record, changed_weight) in changed.iter() {
+            for (stored_record, stored_weight) in bucket.iter() {
+                let weight = sign * changed_weight * stored_weight;
+                if weight == 0 {
+                    continue;
+                }
+                let (left_record, right_record) = match side {
+                    JoinProbeSide::LeftDelta => (changed_record.as_ref(), stored_record.as_ref()),
+                    JoinProbeSide::RightDelta => (stored_record.as_ref(), changed_record.as_ref()),
+                };
+                let record = create_join_record_into(
+                    left_record,
+                    right_record,
+                    context,
+                    &mut output.bytes,
+                    &mut output.variable_scratch,
+                )?;
+                output.deltas.push((record, weight));
             }
-
-            let weight = sign * delta.delta.weight * *right_weight;
-            if weight == 0 {
-                continue;
-            }
-            let (left_record, right_record) = match side {
-                JoinProbeSide::LeftDelta => (delta.delta.raw(), stored_record.as_ref()),
-                JoinProbeSide::RightDelta => (stored_record.as_ref(), delta.delta.raw()),
-            };
-            let record = create_join_record_into(
-                left_record,
-                right_record,
-                context,
-                &mut output.bytes,
-                &mut output.variable_scratch,
-            )?;
-            output.deltas.push((record, weight));
         }
     }
-
     Ok(())
 }
 
@@ -1039,11 +1061,18 @@ fn scalar_join_field_indices(
     Ok(Some(indices))
 }
 
+#[cfg(test)]
+thread_local! {
+    static APPENDED_BUCKET_RECORDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn append_bucket(deltas: &mut Vec<RecordDelta>, bucket: Option<&JoinBucket>, sign: i64) {
     let Some(bucket) = bucket else {
         return;
     };
     for (record, weight) in bucket.iter() {
+        #[cfg(test)]
+        APPENDED_BUCKET_RECORDS.with(|count| count.set(count.get() + 1));
         let weight = sign * *weight;
         if weight == 0 {
             continue;
@@ -1052,19 +1081,6 @@ fn append_bucket(deltas: &mut Vec<RecordDelta>, bucket: Option<&JoinBucket>, sig
             record: record.clone(),
             weight,
         });
-    }
-}
-
-fn append_bucket_diff(
-    deltas: &mut Vec<RecordDelta>,
-    new_bucket: Option<&JoinBucket>,
-    old_bucket: Option<&JoinBucket>,
-) {
-    if let Some(old_bucket) = old_bucket {
-        append_bucket(deltas, Some(old_bucket), -1);
-    }
-    if let Some(new_bucket) = new_bucket {
-        append_bucket(deltas, Some(new_bucket), 1);
     }
 }
 
@@ -1789,6 +1805,104 @@ mod tests {
     }
 
     #[test]
+    fn visible_threshold_update_visits_only_changed_records_at_any_bucket_size() {
+        // Internal work-bound proof: consolidated public output would hide
+        // a full retract/reinsert scan, so count rows visited by the kernel.
+        for size in [10, 10_000] {
+            let key = JoinKey::from_slice(b"group");
+            let bucket = JoinBucket::from_records(
+                (0..size)
+                    .map(|i| (Bytes::from(format!("record-{i}")), 1))
+                    .collect(),
+            );
+            let mut left = AsOf::new(ArrangementState {
+                index: Rc::new(HashMap::from_iter([(key.clone(), bucket)])),
+                ..ArrangementState::default()
+            });
+            let right = AsOf::default();
+            let first = SubTick {
+                tick: 1,
+                sub_tick: 0,
+            };
+            left.mark_forward_as_of(first).unwrap();
+            let mut state = AntiJoinState::default();
+            assert_eq!(
+                state
+                    .evaluate(
+                        ArrangementTransition::at(&left, first),
+                        ArrangementTransition::at(&right, first),
+                        ArrangementUpdateMode::Replace
+                    )
+                    .len(),
+                size
+            );
+            state.commit_published_overlay();
+            left.value_mut().commit_overlay();
+            let deltas = [
+                RecordDelta {
+                    record: Bytes::from_static(b"record-0"),
+                    weight: -1,
+                },
+                RecordDelta {
+                    record: Bytes::from_static(b"replacement"),
+                    weight: 1,
+                },
+            ];
+            let mut staged = left.clone();
+            staged.value_mut().apply_update(
+                &deltas
+                    .iter()
+                    .map(|delta| KeyedRecordDelta {
+                        delta,
+                        key: key.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+                ArrangementUpdateMode::Accumulate,
+            );
+            let second = SubTick {
+                tick: 2,
+                sub_tick: 0,
+            };
+            staged.mark_forward_as_of(second).unwrap();
+            APPENDED_BUCKET_RECORDS.with(|count| count.set(0));
+            let output = state.evaluate(
+                ArrangementTransition::at(&staged, second),
+                ArrangementTransition::at(&right, second),
+                ArrangementUpdateMode::Accumulate,
+            );
+            assert_eq!(output.len(), 2);
+            assert!(deltas.iter().all(|delta| output.contains(delta)));
+            assert_eq!(APPENDED_BUCKET_RECORDS.with(|count| count.get()), 2);
+            assert_eq!(staged.value().key_count(&key), size as i64);
+            // A second consumer sees the same producer delta, not a consumed log.
+            let mut sibling = AntiJoinState::default();
+            sibling.evaluate(
+                ArrangementTransition::at(&left, first),
+                ArrangementTransition::at(&right, first),
+                ArrangementUpdateMode::Replace,
+            );
+            assert_eq!(
+                sibling.evaluate(
+                    ArrangementTransition::at(&staged, second),
+                    ArrangementTransition::at(&right, second),
+                    ArrangementUpdateMode::Accumulate
+                ),
+                output
+            );
+            // Re-entering a completed operator cannot publish a delta twice.
+            assert!(
+                state
+                    .evaluate(
+                        ArrangementTransition::at(&staged, second),
+                        ArrangementTransition::at(&right, second),
+                        ArrangementUpdateMode::Accumulate
+                    )
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn arrangement_commit_preserves_shared_bucket_and_folds_after_release() {
         // Internal ownership proof: compaction must not copy a shared base
         // or mutate the signed multiset retained by a publication snapshot.
@@ -1853,6 +1967,7 @@ mod tests {
         let original = ArrangementState {
             index: Rc::new(index),
             overlay: Rc::default(),
+            changes: Rc::default(),
             snapshot: Weak::new(),
         };
 
