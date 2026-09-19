@@ -595,6 +595,129 @@ pub(super) fn lowered_terminals(
                     .collect(),
                 AppRowTerminal::Direct,
             ),
+            PayloadProjection::Relation(requested) => {
+                let columns = match root_linear_steps(plan).and_then(|steps| match steps.last() {
+                    Some(LinearStep::Project(columns)) => Some(columns.clone()),
+                    _ => None,
+                }) {
+                    Some(columns) => columns,
+                    None => {
+                        let mut columns = vec![RowProjection {
+                            output: TypedOutputField {
+                                name: "row_uuid".to_owned(),
+                                ty: ColumnType::Uuid,
+                            },
+                            value: NormalizedValueRef::RowId(RowIdRef::Source(
+                                plan.root_source().clone(),
+                            )),
+                        }];
+                        for requested in &requested {
+                            let (ty, value) = match &requested.expr {
+                                crate::query::RelationProjectExpr::RowId(
+                                    crate::query::RelationRowIdRef::Current,
+                                ) => (
+                                    ColumnType::Uuid,
+                                    NormalizedValueRef::RowId(RowIdRef::Source(
+                                        plan.root_source().clone(),
+                                    )),
+                                ),
+                                crate::query::RelationProjectExpr::RowId(
+                                    crate::query::RelationRowIdRef::Outer,
+                                )
+                                | crate::query::RelationProjectExpr::RowId(
+                                    crate::query::RelationRowIdRef::Frontier,
+                                ) => {
+                                    return Err(single_gap_report(UnsupportedReason::Operator(
+                                        "outer/frontier row-id relation projections are not unified yet"
+                                            .to_owned(),
+                                    )));
+                                }
+                                crate::query::RelationProjectExpr::Column(reference) => {
+                                    let (ty, value) = if reference.column == "id" {
+                                        (
+                                            ColumnType::Uuid,
+                                            NormalizedValueRef::RowId(RowIdRef::Source(
+                                                plan.root_source().clone(),
+                                            )),
+                                        )
+                                    } else {
+                                        let ty = source
+                                            .table_schema
+                                            .columns
+                                            .iter()
+                                            .find(|column| column.name == reference.column)
+                                            .map(|column| column.column_type.clone())
+                                            .unwrap_or(ColumnType::String);
+                                        (
+                                            ty,
+                                            NormalizedValueRef::SourceField {
+                                                source: plan.root_source().clone(),
+                                                field: reference.column.clone(),
+                                            },
+                                        )
+                                    };
+                                    (ty, value)
+                                }
+                            };
+                            columns.push(RowProjection {
+                                output: TypedOutputField {
+                                    name: requested.alias.clone(),
+                                    ty,
+                                },
+                                value,
+                            });
+                        }
+                        columns
+                    }
+                };
+                let descriptor = RecordDescriptor::new(
+                    columns
+                        .iter()
+                        .map(|column| (column.output.name.clone(), column.output.ty.clone())),
+                );
+                let graph = graph.clone().project_fields(
+                    columns
+                        .iter()
+                        .map(|column| ProjectField::named(&column.output.name))
+                        .chain(root_route_fields.iter().map(ProjectField::named)),
+                );
+                let requested_names = requested
+                    .iter()
+                    .map(|column| column.alias.as_str())
+                    .collect::<BTreeSet<_>>();
+                let hidden_fields = columns
+                    .iter()
+                    .filter(|column| {
+                        column.output.name != "row_uuid"
+                            && !requested_names.contains(column.output.name.as_str())
+                    })
+                    .map(|column| column.output.name.clone())
+                    .collect::<BTreeSet<_>>();
+                let public_field_names = requested_names
+                    .iter()
+                    .map(|name| ((*name).to_owned(), (*name).to_owned()))
+                    .collect::<BTreeMap<_, _>>();
+                let publication_fields = requested
+                    .iter()
+                    .map(|requested| {
+                        let binding = CurrentRowPublicationField::ResultField {
+                            name: requested.alias.clone(),
+                            visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+                        };
+                        (requested.alias.clone(), binding)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                (
+                    graph,
+                    descriptor,
+                    hidden_fields,
+                    AppRowCarrier::Logical,
+                    BTreeMap::new(),
+                    public_field_names,
+                    publication_fields,
+                    AppRowTerminal::Direct,
+                )
+            }
             PayloadProjection::Tree(tree) => {
                 let collected = lower_collect_by_app_rows(
                     closure.visible_root.clone(),

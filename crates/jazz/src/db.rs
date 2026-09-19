@@ -5421,11 +5421,11 @@ fn apply_maintained_update_to_snapshot(
             LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } => {
                 format!("flat:add={} remove={}", added.len(), removed.len())
             }
-            LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+            LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
                 snapshot,
                 occurrence_ids,
             } => format!(
-                "aggregate-window:roots={} occurrences={}",
+                "ordered-window:roots={} occurrences={}",
                 snapshot.root_count,
                 occurrence_ids.len()
             ),
@@ -5436,7 +5436,7 @@ fn apply_maintained_update_to_snapshot(
         );
     }
     match update {
-        LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+        LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
             snapshot: current,
             occurrence_ids,
         } => {

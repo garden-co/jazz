@@ -19,6 +19,9 @@ pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) result_table: String,
     pub(super) result_schema_version: SchemaVersionId,
     pub(super) result_select: Option<Vec<String>>,
+    pub(super) result_relation_projection: Option<Vec<crate::query::RelationProjectColumn>>,
+    pub(super) result_relation_projections:
+        Option<BTreeMap<String, Vec<crate::query::RelationProjectColumn>>>,
     pub(super) result_set: BTreeSet<ResultMemberEntry>,
     pub(super) result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     pub(super) program_facts: BTreeSet<ProgramFactEntry>,
@@ -112,6 +115,43 @@ impl LocalMaintainedViewSubscription {
     /// authorization result.
     pub(crate) fn initial_snapshot_received(&self) -> bool {
         self.initial_received
+    }
+
+    pub(super) fn relation_projection_for_member(
+        &self,
+        member: &ResultMemberEntry,
+    ) -> Result<Option<&Vec<crate::query::RelationProjectColumn>>, Error> {
+        let occurrence = super::public_result_member_occurrence_id(
+            member,
+            self.result_table.as_str(),
+            self.result_query.aggregate.is_some(),
+        )?
+        .ok_or(Error::InvalidStoredValue(
+            "maintained union member has no occurrence identity",
+        ))?;
+        self.relation_projection_for_occurrence(&occurrence)
+    }
+
+    pub(super) fn relation_projection_for_occurrence(
+        &self,
+        occurrence: &OutputOccurrenceId,
+    ) -> Result<Option<&Vec<crate::query::RelationProjectColumn>>, Error> {
+        let Some(projections) = &self.result_relation_projections else {
+            return Ok(self.result_relation_projection.as_ref());
+        };
+        let label = occurrence
+            .union_arms()
+            .iter()
+            .find_map(|(position, label)| (*position == 0).then_some(label))
+            .ok_or(Error::InvalidStoredValue(
+                "maintained union member has no position-0 arm label",
+            ))?;
+        projections
+            .get(label)
+            .map(Some)
+            .ok_or(Error::InvalidStoredValue(
+                "maintained union member has an unknown arm label",
+            ))
     }
 }
 
@@ -232,8 +272,26 @@ impl LocalMaintainedViewSubscription {
                 .as_ref()
                 .map(|columns| columns.iter().map(String::len).sum::<usize>())
                 .unwrap_or_default()
+            + self
+                .result_relation_projection
+                .as_ref()
+                .map(|columns| {
+                    postcard::to_allocvec(columns)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
             + result_set_bytes
             + result_payloads_bytes
+            + self
+                .result_relation_projections
+                .as_ref()
+                .map(|projections| {
+                    postcard::to_allocvec(projections)
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
             + program_facts_bytes;
         LocalMaintainedViewSubscriptionFootprint {
             maintained,
@@ -255,10 +313,10 @@ pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
         added: Vec<(OutputOccurrenceId, CurrentRow)>,
         removed: Vec<OutputOccurrenceId>,
     },
-    /// Aggregate terminals retain every group, while the public facade shows
-    /// an ordered window of those groups. Re-materialize that complete facade
-    /// after each transition so displaced page members are retracted too.
-    AggregateWindow {
+    /// Ordered relation and aggregate terminals retain every member, while
+    /// the public facade shows an ordered window. Re-materialize that complete
+    /// facade after each transition so displaced page members are retracted too.
+    OrderedWindow {
         snapshot: RelationSnapshot,
         occurrence_ids: Vec<OutputOccurrenceId>,
     },
@@ -266,6 +324,22 @@ pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
     Structured {
         terminal_operations: Vec<groove::ivm::TerminalOperation>,
     },
+}
+
+impl LocalMaintainedViewSubscription {
+    fn needs_ordered_relation_snapshot(&self) -> bool {
+        let query_has_window = !self.result_query.order_by.is_empty()
+            || self.result_query.limit.is_some()
+            || self.result_query.offset != 0;
+        let relation_has_union_window =
+            self.result_query.relation.as_ref().is_some_and(|relation| {
+                crate::query::relation_union_presentation_order(relation).is_some()
+                    || crate::query::relation_union_parts(&relation.rel)
+                        .is_some_and(|parts| parts.limit.is_some() || parts.offset.is_some())
+            });
+        (self.result_relation_projection.is_some() || self.result_relation_projections.is_some())
+            && (query_has_window || relation_has_union_window)
+    }
 }
 
 impl<S> NodeState<S>
@@ -371,6 +445,20 @@ where
             result_table: shape.query().table.clone(),
             result_schema_version: shape.schema_version(),
             result_select: shape.query().select.clone(),
+            result_relation_projection: shape
+                .query()
+                .relation
+                .as_ref()
+                .map(crate::query::relation_output_projection_if_present)
+                .transpose()?
+                .flatten(),
+            result_relation_projections: shape
+                .query()
+                .relation
+                .as_ref()
+                .filter(|relation| crate::query::relation_union_parts(&relation.rel).is_some())
+                .map(crate::query::relation_union_leaf_projections)
+                .transpose()?,
             result_set: BTreeSet::new(),
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
@@ -1367,12 +1455,14 @@ where
             LocalMaintainedViewSubscriptionUpdate::Structured {
                 terminal_operations,
             }
-        } else if materialize_update && local.result_query.aggregate.is_some() {
+        } else if materialize_update
+            && (local.result_query.aggregate.is_some() || local.needs_ordered_relation_snapshot())
+        {
             let materialized = self
                 .materialize_local_maintained_relation_snapshot_with_occurrences(local)
                 .await?;
             local.root_occurrence_ids = materialized.root_occurrence_ids.clone();
-            LocalMaintainedViewSubscriptionUpdate::AggregateWindow {
+            LocalMaintainedViewSubscriptionUpdate::OrderedWindow {
                 snapshot: materialized.snapshot,
                 occurrence_ids: materialized.root_occurrence_ids,
             }

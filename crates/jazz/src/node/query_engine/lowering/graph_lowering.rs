@@ -15,7 +15,20 @@ pub(super) fn lower_plan_steps(
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     match plan {
         AnalyzedQueryPlan::Linear(linear) => {
-            lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)
+            let retain_final_project_input_fields =
+                request.output.app_rows.as_ref().is_some_and(|output| {
+                    matches!(output.projection, PayloadProjection::Relation(_))
+                });
+            lower_linear_plan_steps_cached(
+                graph,
+                linear,
+                root_source,
+                resolved_sources,
+                request,
+                None,
+                None,
+                retain_final_project_input_fields,
+            )
         }
         AnalyzedQueryPlan::Union(union) => {
             lower_union_plan(union, Some(graph), root_source, resolved_sources, request)
@@ -752,7 +765,7 @@ fn union_branch_plans_with_labels<'a>(
         .map(|branch| {
             let label = prefix.map_or_else(
                 || branch.label.clone(),
-                |prefix| compose_union_arm_path(prefix, &branch.label),
+                |prefix| crate::query::compose_union_arm_path(prefix, &branch.label),
             );
             (&branch.plan, label)
         })
@@ -760,11 +773,12 @@ fn union_branch_plans_with_labels<'a>(
     while let Some((plan, label)) = pending.pop() {
         match plan {
             RelationInputPlan::Union(nested) => {
-                pending.extend(
-                    nested.branches.iter().rev().map(|branch| {
-                        (&branch.plan, compose_union_arm_path(&label, &branch.label))
-                    }),
-                )
+                pending.extend(nested.branches.iter().rev().map(|branch| {
+                    (
+                        &branch.plan,
+                        crate::query::compose_union_arm_path(&label, &branch.label),
+                    )
+                }))
             }
             RelationInputPlan::Linear(_) | RelationInputPlan::Recursive(_) => {
                 leaves.push((plan, label))
@@ -772,13 +786,6 @@ fn union_branch_plans_with_labels<'a>(
         }
     }
     leaves
-}
-
-/// Encode a nested semantic-arm path without relying on a separator that a
-/// user label could contain. The opaque carrier remains stable when siblings
-/// are inserted or reordered and is never derived from traversal position.
-fn compose_union_arm_path(prefix: &str, label: &str) -> String {
-    format!("{}:{prefix}{}:{label}", prefix.len(), label.len())
 }
 
 fn lower_union_plan(
@@ -814,10 +821,19 @@ fn lower_union_plan(
                         .graph
                         .clone()
                 };
-                lower_linear_plan_steps(graph, linear, root_source, resolved_sources, request)?
+                lower_linear_plan_steps_cached(
+                    graph,
+                    linear,
+                    root_source,
+                    resolved_sources,
+                    request,
+                    None,
+                    None,
+                    true,
+                )?
             }
             RelationInputPlan::Union(_) | RelationInputPlan::Recursive(_) => {
-                lower_relation_input(branch_plan, resolved_sources, request)?
+                lower_relation_input_for_contributor(branch_plan, resolved_sources, request)?
             }
         };
         // A public root UNION ALL has no join-side occurrence slot. Retain an
@@ -835,13 +851,18 @@ fn lower_union_plan(
                 "UNION ALL root arm projection discarded its stable source row identity".to_owned(),
             ));
         }
-        input.graph =
-            input
-                .graph
-                .project_fields(input.fields.iter().map(ProjectField::named).chain([
-                    ProjectField::renamed(row_field, "__root_union_row".to_owned()),
-                    ProjectField::literal("__root_union_arm", Value::String(label)),
-                ]));
+        // Keep the source descriptor's order ahead of public aliases. Global
+        // UNION ordering addresses source fields by descriptor index.
+        let source_field_names = source_fields(source).collect::<Vec<_>>();
+        let source_field_set = source_field_names.iter().cloned().collect::<BTreeSet<_>>();
+        let retained_fields = source_field_names
+            .into_iter()
+            .chain(input.fields.difference(&source_field_set).cloned())
+            .map(ProjectField::named);
+        input.graph = input.graph.project_fields(retained_fields.chain([
+            ProjectField::renamed(row_field, "__root_union_row".to_owned()),
+            ProjectField::literal("__root_union_arm", Value::String(label)),
+        ]));
         input.fields.insert("__root_union_row".to_owned());
         input.fields.insert("__root_union_arm".to_owned());
         input.union_occurrence_carrier =
@@ -1733,6 +1754,34 @@ fn lower_linear_plan_steps_cached(
                 // pre-projection physical row/version fields needed to encode
                 // the admitted source occurrence. Capture the exact fields
                 // available at this boundary before the facade aliases them.
+                // Bind source order while the graph still has the source
+                // descriptor. A relation output projection may narrow or
+                // rename those fields, and unbounded order still determines
+                // the observable row sequence when no Slice follows.
+                if let Some(order) = pending_order.take() {
+                    graph = lower_window(
+                        graph,
+                        &order,
+                        &[],
+                        &available_route_fields,
+                        None,
+                        0,
+                        &[NormalizedValueRef::RowId(RowIdRef::Source(
+                            plan.root
+                                .source()
+                                .ok_or_else(|| {
+                                    UnsupportedReason::Operator(
+                                        "order fallback must be a source".to_owned(),
+                                    )
+                                })?
+                                .clone(),
+                        ))],
+                        plan,
+                        root_source,
+                        request,
+                    )?;
+                }
+
                 let retained_contributor_fields = (retain_final_project_input_fields
                     && step_index + 1 == plan.steps.len())
                 .then(|| fields.clone());
@@ -3314,11 +3363,29 @@ fn lower_order_key(
     source: &ResolvedSource,
     request: &QueryProgramRequest,
 ) -> Result<TopByOrder, UnsupportedReason> {
-    // Preserve source qualification validation before binding the exact carrier.
     let lowered = lower_field_ref(&key.value, plan, source, request, "order key")?;
-    let field = match collect_window_source_field(source, &key.value) {
-        Some(field) => FieldRef::stored_name(field.name.clone().expect("window fields are named")),
-        None => FieldRef::name(lowered),
+    let relation_output = request.output.app_rows.as_ref().is_some_and(|output| {
+        matches!(output.projection, PayloadProjection::Relation(_))
+            && plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, LinearStep::Project(_)))
+    });
+    let field = match (
+        relation_output,
+        collect_window_source_field(source, &key.value),
+    ) {
+        (true, Some(_)) => FieldRef::resolved(
+            resolved_source_descriptor_index(source, &lowered).ok_or_else(|| {
+                UnsupportedReason::Operator(format!(
+                    "resolved order key field {lowered:?} is missing from the source descriptor"
+                ))
+            })?,
+        ),
+        (false, Some(field)) => {
+            FieldRef::stored_name(field.name.clone().expect("window fields are named"))
+        }
+        (_, None) => FieldRef::name(lowered),
     };
     Ok(TopByOrder {
         field,
