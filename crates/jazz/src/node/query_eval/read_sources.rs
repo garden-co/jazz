@@ -4050,9 +4050,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
         .chain(table.columns.iter().map(|column| {
             let value_type = if branch_columns_nonnullable && table.branch_by.contains(&column.name)
             {
-                crate::schema::storage_column_type(column)
+                current_row_column_type(column)
             } else {
-                ValueType::Nullable(Box::new(crate::schema::storage_column_type(column)))
+                ValueType::Nullable(Box::new(current_row_column_type(column)))
             };
             current_row_column_field(column, value_type)
         }))

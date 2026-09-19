@@ -4508,6 +4508,27 @@ fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRo
     values.push(Value::U64(provenance.tx_node_alias().0));
 }
 
+/// Runtime carriers preserve logical nullable wrappers while retaining the
+/// semantic kind of indirect JSON. History/wire storage descriptors have their
+/// own null representation and must not be changed for this runtime concern.
+pub(super) fn current_row_column_type(column: &crate::schema::ColumnSchema) -> records::ValueType {
+    fn json_type(logical: &records::ValueType) -> records::ValueType {
+        match logical {
+            records::ValueType::Nullable(inner) => {
+                records::ValueType::Nullable(Box::new(json_type(inner)))
+            }
+            _ => groove::large_values::physical_storage_value_type(
+                groove::large_values::LargeValueKind::Json,
+            ),
+        }
+    }
+    if column.large_value_kind == crate::schema::LargeValueSemanticKind::Json {
+        json_type(&column.column_type)
+    } else {
+        column.column_type.clone()
+    }
+}
+
 fn current_row_descriptor(table: &TableSchema) -> records::RecordDescriptor {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<CurrentRowDescriptorCacheEntry>>> =
         std::sync::OnceLock::new();
@@ -4538,12 +4559,7 @@ impl CurrentRowDescriptorCacheEntry {
             columns: table
                 .columns
                 .iter()
-                .map(|column| {
-                    (
-                        column.name.clone(),
-                        crate::schema::storage_column_type(column),
-                    )
-                })
+                .map(|column| (column.name.clone(), current_row_column_type(column)))
                 .collect(),
             descriptor,
         }
@@ -4557,8 +4573,7 @@ impl CurrentRowDescriptorCacheEntry {
                 .iter()
                 .zip(&table.columns)
                 .all(|((name, column_type), column)| {
-                    name == &column.name
-                        && column_type == &crate::schema::storage_column_type(column)
+                    name == &column.name && column_type == &current_row_column_type(column)
                 })
     }
 }
@@ -4575,7 +4590,7 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
         .chain(table.columns.iter().map(|column| {
             records::DescriptorField::new(
                 user_column_field(&column.name),
-                records::ValueType::Nullable(Box::new(crate::schema::storage_column_type(column))),
+                records::ValueType::Nullable(Box::new(current_row_column_type(column))),
             )
             .with_identity(records::FieldIdentity::Name(column.name.clone()))
         }))
