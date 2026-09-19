@@ -269,6 +269,9 @@ impl ServerBuilder {
             http_client,
             forwarding_policy,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
+            websocket_admissions: Arc::new(
+                crate::server::routes::WebSocketAdmissionState::default(),
+            ),
             core_server_shell_storage_config,
             storage_factory: self.storage_factory.clone(),
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
@@ -284,6 +287,15 @@ impl ServerBuilder {
             edge_upstream_task: std::sync::Mutex::new(None),
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
+
+        // Recovery normalizes legacy runtime selections to revision zero. Restore
+        // the durable administrative selection before any snapshot can be served.
+        // Edges adopt their authority's selection through authenticated bootstrap.
+        if topology == ServerTopology::Core {
+            super::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
+                .await
+                .map_err(|error| format!("restore active schema before serving: {error}"))?;
+        }
 
         if let (ServerTopology::Edge, Some(upstream_url), Some(admin_secret), Some(connector)) = (
             topology,
@@ -2335,6 +2347,146 @@ mod tests {
             restored_todos.branch_by,
             vec![jazz::tools::public_schema::ColumnName::new("workspace_id")]
         );
+    }
+
+    /// Internal fixture access is needed to recreate a pre-active-schema store.
+    /// Startup must restore the administrative revision before a fresh edge sees B.
+    #[tokio::test]
+    async fn legacy_authority_restores_active_descendant_before_serving_snapshots() {
+        use jazz::tools::schema_lens::{Lens, LensOp};
+        use jazz::tools::{
+            ColumnType, PolicyExpr, SchemaBuilder, TableName, TablePolicies, TableSchema,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let app_id = AppId::from_name("legacy-authority-active-descendant");
+        let base = dynamic_bootstrap_schema();
+        let target = SchemaBuilder::new()
+            .table(TableSchema::builder("notes").column("content", ColumnType::Text))
+            .build();
+        let target_runtime = jazz::schema::JazzSchema::new(&target).unwrap();
+        let lens = Lens::new(
+            SchemaHash::compute(&base),
+            SchemaHash::compute(&target),
+            LensTransform::with_ops(vec![LensOp::RenameColumn {
+                table: "notes".into(),
+                old_name: "body".into(),
+                new_name: "content".into(),
+            }]),
+        );
+        let builder = || {
+            ServerBuilder::new(app_id)
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
+                    path: dir.path().to_path_buf(),
+                })
+        };
+        let core = builder().with_schema(base).build().await.unwrap();
+        core.state
+            .catalogue
+            .publish_schema(&core.state.catalogue_store, target.clone())
+            .unwrap();
+        core.state
+            .catalogue
+            .publish_lens(&core.state.catalogue_store, &lens)
+            .unwrap();
+        super::super::runtime_catalogue::publish_runtime_catalogue(
+            &core.state,
+            &[target.clone()],
+            &[lens],
+        )
+        .await
+        .unwrap();
+        let permissions = std::collections::HashMap::from([(
+            TableName::new("notes"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let selection = super::super::runtime_catalogue::publish_permissions_and_runtime(
+            &core.state,
+            SchemaHash::compute(&target),
+            permissions.clone(),
+            None,
+        )
+        .await
+        .ok()
+        .expect("activate descendant");
+        core.shutdown().await;
+        drop(core);
+
+        // Kind 8 / nil UUID is the existing active-schema record key. Removing
+        // it leaves the old selected pointer and structural catalogue intact;
+        // no storage encoding or codec profile changes are involved.
+        {
+            let families = target_runtime.column_families();
+            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            let storage =
+                jazz_storage_rocksdb::RocksDbStorage::open_with_durability_and_codec_profile(
+                    dir.path().join(SERVER_SHELL_ROCKSDB_DIR),
+                    &refs,
+                    jazz_storage_rocksdb::Durability::WalNoSync,
+                    &jazz::storage_codec_profile::epoch_1_storage_codec_profile().unwrap(),
+                )
+                .unwrap();
+            let mut database = groove::db::Database::new_with_storage_layout(
+                target_runtime.lower_catalogue_meta_to_groove(),
+                storage,
+                groove::storage::StorageLayout::jazz_class_v1(),
+            )
+            .await
+            .unwrap();
+            let mut batch = database.open_batch();
+            batch.delete(
+                "jazz_catalogue",
+                groove::db::PrimaryKeyValue::Composite(vec![
+                    groove::db::PrimaryKeyValue::U64(8),
+                    groove::db::PrimaryKeyValue::Uuid(uuid::Uuid::nil()),
+                ]),
+            );
+            let applied = database.apply_batch(batch).await.unwrap();
+            let persisted = applied.persist().await;
+            database.finish_persistence(persisted).unwrap();
+        }
+
+        // No HTTP publication or test-side activation after reopen.
+        let reopened = builder().build().await.unwrap();
+        let snapshot = reopened
+            .state
+            .runtime()
+            .unwrap()
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.current_write_schema.schema,
+            target_runtime.version_id()
+        );
+        assert_eq!(snapshot.current_write_schema.revision, selection.version);
+        assert!(selection.version > 0);
+        let selected = snapshot
+            .schemas
+            .iter()
+            .find(|schema| schema.id == target_runtime.version_id())
+            .unwrap();
+        assert_eq!(
+            selected.schema.public_schema()[&TableName::new("notes")].policies,
+            permissions[&TableName::new("notes")]
+        );
+        let edge = crate::server::ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
+            StorageConfig::InMemory,
+            None,
+            None,
+            snapshot.clone(),
+        )
+        .expect("fresh edge accepts the upgraded authority snapshot");
+        assert_eq!(
+            edge.trusted_catalogue_snapshot_for_test()
+                .await
+                .unwrap()
+                .current_write_schema,
+            snapshot.current_write_schema
+        );
+        edge.shutdown().await.unwrap();
+        reopened.shutdown().await;
     }
 
     #[tokio::test]

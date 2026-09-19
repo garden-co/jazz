@@ -21,6 +21,7 @@ use jazz::time::GlobalTime;
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
+use jazz::tools::test_support::AllowAll;
 use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use jazz::wire::TransportError;
 use jazz_sim::fixture::{
@@ -1195,7 +1196,8 @@ fn schema() -> JazzSchema {
                     .column("seq", PublicColumnType::Timestamp)
                     .column("payload", PublicColumnType::Bytea),
             )
-            .build(),
+            .build()
+            .allow_all(),
     )
 }
 

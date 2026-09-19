@@ -278,7 +278,7 @@ jazzPlugin({
 
 ### What auto-pushes
 
-On startup and on every change to `schema.ts` or `permissions.ts`, the plugin publishes the current structural schema and permissions bundle to the server. Structural schema push works without an admin secret in development, so a bare `schema.ts` edit is enough to see clients pick up the new shape. Permission pushes use the resolved server admin secret (from `server.adminSecret`, root `adminSecret`, or a generated embedded-server secret).
+On startup and on every change to `schema.ts` or `permissions.ts`, the plugin deploys the current schema and permissions using the resolved admin secret (from `server.adminSecret`, root `adminSecret`, or a generated embedded-server secret). Both files are required. If a schema change requires a migration, prepare the migration before deploying; the plugin reports missing deployment inputs instead of publishing just the schema.
 
 <Callout type="warn">
   Auto-push covers the development loop. For production — or any change that needs a schema migration — run `pnpm dlx jazz-tools@alpha deploy <appId>` to publish the migration, the new schema, and the current permissions in one step. See [Migrations](/docs/schemas/migrations).

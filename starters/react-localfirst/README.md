@@ -68,6 +68,11 @@ starts a local Jazz dev server and writes `VITE_JAZZ_APP_ID` and
 second run (and every run after), Vite picks them up from `.env`
 automatically.
 
+During `pnpm dev`, `JazzSessionProvider` automatically attaches the Jazz inspector.
+Click the Jazz toggle in the bottom-right corner (or press `Alt+Shift+J`),
+then select `todos` in Data Explorer to inspect the app's local rows. The
+inspector is development-only and does not appear in production builds.
+
 If you prefer to wire things up front, create `.env` before running
 `pnpm dev`:
 

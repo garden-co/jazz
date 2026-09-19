@@ -1,3 +1,7 @@
+import {
+  mergePermissionsIntoWasmSchema,
+  type CompiledPermissionsMap,
+} from "../schema-permissions.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,7 +14,7 @@ export { deploy, type DeployOptions } from "./catalogue.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 
-export interface StartLocalJazzServerOptions {
+interface LocalJazzServerOptions {
   appId?: string;
   port?: number;
   dataDir?: string;
@@ -24,13 +28,13 @@ export interface StartLocalJazzServerOptions {
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
   enableLogs?: boolean;
-  /**
-   * Schema used to initialize the server's core runtime. Byte input remains
-   * available for native callers; TypeScript callers can pass an app, query,
-   * or raw WasmSchema directly.
-   */
-  schema?: Uint8Array | SchemaSourceInput;
 }
+
+export type StartLocalJazzServerOptions = LocalJazzServerOptions &
+  (
+    | { schema: SchemaSourceInput; permissions: CompiledPermissionsMap }
+    | { schema?: undefined; permissions?: undefined }
+  );
 
 export interface LocalJazzServerHandle {
   appId: string;
@@ -49,6 +53,8 @@ async function createOwnedDataDir(): Promise<string> {
 /**
  * Start a local Jazz sync server.
  *
+ * To initialize an app, pass its schema and permissions. Omit both to deploy later.
+ *
  * When no port is provided, an available localhost port is chosen automatically.
  * When no data directory is provided, the server owns a temporary directory and
  * removes it when {@link LocalJazzServerHandle.stop} is called. Pass
@@ -62,6 +68,17 @@ async function createOwnedDataDir(): Promise<string> {
 export async function startLocalJazzServer(
   options: StartLocalJazzServerOptions = {},
 ): Promise<LocalJazzServerHandle> {
+  if (options.schema !== undefined && options.permissions == null) {
+    throw new Error(
+      "startLocalJazzServer requires permissions when schema is provided. Pass {} to deny all access.",
+    );
+  }
+  const schema =
+    options.schema === undefined
+      ? undefined
+      : encodeSchema(
+          mergePermissionsIntoWasmSchema(resolveSchemaSource(options.schema), options.permissions),
+        );
   const appId = options.appId ?? DEFAULT_APP_ID;
   // Ask the server to bind port 0 when callers do not require a particular
   // address. Unlike probing a candidate port first, this is atomic and remains
@@ -87,13 +104,7 @@ export async function startLocalJazzServer(
       upstreamUrl: options.upstreamUrl,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
-      schema: options.schema
-        ? [
-            ...(options.schema instanceof Uint8Array
-              ? options.schema
-              : encodeSchema(resolveSchemaSource(options.schema))),
-          ]
-        : undefined,
+      schema: schema ? [...schema] : undefined,
     });
   } catch (error) {
     if (ownsDataDir && dataDir) {

@@ -133,7 +133,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
             return Ok(false);
         }
         let table =
-            self.local_availability_table_id(self.catalogue.current_schema_version_id, table)?;
+            self.local_availability_table_id(self.catalogue.local_schema_version_id, table)?;
         self.update_local_unavailable_rows(scope, &[(table, row, unavailable)])
             .await
     }

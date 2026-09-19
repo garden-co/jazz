@@ -40,7 +40,8 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     // source occurrence is therefore the peer-wire equivalent of these
     // single-table result assertions.
     let mut result_member_adds = program_fact_adds
-        .added_rows().iter()
+        .added_rows()
+        .iter()
         .filter_map(|fact| match fact {
             input if input.version.layer == crate::protocol::ResultRowLayer::Content => {
                 Some((input.version_table.clone(), input.row, input.version.tx))
@@ -60,7 +61,9 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     expected_adds.sort();
     expected_removes.sort();
     assert_eq!(result_member_adds, expected_adds);
-    for removed in expected_removes { assert!(!result_member_adds.contains(&removed)); }
+    for removed in expected_removes {
+        assert!(!result_member_adds.contains(&removed));
+    }
 }
 
 fn recursive_reachable_schema() -> JazzSchema {
@@ -77,7 +80,8 @@ fn recursive_reachable_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("teamAccess")
                     .fk_column("doc", "docs")
                     .fk_column("team", "teams"),
-            ),
+            )
+            .allow_all(),
     )
 }
 

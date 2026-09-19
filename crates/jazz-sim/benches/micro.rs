@@ -10,6 +10,7 @@ use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::time::TxTime;
 use jazz::tools::OpenTransactionId;
+use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction};
 use jazz_sim::fixture::{
@@ -515,7 +516,8 @@ fn schema() -> JazzSchema {
                     .column("title", ColumnType::Text)
                     .column("owner", ColumnType::Uuid),
             )
-            .build(),
+            .build()
+            .allow_all(),
     )
 }
 

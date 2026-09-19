@@ -35,12 +35,9 @@ fn current_winner_projects_rename_copy_chains_across_durability_tiers() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
     })
     .unwrap();
     let new_row = row(0x5d);
@@ -146,12 +143,9 @@ fn assert_current_winner_copied_enum_remap(
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: copied.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: copied.id,
     })
     .unwrap();
     let shape = Query::from("items").validate(&copied.schema).unwrap();
@@ -197,12 +191,9 @@ fn assert_current_winner_copied_enum_remap(
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 2,
-            schema: latest.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 2,
+        schema: latest.id,
     })
     .unwrap();
     accept_global(

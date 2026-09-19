@@ -423,6 +423,7 @@ pub(super) enum CatalogueRecordKind {
     SchemaLineageActive,
     WritePointerPending,
     BootstrapReady,
+    ActiveSchema,
 }
 
 impl CatalogueRecordKind {
@@ -436,6 +437,7 @@ impl CatalogueRecordKind {
             Self::SchemaLineageActive => 5,
             Self::WritePointerPending => 6,
             Self::BootstrapReady => 7,
+            Self::ActiveSchema => 8,
         }
     }
 
@@ -449,6 +451,7 @@ impl CatalogueRecordKind {
             5 => Ok(Self::SchemaLineageActive),
             6 => Ok(Self::WritePointerPending),
             7 => Ok(Self::BootstrapReady),
+            8 => Ok(Self::ActiveSchema),
             _ => Err(records::Error::NonCanonicalRecord),
         }
     }
@@ -1047,6 +1050,7 @@ pub(super) fn decode_catalogue_bootstrap_ready(
     })
 }
 
+#[cfg(test)]
 pub(super) fn encode_catalogue_write_pointer(pointer: CurrentWriteSchema) -> Vec<u8> {
     let mut payload = Vec::with_capacity(1 + 8 + 16);
     payload.push(CATALOGUE_WRITE_POINTER_VERSION);
@@ -4363,6 +4367,7 @@ pub(super) fn sort_current_rows(rows: &mut [CurrentRow]) {
 /// Build a current row from cells that are already app-facing values.
 ///
 /// Build a row from ordinary app-facing cells.
+#[cfg(test)]
 pub(super) fn current_row_from_cells(
     table: &TableSchema,
     row_uuid: RowUuid,
@@ -4965,5 +4970,72 @@ mod authority_storage_codec_tests {
         ] {
             assert_eq!(physical_version_table_id(name, false), None, "{name}");
         }
+    }
+}
+
+// Active-schema record v1: version byte, revision u64 LE,
+// CATS v1 payload length u32 LE,
+// then the existing canonical public-schema envelope. This stores the selected
+// permissions separately from structural catalogue entries; no serde layout
+// is part of this envelope's durable contract.
+pub(super) fn encode_active_schema(active: &ActiveSchema) -> Result<Vec<u8>, Error> {
+    let schema = encode_catalogue_schema(&SchemaVersion::new(active.compiled.clone()))?;
+    let length = u32::try_from(schema.len())
+        .map_err(|_| Error::InvalidStoredValue("active schema too large"))?;
+    let mut bytes = vec![1];
+    bytes.extend_from_slice(&active.revision.to_le_bytes());
+    bytes.extend_from_slice(&length.to_le_bytes());
+    bytes.extend_from_slice(&schema);
+    Ok(bytes)
+}
+
+pub(super) fn decode_active_schema(bytes: &[u8]) -> Result<ActiveSchema, Error> {
+    let mut cursor = CataloguePayloadCursor::new(bytes, 1, "invalid active schema payload")?;
+    let revision = cursor.u64()?;
+    let length = cursor.u32()? as usize;
+    let schema = decode_catalogue_schema(cursor.bytes(length)?)?;
+    cursor.finish()?;
+    let active = ActiveSchema::new(
+        CurrentWriteSchema {
+            revision,
+            schema: schema.id,
+        },
+        schema.schema,
+    )?;
+    Ok(active)
+}
+
+#[cfg(test)]
+mod active_schema_tests {
+    use super::*;
+
+    // Internal because the canonical durable envelope is not a public API.
+    #[test]
+    fn active_schema_v1_bytes_are_pinned_and_reject_malformed_payloads() {
+        let schema = JazzSchema::empty();
+        let active = ActiveSchema::new(
+            CurrentWriteSchema {
+                revision: 7,
+                schema: schema.version_id(),
+            },
+            schema,
+        )
+        .unwrap();
+        let golden = vec![
+            1, 7, 0, 0, 0, 0, 0, 0, 0, 34, 0, 0, 0, 1, 23, 227, 35, 59, 23, 250, 83, 135, 186, 173,
+            138, 61, 188, 160, 144, 152, 13, 0, 0, 0, 123, 34, 116, 97, 98, 108, 101, 115, 34, 58,
+            123, 125, 125,
+        ];
+        assert_eq!(encode_active_schema(&active).unwrap(), golden);
+        assert_eq!(decode_active_schema(&golden).unwrap(), active);
+        for length in 0..golden.len() {
+            assert!(decode_active_schema(&golden[..length]).is_err());
+        }
+        let mut trailing = golden.clone();
+        trailing.push(0);
+        assert!(decode_active_schema(&trailing).is_err());
+        let mut unsupported = golden.clone();
+        unsupported[0] = 2;
+        assert!(decode_active_schema(&unsupported).is_err());
     }
 }

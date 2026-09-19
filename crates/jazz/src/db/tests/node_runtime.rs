@@ -2087,37 +2087,9 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     let alice_reader = open_db(0xa2, alice, &permission_schema);
     let reader = open_db(0xb2, bob, &permission_schema);
 
-    let schema_version = SchemaVersion::new(permission_schema.clone());
-    let schema_id = schema_version.id;
-    let acks = server.publish_schema(schema_version).unwrap();
-    assert!(acks.into_iter().any(|message| matches!(
-        message,
-        SyncMessage::CatalogueAck(CatalogueAck {
-            applied: true,
-            schema: Some(applied_schema),
-            ..
-        }) if applied_schema == schema_id
-    )));
-    let current_acks = server
-        .server
-        .node()
-        .borrow_mut()
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: schema_id,
-            },
-        })
+    server
+        .activate_schema_for_test(1, permission_schema.clone())
         .unwrap();
-    assert!(current_acks.into_iter().any(|message| matches!(
-        message,
-        SyncMessage::CatalogueAck(CatalogueAck {
-            applied: true,
-            schema: Some(applied_schema),
-            ..
-        }) if applied_schema == schema_id
-    )));
 
     let (writer_transport, server_writer_transport) = duplex();
     let _writer_upstream = crate::db::block_on(writer.connect_upstream(writer_transport));

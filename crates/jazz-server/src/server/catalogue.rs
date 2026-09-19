@@ -39,7 +39,7 @@ impl ConnectionSchemaDiagnostics {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PermissionsHeadSummary {
+pub(crate) struct ActiveSchemaSummary {
     pub schema_hash: SchemaHash,
     pub version: u64,
     pub parent_bundle_object_id: Option<ObjectId>,
@@ -47,8 +47,8 @@ pub(crate) struct PermissionsHeadSummary {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct CurrentPermissionsSummary {
-    pub head: PermissionsHeadSummary,
+pub(crate) struct ActiveSchema {
+    pub summary: ActiveSchemaSummary,
     pub permissions: HashMap<TableName, TablePolicies>,
 }
 
@@ -110,8 +110,8 @@ pub(crate) trait CatalogueStore {
         to_hash: SchemaHash,
     ) -> Result<bool, CatalogueError>;
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError>;
-    fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, CatalogueError>;
-    fn current_permissions(&self) -> Result<Option<CurrentPermissionsSummary>, CatalogueError>;
+    fn active_schema_summary(&self) -> Result<Option<ActiveSchemaSummary>, CatalogueError>;
+    fn active_schema(&self) -> Result<Option<ActiveSchema>, CatalogueError>;
     fn publish_permissions_bundle(
         &self,
         schema_hash: SchemaHash,
@@ -275,8 +275,8 @@ struct CatalogueIndex {
     schema_published_at: HashMap<SchemaHash, u64>,
     lens_edges: HashSet<(SchemaHash, SchemaHash)>,
     lenses: HashMap<(SchemaHash, SchemaHash), Lens>,
-    permissions_head: Option<PermissionsHeadSummary>,
-    permissions_bundles: HashMap<ObjectId, CurrentPermissionsSummary>,
+    active_schema: Option<ActiveSchemaSummary>,
+    permissions_bundles: HashMap<ObjectId, ActiveSchema>,
 }
 
 impl CatalogueIndex {
@@ -331,8 +331,8 @@ impl CatalogueIndex {
         false
     }
 
-    fn current_permissions(&self) -> Option<CurrentPermissionsSummary> {
-        let head = self.permissions_head?;
+    fn active_schema(&self) -> Option<ActiveSchema> {
+        let head = self.active_schema?;
         self.permissions_bundles
             .get(&head.bundle_object_id)
             .cloned()
@@ -359,7 +359,7 @@ impl CatalogueIndex {
         client_schema_hash: SchemaHash,
     ) -> ConnectionSchemaDiagnostics {
         let active_permissions_hash = self
-            .permissions_head
+            .active_schema
             .map(|head| head.schema_hash)
             .or_else(|| self.known_schema_hashes().into_iter().next());
         let reachable_hashes = self.non_draft_reachable_hashes(client_schema_hash);
@@ -491,7 +491,7 @@ impl CatalogueIndex {
                             format!("decode permissions bundle payload: {error}"),
                         )
                     })?;
-                let head = PermissionsHeadSummary {
+                let head = ActiveSchemaSummary {
                     schema_hash,
                     version,
                     parent_bundle_object_id,
@@ -499,7 +499,10 @@ impl CatalogueIndex {
                 };
                 self.permissions_bundles.insert(
                     entry.object_id,
-                    CurrentPermissionsSummary { head, permissions },
+                    ActiveSchema {
+                        summary: head,
+                        permissions,
+                    },
                 );
             }
             Some(kind) if kind == ObjectType::CataloguePermissionsHead.as_str() => {
@@ -510,17 +513,17 @@ impl CatalogueIndex {
                             format!("decode permissions head payload: {error}"),
                         )
                     })?;
-                let head = PermissionsHeadSummary {
+                let head = ActiveSchemaSummary {
                     schema_hash,
                     version,
                     parent_bundle_object_id,
                     bundle_object_id,
                 };
                 if self
-                    .permissions_head
+                    .active_schema
                     .is_none_or(|current| current.version <= head.version)
                 {
-                    self.permissions_head = Some(head);
+                    self.active_schema = Some(head);
                 }
             }
             // A newer producer may persist catalogue kinds this server does
@@ -648,14 +651,14 @@ impl CatalogueStore for StoredCatalogue {
         Ok(object_id)
     }
 
-    fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, CatalogueError> {
+    fn active_schema_summary(&self) -> Result<Option<ActiveSchemaSummary>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        Ok(index.permissions_head)
+        Ok(index.active_schema)
     }
 
-    fn current_permissions(&self) -> Result<Option<CurrentPermissionsSummary>, CatalogueError> {
+    fn active_schema(&self) -> Result<Option<ActiveSchema>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        Ok(index.current_permissions())
+        Ok(index.active_schema())
     }
 
     fn publish_permissions_bundle(
@@ -673,8 +676,7 @@ impl CatalogueStore for StoredCatalogue {
         // transaction or a cross-process compare-and-swap.
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        let current_parent_bundle_object_id =
-            index.permissions_head.map(|head| head.bundle_object_id);
+        let current_parent_bundle_object_id = index.active_schema.map(|head| head.bundle_object_id);
         if current_parent_bundle_object_id != expected_parent_bundle_object_id {
             return Err(CatalogueError::WriteError(format!(
                 "stale permissions parent: expected {:?}, current {:?}",
@@ -682,15 +684,15 @@ impl CatalogueStore for StoredCatalogue {
             )));
         }
 
-        if let Some(current) = index.current_permissions()
-            && current.head.schema_hash == schema_hash
+        if let Some(current) = index.active_schema()
+            && current.summary.schema_hash == schema_hash
             && current.permissions == permissions
         {
             return Ok(Some(permissions_head_object_id(self.app_id)));
         }
 
         let version = index
-            .permissions_head
+            .active_schema
             .map(|head| head.version + 1)
             .unwrap_or(1);
         let bundle_object_id = permissions_bundle_object_id(
@@ -700,7 +702,7 @@ impl CatalogueStore for StoredCatalogue {
             current_parent_bundle_object_id,
             &permissions,
         );
-        let head = PermissionsHeadSummary {
+        let head = ActiveSchemaSummary {
             schema_hash,
             version,
             parent_bundle_object_id: current_parent_bundle_object_id,
@@ -730,7 +732,7 @@ impl CatalogueStore for StoredCatalogue {
         storage.upsert_catalogue_entry(&bundle_entry)?;
         storage.upsert_catalogue_entry(&head_entry)?;
         index.apply_entry(&bundle_entry)?;
-        index.permissions_head = Some(head);
+        index.active_schema = Some(head);
         Ok(Some(head_entry.object_id))
     }
 
@@ -812,18 +814,18 @@ impl ServerCatalogue {
         store.publish_schema(schema)
     }
 
-    pub(crate) fn current_permissions_head(
+    pub(crate) fn active_schema_summary(
         &self,
         store: &impl CatalogueStore,
-    ) -> Result<Option<PermissionsHeadSummary>, CatalogueError> {
-        store.current_permissions_head()
+    ) -> Result<Option<ActiveSchemaSummary>, CatalogueError> {
+        store.active_schema_summary()
     }
 
-    pub(crate) fn current_permissions(
+    pub(crate) fn active_schema(
         &self,
         store: &impl CatalogueStore,
-    ) -> Result<Option<CurrentPermissionsSummary>, CatalogueError> {
-        store.current_permissions()
+    ) -> Result<Option<ActiveSchema>, CatalogueError> {
+        store.active_schema()
     }
 
     pub(crate) fn publish_permissions_bundle(
@@ -959,18 +961,8 @@ mod tests {
                 store.publish_permissions_bundle(schema_hash, permissions, None),
                 Err(super::CatalogueError::WriteError(_))
             ));
-            assert!(
-                store
-                    .current_permissions_head()
-                    .expect("read head")
-                    .is_none()
-            );
-            assert!(
-                store
-                    .current_permissions()
-                    .expect("read permissions")
-                    .is_none()
-            );
+            assert!(store.active_schema_summary().expect("read head").is_none());
+            assert!(store.active_schema().expect("read permissions").is_none());
         }
     }
 }

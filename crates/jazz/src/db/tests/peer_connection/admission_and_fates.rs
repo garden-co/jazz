@@ -580,14 +580,17 @@ fn strict_upstream_install_waits_for_existing_peer_and_cancels_without_admission
 
 #[test]
 fn restarted_edge_forwards_complete_publication_without_original_clients() {
+    use crate::tools::test_support::AllowAll;
     // Internal topology test: inspect exact merge authorship and the durable
     // outbox while exercising the real peer-connection scheduler/storage.
     let schema = build_public_db_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("title", PublicColumnType::Text)
-                .column("body", PublicColumnType::Text),
-        ),
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text),
+            )
+            .allow_all(),
     );
     let edge_id = NodeUuid::from_bytes([0xe6; 16]);
     let core_id = NodeUuid::from_bytes([0xc6; 16]);
@@ -4113,6 +4116,13 @@ fn edge_fate_route_identity_is_shared_across_client_connections() {
     ))
     .expect("first client-link upload is admitted");
     assert!(first_outcome.value.is_empty());
+    // Explicit INSERT grants hydrate a support scope on the first turn.
+    let admitted = first
+        .drain_deferred_edge_fates(&mut node.borrow_mut(), 2)
+        .unwrap();
+    for fate in admitted.value {
+        route_edge_admission_fate(&edge.server.edge_fate_routes, tx_id, &fate);
+    }
     assert!(matches!(
         first_fates.borrow().as_slice(),
         [SyncMessage::FateUpdate {
@@ -4166,6 +4176,12 @@ fn edge_fate_route_identity_is_shared_across_client_connections() {
     ))
     .expect("an exact reconnect retransmit reuses the route obligation");
     assert!(retry_outcome.value.is_empty());
+    let admitted = reconnect
+        .drain_deferred_edge_fates(&mut node.borrow_mut(), 3)
+        .unwrap();
+    for fate in admitted.value {
+        route_edge_admission_fate(&edge.server.edge_fate_routes, tx_id, &fate);
+    }
     assert_eq!(
         edge.server.edge_fate_routes.borrow()[&tx_id].routes.len(),
         2,
@@ -5485,8 +5501,15 @@ fn featureless_upstream_cannot_release_routed_edge_outbox() {
 }
 
 #[test]
-fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
-    let schema = schema();
+fn missing_read_policy_advice_denies_with_an_explicit_zero_clause_receipt() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid),
+        ),
+    );
     let identity = AuthorSubject::for_test_bytes([0xa3; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let target = server
@@ -5512,7 +5535,7 @@ fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert_eq!(block_on(advice), PermissionAdvice::Allowed);
+    assert_eq!(block_on(advice), PermissionAdvice::Denied);
 }
 
 #[test]

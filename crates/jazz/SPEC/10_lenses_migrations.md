@@ -193,9 +193,9 @@ permissions relation payload, rejects reopen rather than selecting a fallback
 or recovering a partial catalogue.
 
 Schema evolution is coordinated through the catalogue, which serializes
-publication and write-pointer changes under administrative authority. Catalogue
+publication and active schema changes under administrative authority. Catalogue
 mutations travel as admin-gated
-`SyncMessage::{PublishSchemaWithLens, PublishLens, SetCurrentWriteSchema}`
+`SyncMessage::{PublishSchemaWithLens, PublishLens}`
 messages with `CatalogueAck` replies; a non-admin author is rejected
 (`INV-LENS-3`). `AuthorSubject::SYSTEM` is the catalogue admin.
 
@@ -590,7 +590,9 @@ selection is deterministic over the schema-version graph. The chosen path is the
 shortest path by lens count. Ties are broken by a stable ordering of candidate
 endpoints and lens content ids; publication or storage iteration order must not
 affect the chosen path. Schema updates are rare, so this is specified as a
-clarity-first graph walk rather than a hot-path optimization.
+clarity-first graph walk rather than a hot-path optimization. Each step can traverse its
+lens forward or backward: B-to-C translation through `A → B` and `A → C` applies
+the reverse A-to-B transformation followed by the forward A-to-C transformation.
 
 RLS policy evaluation under lenses uses the permission-evaluation schema pinned
 by the node/admin policy bundle. Row data is translated into that schema before
@@ -672,6 +674,34 @@ dry-runs and before sealing. Literal defaults are in scope; dynamic defaults suc
 as `now()` require a deterministic authority/origin rule before they can be
 accepted. Merge-strategy-only changes still change schema identity because they
 change future merge behavior.
+
+### Active schema and local schema
+
+The authority's **active schema** selects one structural schema and one explicit
+permission bundle at a single monotone revision. Policy-only updates advance
+that revision without changing structural schema identity or creating migration
+lenses. Admitting structural schemas or lenses does not activate them. Activation
+requires an admitted migration path, traversing each lens in either direction.
+For example, `A → B` and `A → C` permit switching from B to C through A.
+An explicit empty permission bundle is a valid deny-all selection. The node's local API schema remains independent, so
+older clients retain their schema view across authority activations.
+
+The server catalogue retains the existing permissions-bundle/head encodings and
+HTTP endpoints as compatibility boundaries. Internally they describe the active
+schema. Runtime activation persists its selection and authorization source in
+one batch before installing the new authorization view. Structural catalogue
+entries do not need to be rewritten with permissions on policy updates.
+
+Opening a legacy store without an active-schema record recovers its selected
+schema and grants from the old write pointer and schema payload, then persists
+an active-schema record at revision zero. The old independent write counter is
+not an authority revision. Server startup installs the durable administrative
+selection before serving traffic. Reopening the upgraded store preserves its
+active revision; snapshots have no legacy revision exception. Standalone schema
+publications cannot replace grants, and standalone write pointers cannot change
+the active selection. Interoperation with old running nodes is not supported.
+The existing snapshot wire layout is retained: the active authorization source
+is projected into its schema payload at serialization and extracted on receipt.
 
 ## Open Questions
 
