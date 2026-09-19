@@ -11,7 +11,7 @@ ruzstd = ["dep:ruzstd"]
 
 [dependencies]
 lz4_flex = { version = "0.11.5", default-features = false, features = ["frame"], optional = true }
-ruzstd = { version = "0.8.2", default-features = false, optional = true }
+ruzstd = { package = "jazz-ruzstd", path = "vendor/ruzstd", version = "0.8.3", default-features = false, optional = true }
 zstd = { version = "0.13.3", optional = true }
 
 [dev-dependencies]

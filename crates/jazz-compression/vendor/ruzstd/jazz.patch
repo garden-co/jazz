@@ -1,0 +1,240 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -12,7 +12,7 @@
+ [package]
+ edition = "2018"
+ rust-version = "1.87"
+-name = "ruzstd"
++name = "jazz-ruzstd"
+ version = "0.8.3"
+ authors = ["Moritz Borcherding <moritz.borcherding@web.de>"]
+ build = false
+@@ -37,7 +37,6 @@
+ categories = ["compression"]
+ license = "MIT"
+ repository = "https://github.com/KillingSpark/zstd-rs"
+-resolver = "3"
+ 
+ [features]
+ default = [
+@@ -58,13 +57,10 @@
+ std = []
+ 
+ [lib]
++test = false
++doctest = false
+ name = "ruzstd"
+ path = "src/lib.rs"
+-
+-[[bench]]
+-name = "decode_all"
+-path = "benches/decode_all.rs"
+-harness = false
+ 
+ [dependencies.alloc]
+ version = "1.0.0"
+@@ -90,12 +86,3 @@
+ optional = true
+ default-features = false
+ 
+-[dev-dependencies.criterion]
+-version = "0.5"
+-
+-[dev-dependencies.rand]
+-version = "0.8.5"
+-features = ["small_rng"]
+-
+-[dev-dependencies.zstd]
+-version = "0.13.2"
+--- a/src/decoding/block_decoder.rs
++++ b/src/decoding/block_decoder.rs
+@@ -50,6 +50,8 @@
+             }
+         }
+ 
++        check_output_limit(header.decompressed_size as usize, workspace.max_block_output)?;
++        check_output_limit(header.content_size as usize, workspace.max_block_output)?;
+         let block_type = header.block_type;
+         match block_type {
+             BlockType::RLE => {
+@@ -109,6 +111,7 @@
+ 
+         let mut section = LiteralsSection::new();
+         let bytes_in_literals_header = section.parse_from_header(raw)?;
++        check_output_limit(section.regenerated_size as usize, workspace.max_block_output)?;
+         let raw = &raw[bytes_in_literals_header as usize..];
+         vprintln!(
+             "Found {} literalssection with regenerated size: {}, and compressed size: {:?}",
+@@ -172,6 +175,9 @@
+         );
+         vprintln!("Slice for sequences: {}", raw.len());
+ 
++        // Every sequence produces at least three match bytes. Reject an
++        // impossible count before decode_sequences reserves its table.
++        check_output_limit(seq_section.num_sequences as usize, workspace.max_block_output / 3)?;
+         if seq_section.num_sequences != 0 {
+             decode_sequences(
+                 &seq_section,
+@@ -180,6 +186,16 @@
+                 &mut workspace.sequences,
+             )?;
+             vprintln!("Executing sequences");
++            // Literals plus matches are the entire regenerated block. Check
++            // before sequence execution can reserve or copy any match output.
++            let mut output_size = workspace.literals_buffer.len();
++            for sequence in &workspace.sequences {
++                output_size = output_size.checked_add(sequence.ml as usize)
++                    .ok_or(DecompressBlockError::OutputTooLarge {
++                        requested: usize::MAX, limit: workspace.max_block_output,
++                    })?;
++                check_output_limit(output_size, workspace.max_block_output)?;
++            }
+             execute_sequences(workspace)?;
+         } else {
+             if !raw.is_empty() {
+@@ -282,3 +298,9 @@
+             | (u32::from(self.header_buffer[2]) << 13)
+     }
+ }
++
++fn check_output_limit(requested: usize, limit: usize) -> Result<(), DecompressBlockError> {
++    if requested > limit {
++        Err(DecompressBlockError::OutputTooLarge { requested, limit })
++    } else { Ok(()) }
++}
+--- a/src/decoding/decode_buffer.rs
++++ b/src/decoding/decode_buffer.rs
+@@ -12,6 +12,7 @@
+ 
+     pub window_size: usize,
+     total_output_counter: u64,
++    streaming_read_position: usize,
+     #[cfg(feature = "hash")]
+     pub hash: twox_hash::XxHash64,
+ }
+@@ -38,6 +39,7 @@
+             dict_content: Vec::new(),
+             window_size,
+             total_output_counter: 0,
++            streaming_read_position: 0,
+             #[cfg(feature = "hash")]
+             hash: twox_hash::XxHash64::with_seed(0),
+         }
+@@ -49,6 +51,7 @@
+         self.buffer.reserve(self.window_size);
+         self.dict_content.clear();
+         self.total_output_counter = 0;
++        self.streaming_read_position = 0;
+         #[cfg(feature = "hash")]
+         {
+             self.hash = twox_hash::XxHash64::with_seed(0);
+@@ -236,6 +239,32 @@
+     pub fn drain_to_writer(&mut self, mut sink: impl Write) -> Result<usize, Error> {
+         let write_limit = self.buffer.len();
+         self.drain_to(write_limit, |buf| write_all_bytes(&mut sink, buf))
++    }
++
++    /// Copy each byte once, retaining already-delivered dictionary history.
++    /// Must not be mixed with the original draining API on the same frame.
++    pub fn read_streaming(&mut self, target: &mut [u8], finished: bool) -> usize {
++        let amount = target.len().min(self.buffer.len() - self.streaming_read_position);
++        let (first, second) = self.buffer.as_slices();
++        let start = self.streaming_read_position;
++        let first_count = amount.min(first.len().saturating_sub(start));
++        if first_count != 0 {
++            target[..first_count].copy_from_slice(&first[start..start + first_count]);
++        }
++        if amount > first_count {
++            let second_start = start.saturating_sub(first.len());
++            target[first_count..amount].copy_from_slice(&second[second_start..second_start + amount - first_count]);
++        }
++        self.streaming_read_position += amount;
++        let retain = if finished { 0 } else { self.window_size };
++        let discard = self.streaming_read_position.min(self.buffer.len().saturating_sub(retain));
++        if discard != 0 { self.buffer.drop_first_n(discard); }
++        self.streaming_read_position -= discard;
++        amount
++    }
++
++    pub fn streaming_available(&self) -> usize {
++        self.buffer.len() - self.streaming_read_position
+     }
+ 
+     pub fn read_all(&mut self, target: &mut [u8]) -> Result<usize, Error> {
+--- a/src/decoding/errors.rs
++++ b/src/decoding/errors.rs
+@@ -254,6 +254,7 @@
+ #[derive(Debug)]
+ #[non_exhaustive]
+ pub enum DecompressBlockError {
++    OutputTooLarge { requested: usize, limit: usize },
+     BlockContentReadError(Error),
+     MalformedSectionHeader {
+         expected_len: usize,
+@@ -284,6 +285,9 @@
+ impl core::fmt::Display for DecompressBlockError {
+     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         match self {
++            DecompressBlockError::OutputTooLarge { requested, limit } => {
++                write!(f, "Block output {requested} exceeds configured limit {limit}")
++            }
+             DecompressBlockError::BlockContentReadError(e) => {
+                 write!(f, "Error while reading the block content: {e}")
+             }
+--- a/src/decoding/frame_decoder.rs
++++ b/src/decoding/frame_decoder.rs
+@@ -204,6 +204,28 @@
+         state.using_dict = Some(dict_id);
+ 
+         Ok(())
++    }
++
++    /// Bound block payload, literal, sequence-table, and regenerated-output
++    /// allocations. Call after init and before decoding any block.
++    pub fn set_max_block_output(&mut self, limit: usize) -> Result<(), FrameDecoderError> {
++        let state = self.state.as_mut().ok_or(FrameDecoderError::NotYetInitialized)?;
++        state.decoder_scratch.max_block_output = limit;
++        Ok(())
++    }
++
++    /// Read newly decoded bytes immediately while retaining dictionary history.
++    /// Do not mix this API with read/collect/decode_from_to on the same frame.
++    /// This API does not calculate content checksums; use checksum-free frames.
++    pub fn read_streaming(&mut self, output: &mut [u8]) -> usize {
++        match self.state.as_mut() {
++            Some(state) => state.decoder_scratch.buffer.read_streaming(output, state.frame_finished),
++            None => 0,
++        }
++    }
++
++    pub fn streaming_available(&self) -> usize {
++        self.state.as_ref().map_or(0, |state| state.decoder_scratch.buffer.streaming_available())
+     }
+ 
+     /// Returns how many bytes the frame contains after decompression
+--- a/src/decoding/scratch.rs
++++ b/src/decoding/scratch.rs
+@@ -13,6 +13,7 @@
+ 
+ /// A block level decoding buffer.
+ pub struct DecoderScratch {
++    pub max_block_output: usize,
+     /// The decoder used for Huffman blocks.
+     pub huf: HuffmanScratch,
+     /// The decoder used for FSE blocks.
+@@ -29,6 +30,7 @@
+ impl DecoderScratch {
+     pub fn new(window_size: usize) -> DecoderScratch {
+         DecoderScratch {
++            max_block_output: usize::MAX,
+             huf: HuffmanScratch {
+                 table: HuffmanTable::new(),
+             },
+@@ -50,6 +52,7 @@
+     }
+ 
+     pub fn reset(&mut self, window_size: usize) {
++        self.max_block_output = usize::MAX;
+         self.offset_hist = [1, 4, 8];
+         self.literals_buffer.clear();
+         self.sequences.clear();
