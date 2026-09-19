@@ -72,3 +72,15 @@ fn match_output_limit_is_checked_before_sequence_execution() {
         "reject before adding any regenerated output"
     );
 }
+
+#[test]
+fn zero_offset_is_rejected_without_repetition_loop() {
+    // Zero literals, one sequence, all three symbol tables RLE. ll=0,
+    // of-code=1 plus extra bit 1 yields repeat offset 3, ml=3. With the
+    // initial offset history [1,4,8], repeat-offset-3 means 1-1 = 0.
+    let invalid = block(2, &[0, 1, 0x54, 0, 1, 0, 3], 7);
+    let error = decoder(64)
+        .decode_blocks(invalid.as_slice(), BlockDecodingStrategy::UptoBlocks(1))
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("ZeroOffset"), "{error:?}");
+}
