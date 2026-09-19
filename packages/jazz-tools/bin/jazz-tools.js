@@ -128,6 +128,9 @@ function printWrapperHelp() {
   console.log("Usage: jazz-tools <COMMAND> [options]");
   console.log("");
   console.log("Commands:");
+  console.log(
+    "  inspect               Open a scoped Inspector session (root secret from environment)",
+  );
   console.log("  validate              Validate root schema.ts and permissions.ts");
   console.log(
     "  schema export         Print structural schema JSON from schema.ts or a schema hash",
@@ -156,6 +159,7 @@ if (!command || command === "--help" || command === "-h") {
 } else if (command === "build") {
   fail("`jazz-tools build` has been renamed to `jazz-tools validate`.");
 } else if (
+  command === "inspect" ||
   command === "validate" ||
   command === "deploy" ||
   command === "migrations" ||
