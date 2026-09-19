@@ -2162,8 +2162,8 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
         )
         .expect("optimistic local update: title change after lockout");
 
-    // Use the marker as a causal barrier so we know the server has settled
-    // before asking alice about her local view.
+    // The marker establishes server-side ordering, but the observer receiving
+    // it does not guarantee Alice has received her rollback on another socket.
     let marker_id = create_document(&alice, super::ALICE_ID, "marker").await;
     wait_for_rows(
         &observer,
@@ -2179,6 +2179,7 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
     // the server. Using EdgeServer durability here would bypass the bug: the
     // server holds the correct value regardless, so an EdgeServer read always
     // returns title="original" even when alice never received a rollback event.
+    let expected_row = document_row_values(super::BOB_ID, "original");
     let alice_rows = wait_for_query(
         &alice,
         query,
@@ -2187,15 +2188,14 @@ async fn originating_client_receives_rollback_for_rejected_mutation_inner() {
         "alice: local cache converged after rollback",
         |rows| {
             rows.iter()
-                .find(|(id, _)| *id == doc_id)
+                .find(|(id, values)| *id == doc_id && *values == expected_row)
                 .map(|(_, values)| values.clone())
         },
     )
     .await;
 
     assert_eq!(
-        alice_rows,
-        document_row_values(super::BOB_ID, "original"),
+        alice_rows, expected_row,
         "alice must see the rollback — the rejected title update should be \
          reverted so she knows the mutation failed"
     );

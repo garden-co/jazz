@@ -353,12 +353,9 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
     )
     .unwrap();
     authority
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: renamed.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
         })
         .unwrap();
     let base_key = schema.project_branch_view_selector(table, &base).unwrap().0;
@@ -2551,12 +2548,9 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_version.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_version.id,
     })
     .unwrap();
 
@@ -2638,12 +2632,9 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 2,
-            schema: renamed_version.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 2,
+        schema: renamed_version.id,
     })
     .unwrap();
     drop(core);
@@ -2948,7 +2939,7 @@ fn partial_parent_misses_do_not_materialize_retained_siblings() {
             tx, versions, Fate::Pending, None, DurabilityTier::Local,
         ).unwrap();
         let present = ParentCoordinate {
-            physical_table_id: reader.physical_table_id_for_schema(reader.catalogue.current_schema_version_id, "todos").unwrap(),
+            physical_table_id: reader.physical_table_id_for_schema(reader.catalogue.local_schema_version_id, "todos").unwrap(),
             branch_key: BranchKey::default(),
             row_uuid: RowUuid(uuid::Uuid::from_u128(1)),
             layer: VersionLayer::Content,

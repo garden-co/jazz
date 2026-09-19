@@ -195,13 +195,13 @@ where
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.current_write_schema.schema)
+            .table_in_schema(table, self.catalogue.active_schema.schema)
             .is_ok()
         {
-            self.catalogue.current_write_schema.schema
+            self.catalogue.active_schema.schema
         } else {
-            self.table_in_schema(table, self.catalogue.current_schema_version_id)?;
-            self.catalogue.current_schema_version_id
+            self.table_in_schema(table, self.catalogue.local_schema_version_id)?;
+            self.catalogue.local_schema_version_id
         };
         self.query_global_layer_winner_in_schema(schema_version, table, row_uuid, layer)
             .await
@@ -214,7 +214,7 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let current_table = self.physical_current_table_for_schema(
             schema_version,
             table,
@@ -428,12 +428,12 @@ where
             self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?
         {
             let schema_version = if self
-                .table_in_schema(table, self.catalogue.current_write_schema.schema)
+                .table_in_schema(table, self.catalogue.active_schema.schema)
                 .is_ok()
             {
-                self.catalogue.current_write_schema.schema
+                self.catalogue.active_schema.schema
             } else {
-                self.catalogue.current_schema_version_id
+                self.catalogue.local_schema_version_id
             };
             let requested_table_id = self.physical_table_id_for_schema(schema_version, table)?;
             let raws = self
@@ -723,12 +723,12 @@ where
         row_uuid: Option<RowUuid>,
     ) -> Result<Vec<Value>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.current_write_schema.schema)
+            .table_in_schema(table, self.catalogue.active_schema.schema)
             .is_ok()
         {
-            self.catalogue.current_write_schema.schema
+            self.catalogue.active_schema.schema
         } else {
-            self.catalogue.current_schema_version_id
+            self.catalogue.local_schema_version_id
         };
         self.deletion_storage_prefix_in_schema_and_branch(
             schema_version,
@@ -753,7 +753,7 @@ where
         )
     }
 
-    fn deletion_storage_prefix_in_schema_and_branch(
+    pub(super) fn deletion_storage_prefix_in_schema_and_branch(
         &self,
         schema_version: SchemaVersionId,
         table: &str,
@@ -833,15 +833,12 @@ where
                 stored_table.clone()
             } else {
                 let requested_schema = if self
-                    .table_in_schema_ref(
-                        requested_table,
-                        self.catalogue.current_write_schema.schema,
-                    )
+                    .table_in_schema_ref(requested_table, self.catalogue.active_schema.schema)
                     .is_ok()
                 {
-                    self.catalogue.current_write_schema.schema
+                    self.catalogue.active_schema.schema
                 } else {
-                    self.catalogue.current_schema_version_id
+                    self.catalogue.local_schema_version_id
                 };
                 (self.physical_table_id_for_schema(requested_schema, requested_table)? == table_id)
                     .then(|| requested_table.to_owned())
@@ -1300,12 +1297,12 @@ where
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
         let schema_version = if self
-            .table_in_schema(table, self.catalogue.current_write_schema.schema)
+            .table_in_schema(table, self.catalogue.active_schema.schema)
             .is_ok()
         {
-            self.catalogue.current_write_schema.schema
+            self.catalogue.active_schema.schema
         } else {
-            self.catalogue.current_schema_version_id
+            self.catalogue.local_schema_version_id
         };
         self.query_version_by_alias_with_storage_in_schema(
             schema_version,

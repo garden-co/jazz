@@ -107,6 +107,18 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 `,
       );
       await writeFile(
+        join(root, "permissions.ts"),
+        `
+import { schema as s } from ${JSON.stringify(schemaImportPath)};
+import { app } from "./schema.js";
+
+export default s.definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.always();
+  policy.todos.allowInsert.always();
+});
+`,
+      );
+      await writeFile(
         join(root, ".env.staging"),
         [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
       );

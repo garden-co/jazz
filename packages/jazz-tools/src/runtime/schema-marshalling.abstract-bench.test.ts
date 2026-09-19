@@ -27,7 +27,7 @@ describe.skipIf(!RUN_ABSTRACT_BENCH)("schema marshalling abstract bench (node)",
 
     const schema = createSyntheticRuntimeSchema();
     const [napiRuntime, wasmRuntime] = await Promise.all([
-      createNapiNativeRuntimeAdapter(schema, { appId: "schema-bench-node-napi" }),
+      createNapiNativeRuntimeAdapter(schema, {}, { appId: "schema-bench-node-napi" }),
       createWasmRuntime(schema, { appId: "schema-bench-node-wasm" }),
     ]);
 

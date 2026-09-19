@@ -17,7 +17,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
         table: &str,
         row: RowUuid,
     ) -> Result<CurrentRowCoordinate, Error> {
-        let schema = self.catalogue.current_schema_version_id;
+        let schema = self.catalogue.local_schema_version_id;
         let physical_table = self
             .catalogue
             .physical_mappings

@@ -71,11 +71,22 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
 
     ### Jazz server configuration
 
-    Point the Jazz server at your Better Auth JWKS endpoint:
+    Configure the reachable JWKS endpoint and the exact issuer and audience emitted by Better Auth:
 
     ```bash
-    pnpm dlx jazz-tools@alpha server <APP_ID> --jwks-url https://your-app.example.com/api/auth/jwks
+    pnpm dlx jazz-tools@alpha server <APP_ID> \
+      --jwks-url https://your-app.example.com/api/auth/jwks \
+      --jwt-issuer https://your-app.example.com \
+      --jwt-audience https://your-app.example.com
     ```
+
+    Better Auth starters use `APP_ORIGIN` for `baseURL`, JWT issuer/audience, and the Jazz server's
+    `jwksUrl`, `jwtIssuer`, and `jwtAudience`. Set it consistently in the environment shared by
+    the app and auth server. The React/Vite and TypeScript starters default to the auth server
+    origin (`http://localhost:3001`), not the frontend's port 5173. A JWKS URL alone is not enough:
+    missing or mismatched issuer/audience settings cause account login to return
+    `invalid account credential`, even when Better Auth sign-in succeeds. Jazz Cloud must be able
+    to reach your JWKS endpoint; a local `localhost` URL is not reachable from the cloud.
 
     For a full working example, see the [Better Auth chat example](https://github.com/garden-co/jazz2/tree/main/examples/auth-betterauth-chat).
 
@@ -96,7 +107,9 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
     Point the Jazz server at the WorkOS JWKS endpoint:
 
     ```bash
-    pnpm dlx jazz-tools@alpha server <APP_ID> --jwks-url https://api.workos.com/sso/jwks/client_01ABC...
+    pnpm dlx jazz-tools@alpha server <APP_ID> \
+      --jwks-url https://api.workos.com/sso/jwks/client_01ABC... \
+      --jwt-issuer <JWT_ISSUER> --jwt-audience <JWT_AUDIENCE>
     ```
 
     For a full working example, see the [WorkOS chat example](https://github.com/garden-co/jazz2/tree/main/examples/auth-workos-chat).

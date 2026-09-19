@@ -1,4 +1,5 @@
 import { cleanup, render, screen } from "@testing-library/react";
+import { schema as s } from "jazz-tools";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { TableSchemaDefinition } from "./TableSchemaDefinition";
@@ -8,6 +9,15 @@ const mockUseDevtoolsContext = vi.fn();
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => mockUseDevtoolsContext(),
 }));
+
+const bigintDefaultApp = s.defineApp({
+  metrics: s.table(
+    {
+      largeCount: s.bigint().default(9007199254740993n),
+    },
+    {},
+  ),
+});
 
 describe("TableSchemaDefinition", () => {
   beforeEach(() => {
@@ -57,6 +67,24 @@ describe("TableSchemaDefinition", () => {
     expect(screen.getByRole("heading", { name: "users permissions" })).not.toBeNull();
     expect(screen.getByText(/"columns"/)).not.toBeNull();
     expect(screen.getByText(/"select"/)).not.toBeNull();
+  });
+  it("displays a BigInt schema default with its exact decimal digits", () => {
+    mockUseDevtoolsContext.mockReturnValue({
+      runtime: "overlay",
+      wasmSchema: bigintDefaultApp.wasmSchema,
+      storedPermissions: null,
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/data-explorer/metrics/schema"]}>
+        <Routes>
+          <Route path="/data-explorer/:table/schema" element={<TableSchemaDefinition />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("heading", { name: "metrics schema" })).not.toBeNull();
+    expect(screen.getByText(/"value":\s*"9007199254740993"/)).not.toBeNull();
   });
 
   it("shows an empty state when no permissions head has been published", () => {

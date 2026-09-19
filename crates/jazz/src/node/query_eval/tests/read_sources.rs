@@ -119,12 +119,9 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         ),
     })
     .unwrap();
-    node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: evolved_payload.id,
-        },
+    node.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
     })
     .unwrap();
 
@@ -358,7 +355,7 @@ fn denormalized_current_content_witness_projects_history_provenance_to_unix_mill
     let table = node.table("issues").expect("issues table").clone();
     let current_source = node
         .physical_current_source_graph(
-            node.catalogue.current_schema_version_id,
+            node.catalogue.local_schema_version_id,
             "issues",
             PhysicalCurrentClass::Global,
         )
@@ -385,7 +382,7 @@ fn denormalized_current_content_witness_projects_history_provenance_to_unix_mill
     assert_eq!(current_rows.len(), 1);
 
     let history_source = node
-        .physical_history_source_graph(node.catalogue.current_schema_version_id, "issues")
+        .physical_history_source_graph(node.catalogue.local_schema_version_id, "issues")
         .expect("physical history source");
     let history_deltas = node
         .database

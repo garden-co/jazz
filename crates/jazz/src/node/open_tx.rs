@@ -173,13 +173,8 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         self.table(table)?;
-        self.tx_read_unchecked(
-            tx_id,
-            self.catalogue.current_write_schema.schema,
-            table,
-            row_uuid,
-        )
-        .await
+        self.tx_read_unchecked(tx_id, self.catalogue.active_schema.schema, table, row_uuid)
+            .await
     }
 
     /// Read a row through an explicit registered schema view.
@@ -250,7 +245,7 @@ where
         tx_id: OpenTransactionId,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let table_schema = self.table(table)?.clone();
         self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
             .await
@@ -406,7 +401,7 @@ where
     ) -> Result<(), Error> {
         self.tx_write_in_schema(
             tx_id,
-            self.catalogue.current_write_schema.schema,
+            self.catalogue.active_schema.schema,
             table,
             row_uuid,
             cells,
@@ -528,7 +523,7 @@ where
     ) -> Result<(), Error> {
         self.tx_write_mergeable_in_schema(
             tx_id,
-            self.catalogue.current_write_schema.schema,
+            self.catalogue.active_schema.schema,
             table,
             row_uuid,
             cells,
@@ -666,7 +661,7 @@ where
     ) -> Result<(), Error> {
         self.tx_patch_mergeable_in_schema(
             tx_id,
-            self.catalogue.current_write_schema.schema,
+            self.catalogue.active_schema.schema,
             table,
             row_uuid,
             patch,
