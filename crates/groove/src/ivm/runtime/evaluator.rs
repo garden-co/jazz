@@ -999,9 +999,20 @@ impl TickEvaluator<'_> {
         Ok(false)
     }
 
-    fn node_depends_on_aggregate(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+    fn node_depends_on_aggregate(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        if let Some(value) = self
+            .node_meta
+            .get(&node)
+            .and_then(|meta| meta.has_hydration_state_ancestor)
+        {
+            return Ok(value);
+        }
+        // Node descriptors and input edges are immutable while installed. The
+        // metadata is retired with the node; consumer attachment and runtime
+        // state cleanup do not change this ancestor classification.
         let mut ancestors = HashSet::new();
         self.graph.mark_ancestors(node, &mut ancestors);
+        let mut depends = false;
         for ancestor in ancestors {
             let graph_node = self
                 .graph
@@ -1014,10 +1025,15 @@ impl TickEvaluator<'_> {
                     | OpType::ArgMaxBy(_)
                     | OpType::Arrange(_)
             ) {
-                return Ok(true);
+                depends = true;
+                break;
             }
         }
-        Ok(false)
+        self.node_meta
+            .entry(node)
+            .or_default()
+            .has_hydration_state_ancestor = Some(depends);
+        Ok(depends)
     }
 
     fn aggregate_arrangements_are_current(
@@ -1035,12 +1051,12 @@ impl TickEvaluator<'_> {
         if !seen.insert(node) {
             return Ok(true);
         }
-        let graph_node = self
-            .graph
+        let graph = self.graph;
+        let graph_node = graph
             .node(node)
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-        let operator = graph_node.descriptor.operator.clone();
-        let inputs = graph_node.descriptor.inputs.clone();
+        let operator = &graph_node.descriptor.operator;
+        let inputs = &graph_node.descriptor.inputs;
         if matches!(operator, OpType::Recursive(_)) {
             // The recursive operator owns its seed/step scopes. Their local
             // indexes must not be looked up using this caller's scope. Its
@@ -1093,7 +1109,7 @@ impl TickEvaluator<'_> {
                 .ok_or(IvmRuntimeError::GraphNodeNotFound(*input))?
                 .descriptor
                 .output;
-            let group_fields = self.aggregate_group_fields(node, &aggregate);
+            let group_fields = self.aggregate_group_fields(node, aggregate);
             let arrangement_key = self.arrangement_key(
                 *input,
                 input_desc.records(),
@@ -1110,7 +1126,7 @@ impl TickEvaluator<'_> {
             }
         }
         for input in inputs {
-            if !self.aggregate_arrangements_are_current_inner(input, seen)? {
+            if !self.aggregate_arrangements_are_current_inner(*input, seen)? {
                 return Ok(false);
             }
         }
@@ -1139,6 +1155,15 @@ impl TickEvaluator<'_> {
         let signature = self.input_signature(node)?;
         let memo_key = self.memo_key(node, &signature)?;
         let current_watermark = self.input_generation(node);
+        // Readiness is necessary only when reusing a result. A missing or
+        // invalidated memo will execute the producer normally below.
+        if self
+            .eval_memo
+            .get(&memo_key)
+            .is_none_or(|entry| entry.input_watermark != current_watermark)
+        {
+            return Ok(None);
+        }
         // A cached record batch is not proof that its producer-owned physical
         // index exists in this scope. Hydration can reuse records from a probe,
         // and recursive child state may have been retired independently.

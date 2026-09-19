@@ -2,6 +2,69 @@
 
 use super::*;
 
+/// Keeping a prepared graph (and its immutable dependency classification)
+/// across detachment must not keep a stale runtime-readiness proof.
+#[futures_test::test]
+async fn prepared_hydration_after_detach_rebuilds_current_candidates() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]).unwrap();
+    let mut db = Database::new(history_schema(), storage).await.unwrap();
+    let graph =
+        GraphBuilder::arg_max_by(GraphBuilder::table("history"), ["row"], ["stamp", "node"])
+            .project(["row", "stamp"]);
+    let params = RecordDescriptor::new([("row", ColumnType::U64)]);
+    let prepared = db
+        .prepare_one_sink(
+            GraphBuilder::join(
+                GraphBuilder::binding_source("selected_row", params),
+                graph.clone(),
+                ["row"],
+                ["row"],
+            )
+            .project_fields([
+                ProjectField::renamed("left.row", "row"),
+                ProjectField::renamed("right.stamp", "stamp"),
+            ]),
+            "selected_row",
+            params,
+            ["row"],
+        )
+        .await
+        .unwrap();
+    let mut batch = db.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "runner-up"));
+    db.commit_batch(batch).await.unwrap();
+    let values = |stamp| vec![Value::U64(1), Value::U64(stamp)];
+    for winner in [20, 30] {
+        let mut batch = db.open_batch();
+        batch.insert("history", history_values(1, winner, 1, "winner"));
+        db.commit_batch(batch).await.unwrap();
+        assert_eq!(
+            db.query_graph(graph.clone())
+                .await
+                .unwrap()
+                .to_values()
+                .unwrap(),
+            [(values(winner), 1)]
+        );
+        let subscription = db
+            .bind_shape_one_sink(prepared.id(), &[Value::U64(1)])
+            .await
+            .unwrap();
+        assert_eq!(
+            subscription.recv().unwrap().to_values().unwrap(),
+            [(values(winner), 1)]
+        );
+        let mut batch = db.open_batch();
+        batch.delete("history", history_key(1, winner, 1));
+        db.commit_batch(batch).await.unwrap();
+        let changes = subscription.recv().unwrap().to_values().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.contains(&(values(winner), -1)));
+        assert!(changes.contains(&(values(10), 1)));
+        assert!(db.unsubscribe(subscription.id()));
+    }
+}
+
 /// Alice probes a prepared-but-unbound graph before Bob subscribes. A cached
 /// winner is not evidence of a seeded candidate index: deleting that winner
 /// must expose its runner-up. Further probes must not erase Bob's live state.
