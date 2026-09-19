@@ -4345,6 +4345,235 @@ async fn commits_insert_update_and_delete_batches() {
 }
 
 #[futures_test::test]
+async fn raw_batch_writes_reject_keys_that_disagree_with_record_primary_keys() {
+    let schema = albums_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).expect("valid storage families");
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let descriptor = database
+        .ivm_runtime
+        .schema()
+        .table("albums")
+        .unwrap()
+        .record_schema();
+
+    // Vec<u8> raw inputs are payloads, not variant-tagged storage envelopes.
+    let encoded = descriptor
+        .create(&[Value::U64(7), Value::String("raw insert".to_owned())])
+        .unwrap();
+    let mut insert = database.open_batch();
+    insert.insert_raw("albums", PrimaryKeyValue::U64(9), encoded.clone());
+    assert!(matches!(
+        database.apply_batch(insert).await,
+        Err(Error::InvalidDirectRecordStoreKey(_))
+    ));
+    assert!(
+        database
+            .primary_key_scan_raw("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected raw insert must not publish a physical row"
+    );
+    assert!(
+        database
+            .primary_key_scan("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected raw insert must not publish a logical row"
+    );
+
+    let mut fresh = database.open_batch();
+    // SAFETY: Key 9 is absent from storage and all earlier batch operations.
+    // Freshness does not permit the payload to name a different primary key.
+    unsafe {
+        fresh.insert_raw_fresh("albums", PrimaryKeyValue::U64(9), encoded.clone());
+    }
+    assert!(matches!(
+        database.apply_batch(fresh).await,
+        Err(Error::InvalidDirectRecordStoreKey(_))
+    ));
+    assert!(
+        database
+            .primary_key_scan_raw("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected fresh raw insert must not publish a physical row"
+    );
+    assert!(
+        database
+            .primary_key_scan("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected fresh raw insert must not publish a logical row"
+    );
+
+    let mut exact = database.open_batch();
+    assert!(matches!(
+        exact
+            .ensure_exact(
+                &database,
+                "albums",
+                PrimaryKeyValue::U64(9),
+                encoded.clone(),
+            )
+            .await,
+        Err(Error::InvalidDirectRecordStoreKey(_))
+    ));
+    assert!(
+        database
+            .primary_key_scan_raw("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected exact insert must not publish a physical row"
+    );
+    assert!(
+        database
+            .primary_key_scan("albums", &[])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected exact insert must not publish a logical row"
+    );
+
+    let mut seed = database.open_batch();
+    seed.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("stored".to_owned())],
+    );
+    database.commit_batch(seed).await.unwrap();
+    let physical_before = database
+        .primary_key_scan_raw("albums", &[])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(EncodedKeyValue::into_parts)
+        .collect::<Vec<_>>();
+    let logical_before = record_values(database.primary_key_scan("albums", &[]).await.unwrap());
+
+    let replacement = descriptor
+        .create(&[Value::U64(2), Value::String("replacement".to_owned())])
+        .unwrap();
+    let mut update = database.open_batch();
+    update.update_raw("albums", PrimaryKeyValue::U64(1), replacement);
+    assert!(matches!(
+        database.apply_batch(update).await,
+        Err(Error::InvalidDirectRecordStoreKey(_))
+    ));
+    assert_eq!(
+        database
+            .primary_key_scan_raw("albums", &[])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(EncodedKeyValue::into_parts)
+            .collect::<Vec<_>>(),
+        physical_before,
+        "a rejected raw update must leave physical state unchanged"
+    );
+    assert_eq!(
+        record_values(database.primary_key_scan("albums", &[]).await.unwrap()),
+        logical_before,
+        "a rejected raw update must leave logical state unchanged"
+    );
+}
+
+#[futures_test::test]
+async fn raw_batch_writes_accept_matching_record_primary_keys() {
+    let schema = albums_schema();
+    let descriptor = schema.table("albums").unwrap().record_schema();
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let payload = |id, title: &str| {
+        descriptor
+            .create(&[Value::U64(id), Value::String(title.to_owned())])
+            .unwrap()
+    };
+
+    let mut insert = database.open_batch();
+    insert.insert_raw("albums", PrimaryKeyValue::U64(7), payload(7, "inserted"));
+    database.commit_batch(insert).await.unwrap();
+    let mut fresh = database.open_batch();
+    // SAFETY: Key 9 is absent from storage and earlier operations in this batch.
+    unsafe {
+        fresh.insert_raw_fresh("albums", PrimaryKeyValue::U64(9), payload(9, "fresh"));
+    }
+    database.commit_batch(fresh).await.unwrap();
+    let mut update = database.open_batch();
+    update.update_raw("albums", PrimaryKeyValue::U64(7), payload(7, "updated"));
+    database.commit_batch(update).await.unwrap();
+    assert_eq!(
+        record_values(database.primary_key_scan("albums", &[]).await.unwrap()),
+        vec![
+            vec![Value::U64(7), Value::String("updated".to_owned())],
+            vec![Value::U64(9), Value::String("fresh".to_owned())],
+        ]
+    );
+    assert_eq!(
+        database
+            .primary_key_scan_raw("albums", &[])
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[futures_test::test]
+async fn raw_batch_overlay_rejects_keys_that_disagree_with_record_primary_keys() {
+    for operation in ["insert", "fresh", "update"] {
+        let schema = albums_schema();
+        let descriptor = schema.table("albums").unwrap().record_schema();
+        let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+        let database = Database::new(schema, storage).await.unwrap();
+        let payload = descriptor
+            .create(&[Value::U64(7), Value::String("mismatch".to_owned())])
+            .unwrap();
+        let mut batch = database.open_batch();
+        match operation {
+            "insert" => batch.insert_raw("albums", PrimaryKeyValue::U64(9), payload),
+            // SAFETY: Key 9 is absent from storage and earlier batch operations.
+            "fresh" => unsafe {
+                batch.insert_raw_fresh("albums", PrimaryKeyValue::U64(9), payload);
+            },
+            "update" => batch.update_raw("albums", PrimaryKeyValue::U64(9), payload),
+            _ => unreachable!(),
+        }
+        // A valid immutable insertion reads the preceding batch overlay. This
+        // exercises borrowed raw validation through the public batch API.
+        let valid = descriptor
+            .create(&[Value::U64(10), Value::String("valid".to_owned())])
+            .unwrap();
+        assert!(
+            matches!(
+                batch
+                    .ensure_exact(&database, "albums", PrimaryKeyValue::U64(10), valid)
+                    .await,
+                Err(Error::InvalidDirectRecordStoreKey(_))
+            ),
+            "{operation} overlay must reject the mismatched key"
+        );
+        assert!(
+            database
+                .primary_key_scan_raw("albums", &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            database
+                .primary_key_scan("albums", &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[futures_test::test]
 async fn staged_batch_reads_observe_uncommitted_writes() {
     let mut database = Database::new(
         albums_schema(),
