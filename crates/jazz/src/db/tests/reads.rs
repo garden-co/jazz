@@ -3523,3 +3523,52 @@ fn required_nested_nullable_includes_preserve_parent_descriptors() {
         assert!(removed.rows.is_empty());
     }
 }
+
+// This internal scheduling fixture is necessary because a public remote source
+// cannot hold a read forever while exposing whether its owner future was dropped.
+#[test]
+fn cancelled_pending_read_releases_fence_preserving_later_operation() {
+    struct ObserveDrop(Rc<Cell<bool>>);
+    impl Drop for ObserveDrop {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    let dropped = Rc::new(Cell::new(false));
+    let guard = ObserveDrop(Rc::clone(&dropped));
+    let receiver = db.node.enqueue_transaction_read(tx.tx_id, async move {
+        let _guard = guard;
+        std::future::pending::<Result<(), Error>>().await
+    });
+    let advanced = Rc::new(Cell::new(false));
+    let mark = Rc::clone(&advanced);
+    db.node
+        .enqueue_transaction_operation(
+            tx.tx_id,
+            Box::pin(async move {
+                mark.set(true);
+                Ok(())
+            }),
+        )
+        .unwrap();
+    block_on(db.tick()).unwrap();
+    assert!(!dropped.get());
+    assert!(
+        !advanced.get(),
+        "later same-transaction operation must remain fenced"
+    );
+    drop(receiver);
+    for _ in 0..3 {
+        block_on(db.tick()).unwrap();
+    }
+    assert!(
+        dropped.get(),
+        "cancelled receiver must drop the indefinitely pending read"
+    );
+    assert!(
+        advanced.get(),
+        "cancellation must release the read fence without dropping later work"
+    );
+}
