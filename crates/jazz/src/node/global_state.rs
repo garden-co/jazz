@@ -125,10 +125,10 @@ where
     /// visible content transaction.
     pub(super) async fn visible_global_row_tx_id_now(
         &mut self,
+        schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
     ) -> Option<TxId> {
-        let schema_version = self.catalogue.active_schema.schema;
         let deletion_current_table = self
             .physical_current_table_for_schema(
                 schema_version,
@@ -171,15 +171,16 @@ where
                 return Some(TxId::new(tx_time, tx_node));
             }
         }
-        self.visible_global_content_tx_id_now(table, row_uuid).await
+        self.visible_global_content_tx_id_in_schema_now(schema_version, table, row_uuid)
+            .await
     }
 
-    pub(super) async fn visible_global_content_tx_id_now(
+    pub(super) async fn visible_global_content_tx_id_in_schema_now(
         &mut self,
+        schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
     ) -> Option<TxId> {
-        let schema_version = self.catalogue.active_schema.schema;
         let deletion_current_table = self
             .physical_current_table_for_schema(
                 schema_version,

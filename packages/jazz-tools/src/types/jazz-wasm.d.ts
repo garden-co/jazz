@@ -28,6 +28,7 @@ declare module "jazz-wasm" {
   };
   export class PendingNativeRead {
     poll(): Uint8Array | null;
+    cancel(): void;
   }
   export class WasmPermissionAdviceRequest {
     readonly promise: Promise<"allowed" | "denied" | "unknown">;

@@ -24,6 +24,12 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 
+/** @internal Runtime operations bound to the currently executing preparation. */
+export type TransactionPreparationIO = Pick<
+  JazzClient,
+  "queryInternal" | "insertInternal" | "updateInternal" | "upsertInternal" | "restoreInternal"
+>;
+
 type RuntimeSerializedSession = Pick<
   Session,
   "account_id" | "issuer" | "user_id" | "claims" | "authMode"
@@ -150,6 +156,8 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /** @internal Construct a provisional row without staging or accepting a write. */
+  previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
   insert(
     table: string,
     values: InsertValues,
@@ -281,6 +289,7 @@ export interface TransactionalRuntime extends Runtime {
     id: OpenTransactionId,
     sessionJson?: string | null,
   ): OpenTransactionId;
+  /** Completion may include asynchronous preparation before physical submission. */
   commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
   rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
 }
@@ -789,6 +798,9 @@ export class WriteHandle<T = void, WaitResult = void> {
   constructor(txId: TxId | Promise<TxId>, client: JazzClient, value = undefined as T) {
     this.value = value;
     this.txId = Promise.resolve(txId);
+    // Fire-and-forget callers may wait later, or never. Observe rejection now
+    // without replacing txId: a later wait must still receive the original error.
+    this.txId.catch(() => {});
     this.#client = client;
   }
 
@@ -876,16 +888,37 @@ export class ExclusiveWriteResult<T> extends WriteResult<T> {
   }
 }
 
-/**
- * High-level Jazz client.
- */
+const transactionAdmission = new WeakMap<JazzClient, () => Promise<void>>();
+
+/** @internal Scope an opening prerequisite without adding a public client method. */
+export function withTransactionAdmission<T>(
+  client: JazzClient,
+  prepare: () => Promise<void>,
+  begin: () => T,
+): T {
+  const previous = transactionAdmission.get(client);
+  transactionAdmission.set(client, prepare);
+  try {
+    return begin();
+  } finally {
+    if (previous) transactionAdmission.set(client, previous);
+    else transactionAdmission.delete(client);
+  }
+}
+
+/** High-level Jazz client. */
 export class JazzClient {
+  private readonly transactionPreparations = new Map<
+    OpenTransactionId,
+    { pending?: Promise<void>; committing: boolean; unopened?: boolean }
+  >();
   private runtime: Runtime;
   private scheduler: (task: () => void) => void;
   private context: AppContext;
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private shutdownPromise: Promise<void> | null = null;
+  private discarded = false;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
   private activeSubscriptionReleases = new Map<number, () => void>();
 
@@ -987,23 +1020,210 @@ export class JazzClient {
   ): OpenTransactionId {
     const id = createOpenTransactionId();
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    return requireTransactionalRuntime(this.runtime).beginTransaction(
+    const prerequisite = transactionAdmission.get(this);
+    if (prerequisite) {
+      const context = this.encodeWriteContext(effectiveSession, attribution);
+      const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
+        committing: false,
+        unopened: true,
+      };
+      this.transactionPreparations.set(id, state);
+      state.pending = Promise.resolve().then(async () => {
+        const assertCurrent = () => {
+          if (this.discarded) throw new Error("Client discarded before transaction admission");
+          if (this.shutdownPromise)
+            throw new Error("Client shut down before transaction admission");
+          if (this.transactionPreparations.get(id) !== state)
+            throw new Error("Transaction was rolled back before admission");
+        };
+        assertCurrent();
+        await prerequisite();
+        assertCurrent();
+        requireTransactionalRuntime(this.runtime).beginTransaction(kind, id, context);
+        state.unopened = false;
+      });
+      state.pending.catch(() => {});
+      return id;
+    }
+    const opened = requireTransactionalRuntime(this.runtime).beginTransaction(
       kind,
       id,
       this.encodeWriteContext(effectiveSession, attribution),
     );
+    this.transactionPreparations.set(opened, { committing: false });
+    return opened;
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
     this.runtime.onMutationError(listener);
   }
 
+  /**
+   * @internal Register deferred physical preparation before returning a mutation.
+   * Callbacks must use the underlying runtime, not re-enter this client's
+   * transaction reads or commit (which wait for the registered preparation).
+   */
+  prepareTransaction(
+    id: OpenTransactionId,
+    prepare: (io: TransactionPreparationIO) => Promise<void>,
+  ): Promise<void> {
+    const state = this.transactionPreparations.get(id);
+    if (!state || state.committing) {
+      throw new Error("Cannot prepare a transaction that is closed or committing");
+    }
+    state.pending = (state.pending ?? Promise.resolve()).then(async () => {
+      if (this.transactionPreparations.get(id) !== state) {
+        throw new Error("Transaction was rolled back before preparation");
+      }
+      let active = true;
+      const assertActive = () => {
+        if (!active || this.transactionPreparations.get(id) !== state)
+          throw new Error("Transaction preparation is no longer active");
+      };
+      try {
+        await prepare({
+          queryInternal: (query, options, session) => {
+            assertActive();
+            return this.queryWithoutPreparation(
+              query,
+              { ...options, openTransactionId: id },
+              session,
+            );
+          },
+          insertInternal: (table, values, options, session, attribution) => {
+            assertActive();
+            const effectiveSession = this.resolveWriteSession(session, attribution);
+            const writeContext = this.encodeWriteContext(
+              effectiveSession,
+              attribution,
+              id,
+              options?.updatedAt,
+              options?.branch ? { head: options.branch } : undefined,
+            );
+            const row = this.runtime.insert(table, values, writeContext, options?.id);
+            return { ...row, values: row.values as Value[] };
+          },
+          updateInternal: (
+            table,
+            objectId,
+            updates,
+            updatedAt,
+            session,
+            attribution,
+            _transaction,
+            branch,
+          ) => {
+            assertActive();
+            const effectiveSession = this.resolveWriteSession(session, attribution);
+            const writeContext = this.encodeWriteContext(
+              effectiveSession,
+              attribution,
+              id,
+              updatedAt,
+              branch,
+            );
+            return this.runtime.update(table, objectId, updates, writeContext);
+          },
+          upsertInternal: (table, objectId, values, options, session, attribution) => {
+            assertActive();
+            const effectiveSession = this.resolveWriteSession(session, attribution);
+            const writeContext = this.encodeWriteContext(
+              effectiveSession,
+              attribution,
+              id,
+              options?.updatedAt,
+              options?.branch,
+            );
+            return this.runtime.upsert(table, objectId, values, writeContext);
+          },
+          restoreInternal: (table, objectId, values, options, session, attribution) => {
+            assertActive();
+            const effectiveSession = this.resolveWriteSession(session, attribution);
+            const writeContext = this.encodeWriteContext(
+              effectiveSession,
+              attribution,
+              id,
+              options?.updatedAt,
+              options?.branch ? { head: options.branch } : undefined,
+            );
+            const row = this.runtime.restore(table, objectId, values, writeContext);
+            return { ...row, values: row.values as Value[] };
+          },
+        });
+      } finally {
+        active = false;
+      }
+    });
+    // Registration owns failures even if the caller never commits or waits.
+    state.pending.catch(() => {});
+    return state.pending;
+  }
+
+  private stageMutation(
+    id: OpenTransactionId | undefined,
+    values: InsertValues,
+    write: (values: InsertValues) => MutationResult,
+  ): MutationResult {
+    if (!id || !this.transactionPreparations.get(id)?.pending) return write(values);
+    const snapshot = structuredClone(values);
+    this.prepareTransaction(id, async () => {
+      write(snapshot);
+    });
+    return { kind: "staged", openTransactionId: id };
+  }
+
+  private stageRowMutation(
+    id: OpenTransactionId | undefined,
+    table: string,
+    values: InsertValues,
+    objectId: string | undefined,
+    write: (values: InsertValues, objectId?: string) => InsertResult,
+  ): InsertResult {
+    if (!id || !this.transactionPreparations.get(id)?.pending) return write(values, objectId);
+    const snapshot = structuredClone(values);
+    // The returned logical row must not share mutable bytes with the queued write.
+    const row = this.previewInsertInternal(table, snapshot, objectId);
+    this.prepareTransaction(id, async () => {
+      write(snapshot, row.id);
+    });
+    return { ...row, kind: "staged", openTransactionId: id };
+  }
+
+  /** @internal Prepare a return value without publishing or staging a physical row. */
+  previewInsertInternal(table: string, values: InsertValues, objectId?: string): Row {
+    if (!this.runtime.previewInsert) throw new Error("This runtime cannot prepare an inserted row");
+    return this.runtime.previewInsert(table, structuredClone(values), objectId);
+  }
+
   commitTransaction(id: OpenTransactionId): WriteHandle {
-    const txId = requireTransactionalRuntime(this.runtime).commitTransaction(id);
+    const state = this.transactionPreparations.get(id);
+    if (state?.committing) throw new Error("Transaction is already committing");
+    const runtime = requireTransactionalRuntime(this.runtime);
+    const submitted = state?.pending
+      ? state.pending.then(() => runtime.commitTransaction(id))
+      : runtime.commitTransaction(id);
+    if (typeof submitted === "string") {
+      this.transactionPreparations.delete(id);
+      return new WriteHandle(submitted, this);
+    }
+    if (state) state.committing = true;
+    const txId = Promise.resolve(submitted).then(
+      (committed) => {
+        this.transactionPreparations.delete(id);
+        return committed;
+      },
+      (error) => {
+        if (state) state.committing = false;
+        throw error;
+      },
+    );
     return new WriteHandle(txId, this);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
+    const unopened = this.transactionPreparations.get(id)?.unopened;
+    this.transactionPreparations.delete(id);
+    if (unopened) return Promise.resolve(true);
     return requireTransactionalRuntime(this.runtime).rollbackTransaction(id);
   }
 
@@ -1288,7 +1508,13 @@ export class JazzClient {
       options?.updatedAt,
       options?.branch ? { head: options.branch } : undefined,
     );
-    const row = this.runtime.insert(table, values, writeContext, options?.id);
+    const row = this.stageRowMutation(
+      openTransactionId,
+      table,
+      values,
+      options?.id,
+      (prepared, objectId) => this.runtime.insert(table, prepared, writeContext, objectId),
+    );
     return {
       ...row,
       values: row.values as Value[],
@@ -1330,7 +1556,9 @@ export class JazzClient {
       options?.updatedAt,
       options?.branch ? { head: options.branch } : undefined,
     );
-    const row = this.runtime.restore(table, objectId, values, writeContext);
+    const row = this.stageRowMutation(openTransactionId, table, values, objectId, (prepared) =>
+      this.runtime.restore(table, objectId, prepared, writeContext),
+    );
     return {
       ...row,
       values: row.values as Value[],
@@ -1372,7 +1600,9 @@ export class JazzClient {
       options?.updatedAt,
       options?.branch,
     );
-    return this.runtime.upsert(table, objectId, values, writeContext);
+    return this.stageMutation(openTransactionId, values, (prepared) =>
+      this.runtime.upsert(table, objectId, prepared, writeContext),
+    );
   }
 
   /**
@@ -1388,6 +1618,18 @@ export class JazzClient {
 
   /** @internal */
   async queryInternal(
+    query: string,
+    options?: InternalQueryExecutionOptions,
+    session?: Session,
+  ): Promise<Row[]> {
+    const preparation = options?.openTransactionId
+      ? this.transactionPreparations.get(options.openTransactionId)?.pending
+      : undefined;
+    if (preparation) await preparation;
+    return this.queryWithoutPreparation(query, options, session);
+  }
+
+  private async queryWithoutPreparation(
     query: string,
     options?: InternalQueryExecutionOptions,
     session?: Session,
@@ -1508,7 +1750,9 @@ export class JazzClient {
       updatedAt,
       branch,
     );
-    return this.runtime.update(table, objectId, updates, writeContext);
+    return this.stageMutation(openTransactionId, updates, (prepared) =>
+      this.runtime.update(table, objectId, prepared, writeContext),
+    );
   }
 
   /**
@@ -1661,7 +1905,9 @@ export class JazzClient {
       updatedAt,
       branch,
     );
-    return this.runtime.delete(table, objectId, writeContext);
+    return this.stageMutation(openTransactionId, {}, () =>
+      this.runtime.delete(table, objectId, writeContext),
+    );
   }
 
   /**
@@ -1860,6 +2106,7 @@ export class JazzClient {
 
   /** @internal Abandon runtime work after external storage invalidation/reset. */
   discard(): void {
+    this.discarded = true;
     this.runtime.discard?.();
   }
 

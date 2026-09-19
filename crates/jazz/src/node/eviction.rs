@@ -210,6 +210,7 @@ where
             // in-memory fast known-state cursor may survive. Scope and cursor
             // invalidation is infallible and precedes any body deletion.
             self.invalidate_subscription_scopes();
+            self.clear_content_version_reachability_cache();
         }
 
         if low_water_bytes.is_none() {

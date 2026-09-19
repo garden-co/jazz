@@ -159,7 +159,7 @@ type NativeWriteOptions = {
   updatedAtMs?: number;
 };
 
-type PendingNativeRead = { poll(): Uint8Array | null };
+type PendingNativeRead = { poll(): Uint8Array | null; cancel(): void };
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativePermissionAdvice = {
@@ -649,6 +649,7 @@ function openMemoryDb(
 export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
+  private readonly pendingNativeReadCancels = new Set<() => void>();
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
@@ -1145,6 +1146,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.closed = true;
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
+    for (const cancel of this.pendingNativeReadCancels) cancel();
     await this.foregroundLeaseCapture?.catch(() => undefined);
     if (this.pendingStreamingMutations.size > 0) {
       await Promise.all(this.pendingStreamingMutations);
@@ -1174,6 +1176,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.closed = true;
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
+    for (const cancel of this.pendingNativeReadCancels) cancel();
     for (const [handle, subscription] of this.subscriptions) {
       this.terminateSubscription(handle, subscription);
     }
@@ -1214,6 +1217,16 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverCarrier?.close();
     this.serverCarrier = null;
     return true;
+  }
+
+  /** Row identity/defaults only; physical validation and staging happen on insertion. */
+  previewInsert(table: string, values: InsertValues, objectId?: string): WasmRow {
+    const row = this.rowStateFromValues(
+      table,
+      objectId ? parseUuid(objectId) : runtimeRandomBytes(16),
+      values,
+    );
+    return { id: row.id, values: row.values };
   }
 
   insert(
@@ -1866,10 +1879,11 @@ export class NativeRuntimeAdapter implements Runtime {
     // boundary; lowering it to Local here would re-scan cached rows that a
     // fresh remote receipt had just removed.
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    const transportTier = readPropagationIsFull(optionsJson) ? tier : undefined;
     const readContext = this.nativeReadContext(session, pendingTx);
     const query = nativeQueryInput(coreQueryJson, this.schema);
     await this.ensureClientSessionClaims(session);
-    await this.waitForStrictRemoteQueryTransport(tier);
+    await this.waitForStrictRemoteQueryTransport(transportTier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed || this.ownerRuntime.closed) return [];
     if (!pendingTx) {
@@ -2562,7 +2576,9 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<Uint8Array> {
     return this.awaitNativeRead(
       this.startRowsForContext(query, opts, context, openTransactionId),
-      (opts as { tier?: string }).tier,
+      (opts as { propagation?: string }).propagation === "local_only"
+        ? undefined
+        : (opts as { tier?: string }).tier,
     );
   }
 
@@ -2629,17 +2645,27 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
-    for (;;) {
-      if (this.closed) throw new Error("native read was cancelled by runtime shutdown");
-      if (tier) this.throwServerTransportErrorForTier(tier);
-      const bytes = result.poll();
-      if (bytes !== null) return bytes;
-      // A core pass may itself suspend while the auxiliary transport fetches
-      // large-value chunks. Keep polling the owning read while that pass runs;
-      // awaiting the pump here would circularly wait for the read to resume it.
-      void this.pumpServerTransport();
-      if (tier) this.throwServerTransportErrorForTier(tier);
-      await sleep(0);
+    const cancel = () => result.cancel();
+    this.ownerRuntime.pendingNativeReadCancels.add(cancel);
+    try {
+      for (;;) {
+        if (this.closed || this.ownerRuntime.closed)
+          throw new Error("native read was cancelled by runtime shutdown");
+        if (tier) this.throwServerTransportErrorForTier(tier);
+        const bytes = result.poll();
+        if (bytes !== null) return bytes;
+        // Keep polling while a core pass waits for large-value chunks: the
+        // read itself may be what lets that pass resume.
+        this.pumpServerTransport();
+        if (tier) this.throwServerTransportErrorForTier(tier);
+        await sleep(0);
+      }
+    } finally {
+      this.ownerRuntime.pendingNativeReadCancels.delete(cancel);
+      cancel();
+      // A suspended read may have held the owner while queued commands
+      // yielded. Resume those commands even without a network pump.
+      this.ownerRuntime.scheduleCoreTick();
     }
   }
 

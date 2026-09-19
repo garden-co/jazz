@@ -480,6 +480,16 @@ struct CompiledLensCacheKey {
     target: SchemaVersionId,
     table: String,
 }
+const CONTENT_VERSION_REACHABILITY_CACHE_MAX_ENTRIES: usize = 64;
+const CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS: usize = 65_536;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ContentVersionReachabilityCacheKey {
+    table_id: PhysicalTableId,
+    branch_key: BranchKey,
+    row_uuid: RowUuid,
+    start: TxId,
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct CompiledLensPath {
@@ -567,6 +577,16 @@ pub struct NodeState<S> {
     /// Exact ahead-current keys used to make peer replay idempotent. No caller
     /// needs ordering, so use the low-overhead deterministic hasher here.
     ahead_current_keys: FxHashSet<(PhysicalTableId, VersionLayer, Vec<u8>)>,
+    /// Complete row-local ancestry closures. Entries are bounded by both
+    /// frontier count and total transaction identities because a single merge
+    /// graph can otherwise dominate the node's memory.
+    content_version_reachability_cache:
+        BTreeMap<ContentVersionReachabilityCacheKey, FxHashSet<TxId>>,
+    /// Approximate insertion order for the bounded ancestry cache.
+    content_version_reachability_cache_order: VecDeque<ContentVersionReachabilityCacheKey>,
+    /// Total transaction identities retained by the ancestry cache.
+    content_version_reachability_cache_tx_ids: usize,
+
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
     /// Runtime counters for query-engine read authorization paths.
@@ -575,6 +595,12 @@ pub struct NodeState<S> {
     /// node-scoped so unrelated parallel test nodes cannot contaminate it.
     #[cfg(any(test, feature = "testing"))]
     merge_head_reachability_walks: usize,
+    /// Test-only count of transaction nodes visited by merge-head walks.
+    #[cfg(any(test, feature = "testing"))]
+    merge_head_reachability_nodes: usize,
+    /// Test-only count of query programs actually lowered, excluding cache hits.
+    #[cfg(any(test, feature = "testing"))]
+    query_program_compilations: usize,
     /// Process-local claims attached to authenticated subscriber sessions.
     session_claims: BTreeMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.
@@ -822,6 +848,64 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(crate) fn clear_content_version_reachability_cache(&mut self) {
+        self.content_version_reachability_cache.clear();
+        self.content_version_reachability_cache_order.clear();
+        self.content_version_reachability_cache_tx_ids = 0;
+    }
+
+    fn cached_content_version_reachability(
+        &self,
+        key: &ContentVersionReachabilityCacheKey,
+        target: TxId,
+    ) -> Option<bool> {
+        self.content_version_reachability_cache
+            .get(key)
+            .map(|ancestors| ancestors.contains(&target))
+    }
+
+    fn cache_content_version_reachability(
+        &mut self,
+        key: ContentVersionReachabilityCacheKey,
+        ancestors: FxHashSet<TxId>,
+    ) {
+        if ancestors.len() > CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS {
+            return;
+        }
+
+        if let Some(previous) = self.content_version_reachability_cache.remove(&key) {
+            self.content_version_reachability_cache_tx_ids -= previous.len();
+            self.content_version_reachability_cache_order
+                .retain(|existing| existing != &key);
+        }
+
+        while self.content_version_reachability_cache.len()
+            >= CONTENT_VERSION_REACHABILITY_CACHE_MAX_ENTRIES
+            || self.content_version_reachability_cache_tx_ids + ancestors.len()
+                > CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS
+        {
+            let Some(oldest) = self.content_version_reachability_cache_order.pop_front() else {
+                break;
+            };
+            let Some(evicted) = self.content_version_reachability_cache.remove(&oldest) else {
+                continue;
+            };
+            self.content_version_reachability_cache_tx_ids -= evicted.len();
+        }
+
+        if self.content_version_reachability_cache.len()
+            < CONTENT_VERSION_REACHABILITY_CACHE_MAX_ENTRIES
+            && self.content_version_reachability_cache_tx_ids + ancestors.len()
+                <= CONTENT_VERSION_REACHABILITY_CACHE_MAX_TX_IDS
+        {
+            self.content_version_reachability_cache_tx_ids += ancestors.len();
+            self.content_version_reachability_cache_order
+                .push_back(key.clone());
+            self.content_version_reachability_cache
+                .insert(key, ancestors);
+        }
+    }
+
     pub(crate) fn reserve_tx_time_after(&mut self, high_water: TxTime) -> Result<(), Error> {
         // Binding mutations reserve through the shared clock before taking
         // the node lock. A reused foreground must advance that mirror too,
@@ -838,10 +922,23 @@ where
 {
     pub(super) fn reset_merge_head_reachability_walks_for_test(&mut self) {
         self.merge_head_reachability_walks = 0;
+        self.merge_head_reachability_nodes = 0;
     }
 
     pub(super) fn merge_head_reachability_walks_for_test(&self) -> usize {
         self.merge_head_reachability_walks
+    }
+
+    pub(super) fn merge_head_reachability_nodes_for_test(&self) -> usize {
+        self.merge_head_reachability_nodes
+    }
+
+    pub(super) fn reset_query_program_compilations_for_test(&mut self) {
+        self.query_program_compilations = 0;
+    }
+
+    pub(super) fn query_program_compilations_for_test(&self) -> usize {
+        self.query_program_compilations
     }
 
     fn allocate_global_time_for_test(&mut self) -> GlobalTime {
@@ -967,6 +1064,9 @@ struct QueryServing {
     /// Derived read-policy authorization requests keyed by policy context.
     read_policy_authorization_request_cache:
         BTreeMap<ReadPolicyAuthorizationRequestCacheKey, query_engine::QueryProgramRequest>,
+    /// Lowered cache-safe storage-backed query programs keyed by their complete
+    /// request and access-path identity. Dynamic source graphs never enter it.
+    compiled_query_program_cache: BTreeMap<String, Arc<query_engine::QueryProgram>>,
     /// Lowered authorization row-id graphs keyed by their full query-engine request.
     policy_authorization_graph_cache: BTreeMap<String, query_eval::PolicyAuthorizationGraph>,
     /// Temporary point-policy replacements required by one compiler turn. The

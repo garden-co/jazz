@@ -341,6 +341,7 @@ where
         self.query
             .query_shape_cache
             .retain(|(shape_id, _, _), _| !reclaimed.contains(*shape_id));
+        self.query.compiled_query_program_cache.clear();
         self.query
             .applied_view_update_generations
             .retain(|key, _| !reclaimed.contains(key.shape_id));

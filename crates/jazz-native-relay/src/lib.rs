@@ -13997,18 +13997,19 @@ mod tests {
         let tx = client
             .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
             .unwrap();
-        let release = relay
+        let (release, pending_read) = relay
             .run(move |worker| {
                 let (db, transaction) = worker.foreground_transaction(id, tx)?;
                 let (release, released) = futures::channel::oneshot::channel::<()>();
                 let held = Rc::clone(&db);
-                let _read = db.enqueue_transaction_read(transaction.open_tx_id, async move {
+                let read = db.enqueue_transaction_read(transaction.open_tx_id, async move {
                     let hold = Box::pin(held.hold_node_owner_for_test());
                     let _ = futures::future::select(released, hold).await;
                     Ok(())
                 });
                 db.drive_queued_mutation_once();
-                Ok(release)
+                // Dropping the receiver cancels the queued read and releases contention.
+                Ok((release, read))
             })
             .unwrap();
         client
@@ -14035,6 +14036,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(relay.run(|worker| Ok(worker.closing.is_empty())).unwrap());
+        drop(pending_read);
         assert!(host.close_foreground(next).unwrap());
         assert!(host.close_foreground(keeper).unwrap());
     }

@@ -763,6 +763,7 @@ where
                 edge_availability_retirements: Default::default(),
                 local_unavailable_inputs: BTreeMap::new(),
                 query_shape_cache: BTreeMap::new(),
+                compiled_query_program_cache: BTreeMap::new(),
                 read_policy_authorization_request_cache: BTreeMap::new(),
                 policy_authorization_graph_cache: BTreeMap::new(),
                 policy_authorization_graph_replacements: BTreeMap::new(),
@@ -807,10 +808,17 @@ where
             node_aliases: BTreeMap::new(),
             absent_node_alias: None,
             ahead_current_keys: FxHashSet::default(),
+            content_version_reachability_cache: BTreeMap::new(),
+            content_version_reachability_cache_order: VecDeque::new(),
+            content_version_reachability_cache_tx_ids: 0,
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
             #[cfg(any(test, feature = "testing"))]
             merge_head_reachability_walks: 0,
+            #[cfg(any(test, feature = "testing"))]
+            merge_head_reachability_nodes: 0,
+            #[cfg(any(test, feature = "testing"))]
+            query_program_compilations: 0,
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
             active_session_claims: None,
@@ -957,7 +965,7 @@ where
 
     /// Enable only for a host that owns complete current policy inputs. The
     /// historical-read flag is insufficient: server edge shells also use it.
-    #[cfg(feature = "runtime")]
+    #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&mut self) {
         if self.client_relay_scope().is_none() {
             self.authoritative_scalar_exit_refresh = true;
@@ -1785,6 +1793,8 @@ where
     /// dropping handles and plans that were compiled against the old registry.
     fn invalidate_runtime_handles_after_database_rebuild(&mut self) {
         self.query.query_shape_cache.clear();
+        self.query.compiled_query_program_cache.clear();
+        self.clear_content_version_reachability_cache();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();

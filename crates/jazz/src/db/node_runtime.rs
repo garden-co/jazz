@@ -226,6 +226,7 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    owner_release_wait: RefCell<Option<futures::future::LocalBoxFuture<'static, ()>>>,
     mutation_owner_lifecycle: Cell<MutationOwnerLifecycle>,
     close_owner: futures::lock::Mutex<()>,
     tx_time_reservation_clock: Rc<Cell<TxTime>>,
@@ -296,7 +297,8 @@ where
     pub(super) chunk_resolver: PeerChunkResolver,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
     pub(super) observed_chunk_completion_generation: Cell<u64>,
-    local_availability_dirty: Cell<bool>,
+    local_subscription_dirty_generation: Cell<u64>,
+    observed_local_subscription_dirty_generation: Cell<u64>,
 }
 
 impl<S> Node<S>
@@ -372,6 +374,7 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            owner_release_wait: RefCell::new(None),
             mutation_owner_lifecycle: Cell::new(MutationOwnerLifecycle::Open),
             close_owner: futures::lock::Mutex::new(()),
             tx_time_reservation_clock,
@@ -435,7 +438,8 @@ where
             chunk_resolver,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
-            local_availability_dirty: Cell::new(false),
+            local_subscription_dirty_generation: Cell::new(0),
+            observed_local_subscription_dirty_generation: Cell::new(0),
         }
     }
 
@@ -581,8 +585,24 @@ where
                 transaction: None,
                 open_tx_id,
                 future: Box::pin(async move {
-                    let result = read.await;
-                    if let Some(sender) = read_sender.borrow_mut().take() {
+                    let mut read = std::pin::pin!(read);
+                    // Cancelling an observation releases its read fence, not
+                    // any staging or commit already admitted after that read.
+                    let result = std::future::poll_fn(|context| {
+                        let cancelled = read_sender
+                            .borrow_mut()
+                            .as_mut()
+                            .is_none_or(|sender| sender.poll_canceled(context).is_ready());
+                        if cancelled {
+                            std::task::Poll::Ready(None)
+                        } else {
+                            read.as_mut().poll(context).map(Some)
+                        }
+                    })
+                    .await;
+                    if let Some(result) = result
+                        && let Some(sender) = read_sender.borrow_mut().take()
+                    {
                         let _ = sender.send(result);
                     }
                     Ok(())
@@ -649,6 +669,32 @@ where
         self.node.try_lock().is_some()
     }
 
+    /// Yield without losing the host wake needed after an external read finishes.
+    pub(super) fn owner_is_available_or_wake_when_released(&self) -> bool {
+        let mut waiter = self.owner_release_wait.borrow_mut();
+        if self.owner_is_available() {
+            waiter.take();
+            return true;
+        }
+        let Some(waker) = self.query_runtime_waker() else {
+            return false;
+        };
+        // Retain the lock future: dropping a pending mutex waiter cancels its wake.
+        let pending = waiter.get_or_insert_with(|| {
+            let node = Rc::clone(&self.node);
+            Box::pin(async move { drop(node.lock().await) })
+        });
+        if pending
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_ready()
+        {
+            waiter.take();
+            return true;
+        }
+        false
+    }
+
     pub(super) fn queued_transaction_error(&self, id: OpenTransactionId) -> Option<Error> {
         self.queued_open_transaction_failures
             .borrow()
@@ -662,36 +708,77 @@ where
             .remove(&id);
     }
 
-    /// Poll one FIFO owner-queue entry, retaining a pending continuation.
+    /// Poll the next eligible owner operation, retaining pending read fences.
     pub(super) fn poll_queued_mutation_once(&self) -> bool {
         use std::task::{Context, Poll, Waker};
 
-        let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+        if self.queued_mutations.borrow().is_empty() {
             return false;
-        };
+        }
         let owned_waker = self.query_runtime_waker();
         let waker = owned_waker.as_ref().unwrap_or_else(|| Waker::noop());
         let mut context = Context::from_waker(waker);
-        let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
-            self.queued_open_transaction_failures
-                .borrow()
-                .get(&open_tx_id)
-                .cloned()
-        });
-        let outcome = match poisoned {
-            Some(error) => Poll::Ready(Err(error)),
-            None => operation.future.as_mut().poll(&mut context),
+        let mut deferred_reads: Vec<QueuedMutationOperation> = Vec::new();
+        let mut active_operation = None;
+        let pending = loop {
+            let Some(mut operation) = self.queued_mutations.borrow_mut().pop_front() else {
+                break !deferred_reads.is_empty();
+            };
+            // ponytail: scan pending readers; index by transaction if wide
+            // concurrent read batches make this quadratic path significant.
+            if deferred_reads
+                .iter()
+                .any(|read| read.open_tx_id == operation.open_tx_id)
+            {
+                // Reads in one transaction retain their invocation order. A
+                // later mutation also fences every operation behind it.
+                if operation.transaction.is_some() || operation.completion.is_none() {
+                    self.queued_mutations.borrow_mut().push_front(operation);
+                    break true;
+                }
+                deferred_reads.push(operation);
+                continue;
+            }
+            let poisoned = operation.open_tx_id.and_then(|open_tx_id| {
+                self.queued_open_transaction_failures
+                    .borrow()
+                    .get(&open_tx_id)
+                    .cloned()
+            });
+            let outcome = match poisoned {
+                Some(error) => Poll::Ready(Err(error)),
+                None => operation.future.as_mut().poll(&mut context),
+            };
+            match outcome {
+                Poll::Pending
+                    if operation.transaction.is_none()
+                        && operation.open_tx_id.is_some()
+                        && operation.completion.is_some()
+                        && self.owner_is_available() =>
+                {
+                    // Remote coverage must not stop unrelated local work.
+                    // No queue scan or allocation is needed for ready reads.
+                    deferred_reads.push(operation);
+                }
+                Poll::Pending => {
+                    // Once started, this operation may own the lock needed by
+                    // the deferred reads. It must resume before those readers.
+                    active_operation = Some(operation);
+                    break true;
+                }
+                Poll::Ready(result) => {
+                    self.finish_queued_mutation(operation, result);
+                    break !deferred_reads.is_empty();
+                }
+            }
         };
-        match outcome {
-            Poll::Pending => {
-                self.queued_mutations.borrow_mut().push_front(operation);
-                true
-            }
-            Poll::Ready(result) => {
-                self.finish_queued_mutation(operation, result);
-                false
-            }
+        for read in deferred_reads.into_iter().rev() {
+            self.queued_mutations.borrow_mut().push_front(read);
         }
+        if let Some(operation) = active_operation {
+            self.queued_mutations.borrow_mut().push_front(operation);
+        }
+        pending
     }
 
     fn finish_queued_mutation(
@@ -819,7 +906,7 @@ where
             .contains(&tx_id)
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
         self.node
             .borrow_mut()
@@ -1081,6 +1168,11 @@ where
             .query_runtime_wake_pending
             .swap(false, Ordering::AcqRel)
         {
+            self.local_subscription_dirty_generation.set(
+                self.local_subscription_dirty_generation
+                    .get()
+                    .wrapping_add(1),
+            );
             self.mark_subscriber_connections_dirty();
         }
     }
@@ -1371,6 +1463,7 @@ where
         self.finish_transaction_abandonment_shutdown_in(&mut node)
     }
 
+    #[cfg(test)]
     pub(super) fn transaction_abandonment_shutdown_is_pending(&self) -> bool {
         self.transaction_abandonment_shutdown_pending.get()
     }
@@ -1528,10 +1621,6 @@ where
         self.pending_relay_subscription_rejections
             .borrow_mut()
             .clear();
-    }
-
-    pub(super) fn subscription_finalization_shutdown_is_pending(&self) -> bool {
-        self.subscription_finalizations_closed.get() && !self.subscription_runtime_retired.get()
     }
 
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
@@ -3310,7 +3399,12 @@ where
         let mut stats = DbTickStats::default();
         let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
-        if self.local_availability_dirty.replace(false)
+        // Another query can finish a local subscription's first terminal batch
+        // before this turn. Groove is then idle, but the queued terminal still
+        // needs to be folded into the application stream. Preserve its wake as
+        // local delivery work as well as downstream peer publication work.
+        let local_dirty_generation = self.local_subscription_dirty_generation.get();
+        if local_dirty_generation != self.observed_local_subscription_dirty_generation.get()
             || self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
             || self.node.lock().await.has_pending_query_runtime()
@@ -3322,6 +3416,10 @@ where
                 progress_waker.as_ref(),
             ))
             .await?;
+            // Acknowledge only completed delivery. Cancellation/error retains
+            // this generation, and wakes consumed during refresh remain dirty.
+            self.observed_local_subscription_dirty_generation
+                .set(local_dirty_generation);
             self.observed_chunk_completion_generation
                 .set(chunk_completion_generation);
         }
@@ -3666,7 +3764,11 @@ where
                             drop(owner);
                             self.subscriber_dirty_epoch
                                 .set(self.subscriber_dirty_epoch.get().wrapping_add(1));
-                            self.local_availability_dirty.set(true);
+                            self.local_subscription_dirty_generation.set(
+                                self.local_subscription_dirty_generation
+                                    .get()
+                                    .wrapping_add(1),
+                            );
                             self.schedule_tick(TickUrgency::Immediate);
                         }
                     }
