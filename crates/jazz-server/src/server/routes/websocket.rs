@@ -7,7 +7,6 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
@@ -37,8 +36,20 @@ const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTI
 const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
-static WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
-static WS_ADMISSIONS: OnceLock<std::sync::Mutex<WebSocketAdmissionRegistry>> = OnceLock::new();
+#[derive(Debug)]
+pub(crate) struct WebSocketAdmissionState {
+    registry: std::sync::Mutex<WebSocketAdmissionRegistry>,
+    next_connection_id: AtomicU64,
+}
+
+impl Default for WebSocketAdmissionState {
+    fn default() -> Self {
+        Self {
+            registry: std::sync::Mutex::new(WebSocketAdmissionRegistry::default()),
+            next_connection_id: AtomicU64::new(1),
+        }
+    }
+}
 
 /// Jazz WebSocket endpoint.
 ///
@@ -113,42 +124,44 @@ struct WebSocketAdmissionRegistration {
     /// Present only for a public session. Trusted backend links are not part of
     /// the per-session connection cap: one edge legitimately owns multiple
     /// short-lived bootstrap and long-lived replication sockets under SYSTEM.
+    owner: Arc<WebSocketAdmissionState>,
     key: Option<WebSocketAdmissionKey>,
     id: u64,
     evict_rx: mpsc::UnboundedReceiver<WebSocketEviction>,
-    /// Keeps an unbounded registration's receiver pending without retaining a
-    /// global admission-registry entry.
+    /// Keeps an unbounded registration's receiver pending without retaining an
+    /// admission-registry entry.
     _unbounded_keepalive: Option<mpsc::UnboundedSender<WebSocketEviction>>,
 }
 
 impl Drop for WebSocketAdmissionRegistration {
     fn drop(&mut self) {
         if let Some(key) = self.key {
-            ws_unregister_admission(key, self.id);
+            ws_unregister_admission(&self.owner, key, self.id);
         }
     }
 }
 
-fn ws_admission_registry() -> &'static std::sync::Mutex<WebSocketAdmissionRegistry> {
-    WS_ADMISSIONS.get_or_init(Default::default)
-}
-
 fn ws_register_admission(
+    owner: Arc<WebSocketAdmissionState>,
     key: WebSocketAdmissionKey,
     enforce_session_cap: bool,
 ) -> WebSocketAdmissionRegistration {
     if !enforce_session_cap {
         let (keepalive, evict_rx) = mpsc::unbounded_channel();
         return WebSocketAdmissionRegistration {
+            owner,
             key: None,
             id: 0,
             evict_rx,
             _unbounded_keepalive: Some(keepalive),
         };
     }
-    let id = WS_NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+    let id = owner.next_connection_id.fetch_add(1, Ordering::Relaxed);
     let (evict_tx, evict_rx) = mpsc::unbounded_channel();
-    let mut registry = ws_admission_registry().lock().unwrap();
+    let mut registry = owner
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let entries = registry.by_key.entry(key).or_default();
     entries.push_back(WebSocketAdmissionEntry { id, evict_tx });
 
@@ -158,7 +171,10 @@ fn ws_register_admission(
         }
     }
 
+    drop(registry);
+
     WebSocketAdmissionRegistration {
+        owner,
         key: Some(key),
         id,
         evict_rx,
@@ -166,8 +182,11 @@ fn ws_register_admission(
     }
 }
 
-fn ws_unregister_admission(key: WebSocketAdmissionKey, id: u64) {
-    let mut registry = ws_admission_registry().lock().unwrap();
+fn ws_unregister_admission(owner: &WebSocketAdmissionState, key: WebSocketAdmissionKey, id: u64) {
+    let mut registry = owner
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(entries) = registry.by_key.get_mut(&key) else {
         return;
     };
@@ -178,10 +197,12 @@ fn ws_unregister_admission(key: WebSocketAdmissionKey, id: u64) {
 }
 
 #[cfg(test)]
-fn ws_live_admissions_for(key: WebSocketAdmissionKey) -> usize {
-    ws_admission_registry()
+fn ws_live_admissions_for(state: &ServerState, key: WebSocketAdmissionKey) -> usize {
+    state
+        .websocket_admissions
+        .registry
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .by_key
         .get(&key)
         .map_or(0, VecDeque::len)
@@ -676,6 +697,7 @@ async fn handle_ws_connection(
     // reconnecting.  Reserved subjects are rejected by `ws_admission` before
     // reaching this point.
     let mut admission_registration = ws_register_admission(
+        Arc::clone(&state.websocket_admissions),
         WebSocketAdmissionKey {
             inspector_operator: admission.inspector_operator,
             app_id: state.app_id,
@@ -3889,14 +3911,15 @@ mod tests {
     }
 
     async fn wait_for_ws_live_admissions(
+        state: &ServerState,
         key: WebSocketAdmissionKey,
         predicate: impl Fn(usize) -> bool,
     ) -> usize {
         let start = tokio::time::Instant::now();
-        let mut live = ws_live_admissions_for(key);
+        let mut live = ws_live_admissions_for(state, key);
         while !predicate(live) && start.elapsed() < WS_SETTLE_DEADLINE {
             tokio::time::sleep(Duration::from_millis(25)).await;
-            live = ws_live_admissions_for(key);
+            live = ws_live_admissions_for(state, key);
         }
         live
     }
@@ -3955,13 +3978,109 @@ mod tests {
         );
 
         tokio::time::timeout(Duration::from_secs(5), async {
-            while ws_live_admissions_for(key) > WS_PER_IDENTITY_CONNECTION_CAP {
+            while ws_live_admissions_for(&state, key) > WS_PER_IDENTITY_CONNECTION_CAP {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .expect("websocket admission cleanup");
-        assert_eq!(ws_live_admissions_for(key), WS_PER_IDENTITY_CONNECTION_CAP);
+        assert_eq!(
+            ws_live_admissions_for(&state, key),
+            WS_PER_IDENTITY_CONNECTION_CAP
+        );
+    }
+
+    // Internal route-boundary test: the admission cap belongs to each
+    // independently built ServerState, even when states serve the same app
+    // and authenticated identity. Observe the established sockets' protocol
+    // behavior rather than relying on registry counts alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn websocket_admission_cap_is_scoped_to_server_state() {
+        let app_id = AppId::random();
+        let state_a = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_core_server_shell_schema(ws_public_schema_convert())
+            .build()
+            .await
+            .expect("build first websocket server state")
+            .state;
+        let state_b = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_core_server_shell_schema(ws_public_schema_convert())
+            .build()
+            .await
+            .expect("build second websocket server state")
+            .state;
+        let addr_a = start_ws_test_server(state_a.clone()).await;
+        let addr_b = start_ws_test_server(state_b.clone()).await;
+        let identity = AuthorSubject::for_test_bytes([0x4a; 16]);
+
+        let mut sockets_a = Vec::with_capacity(WS_PER_IDENTITY_CONNECTION_CAP);
+        for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
+            let mut socket = open_negotiated_ws_session(addr_a, &state_a, identity).await;
+            let _ = receive_required_ws_encoded_frames(&mut socket).await;
+            sockets_a.push(socket);
+        }
+        let mut oldest_a = sockets_a.remove(0);
+
+        // This admission must succeed without evicting the oldest socket on
+        // the other ServerState.
+        let mut session_b = open_negotiated_ws_session(addr_b, &state_b, identity).await;
+        let _ = receive_required_ws_encoded_frames(&mut session_b).await;
+        let _session_b = session_b;
+
+        let ping = vec![0x4a, 0x4b, 0x4c];
+        oldest_a
+            .send(WsMessage::Ping(ping.clone().into()))
+            .await
+            .expect("send liveness ping on first server");
+        let handshake_deadline = tokio::time::Instant::now() + WS_SETTLE_DEADLINE;
+        let mut post_pong_deadline = None;
+        let mut saw_pong = false;
+        loop {
+            let deadline = post_pong_deadline.unwrap_or(handshake_deadline);
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, oldest_a.next()).await {
+                Ok(Some(Ok(WsMessage::Pong(payload)))) => {
+                    assert_eq!(payload.as_ref(), ping.as_slice());
+                    saw_pong = true;
+                    post_pong_deadline =
+                        Some(tokio::time::Instant::now() + Duration::from_millis(250));
+                }
+                Ok(Some(Ok(WsMessage::Binary(bytes)))) => {
+                    let frames = decode_ws_message(&WsMessage::Binary(bytes));
+                    panic!("first server state unexpectedly emitted {frames:?}");
+                }
+                Ok(Some(Ok(WsMessage::Close(frame)))) => {
+                    panic!("first server state evicted its oldest socket: {frame:?}");
+                }
+                Ok(Some(Err(error))) => panic!("first server socket failed: {error}"),
+                Ok(Some(Ok(message))) => {
+                    panic!("unexpected first server websocket message: {message:?}");
+                }
+                Ok(None) => panic!("first server websocket ended"),
+                Err(_) => break,
+            }
+        }
+        assert!(
+            saw_pong,
+            "oldest socket on first server must remain usable after second admission"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3981,7 +4100,7 @@ mod tests {
         }
 
         assert_eq!(
-            ws_live_admissions_for(key),
+            ws_live_admissions_for(&state, key),
             0,
             "verified trusted links must not consume the untrusted per-session cap"
         );
@@ -4017,8 +4136,10 @@ mod tests {
             "websocket cap must evict older sockets, not reject new handshakes"
         );
 
-        let live =
-            wait_for_ws_live_admissions(key, |count| count <= WS_PER_IDENTITY_CONNECTION_CAP).await;
+        let live = wait_for_ws_live_admissions(&state, key, |count| {
+            count <= WS_PER_IDENTITY_CONNECTION_CAP
+        })
+        .await;
         assert!(
             live <= WS_PER_IDENTITY_CONNECTION_CAP,
             "websocket must bound live admissions per peer_identity to {WS_PER_IDENTITY_CONNECTION_CAP}; got {live}"
@@ -4049,10 +4170,9 @@ mod tests {
             quiet_sockets.push(open_negotiated_ws_session(addr, &state, quiet_identity).await);
         }
         assert_eq!(
-            ws_live_admissions_for(quiet_key),
+            ws_live_admissions_for(&state, quiet_key),
             WS_PER_IDENTITY_CONNECTION_CAP
         );
-
         let mut pending = FuturesUnordered::new();
         for _ in 0..WS_STORM_SIZE {
             pending.push(open_negotiated_ws_session(addr, &state, noisy_identity));
@@ -4062,15 +4182,16 @@ mod tests {
             noisy_sockets.push(ws);
         }
 
-        let noisy_live =
-            wait_for_ws_live_admissions(noisy_key, |count| count <= WS_PER_IDENTITY_CONNECTION_CAP)
-                .await;
+        let noisy_live = wait_for_ws_live_admissions(&state, noisy_key, |count| {
+            count <= WS_PER_IDENTITY_CONNECTION_CAP
+        })
+        .await;
         assert!(
             noisy_live <= WS_PER_IDENTITY_CONNECTION_CAP,
             "noisy identity live admissions must be bounded; got {noisy_live}"
         );
         assert_eq!(
-            ws_live_admissions_for(quiet_key),
+            ws_live_admissions_for(&state, quiet_key),
             WS_PER_IDENTITY_CONNECTION_CAP,
             "quiet identity admissions must not be evicted by another peer_identity storm"
         );
@@ -4096,16 +4217,18 @@ mod tests {
             sockets.push(open_negotiated_ws_session(addr, &state, identity).await);
         }
         assert_eq!(
-            wait_for_ws_live_admissions(key, |count| { count == WS_PER_IDENTITY_CONNECTION_CAP })
-                .await,
+            wait_for_ws_live_admissions(&state, key, |count| count
+                == WS_PER_IDENTITY_CONNECTION_CAP,)
+            .await,
             WS_PER_IDENTITY_CONNECTION_CAP
         );
 
         for cycle in 0..(WS_PER_IDENTITY_CONNECTION_CAP * 3) {
             sockets.push(open_negotiated_ws_session(addr, &state, identity).await);
-            let live =
-                wait_for_ws_live_admissions(key, |count| count == WS_PER_IDENTITY_CONNECTION_CAP)
-                    .await;
+            let live = wait_for_ws_live_admissions(&state, key, |count| {
+                count == WS_PER_IDENTITY_CONNECTION_CAP
+            })
+            .await;
             assert_eq!(
                 live, WS_PER_IDENTITY_CONNECTION_CAP,
                 "live websocket admissions must stay at cap after reconnect cycle {cycle}; got {live}"

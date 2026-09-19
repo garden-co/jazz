@@ -2,6 +2,12 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { buildInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
+import {
+  OVERLAY_EMBEDDED_PREFIX,
+  OVERLAY_ENABLED_MESSAGE,
+  startOverlayAssetServer,
+  type OverlayAssetServer,
+} from "./inspector-overlay/serve.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
 export interface NextJazzServerOptions extends JazzServerOptions {
@@ -68,6 +74,12 @@ const runtime = new ManagedDevRuntime({
   serverUrl: PUBLIC_SERVER_URL_ENV,
   telemetryCollectorUrl: PUBLIC_TELEMETRY_COLLECTOR_URL_ENV,
 });
+let overlayServer: Promise<OverlayAssetServer> | undefined;
+
+type NextRewrite = { source: string; destination: string; [key: string]: unknown };
+type NextRewrites =
+  | NextRewrite[]
+  | { beforeFiles?: NextRewrite[]; afterFiles?: NextRewrite[]; fallback?: NextRewrite[] };
 
 function mergeServerExternalPackages(existing: string[] | undefined): string[] {
   return Array.from(new Set([...(existing ?? []), "jazz-napi"]));
@@ -159,6 +171,38 @@ export function withJazz(
       hasLoggedInspectorLink = true;
     }
 
+    let inspectorConfig: NextConfigLike = {};
+    if (options.inspector !== false) {
+      overlayServer ??= startOverlayAssetServer()
+        .then((server) => {
+          console.log(OVERLAY_ENABLED_MESSAGE);
+          return server;
+        })
+        .catch((error) => {
+          overlayServer = undefined;
+          throw error;
+        });
+      const { origin } = await overlayServer;
+      const previousRewrites = merged.rewrites as (() => Promise<NextRewrites>) | undefined;
+      inspectorConfig = {
+        async rewrites() {
+          const existing = previousRewrites ? await previousRewrites() : [];
+          const inspectorRewrite = {
+            source: `${OVERLAY_EMBEDDED_PREFIX}/:path*`,
+            destination: `${origin}${OVERLAY_EMBEDDED_PREFIX}/:path*`,
+          };
+          // Reserve the inspector route before filesystem routes; preserve the
+          // afterFiles semantics of the application's array-form rewrites.
+          return Array.isArray(existing)
+            ? { beforeFiles: [inspectorRewrite], afterFiles: existing, fallback: [] }
+            : {
+                ...existing,
+                beforeFiles: [inspectorRewrite, ...(existing.beforeFiles ?? [])],
+              };
+        },
+      };
+    }
+
     const stubPath = join(resolvedAppRoot, SCHEMA_HASH_STUB_SUBPATH);
     // Turbopack interprets absolute alias targets as server-relative paths and
     // refuses to resolve them. Use the project-root-relative form there. Webpack
@@ -166,10 +210,12 @@ export function withJazz(
     const turbopackStubPath = `./${SCHEMA_HASH_STUB_SUBPATH}`;
     return withSealedWasm({
       ...merged,
+      ...inspectorConfig,
       env: {
         ...merged.env,
         [PUBLIC_APP_ID_ENV]: managed.appId,
         [PUBLIC_SERVER_URL_ENV]: managed.serverUrl,
+        ...(options.inspector !== false ? { NEXT_PUBLIC_JAZZ_INSPECTOR: "1" } : {}),
         ...(managed.telemetryCollectorUrl
           ? { [PUBLIC_TELEMETRY_COLLECTOR_URL_ENV]: managed.telemetryCollectorUrl }
           : {}),
@@ -206,4 +252,8 @@ interface TurbopackConfig {
 
 export async function __resetJazzNextPluginForTests(): Promise<void> {
   await runtime.resetForTests();
+  if (overlayServer) {
+    await (await overlayServer).close();
+    overlayServer = undefined;
+  }
 }

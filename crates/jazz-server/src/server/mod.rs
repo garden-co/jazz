@@ -172,6 +172,11 @@ pub struct ServerState {
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
+    /// Per-state admission owner for policy-scoped WebSocket connections.
+    ///
+    /// The owner is shared by every router and connection task that clones
+    /// this `ServerState`, while independently built states remain isolated.
+    pub(crate) websocket_admissions: Arc<routes::WebSocketAdmissionState>,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
     pub(crate) storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
     /// Serializes durable-catalogue reconciliation into the local runtime shell.
@@ -741,6 +746,7 @@ mod tests {
             .expect("default forwarding policy"),
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
+            websocket_admissions: Arc::new(routes::WebSocketAdmissionState::default()),
             core_server_shell_storage_config: None,
             storage_factory: None,
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
