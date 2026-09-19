@@ -42,7 +42,10 @@ describe("BrowserWorkerTransportPump", () => {
     let retired = false;
     const failure = vi.fn();
     const peer = transport({
-      tick: () => held,
+      tick: async () => {
+        await held;
+        return 0;
+      },
       routeAuxiliaryWireFrame: () => {
         deadline = performance.now() + 20;
         return undefined;
