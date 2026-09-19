@@ -984,6 +984,7 @@ where
         if rejected.is_empty() {
             return Ok(None);
         }
+        self.clear_content_version_reachability_cache();
         let affected = rejected
             .iter()
             .map(|version| (version.table, version.row_uuid(), version.layer()))
@@ -1070,6 +1071,7 @@ where
             )
             .await?;
         }
+        self.clear_content_version_reachability_cache();
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
         Ok(rejected_payload)
