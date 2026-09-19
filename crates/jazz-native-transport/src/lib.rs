@@ -459,6 +459,12 @@ impl WebSocketTransport {
             tokio::select! {
                 _ = progress.notified() => {}
                 _ = notified => {}
+                _ = async {
+                    match jazz::db::Transport::incomplete_receive_timeout_ms(&wire) {
+                        Some(delay) => tokio::time::sleep(std::time::Duration::from_millis(delay)).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
                 _ = tokio::time::sleep_until(deadline) => {
                     return Err(WebSocketClientError::HandshakeTimeout);
                 }

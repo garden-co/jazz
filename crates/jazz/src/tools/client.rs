@@ -149,6 +149,9 @@ async fn drive_native_client_wire(
         |error: String| NativeTransportTerminal::Failed(NativeTransportError::Terminal(error));
     let result = async {
         loop {
+            if let Err(error) = pump.expire_incomplete_receive() {
+                return failed(error);
+            }
             let mut received = false;
             // Bounded turns keep cancellation and other connections runnable.
             for _ in 0..64 {
@@ -238,6 +241,14 @@ async fn drive_native_client_wire(
                 _ = scheduler.cancelled() => return NativeTransportTerminal::OwnerDropped,
                 stopped = &mut terminal => return stopped,
                 _ = transport.wake.notified() => {},
+                _ = async {
+                    match pump.incomplete_receive_timeout_ms() {
+                        Some(delay) => tokio::time::sleep(Duration::from_millis(delay)).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    if let Err(error) = pump.expire_incomplete_receive() { return failed(error); }
+                },
                 _ = async {
                     if backpressured { std::future::pending::<()>().await; }
                     pump.outbound_ready().await;
@@ -942,7 +953,7 @@ struct TickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
     after_current_turn: AtomicBool,
-    delayed: AtomicBool,
+    delayed: std::sync::Mutex<Option<(tokio::time::Instant, tokio::task::AbortHandle)>>,
     cancelled: AtomicBool,
     cancel_notify: tokio::sync::Notify,
     notify: tokio::sync::Notify,
@@ -960,6 +971,9 @@ impl TickState {
 
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        if let Some((_, task)) = self.delayed.lock().unwrap().take() {
+            task.abort();
+        }
         self.cancel_notify.notify_waiters();
     }
 }
@@ -1023,23 +1037,32 @@ impl TickSchedulerImpl {
     }
 
     fn wake_after(&self, delay_ms: u64) {
-        // One delayed wake is enough to service all currently rate-limited
-        // uploads. The protocol has no receiver-supplied retry-after, so every
-        // caller uses the same bounded default admission window.
-        if self.state.delayed.swap(true, Ordering::AcqRel) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(delay_ms);
+        let mut pending = self.state.delayed.lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|(earlier, _)| *earlier <= deadline)
+        {
             return;
         }
+        if let Some((_, task)) = pending.take() {
+            task.abort();
+        }
         let state = Arc::clone(&self.state);
-        tokio::task::spawn_local(async move {
+        let task = tokio::task::spawn_local(async move {
             tokio::select! {
                 _ = state.cancelled() => {}
-                _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {
-                    state.delayed.store(false, Ordering::Release);
+                _ = tokio::time::sleep_until(deadline) => {
+                    let mut pending = state.delayed.lock().unwrap();
+                    if pending.as_ref().is_none_or(|(current, _)| *current != deadline) { return; }
+                    pending.take();
+                    drop(pending);
                     state.deferred.store(true, Ordering::Release);
                     state.notify.notify_one();
                 }
             }
         });
+        *pending = Some((deadline, task.abort_handle()));
     }
 }
 
@@ -4594,6 +4617,32 @@ mod tests {
     // These internal lifecycle tests are necessary because a detached
     // spawn_local task and a late connection installation have no direct
     // public observation once the client has consumed its core facade.
+
+    // Scheduler deadlines belong to different peers and upload retries. An
+    // already armed long receive timeout must not suppress an earlier wake.
+    #[tokio::test(flavor = "current_thread")]
+    async fn earlier_client_deadline_replaces_pending_later_wake() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let scheduler = TickSchedulerImpl::default();
+                scheduler.wake_after(30_000);
+                scheduler.wake_after(5);
+                tokio::time::timeout(Duration::from_secs(1), scheduler.state.notify.notified())
+                    .await
+                    .unwrap();
+                assert!(scheduler.take().is_some());
+                // A host tick services every peer and rearms remaining deadlines.
+                scheduler.wake_after(10);
+                tokio::time::timeout(Duration::from_secs(1), scheduler.state.notify.notified())
+                    .await
+                    .unwrap();
+                assert!(scheduler.take().is_some());
+                scheduler.wake_after(30_000);
+                scheduler.cancel();
+                assert!(scheduler.state.delayed.lock().unwrap().is_none());
+            })
+            .await;
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_shutdown_aborts_owned_tick_driver() {

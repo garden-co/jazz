@@ -266,16 +266,154 @@ struct ServerShellTickScheduler {
     state: Arc<ServerShellTickState>,
 }
 
+// The owner uses LocalPool without a Tokio timer context. One lazily started
+// host worker services all incomplete-channel deadlines for this runtime.
+// Each pending future owns one removable entry; ordinary traffic starts none.
+#[derive(Default)]
+struct ReceiveTimerState {
+    next_id: u64,
+    stopped: bool,
+    deadlines: BTreeMap<(std::time::Instant, u64), Arc<ReceiveTimerSignal>>,
+}
+#[derive(Default)]
+struct ReceiveTimerSignal {
+    callback: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    ready: AtomicBool,
+    waker: futures::task::AtomicWaker,
+}
+struct ReceiveTimerQueue {
+    shared: Arc<(Mutex<ReceiveTimerState>, Condvar)>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl ReceiveTimerQueue {
+    fn new() -> Self {
+        let shared = Arc::new((Mutex::new(ReceiveTimerState::default()), Condvar::new()));
+        let worker_shared = Arc::clone(&shared);
+        let worker = thread::Builder::new()
+            .name("jazz-receive-deadlines".into())
+            .spawn(move || {
+                let (lock, changed) = &*worker_shared;
+                let mut state = lock.lock().unwrap();
+                loop {
+                    if state.stopped {
+                        break;
+                    }
+                    let Some((&(deadline, _), _)) = state.deadlines.first_key_value() else {
+                        state = changed.wait(state).unwrap();
+                        continue;
+                    };
+                    let now = std::time::Instant::now();
+                    if deadline > now {
+                        state = changed.wait_timeout(state, deadline - now).unwrap().0;
+                        continue;
+                    }
+                    let (_, signal) = state.deadlines.pop_first().unwrap();
+                    drop(state);
+                    signal.ready.store(true, Ordering::Release);
+                    signal.waker.wake();
+                    if let Some(callback) = signal.callback.lock().unwrap().take() {
+                        callback();
+                    }
+                    state = lock.lock().unwrap();
+                }
+            })
+            .expect("server receive timer worker starts");
+        Self {
+            shared,
+            worker: Some(worker),
+        }
+    }
+    fn after(&self, delay_ms: u64) -> ReceiveTimer {
+        self.register(delay_ms, None)
+    }
+    fn register(&self, delay_ms: u64, callback: Option<Box<dyn FnOnce() + Send>>) -> ReceiveTimer {
+        let signal = Arc::new(ReceiveTimerSignal {
+            callback: Mutex::new(callback),
+            ..Default::default()
+        });
+        let (lock, changed) = &*self.shared;
+        let mut state = lock.lock().unwrap();
+        let key = (
+            std::time::Instant::now() + std::time::Duration::from_millis(delay_ms),
+            state.next_id,
+        );
+        state.next_id = state
+            .next_id
+            .checked_add(1)
+            .expect("receive timer id exhausted");
+        state.deadlines.insert(key, Arc::clone(&signal));
+        changed.notify_one();
+        ReceiveTimer {
+            shared: Arc::downgrade(&self.shared),
+            key,
+            signal,
+        }
+    }
+}
+impl Drop for ReceiveTimerQueue {
+    fn drop(&mut self) {
+        let (lock, changed) = &*self.shared;
+        lock.lock().unwrap().stopped = true;
+        changed.notify_one();
+        if let Some(worker) = self.worker.take() {
+            if worker.thread().id() != thread::current().id() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+struct ReceiveTimer {
+    shared: std::sync::Weak<(Mutex<ReceiveTimerState>, Condvar)>,
+    key: (std::time::Instant, u64),
+    signal: Arc<ReceiveTimerSignal>,
+}
+impl std::future::Future for ReceiveTimer {
+    type Output = ();
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+        self.signal.waker.register(cx.waker());
+        if self.signal.ready.load(Ordering::Acquire) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+impl Drop for ReceiveTimer {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.upgrade() {
+            let (lock, changed) = &*shared;
+            lock.lock().unwrap().deadlines.remove(&self.key);
+            changed.notify_one();
+        }
+        self.signal.waker.take();
+    }
+}
+
 #[derive(Default)]
 struct ServerShellTickState {
+    receive_timers: std::sync::OnceLock<ReceiveTimerQueue>,
     queued: AtomicBool,
-    delayed: AtomicBool,
+    delayed: Mutex<Option<(std::time::Instant, ReceiveTimer)>>,
     deferred: AtomicBool,
     query_wake_queued: AtomicBool,
     #[cfg(test)]
     deferred_timer_gate: Mutex<Option<ServerShellTimerGate>>,
     #[cfg(test)]
     delayed_timer_gate: Mutex<Option<ServerShellTimerGate>>,
+}
+
+impl ServerShellTickState {
+    async fn receive_deadline(&self, delay_ms: Option<u64>) {
+        match delay_ms {
+            Some(delay) => {
+                self.receive_timers
+                    .get_or_init(ReceiveTimerQueue::new)
+                    .after(delay)
+                    .await
+            }
+            None => futures::future::pending::<()>().await,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -416,27 +554,45 @@ impl TickScheduler for ServerShellTickScheduler {
     }
 
     fn schedule_tick_after(&self, delay_ms: u64) {
-        // The shell owner must not sleep: it owns the thread-affine database
-        // and needs to keep accepting transport work while an upload waits for
-        // its admission window. Coalesce same-window retry wakes, then return
-        // to the owner queue from a tiny timer thread.
-        #[cfg(test)]
-        let _ = delay_ms;
-        if self.state.delayed.swap(true, Ordering::AcqRel) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(delay_ms);
+        let mut pending = self.state.delayed.lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|(earlier, _)| *earlier <= deadline)
+        {
             return;
         }
         let jobs = self.jobs.clone();
         let activity_tx = self.activity_tx.clone();
         let io_wakers = Arc::clone(&self.io_wakers);
-        let state = Arc::clone(&self.state);
-        thread::spawn(move || {
-            #[cfg(test)]
-            wait_for_test_timer_gate(&state.delayed_timer_gate);
-            #[cfg(not(test))]
-            thread::sleep(std::time::Duration::from_millis(delay_ms));
-            state.delayed.store(false, Ordering::Release);
-            Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
-        });
+        let weak = Arc::downgrade(&self.state);
+        let timer = self
+            .state
+            .receive_timers
+            .get_or_init(ReceiveTimerQueue::new)
+            .register(
+                delay_ms,
+                Some(Box::new(move || {
+                    let Some(state) = weak.upgrade() else {
+                        return;
+                    };
+                    // A cancelled older callback may already have left the timer map.
+                    // It must not consume a replacement deadline or emit an extra tick.
+                    let mut pending = state.delayed.lock().unwrap();
+                    if pending
+                        .as_ref()
+                        .is_none_or(|(current, _)| *current != deadline)
+                    {
+                        return;
+                    }
+                    pending.take();
+                    drop(pending);
+                    #[cfg(test)]
+                    wait_for_test_timer_gate(&state.delayed_timer_gate);
+                    Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
+                })),
+            );
+        *pending = Some((deadline, timer));
     }
 
     fn query_runtime_waker(&self) -> Option<std::task::Waker> {
@@ -486,8 +642,9 @@ fn dispatch_ingress(
     pumps: &SessionPumps,
     workers: &mut AuxiliaryWorkers,
     spawner: &futures::executor::LocalSpawner,
-    activity_tx: watch::Sender<u64>,
+    scheduler: ServerShellTickScheduler,
 ) -> Option<ServerShellCommand> {
+    let activity_tx = scheduler.activity_tx.clone();
     let Some(pump) = pumps.get(&session).filter(|pump| !pump.is_disconnected()) else {
         let _ = reply.send(Err("invalid or retired server session".to_owned()));
         return None;
@@ -511,10 +668,15 @@ fn dispatch_ingress(
         let worker = workers.entry(session).or_insert_with(|| {
             let (sender, mut receiver) = mpsc::unbounded::<AuxiliaryIngress>();
             let pump = pump.clone();
-            let auxiliary_activity = activity_tx.clone();
+            let auxiliary_activity = scheduler.activity_tx.clone();
             spawner.spawn_local(async move {
                 let mut active_reply: Option<FrameStreamSender> = None;
                 loop {
+                    if let Err(error) = pump.expire_incomplete_receive() {
+                        pump.disconnect();
+                        if let Some(reply) = &active_reply { let _ = reply.send(Err(error)); }
+                        break;
+                    }
                     let output_enabled = active_reply.as_ref().is_some_and(|reply| !reply.is_closed());
                     let outbound = async {
                         if output_enabled {
@@ -523,9 +685,18 @@ fn dispatch_ingress(
                             futures::future::pending::<()>().await;
                         }
                     }.fuse();
+                    let deadline = scheduler.state.receive_deadline(pump.incomplete_receive_timeout_ms()).fuse();
                     let incoming = receiver.next().fuse();
-                    futures::pin_mut!(outbound, incoming);
+                    futures::pin_mut!(outbound, incoming, deadline);
                     let work = futures::select! {
+                        _ = deadline => {
+                            if let Err(error) = pump.expire_incomplete_receive() {
+                        pump.disconnect();
+                                if let Some(reply) = &active_reply { let _ = reply.send(Err(error)); }
+                                break;
+                            }
+                            continue;
+                        },
                         work = incoming => match work { Some(work) => work, None => break },
                         _ = outbound => {
                             if pump.is_disconnected() { break; }
@@ -640,7 +811,7 @@ fn run_server_shell_owner(
                         &pumps,
                         &mut workers,
                         &spawner,
-                        scheduler.activity_tx.clone(),
+                        scheduler.clone(),
                     ) {
                         pending.push_front(command);
                     }
@@ -682,7 +853,7 @@ fn run_server_shell_owner(
                                     &pumps,
                                     &mut workers,
                                     &spawner,
-                                    scheduler.activity_tx.clone(),
+                                    scheduler.clone(),
                                 ) {
                                     pending.push_back(command);
                                 }
@@ -807,6 +978,9 @@ async fn drive_upstream_wire(
     let connection_id = io.connection_id;
     let reason = async {
         loop {
+            if let Err(error) = io.pump.expire_incomplete_receive() {
+                return ServerUpstreamTerminalReason::ProtocolFailed(error);
+            }
             let mut staged_semantic_input = false;
             while let Some(frame) = wire.try_recv_frame() {
                 match io.pump.route_incoming_wire_frame(frame).await {
@@ -887,6 +1061,10 @@ async fn drive_upstream_wire(
                 continue;
             }
 
+            let deadline = scheduler
+                .state
+                .receive_deadline(io.pump.incomplete_receive_timeout_ms())
+                .fuse();
             let external_wake = wake_rx.next().fuse();
             let auxiliary_wake = async {
                 if transport_backpressured {
@@ -898,9 +1076,20 @@ async fn drive_upstream_wire(
             .fuse();
             let transport_stopped = transport_terminal.as_mut().fuse();
             let cancelled = (&mut cancel_rx).fuse();
-            futures::pin_mut!(external_wake, auxiliary_wake, transport_stopped, cancelled);
+            futures::pin_mut!(
+                external_wake,
+                auxiliary_wake,
+                transport_stopped,
+                cancelled,
+                deadline
+            );
             futures::select_biased! {
                 _ = cancelled => return ServerUpstreamTerminalReason::Cancelled,
+                _ = deadline => {
+                    if let Err(error) = io.pump.expire_incomplete_receive() {
+                        return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                    }
+                },
                 terminal = transport_stopped => {
                     return ServerUpstreamTerminalReason::NativeTransport(terminal);
                 }
@@ -2453,6 +2642,191 @@ mod tests {
         release_tx.send(()).unwrap();
         held.await.unwrap().unwrap();
         runtime.shutdown().await.unwrap();
+    }
+
+    // The owner suspension is an internal scheduling seam: real admitted
+    // session bytes must expire without another frame or a semantic tick.
+    #[tokio::test]
+    async fn partial_auxiliary_receive_expires_while_semantic_owner_is_suspended() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let features = crate::wire::current_wire_features();
+        let session = runtime
+            .open_with_session_context(
+                AuthorSubject::for_test_bytes([93; 16]),
+                BTreeMap::new(),
+                CommitUnitTrust::TrustedAdmin,
+                features,
+                None,
+                crate::serving::ServerLinkAdmission::OrdinarySession,
+            )
+            .await
+            .unwrap();
+        runtime
+            .run_async(move |shell| {
+                Box::pin(async move {
+                    let pump = shell.sessions[session.transport]
+                        .as_ref()
+                        .unwrap()
+                        .auxiliary_pump
+                        .clone();
+                    pump.set_incomplete_receive_timeout_for_test(20);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let mut stream = runtime.open_wire_stream(session).unwrap();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let held_runtime = runtime.clone();
+        let held = tokio::spawn(async move {
+            held_runtime
+                .run_async(move |_| {
+                    Box::pin(async move {
+                        let _ = started_tx.send(());
+                        release_rx.await.map_err(|_| "hold cancelled".to_owned())
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut peer =
+            crate::db::AuxiliaryChannelEndpoint::new(crate::wire::WireInboundContext::new(
+                crate::wire::WIRE_PROTOCOL_VERSION,
+                features,
+                None,
+            ))
+            .unwrap();
+        peer.enqueue(SyncMessage::ChunkResponseBatch(
+            crate::protocol::ChunkResponseBatch {
+                responses: vec![crate::protocol::ChunkResponseEntry {
+                    request_id: 1,
+                    result: crate::protocol::ChunkResponse::Found(
+                        vec![7; 3 * crate::wire::channels::CHANNEL_CHUNK_BYTES],
+                    ),
+                }],
+            },
+        ))
+        .unwrap();
+        let first = peer.peek_outbound().unwrap().unwrap();
+        peer.accept_outbound().unwrap();
+        assert!(
+            matches!(crate::wire::decode_frame(&first).unwrap(), WireFrame::Channel(frame) if frame.extent.first && !frame.extent.last)
+        );
+        runtime.receive_wire_frames(session, vec![first]).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match stream
+                    .recv()
+                    .await
+                    .expect("session emits a terminal expiry")
+                {
+                    Err(error) => return error,
+                    Ok(frames) => assert!(frames.iter().all(|bytes| matches!(
+                        crate::wire::decode_frame(bytes).unwrap(),
+                        WireFrame::ChannelCredit(_)
+                    ))),
+                }
+            }
+        })
+        .await
+        .expect("idle partial must expire without traffic or explicit polling");
+        assert!(error.contains("expired"), "{error}");
+        assert!(
+            !held.is_finished(),
+            "expiry does not require the semantic owner"
+        );
+        let next = peer.peek_outbound().unwrap().unwrap();
+        let mut retired = runtime.receive_tick_stream(session, vec![next]).unwrap();
+        let rejection = tokio::time::timeout(Duration::from_secs(2), retired.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            rejection.is_err(),
+            "retired decoder cannot resume after expiry"
+        );
+        release_tx.send(()).unwrap();
+        held.await.unwrap().unwrap();
+        runtime
+            .run_async(move |shell| {
+                Box::pin(async move {
+                    let pump = &shell.sessions[session.transport]
+                        .as_ref()
+                        .unwrap()
+                        .auxiliary_pump;
+                    assert!(pump.is_disconnected());
+                    assert!(
+                        pump.incomplete_receive_timeout_ms().is_none(),
+                        "expiry frees partial codec state"
+                    );
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn earlier_server_deadline_replaces_pending_later_wake() {
+        let (jobs, mut receiver) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let state = Arc::new(ServerShellTickState::default());
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::clone(&state),
+        };
+        scheduler.schedule_tick_after(30_000);
+        scheduler.schedule_tick_after(5);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.next())
+                .await
+                .unwrap(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+        state.queued.store(false, Ordering::Release);
+        // The tick services all peers; a still-partial peer rearms its remaining deadline.
+        scheduler.schedule_tick_after(10);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), receiver.next())
+                .await
+                .unwrap(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+        assert!(state.delayed.lock().unwrap().is_none());
+    }
+
+    // Timer cancellation and deadline ordering are host resources, not visible
+    // through row APIs. Dropping one connection's wait must not retain its slot
+    // or prevent another connection's earlier deadline from waking.
+    #[test]
+    fn receive_timer_queue_cancels_and_reorders_without_retaining_waiters() {
+        let timers = ReceiveTimerQueue::new();
+        let long = timers.after(60_000);
+        let cancelled = timers.after(60_000);
+        assert_eq!(timers.shared.0.lock().unwrap().deadlines.len(), 2);
+        drop(cancelled);
+        assert_eq!(timers.shared.0.lock().unwrap().deadlines.len(), 1);
+        futures::executor::block_on(timers.after(5));
+        assert_eq!(timers.shared.0.lock().unwrap().deadlines.len(), 1);
+        drop(long);
+        assert!(timers.shared.0.lock().unwrap().deadlines.is_empty());
+        let weak = Arc::downgrade(&timers.shared);
+        drop(timers);
+        assert!(
+            weak.upgrade().is_none(),
+            "worker exits when its runtime timer owner drops"
+        );
     }
 
     // Queue credits are private ownership, so test their exact release at this
