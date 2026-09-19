@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import { jazzPlugin } from "jazz-tools/dev/vite";
 
@@ -11,9 +11,23 @@ const apiProxy = {
   },
 };
 
-export default defineConfig({
-  plugins: [react(), jazzPlugin({ server: { jwksUrl: "http://localhost:3001/api/auth/jwks" } })],
-  worker: { format: "es" },
-  server: { proxy: apiProxy },
-  preview: { proxy: apiProxy },
+export default defineConfig(({ mode }) => {
+  const appOrigin =
+    loadEnv(mode, process.cwd(), "APP_ORIGIN").APP_ORIGIN ?? "http://localhost:3001";
+
+  return {
+    plugins: [
+      react(),
+      jazzPlugin({
+        server: {
+          jwksUrl: `${appOrigin}/api/auth/jwks`,
+          jwtIssuer: appOrigin,
+          jwtAudience: appOrigin,
+        },
+      }),
+    ],
+    worker: { format: "es" },
+    server: { proxy: apiProxy },
+    preview: { proxy: apiProxy },
+  };
 });
