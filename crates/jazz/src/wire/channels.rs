@@ -290,7 +290,7 @@ impl ChannelScheduler {
         if self.selected.is_none() {
             let eligible = |c: &OutboundChannel| has_credit(c.class) && !c.messages.is_empty();
             // Weight classes, then round-robin within each class: a newly
-            // admitted request waits at most one finite 18-frame class round,
+            // admitted request waits at most one finite 20-frame class round,
             // independent of how many large transfers are already active.
             const ROUND: [ChannelClass; 20] = [
                 ChannelClass::Control,
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn late_request_has_bounded_latency_with_many_busy_bulk_channels() {
         let mut scheduler = ChannelScheduler::default();
-        for slot in 3..AUXILIARY_CHANNEL {
+        for slot in 3..PROGRESS_CHANNEL {
             scheduler
                 .enqueue(
                     slot,
