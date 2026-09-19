@@ -3,28 +3,31 @@
 //! This stays below the database facade: it converts authenticated byte frames
 //! into logical sync messages without changing peer dispatch semantics.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-
-use web_time::Instant;
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use super::{ConnectionSessionContext, Transport};
 use crate::protocol::SyncMessage;
+use crate::protocol_limits::validate_wire_frame_len;
+#[cfg(test)]
 use crate::protocol_limits::{
     MAX_FRAGMENT_REASSEMBLY_AGE_MS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
     MAX_INFLIGHT_ENCODED_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
-    validate_encoded_message_len, validate_logical_message_len, validate_wire_frame_len,
+    validate_encoded_message_len,
 };
 use crate::wire::{
-    FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireEnvelope, WireError,
-    WireErrorCode, WireFeatures, WireFrame, WireInboundContext, WireMessageFragment, WireRetry,
-    WireSession, WireStreamDecoder, WireStreamEncoder, WireTransport, admit_complete_envelope,
-    current_wire_features, encode_frame, encode_sync_message_for_features,
+    TransportError, WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFeatures, WireFrame,
+    WireInboundContext, WireRetry, WireSession, WireTransport, current_wire_features,
 };
+#[cfg(test)]
+use crate::wire::{WireEnvelope, WireMessageFragment};
 
-const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
+#[cfg(test)]
 pub(super) const RECENT_COMPLETED_LOGICAL_MESSAGES: usize = 64;
 
 /// Adapter from postcard wire frames to the internal sync-message transport.
+#[cfg(test)]
 pub(super) struct IncompleteLogicalMessage {
     protocol_version: u16,
     features: WireFeatures,
@@ -37,6 +40,7 @@ pub(super) struct IncompleteLogicalMessage {
     deadline_ms: u64,
 }
 
+#[cfg(test)]
 pub(super) struct LogicalMessageReassembler {
     pub(super) incomplete: HashMap<u64, IncompleteLogicalMessage>,
     pub(super) staged_bytes: usize,
@@ -45,6 +49,7 @@ pub(super) struct LogicalMessageReassembler {
     recently_completed: VecDeque<(u64, [u8; 32])>,
 }
 
+#[cfg(test)]
 impl Default for LogicalMessageReassembler {
     fn default() -> Self {
         Self {
@@ -57,6 +62,7 @@ impl Default for LogicalMessageReassembler {
     }
 }
 
+#[cfg(test)]
 impl LogicalMessageReassembler {
     #[cfg(test)]
     pub(super) fn with_staging_budget_for_test(staging_budget: usize) -> Self {
@@ -235,33 +241,38 @@ impl LogicalMessageReassembler {
     }
 }
 
-/// Converts logical sync messages to negotiated bounded wire frames and back.
+/// Outcome of one bounded transport-output turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireFlushStatus {
+    /// No queued output remains.
+    Idle,
+    /// More output can be driven in another cooperative turn.
+    MoreReady,
+    /// A lower queue rejected this exact retained frame; await writable wake.
+    Backpressured,
+}
+
+/// Converts logical messages to mandatory wire-v3 ordered channels.
 pub struct WireTransportAdapter<T> {
     inner: T,
     inbound_context: WireInboundContext,
     session_context: Option<ConnectionSessionContext>,
     permits_delegated_sessions: bool,
-    outbound_stream: WireStreamEncoder,
-    inbound_stream: WireStreamDecoder,
-    pub(super) reassembler: LogicalMessageReassembler,
-    reassembly_started: Instant,
-    pending_outbound_frames: VecDeque<Vec<u8>>,
-    next_outbound_message_id: u64,
-    /// A permanent failure closes this adapter even when first observed while
-    /// a receive poll flushes an accepted outbound backlog.
+    endpoint: super::channel_endpoint::ChannelEndpoint,
+    auxiliary: super::SharedAuxiliaryEndpoint,
+    routes: BTreeMap<Vec<u8>, (u16, u64)>,
     terminal_error: Option<TransportError>,
+    // Retained only for historical fragment corpus tests, not live admission.
+    #[cfg(test)]
+    pub(super) reassembler: LogicalMessageReassembler,
 }
 
-impl<T> WireTransportAdapter<T>
-where
-    T: WireTransport,
-{
-    /// Wrap a byte transport with the current Jazz wire defaults.
+impl<T: WireTransport> WireTransportAdapter<T> {
+    /// Wrap an admitted byte transport with current wire defaults.
     pub fn current(inner: T) -> Self {
         Self::new(inner, WIRE_PROTOCOL_VERSION, current_wire_features(), None)
     }
-
-    /// Wrap a byte transport with explicit negotiated frame metadata.
+    /// Wrap a byte transport with negotiated metadata.
     pub fn new(
         inner: T,
         protocol_version: u16,
@@ -270,9 +281,7 @@ where
     ) -> Self {
         Self::new_with_session_context(inner, protocol_version, features, session, None)
     }
-
-    /// Wrap a transport after authenticated hello/session admission supplied
-    /// immutable endpoint identities and epochs.
+    /// Wrap a transport with immutable authenticated endpoint facts.
     pub fn new_with_session_context(
         inner: T,
         protocol_version: u16,
@@ -289,9 +298,7 @@ where
             false,
         )
     }
-
-    /// Wrap an already admitted trusted SYSTEM backend link. This is the only
-    /// transport form that may forward a downstream session binding upstream.
+    /// Wrap an admitted trusted backend permitted to forward session bindings.
     pub fn new_with_session_context_and_delegated_sessions(
         inner: T,
         protocol_version: u16,
@@ -300,371 +307,255 @@ where
         session_context: Option<ConnectionSessionContext>,
         permits_delegated_sessions: bool,
     ) -> Self {
-        let outbound_stream = WireStreamEncoder::new(features)
-            .expect("negotiated wire compression must be compiled into this binary");
-        let inbound_stream = WireStreamDecoder::new(features)
-            .expect("negotiated wire compression must be compiled into this binary");
+        let context = WireInboundContext::new(protocol_version, features, session);
         Self {
             inner,
-            inbound_context: WireInboundContext::new(protocol_version, features, session),
+            inbound_context: context.clone(),
             session_context,
             permits_delegated_sessions,
-            outbound_stream,
-            inbound_stream,
-            reassembler: LogicalMessageReassembler::default(),
-            reassembly_started: Instant::now(),
-            pending_outbound_frames: VecDeque::new(),
-            next_outbound_message_id: 0,
+            endpoint: super::channel_endpoint::ChannelEndpoint::new(context.clone())
+                .expect("valid channel context"),
+            auxiliary: std::sync::Arc::new(std::sync::Mutex::new(
+                super::AuxiliaryChannelEndpoint::new(context).expect("valid auxiliary context"),
+            )),
+            routes: BTreeMap::new(),
             terminal_error: None,
+            #[cfg(test)]
+            reassembler: LogicalMessageReassembler::default(),
         }
     }
-
-    /// Consume the adapter and return the wrapped byte transport.
+    /// Return the underlying byte transport.
     pub fn into_inner(self) -> T {
         self.inner
     }
 
-    fn reassembly_now_ms(&self) -> u64 {
-        self.reassembly_started
-            .elapsed()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX)
-    }
-
     #[cfg(test)]
     pub(super) fn set_reassembly_elapsed_for_test(&mut self, elapsed_ms: u64) {
-        self.reassembly_started = Instant::now() - std::time::Duration::from_millis(elapsed_ms);
+        self.reassembler.expire(elapsed_ms);
     }
 
-    fn send_wire_error(&mut self, error: WireError) {
-        if let Ok(frame) = encode_frame(&WireFrame::Error(error)) {
-            let _ = self.inner.send_frame(frame);
+    fn route(
+        &mut self,
+        message: &SyncMessage,
+    ) -> Result<(u16, u64, crate::wire::channels::ChannelClass, bool), TransportError> {
+        use crate::wire::channels::ChannelClass;
+        let (class, barrier) = super::channel_endpoint::message_class(message);
+        let fixed = match class {
+            ChannelClass::Control => Some(0),
+            ChannelClass::Requests => Some(1),
+            ChannelClass::Writes => Some(2),
+            _ => None,
+        };
+        if let Some(slot) = fixed {
+            return Ok((slot, 0, class, barrier));
         }
+        let key = delivery_route_key(message);
+        if let Some(&(slot, generation)) = self.routes.get(&key) {
+            return Ok((slot, generation, class, barrier));
+        }
+        let slot = (3..crate::wire::channels::AUXILIARY_CHANNEL)
+            .find(|slot| self.endpoint.is_idle(*slot))
+            .ok_or(TransportError::Backpressure)?;
+        let generation = self
+            .endpoint
+            .reset_idle(slot, class)
+            .map_err(TransportError::Failed)?;
+        self.routes.retain(|_, (existing, _)| *existing != slot);
+        self.routes.insert(key, (slot, generation));
+        Ok((slot, generation, class, barrier))
     }
 
-    fn flush_pending_outbound(&mut self) -> Result<(), TransportError> {
+    fn flush_turn(&mut self, turns: usize) -> Result<WireFlushStatus, TransportError> {
         if let Some(error) = &self.terminal_error {
             return Err(error.clone());
         }
-        while let Some(frame) = self.pending_outbound_frames.pop_front() {
-            if let Err(error) = self.inner.send_frame(frame.clone()) {
-                if matches!(error, TransportError::Failed(_)) {
-                    // A terminal adapter must not retain accepted-but-unsent
-                    // frames after the only possible retry path has closed.
-                    self.pending_outbound_frames.clear();
-                    self.terminal_error = Some(error.clone());
-                } else {
-                    self.pending_outbound_frames.push_front(frame);
+        for _ in 0..turns {
+            let canonical = self
+                .endpoint
+                .peek_outbound()
+                .map_err(TransportError::Failed)?;
+            if let Some(frame) = canonical {
+                match self.inner.send_frame(frame) {
+                    Ok(()) => {
+                        self.endpoint
+                            .accept_outbound()
+                            .map_err(TransportError::Failed)?;
+                    }
+                    Err(TransportError::Backpressure) => return Ok(WireFlushStatus::Backpressured),
+                    Err(error) => {
+                        self.terminal_error = Some(error.clone());
+                        return Err(error);
+                    }
                 }
-                return Err(error);
+            } else {
+                let mut aux = self.auxiliary.lock().map_err(|_| {
+                    TransportError::Failed("auxiliary channel mutex poisoned".into())
+                })?;
+                if aux.pump_owned() {
+                    return Ok(WireFlushStatus::Idle);
+                }
+                let Some(frame) = aux.peek_outbound().map_err(TransportError::Failed)? else {
+                    return Ok(WireFlushStatus::Idle);
+                };
+                match self.inner.send_frame(frame) {
+                    Ok(()) => {
+                        aux.accept_outbound().map_err(TransportError::Failed)?;
+                    }
+                    Err(TransportError::Backpressure) => return Ok(WireFlushStatus::Backpressured),
+                    Err(error) => {
+                        self.terminal_error = Some(error.clone());
+                        return Err(error);
+                    }
+                }
             }
         }
-        Ok(())
+        let aux = self
+            .auxiliary
+            .lock()
+            .map_err(|_| TransportError::Failed("auxiliary channel mutex poisoned".into()))?;
+        Ok(
+            if self.endpoint.has_pending() || (!aux.pump_owned() && aux.has_pending_outbound()) {
+                WireFlushStatus::MoreReady
+            } else {
+                WireFlushStatus::Idle
+            },
+        )
     }
 
-    fn send_encoded_frames(&mut self, frames: Vec<Vec<u8>>) -> Result<(), TransportError> {
-        for (index, frame) in frames.iter().enumerate() {
-            match self.inner.send_frame(frame.clone()) {
-                Ok(()) => {}
-                Err(TransportError::Backpressure) => {
-                    // Encoding may have advanced a connection-stream compressor. Accept the
-                    // logical message once encoded and retain every unaccepted frame so the
-                    // semantic caller must never retry it against advanced codec state.
-                    self.pending_outbound_frames
-                        .extend(frames[index..].iter().cloned());
-                    return Ok(());
-                }
-                Err(error @ TransportError::Failed(_)) => {
-                    self.terminal_error = Some(error.clone());
-                    return Err(error);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn decode_inbound_envelope(
-        &mut self,
-        envelope: WireEnvelope,
-    ) -> Result<SyncMessage, WireError> {
-        admit_complete_envelope(&self.inbound_context, &mut self.inbound_stream, envelope)
-    }
-
-    /// Strict receive mode for bootstrap-only exchanges. Unlike a live peer,
-    /// bootstrap cannot safely skip a malformed physical frame and continue to
-    /// a later catalogue snapshot: that would make the authority boundary
-    /// depend on first-valid-message behavior.
-    /// Receive one validated wire message for a short-lived adapter-owned
-    /// exchange such as native edge bootstrap.
+    /// Strict receive for bootstrap and live channels. Stateful stream errors
+    /// terminate the connection; skipping a corrupt compressed extent is unsafe.
     pub fn try_recv_strict(&mut self) -> Result<Option<SyncMessage>, WireError> {
-        self.flush_pending_outbound()
-            .map_err(Self::transport_error_as_wire_error)?;
-        let now_ms = self.reassembly_now_ms();
-        self.reassembler.expire(now_ms);
+        self.try_recv_result().map_err(|error| {
+            WireError::new(
+                WireErrorCode::MalformedFrame,
+                WireRetry::AfterResume,
+                format!("{error:?}"),
+            )
+        })
+    }
+
+    fn receive(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        if let Some(error) = &self.terminal_error {
+            return Err(error.clone());
+        }
+        // Outbound backpressure does not block independent inbound progress.
+        let _ = self.flush_turn(1)?;
         while let Some(bytes) = self.inner.try_recv_frame() {
-            validate_wire_frame_len(bytes.len()).map_err(|message| {
-                WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
-            })?;
-            let frame = self.inbound_context.decode_frame(&bytes).map_err(|error| {
-                WireError::new(
-                    WireErrorCode::MalformedFrame,
-                    WireRetry::Never,
-                    format!("failed to decode wire frame: {error}"),
-                )
-            })?;
-            match frame {
-                WireFrame::Message(envelope) => {
-                    return self.decode_inbound_envelope(envelope).map(Some);
+            validate_wire_frame_len(bytes.len()).map_err(TransportError::Failed)?;
+            let frame = self
+                .inbound_context
+                .decode_frame(&bytes)
+                .map_err(|error| TransportError::Failed(error.to_string()))?;
+            let message = match frame {
+                WireFrame::Channel(frame)
+                    if frame.extent.channel == crate::wire::channels::AUXILIARY_CHANNEL =>
+                {
+                    self.auxiliary
+                        .lock()
+                        .map_err(|_| {
+                            TransportError::Failed("auxiliary channel mutex poisoned".into())
+                        })?
+                        .receive(frame)
+                        .map_err(TransportError::Failed)?
                 }
-                WireFrame::MessageFragment(fragment) => {
-                    let fragment_message_id = fragment.message_id;
-                    self.inbound_context.validate_fragment_metadata(&fragment)?;
-                    if self.inbound_context.negotiated_features() & FEATURE_MESSAGE_FRAGMENTATION
-                        == 0
-                        || fragment.features & FEATURE_MESSAGE_FRAGMENTATION == 0
-                    {
-                        return Err(WireError::new(
-                            WireErrorCode::UnsupportedFeature,
-                            WireRetry::Never,
-                            "fragment does not declare logical-message fragmentation",
-                        ));
-                    }
-                    let now_ms = self.reassembly_now_ms();
-                    match self.reassembler.push(fragment, now_ms) {
-                        Ok(Some(envelope)) => {
-                            return self.decode_inbound_envelope(envelope).map(Some);
-                        }
-                        Ok(None) => {}
-                        Err(message) => {
-                            self.reassembler.discard(fragment_message_id);
-                            return Err(WireError::new(
-                                WireErrorCode::MalformedFrame,
-                                WireRetry::AfterResume,
-                                message,
-                            ));
-                        }
-                    }
+                WireFrame::Channel(frame) => self
+                    .endpoint
+                    .receive(frame)
+                    .map_err(TransportError::Failed)?,
+                WireFrame::Error(error) => {
+                    return Err(TransportError::Failed(format!(
+                        "remote wire error: {error:?}"
+                    )));
                 }
-                WireFrame::Hello(_) => {
-                    return Err(WireError::new(
-                        WireErrorCode::UnsupportedFeature,
-                        WireRetry::AfterResume,
-                        "hello frames must be handled before constructing a peer connection",
+                _ => {
+                    return Err(TransportError::Failed(
+                        "live wire-v3 transport requires ordered channel frames".into(),
                     ));
                 }
-                WireFrame::Error(error) => return Err(error),
+            };
+            if message.is_some() {
+                return Ok(message);
             }
         }
         Ok(None)
-    }
-    fn transport_error_as_wire_error(error: TransportError) -> WireError {
-        match error {
-            TransportError::Backpressure => WireError::new(
-                WireErrorCode::Backpressure,
-                WireRetry::Later,
-                "transport backpressure",
-            ),
-            TransportError::Failed(message) => {
-                WireError::new(WireErrorCode::Internal, WireRetry::Never, message)
-            }
-        }
     }
 }
 
-impl<T> Transport for WireTransportAdapter<T>
-where
-    T: WireTransport,
-{
+impl<T: WireTransport> Transport for WireTransportAdapter<T> {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        let now_ms = self.reassembly_now_ms();
-        self.reassembler.expire(now_ms);
-        // A retained frame belongs to the one logical message that was already
-        // accepted by `send_encoded_frames`. Do not admit a second message
-        // until that bounded backlog flushes: callers retain/retry an
-        // `Err(Backpressure)` message at their semantic boundary.
-        self.flush_pending_outbound()?;
-        let negotiated_features = self.inbound_context.negotiated_features();
-        let payload = match encode_sync_message_for_features(&message, negotiated_features) {
-            Ok(payload) => payload,
-            Err(error) => {
-                self.send_wire_error(error);
-                return Ok(());
-            }
-        };
-        if let Err(message) = validate_logical_message_len(payload.len()) {
-            return Err(TransportError::Failed(message));
+        if let Some(error) = &self.terminal_error {
+            return Err(error.clone());
         }
-        let payload = match self.outbound_stream.encode_message(&payload) {
-            Ok(payload) => payload,
-            Err(message) => return Err(TransportError::Failed(message)),
-        };
-        if let Err(message) = validate_encoded_message_len(payload.len()) {
-            return Err(TransportError::Failed(message));
+        if super::channel_endpoint::message_class(&message).0
+            == crate::wire::channels::ChannelClass::Auxiliary
+        {
+            self.auxiliary
+                .lock()
+                .map_err(|_| TransportError::Failed("auxiliary channel mutex poisoned".into()))?
+                .enqueue(message)?;
+        } else {
+            let (slot, generation, class, barrier) = self.route(&message)?;
+            self.endpoint
+                .enqueue(slot, generation, class, &message, barrier)?;
         }
-        let active_features = (negotiated_features
-            & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD))
-            | self.outbound_stream.active_feature();
-        let mut envelope = WireEnvelope::new(
-            self.inbound_context.expected_protocol_version(),
-            active_features,
-            payload,
-        );
-        if let Some(session) = self.inbound_context.expected_session().cloned() {
-            envelope = envelope.with_session(session);
+        // Semantic ownership is now accepted. A rejected physical extent is
+        // retained exactly and must never be retried by the semantic caller.
+        let result = self.flush_turn(1);
+        if let Err(error) = result {
+            self.terminal_error = Some(error.clone());
+            return Err(error);
         }
-        match encode_frame(&WireFrame::Message(envelope.clone())) {
-            Ok(frame) if frame.len() <= WIRE_FRAGMENT_PAYLOAD_BYTES => {
-                self.send_encoded_frames(vec![frame])
-            }
-            Ok(_) if negotiated_features & FEATURE_MESSAGE_FRAGMENTATION == 0 => {
-                Err(TransportError::Failed(
-                    "peer did not negotiate logical-message fragmentation".to_owned(),
-                ))
-            }
-            Ok(_) => {
-                let message_digest = *blake3::hash(&envelope.payload).as_bytes();
-                let message_id = self.next_outbound_message_id;
-                self.next_outbound_message_id = self
-                    .next_outbound_message_id
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        TransportError::Failed("logical message id space exhausted".to_owned())
-                    })?;
-                let total_len = u64::try_from(envelope.payload.len()).map_err(|_| {
-                    TransportError::Failed("logical message is too large".to_owned())
-                })?;
-                let mut frames = Vec::new();
-                for (index, payload) in envelope
-                    .payload
-                    .chunks(WIRE_FRAGMENT_PAYLOAD_BYTES)
-                    .enumerate()
-                {
-                    let offset = u64::try_from(index * WIRE_FRAGMENT_PAYLOAD_BYTES)
-                        .expect("fragment offset is bounded by encoded message size");
-                    let fragment = WireMessageFragment {
-                        protocol_version: envelope.protocol_version,
-                        features: envelope.features,
-                        session: envelope.session.clone(),
-                        message_id,
-                        message_digest,
-                        total_len,
-                        offset,
-                        payload: payload.to_vec(),
-                    };
-                    let frame =
-                        encode_frame(&WireFrame::MessageFragment(fragment)).map_err(|error| {
-                            TransportError::Failed(format!(
-                                "failed to encode logical message fragment: {error}"
-                            ))
-                        })?;
-                    validate_wire_frame_len(frame.len()).map_err(TransportError::Failed)?;
-                    frames.push(frame);
-                }
-                self.send_encoded_frames(frames)
-            }
-            Err(err) => {
-                self.send_wire_error(WireError::new(
-                    WireErrorCode::Internal,
-                    WireRetry::Never,
-                    format!("failed to encode wire frame: {err}"),
-                ));
-                Ok(())
-            }
-        }
+        Ok(())
     }
-
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.try_recv_result().ok().flatten()
     }
-
     fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
-        self.flush_pending_outbound()?;
-        let now_ms = self.reassembly_now_ms();
-        self.reassembler.expire(now_ms);
-        while let Some(bytes) = self.inner.try_recv_frame() {
-            if let Err(message) = validate_wire_frame_len(bytes.len()) {
-                self.send_wire_error(WireError::new(
-                    WireErrorCode::MalformedFrame,
-                    WireRetry::Never,
-                    message,
-                ));
-                continue;
-            }
-            let frame = match self.inbound_context.decode_frame(&bytes) {
-                Ok(frame) => frame,
-                Err(err) => {
-                    self.send_wire_error(WireError::new(
-                        WireErrorCode::MalformedFrame,
-                        WireRetry::Never,
-                        format!("failed to decode wire frame: {err}"),
-                    ));
-                    continue;
-                }
-            };
-            match frame {
-                WireFrame::Message(envelope) => match self.decode_inbound_envelope(envelope) {
-                    Ok(message) => return Ok(Some(message)),
-                    Err(error) => self.send_wire_error(error),
-                },
-                WireFrame::MessageFragment(fragment) => {
-                    let fragment_message_id = fragment.message_id;
-                    if let Err(error) = self.inbound_context.validate_fragment_metadata(&fragment) {
-                        self.send_wire_error(error);
-                        continue;
-                    }
-                    if self.inbound_context.negotiated_features() & FEATURE_MESSAGE_FRAGMENTATION
-                        == 0
-                        || fragment.features & FEATURE_MESSAGE_FRAGMENTATION == 0
-                    {
-                        self.send_wire_error(WireError::new(
-                            WireErrorCode::UnsupportedFeature,
-                            WireRetry::Never,
-                            "fragment does not declare logical-message fragmentation",
-                        ));
-                        continue;
-                    }
-                    let now_ms = self.reassembly_now_ms();
-                    match self.reassembler.push(fragment, now_ms) {
-                        Ok(Some(envelope)) => match self.decode_inbound_envelope(envelope) {
-                            Ok(message) => return Ok(Some(message)),
-                            Err(error) => self.send_wire_error(error),
-                        },
-                        Ok(None) => {}
-                        Err(message) => {
-                            self.reassembler.discard(fragment_message_id);
-                            self.send_wire_error(WireError::new(
-                                WireErrorCode::MalformedFrame,
-                                WireRetry::AfterResume,
-                                message,
-                            ));
-                        }
-                    }
-                }
-                WireFrame::Hello(_) => self.send_wire_error(WireError::new(
-                    WireErrorCode::UnsupportedFeature,
-                    WireRetry::AfterResume,
-                    "hello frames must be handled before constructing a peer connection",
-                )),
-                WireFrame::Error(_) => {}
-            }
+        let result = self.receive();
+        if let Err(error) = &result {
+            self.terminal_error = Some(error.clone());
         }
-        Ok(None)
+        result
     }
-
+    fn poll_flush(&mut self) -> Result<WireFlushStatus, TransportError> {
+        self.flush_turn(8)
+    }
+    fn shared_auxiliary_endpoint(&self) -> Option<super::SharedAuxiliaryEndpoint> {
+        Some(std::sync::Arc::clone(&self.auxiliary))
+    }
     fn set_trusted_encoder(&mut self, trusted: bool) {
         self.inbound_context.set_trusted_encoder(trusted);
     }
-
     fn wire_inbound_context(&self) -> Option<WireInboundContext> {
         Some(self.inbound_context.clone())
     }
-
     fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
         self.session_context
     }
-
     fn permits_delegated_sessions(&self) -> bool {
         self.permits_delegated_sessions
     }
+}
+
+fn delivery_route_key(message: &SyncMessage) -> Vec<u8> {
+    use SyncMessage::*;
+    let (tag, bytes) = match message {
+        ViewUpdate(view) => (0, postcard::to_allocvec(&view.subscription).unwrap()),
+        SubscribeRejected { subscription, .. } | AuthorizationScopeReceipt { subscription, .. } => {
+            (0, postcard::to_allocvec(subscription).unwrap())
+        }
+        AuthorizationScopeView { request_id, .. }
+        | AuthorizationScopeAggregateReceipt { request_id, .. }
+        | AuthorizationScopeUnavailable { request_id }
+        | AuthorizationScopeDecision { request_id, .. }
+        | PermissionAdviceResponse { request_id, .. } => (1, request_id.0.to_vec()),
+        CurrentRowsReceipt(receipt) => (2, receipt.request_id.0.to_vec()),
+        ChunkUploadStart(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),
+        ChunkUploadNodes(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),
+        ChunkUploadResult(upload) => (3, upload.value_ref.root.object_hash.0.to_vec()),
+        _ => (4, Vec::new()),
+    };
+    let mut key = vec![tag];
+    key.extend(bytes);
+    key
 }

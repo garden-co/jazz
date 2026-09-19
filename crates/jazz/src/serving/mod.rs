@@ -328,7 +328,19 @@ pub(super) struct ServerUpstreamIo {
 
 impl WireTransport for SharedWireTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> std::result::Result<(), TransportError> {
-        self.queues.borrow_mut().outbound.push_back(frame);
+        let mut queues = self.queues.borrow_mut();
+        if queues.outbound.len() >= 128
+            || queues
+                .outbound
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>()
+                .saturating_add(frame.len())
+                > 8 * 1024 * 1024
+        {
+            return Err(TransportError::Backpressure);
+        }
+        queues.outbound.push_back(frame);
         Ok(())
     }
 
@@ -1626,19 +1638,20 @@ impl InMemoryServerShell {
     /// Drain encoded wire frames ready to send to the host for a session.
     pub fn take_frames(&mut self, session: ServerSession) -> ShellResult<Vec<AbiBytes>> {
         let state = self.session_state(session)?;
-        let mut frames = state
-            .transport
-            .queues
-            .borrow_mut()
-            .outbound
-            .drain(..)
-            .collect::<Vec<_>>();
-        while let Some(frame) = state
-            .auxiliary_pump
-            .take_outbound_wire_frame()
-            .map_err(ShellError::Transport)?
-        {
-            frames.push(frame);
+        let mut frames = Vec::new();
+        // Bound each host turn and alternate sources at physical-frame
+        // granularity. A chunk response may itself span several extents.
+        for _ in 0..16 {
+            let canonical = state.transport.queues.borrow_mut().outbound.pop_front();
+            let auxiliary = state
+                .auxiliary_pump
+                .take_outbound_wire_frame()
+                .map_err(ShellError::Transport)?;
+            if canonical.is_none() && auxiliary.is_none() {
+                break;
+            }
+            frames.extend(canonical);
+            frames.extend(auxiliary);
         }
         self.metrics.frames_sent += frames.len() as u64;
         self.metrics.bytes_sent += frames.iter().map(Vec::len).sum::<usize>() as u64;

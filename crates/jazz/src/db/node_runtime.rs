@@ -2086,6 +2086,7 @@ where
             let confirmation_floor = node.committed_global_time();
             drop(node);
             let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
+            let shared_auxiliary_endpoint = transport.shared_auxiliary_endpoint();
             let upstream_upload_destination = session_context.and_then(|context| {
                 context.remote.map(|remote| UpstreamUploadDestination {
                     remote_node: *remote.node.as_bytes(),
@@ -2371,7 +2372,8 @@ where
                     connection_epoch,
                     PeerIoPumpRole::Upstream,
                     wire_inbound_context,
-                ),
+                )
+                .with_shared_auxiliary_endpoint(shared_auxiliary_endpoint),
             }));
             self.connections.borrow_mut().push(Rc::clone(&connection));
             self.schedule_tick(TickUrgency::Immediate);
@@ -2727,6 +2729,7 @@ where
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
         transport.set_trusted_encoder(ingest_context.trust.is_trusted());
         let wire_inbound_context = transport.wire_inbound_context().map(Rc::new);
+        let shared_auxiliary_endpoint = transport.shared_auxiliary_endpoint();
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
@@ -2800,7 +2803,8 @@ where
                 connection_epoch,
                 PeerIoPumpRole::Subscriber,
                 wire_inbound_context,
-            ),
+            )
+            .with_shared_auxiliary_endpoint(shared_auxiliary_endpoint),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);
@@ -5374,6 +5378,16 @@ pub trait Transport {
     /// not expose transport failures retain the Option-only behavior.
     fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
         Ok(self.try_recv())
+    }
+
+    /// Drive one bounded output turn. Backpressure must wait for a binding wake.
+    fn poll_flush(&mut self) -> Result<super::WireFlushStatus, TransportError> {
+        Ok(super::WireFlushStatus::Idle)
+    }
+    /// Persistent fixed auxiliary channel shared with a lock-independent pump.
+    #[doc(hidden)]
+    fn shared_auxiliary_endpoint(&self) -> Option<super::SharedAuxiliaryEndpoint> {
+        None
     }
 
     /// Assign encoder trust from the locally admitted connection role.

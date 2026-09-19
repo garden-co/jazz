@@ -539,59 +539,66 @@ async fn drive_upstream_wire(
                 scheduler.schedule_tick(TickUrgency::Immediate);
             }
             let mut transport_backpressured = false;
-            loop {
+            // A bounded turn alternates physical frames so a long canonical
+            // stream cannot starve the reserved chunk channel.
+            for _ in 0..16 {
                 let frame = io.transport.queues.borrow_mut().outbound.pop_front();
-                let Some(frame) = frame else { break };
-                match wire.send_frame(frame.clone()) {
-                    Ok(()) => {}
-                    Err(TransportError::Backpressure) => {
-                        // Backpressure is a retry signal from this live
-                        // transport, not a disconnect. Put the exact frame
-                        // back ahead of later semantic work so its FIFO
-                        // obligation cannot be lost or overtaken.
-                        io.transport.queues.borrow_mut().outbound.push_front(frame);
-                        transport_backpressured = true;
-                        break;
-                    }
-                    Err(TransportError::Failed(error)) => {
-                        return ServerUpstreamTerminalReason::TransportFailed(error);
-                    }
-                }
-            }
-            if !transport_backpressured {
-                loop {
-                    let reservation = match io.pump.reserve_outbound_wire_frame() {
-                        Ok(reservation) => reservation,
-                        Err(error) => {
-                            return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                let had_canonical = frame.is_some();
+                if let Some(frame) = frame {
+                    match wire.send_frame(frame.clone()) {
+                        Ok(()) => {
+                            scheduler.schedule_tick(TickUrgency::Immediate);
                         }
-                    };
-                    let Some(mut reservation) = reservation else {
-                        break;
-                    };
-                    match wire.send_frame(reservation.take_frame()) {
-                        Ok(()) => reservation.commit(),
                         Err(TransportError::Backpressure) => {
-                            // The reservation restores requests and relay
-                            // responses (including their capacity claim) to
-                            // their exact FIFO lane before we wait for this
-                            // same transport to become writable again.
-                            drop(reservation);
+                            io.transport.queues.borrow_mut().outbound.push_front(frame);
+                            transport_backpressured = true;
                             break;
                         }
                         Err(TransportError::Failed(error)) => {
-                            // Do not let a failed connection consume the
-                            // auxiliary obligation while the driver reports
-                            // its terminal outcome to the reconnect owner.
-                            drop(reservation);
                             return ServerUpstreamTerminalReason::TransportFailed(error);
                         }
                     }
                 }
+                let reservation = match io.pump.reserve_outbound_wire_frame() {
+                    Ok(reservation) => reservation,
+                    Err(error) => return ServerUpstreamTerminalReason::ProtocolFailed(error),
+                };
+                let had_auxiliary = reservation.is_some();
+                if let Some(mut reservation) = reservation {
+                    match wire.send_frame(reservation.take_frame()) {
+                        Ok(()) => reservation.commit(),
+                        Err(TransportError::Backpressure) => {
+                            // The endpoint retains the exact compressed extent
+                            // and sequence until this same connection accepts it.
+                            transport_backpressured = true;
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => {
+                            return ServerUpstreamTerminalReason::TransportFailed(error);
+                        }
+                    }
+                }
+                if !had_canonical && !had_auxiliary {
+                    break;
+                }
+            }
+            if !transport_backpressured
+                && (!io.transport.queues.borrow().outbound.is_empty()
+                    || io.pump.outbound_is_ready())
+            {
+                yield_to_local_tasks().await;
+                continue;
             }
 
             let external_wake = wake_rx.next().fuse();
-            let auxiliary_wake = io.pump.outbound_ready().fuse();
+            let auxiliary_wake = async {
+                if transport_backpressured {
+                    futures::future::pending::<()>().await;
+                } else {
+                    io.pump.outbound_ready().await;
+                }
+            }
+            .fuse();
             let transport_stopped = transport_terminal.as_mut().fuse();
             let cancelled = (&mut cancel_rx).fuse();
             futures::pin_mut!(external_wake, auxiliary_wake, transport_stopped, cancelled);
@@ -1355,6 +1362,7 @@ fn inbound_frame_phase(frame: &[u8]) -> String {
             WireFrame::Hello(_) => "wire hello".to_owned(),
             WireFrame::Error(_) => "wire error".to_owned(),
             WireFrame::MessageFragment(_) => "wire message fragment".to_owned(),
+            WireFrame::Channel(_) => "wire channel extent".to_owned(),
             WireFrame::Message(_) => unreachable!("message handled above"),
         };
     };

@@ -79,10 +79,12 @@ use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
+mod channel_endpoint;
+pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
 mod wire_transport;
-pub use wire_transport::WireTransportAdapter;
 #[cfg(test)]
 use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
+pub use wire_transport::{WireFlushStatus, WireTransportAdapter};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
 ///
@@ -704,39 +706,44 @@ pub struct PeerIoPump {
     connection: u64,
     role: PeerIoPumpRole,
     wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
-    wire_outbound_frame: Option<Rc<RefCell<crate::wire::WireFrame>>>,
+    auxiliary_endpoint: Option<SharedAuxiliaryEndpoint>,
+    wire_reservation_active: Rc<Cell<bool>>,
+    wire_outbound_obligation: Rc<RefCell<Option<SyncMessage>>>,
 }
 
-/// One encoded auxiliary frame whose source obligation remains owned by this
-/// pump until the binding commits the handoff. Dropping the reservation restores
-/// the exact request/response batch to the front of its lane.
+/// One exact encoded channel frame retained by the endpoint until handoff.
+/// Dropping a reservation leaves both bytes and the logical obligation pending.
 pub(crate) struct ReservedOutboundWireFrame {
     pump: PeerIoPump,
-    message: Option<SyncMessage>,
-    frame: Option<Vec<u8>>,
+    frame: Vec<u8>,
 }
 
 impl ReservedOutboundWireFrame {
     pub(crate) fn take_frame(&mut self) -> Vec<u8> {
-        self.frame
-            .take()
-            .expect("reserved auxiliary wire frame is handed to the transport once")
+        self.frame.clone()
     }
 
-    pub(crate) fn commit(mut self) {
-        let message = self
-            .message
-            .take()
-            .expect("reserved auxiliary outbound batch is committed once");
-        self.pump.acknowledge_outbound(&message);
+    pub(crate) fn commit(self) {
+        let completed = self
+            .pump
+            .auxiliary_endpoint
+            .as_ref()
+            .expect("reserved frame has an auxiliary endpoint")
+            .lock()
+            .expect("auxiliary endpoint lock poisoned")
+            .accept_outbound()
+            .expect("reserved frame remains pending until handoff");
+        if completed.is_some() {
+            if let Some(message) = self.pump.wire_outbound_obligation.borrow_mut().take() {
+                self.pump.acknowledge_outbound(&message);
+            }
+        }
     }
 }
 
 impl Drop for ReservedOutboundWireFrame {
     fn drop(&mut self) {
-        if let Some(message) = self.message.take() {
-            self.pump.restore_outbound(message);
-        }
+        self.pump.wire_reservation_active.set(false);
     }
 }
 
@@ -749,16 +756,11 @@ impl PeerIoPump {
         wire_inbound_context: Option<Rc<crate::wire::WireInboundContext>>,
     ) -> Self {
         resolver.register_connection(connection, matches!(role, PeerIoPumpRole::Upstream));
-        let wire_outbound_frame = wire_inbound_context.as_ref().map(|context| {
-            let mut envelope = crate::wire::WireEnvelope::new(
-                context.expected_protocol_version(),
-                crate::wire::FEATURE_NONE,
-                Vec::new(),
-            );
-            if let Some(session) = context.expected_session().cloned() {
-                envelope = envelope.with_session(session);
-            }
-            Rc::new(RefCell::new(crate::wire::WireFrame::Message(envelope)))
+        let auxiliary_endpoint = wire_inbound_context.as_ref().map(|context| {
+            let mut endpoint = AuxiliaryChannelEndpoint::new((**context).clone())
+                .expect("paired transport has a valid auxiliary channel context");
+            endpoint.set_pump_owned();
+            std::sync::Arc::new(std::sync::Mutex::new(endpoint))
         });
         Self {
             resolver,
@@ -766,8 +768,24 @@ impl PeerIoPump {
             connection,
             role,
             wire_inbound_context,
-            wire_outbound_frame,
+            auxiliary_endpoint,
+            wire_reservation_active: Rc::new(Cell::new(false)),
+            wire_outbound_obligation: Rc::new(RefCell::new(None)),
         }
+    }
+
+    pub(crate) fn with_shared_auxiliary_endpoint(
+        mut self,
+        endpoint: Option<SharedAuxiliaryEndpoint>,
+    ) -> Self {
+        if let Some(endpoint) = endpoint {
+            endpoint
+                .lock()
+                .expect("auxiliary endpoint lock poisoned")
+                .set_pump_owned();
+            self.auxiliary_endpoint = Some(endpoint);
+        }
+        self
     }
 
     fn wire_inbound_context(&self) -> Result<&crate::wire::WireInboundContext, String> {
@@ -925,17 +943,25 @@ impl PeerIoPump {
         let decoded = context
             .decode_frame(&frame)
             .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
-        let crate::wire::WireFrame::Message(envelope) = decoded else {
+        let crate::wire::WireFrame::Channel(envelope) = decoded else {
             return Ok(Some(frame));
         };
-        let mut decoder = crate::wire::WireStreamDecoder::new(context.negotiated_features())
-            .map_err(|error| format!("invalid auxiliary wire context: {error}"))?;
-        let message = crate::wire::admit_complete_envelope(context, &mut decoder, envelope)
-            .map_err(|error| format!("malformed auxiliary wire envelope: {error:?}"))?;
-        match self.route_incoming(message).await {
-            Ok(()) => Ok(None),
-            Err(_) => Ok(Some(frame)),
+        if envelope.extent.channel != crate::wire::channels::AUXILIARY_CHANNEL {
+            return Ok(Some(frame));
         }
+        let message = self
+            .auxiliary_endpoint
+            .as_ref()
+            .ok_or_else(|| "auxiliary channel endpoint is unavailable".to_owned())?
+            .lock()
+            .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?
+            .receive(envelope)?;
+        if let Some(message) = message {
+            self.route_incoming(message)
+                .await
+                .map_err(|_| "canonical message on reserved auxiliary channel".to_owned())?;
+        }
+        Ok(None)
     }
 
     /// Encode one bounded auxiliary batch as an ordinary complete wire frame.
@@ -956,101 +982,65 @@ impl PeerIoPump {
     pub(crate) fn reserve_outbound_wire_frame(
         &self,
     ) -> Result<Option<ReservedOutboundWireFrame>, String> {
-        let context = self.wire_inbound_context()?;
-        let Some(message) = self.take_outbound(1) else {
+        if self.is_disconnected() || self.wire_reservation_active.get() {
+            return Ok(None);
+        }
+        let endpoint = self.auxiliary_endpoint.as_ref().ok_or_else(|| {
+            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
+        })?;
+        let mut endpoint = endpoint
+            .lock()
+            .map_err(|_| "auxiliary endpoint lock poisoned".to_owned())?;
+        if !endpoint.has_pending_outbound() {
+            let Some(message) = self.take_outbound(1) else {
+                return Ok(None);
+            };
+            if let Err(error) = endpoint.enqueue(message.clone()) {
+                self.restore_outbound(message);
+                return Err(format!(
+                    "cannot enqueue auxiliary channel message: {error:?}"
+                ));
+            }
+            *self.wire_outbound_obligation.borrow_mut() = Some(message);
+        }
+        let Some(frame) = endpoint.peek_outbound()? else {
             return Ok(None);
         };
-        let frame = match self.encode_outbound_wire_frame(message.clone(), context) {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.restore_outbound(message);
-                return Err(error);
-            }
-        };
+        self.wire_reservation_active.set(true);
         Ok(Some(ReservedOutboundWireFrame {
             pump: self.clone(),
-            message: Some(message),
-            frame: Some(frame),
+            frame,
         }))
     }
 
-    /// Drain a bounded FIFO prefix of the auxiliary lane into complete wire
-    /// frames. If the next complete frame would exceed `max_bytes`, it remains
-    /// queued for a later drain; no response is dropped merely because a host
-    /// transport chooses a smaller batch boundary.
+    /// Drain a bounded prefix while retaining exact encoded bytes for any frame
+    /// that does not fit the caller's budget.
     pub fn take_outbound_wire_frames(
         &self,
         max_frames: usize,
         max_bytes: usize,
     ) -> Result<Vec<Vec<u8>>, String> {
-        if max_frames == 0 || max_bytes == 0 {
-            return Ok(Vec::new());
-        }
-        let context = self.wire_inbound_context()?;
         let mut frames = Vec::new();
-        let mut total_bytes: usize = 0;
-        while frames.len() < max_frames {
-            let Some(message) = self.take_outbound(1) else {
+        let mut total_bytes = 0usize;
+        while frames.len() < max_frames && total_bytes < max_bytes {
+            let Some(mut reservation) = self.reserve_outbound_wire_frame()? else {
                 break;
             };
-            let frame = self.encode_outbound_wire_frame(message.clone(), context);
-            let frame = match frame {
-                Ok(frame) => frame,
-                Err(error) => {
-                    self.restore_outbound(message);
-                    return Err(error);
-                }
-            };
-            let Some(next_total) = total_bytes.checked_add(frame.len()) else {
-                self.restore_outbound(message);
-                break;
-            };
-            if next_total > max_bytes {
-                self.restore_outbound(message);
+            if reservation.frame.len() > max_bytes - total_bytes {
                 if frames.is_empty() {
                     return Err(format!(
                         "auxiliary wire frame exceeds bounded drain budget: frame={} budget={max_bytes}",
-                        frame.len()
+                        reservation.frame.len()
                     ));
                 }
                 break;
             }
-            total_bytes = next_total;
-            self.acknowledge_outbound(&message);
+            let frame = reservation.take_frame();
+            total_bytes += frame.len();
+            reservation.commit();
             frames.push(frame);
         }
         Ok(frames)
-    }
-
-    fn encode_outbound_wire_frame(
-        &self,
-        message: SyncMessage,
-        context: &crate::wire::WireInboundContext,
-    ) -> Result<Vec<u8>, String> {
-        let negotiated_features = context.negotiated_features();
-        let payload = crate::wire::encode_sync_message_for_features(&message, negotiated_features)
-            .map_err(|error| format!("cannot encode auxiliary sync payload: {error:?}"))?;
-        let active_features = negotiated_features
-            & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD);
-        let wire_outbound_frame = self.wire_outbound_frame.as_ref().ok_or_else(|| {
-            "auxiliary wire framing requires a paired wire transport adapter".to_owned()
-        })?;
-        let mut frame = wire_outbound_frame.borrow_mut();
-        {
-            let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
-                unreachable!("auxiliary outbound template is always a message frame");
-            };
-            envelope.protocol_version = context.expected_protocol_version();
-            envelope.features = active_features;
-            envelope.payload = payload;
-        }
-        let encoded = crate::wire::encode_frame(&frame)
-            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"));
-        let crate::wire::WireFrame::Message(envelope) = &mut *frame else {
-            unreachable!("auxiliary outbound template is always a message frame");
-        };
-        envelope.payload = Vec::new();
-        encoded
     }
 
     /// Drain one bounded auxiliary batch for immediate transmission.
@@ -1168,6 +1158,14 @@ impl PeerIoPump {
     }
 
     fn has_outbound(&self) -> bool {
+        if self.auxiliary_endpoint.as_ref().is_some_and(|endpoint| {
+            endpoint
+                .lock()
+                .expect("auxiliary endpoint lock poisoned")
+                .has_pending_outbound()
+        }) {
+            return true;
+        }
         let state = self.resolver.state.borrow();
         match self.role {
             PeerIoPumpRole::Upstream => !state.outbound.is_empty(),
@@ -1206,6 +1204,16 @@ impl Future for PeerIoOutboundReady {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(endpoint) = &self.pump.auxiliary_endpoint {
+            if endpoint
+                .lock()
+                .expect("auxiliary endpoint lock poisoned")
+                .poll_outbound_ready(context)
+                .is_ready()
+            {
+                return Poll::Ready(());
+            }
+        }
         if self.pump.has_outbound() || self.pump.is_disconnected() {
             Poll::Ready(())
         } else {

@@ -1962,7 +1962,16 @@ where
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub async fn tick(&mut self) -> Result<DbTickStats, Error> {
-        let result = self.tick_inner().await;
+        let mut result = self.tick_inner().await;
+        if result.is_ok() {
+            match self.transport.poll_flush() {
+                Ok(super::WireFlushStatus::MoreReady) => {
+                    schedule_tick_in(&self.scheduler, TickUrgency::AfterCurrentTurn)
+                }
+                Ok(super::WireFlushStatus::Idle | super::WireFlushStatus::Backpressured) => {}
+                Err(error) => result = Err(transport_error(error)),
+            }
+        }
         if let Err(error) = &result {
             if matches!(self.link, ConnectionLink::Upstream(_)) {
                 finish_open_schema_connection(

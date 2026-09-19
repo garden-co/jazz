@@ -16,6 +16,11 @@ pub const CHANNEL_CHUNK_BYTES: usize = 64 * 1024;
 pub const MAX_CHANNEL_FRAME_PAYLOAD: usize = CHANNEL_CHUNK_BYTES + CHANNEL_CHUNK_BYTES / 10 + 64;
 /// Dedicated admission capacity for control traffic, unavailable to other flows.
 pub const CONTROL_RESERVE_BYTES: usize = 1024 * 1024;
+/// Capacity for bounded interactive messages beside one maximum legal bulk.
+pub const INTERACTIVE_RESERVE_BYTES: usize = 8 * 1024 * 1024;
+/// Aggregate decoded staging budget mirrored by both channel endpoints.
+pub const MAX_CHANNEL_BUFFER_BYTES: usize =
+    MAX_LOGICAL_MESSAGE_BYTES + INTERACTIVE_RESERVE_BYTES + CONTROL_RESERVE_BYTES;
 /// Maximum retained logical messages, independently of their byte sizes.
 pub const MAX_CHANNEL_QUEUED_MESSAGES: usize = 1024;
 /// Slots unavailable to data traffic so tiny messages cannot starve control.
@@ -25,6 +30,8 @@ pub const CHANNEL_HEADER_BYTES: usize = 64;
 
 /// Slot zero is reserved for control and conservative semantic barriers.
 pub const CONTROL_CHANNEL: u16 = 0;
+/// Fixed auxiliary lane shared with the lock-independent chunk pump.
+pub const AUXILIARY_CHANNEL: u16 = 63;
 
 /// Stable scheduling class. Its value is explicitly encoded as one byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -40,17 +47,8 @@ pub enum ChannelClass {
     Writes = 3,
     /// One independent immutable large-value transfer.
     LargeValue = 4,
-}
-
-impl ChannelClass {
-    fn weight(self) -> usize {
-        match self {
-            Self::Control => 8,
-            Self::Requests => 4,
-            Self::Delivery | Self::Writes => 2,
-            Self::LargeValue => 1,
-        }
-    }
+    /// Immutable chunk lookup/response traffic without semantic authority.
+    Auxiliary = 5,
 }
 
 /// Physical channel extent. `sequence` is contiguous within one generation;
@@ -80,7 +78,7 @@ pub struct ChannelFrame {
 }
 
 impl ChannelFrame {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if usize::from(self.channel) >= MAX_CHANNELS {
             return Err("channel slot exceeds connection limit".into());
         }
@@ -130,7 +128,7 @@ impl ChannelFrame {
 }
 
 struct Message {
-    bytes: Vec<u8>,
+    bytes: Box<[u8]>,
     offset: usize,
     ordinal: u64,
     barrier: bool,
@@ -175,13 +173,15 @@ pub struct ScheduledChunk<'a> {
 #[derive(Default)]
 pub struct ChannelScheduler {
     channels: BTreeMap<u16, OutboundChannel>,
-    round: VecDeque<u16>,
+    round_cursor: usize,
+    class_cursor: [u16; 6],
     selected: Option<u16>,
     next_ordinal: u64,
     bytes: usize,
     data_bytes: usize,
     messages: usize,
     data_messages: usize,
+    bulk_bytes: usize,
 }
 
 impl ChannelScheduler {
@@ -207,10 +207,14 @@ impl ChannelScheduler {
         if self.messages == MAX_CHANNEL_QUEUED_MESSAGES
             || (class != ChannelClass::Control
                 && self.data_messages >= MAX_CHANNEL_QUEUED_MESSAGES - CONTROL_RESERVE_MESSAGES)
-            || self.bytes + len > MAX_LOGICAL_MESSAGE_BYTES + CONTROL_RESERVE_BYTES
-            || (class != ChannelClass::Control && self.data_bytes + len > MAX_LOGICAL_MESSAGE_BYTES)
+            || self.bytes + len > MAX_CHANNEL_BUFFER_BYTES
+            || (class != ChannelClass::Control
+                && self.data_bytes + len > MAX_LOGICAL_MESSAGE_BYTES + INTERACTIVE_RESERVE_BYTES)
         {
             return Err("channel queue backpressure".into());
+        }
+        if len > CHANNEL_CHUNK_BYTES && self.bulk_bytes + len > MAX_LOGICAL_MESSAGE_BYTES {
+            return Err("bulk channel queue backpressure".into());
         }
         if let Some(state) = self.channels.get(&channel) {
             if state.generation != generation || state.class != class {
@@ -234,12 +238,15 @@ impl ChannelScheduler {
             });
         state.bytes += len;
         state.messages.push_back(Message {
-            bytes: payload,
+            bytes: payload.into_boxed_slice(),
             offset: 0,
             ordinal,
             barrier,
         });
         self.bytes += len;
+        if len > CHANNEL_CHUNK_BYTES {
+            self.bulk_bytes += len;
+        }
         if class != ChannelClass::Control {
             self.data_bytes += len;
             self.data_messages += 1;
@@ -271,19 +278,51 @@ impl ChannelScheduler {
                     barrier.is_none_or(|b| m.ordinal < b || (m.ordinal == b && oldest == b))
                 })
             };
-            // Discard stale/ineligible round entries. A newly enqueued barrier
-            // may make a previously scheduled channel temporarily ineligible.
-            self.round
-                .retain(|id| self.channels.get(id).is_some_and(&eligible));
-            if self.round.is_empty() {
-                for (&id, state) in &self.channels {
-                    if eligible(state) {
-                        self.round
-                            .extend(std::iter::repeat_n(id, state.class.weight()));
-                    }
+            // Weight classes, then round-robin within each class: a newly
+            // admitted request waits at most one finite 18-frame class round,
+            // independent of how many large transfers are already active.
+            const ROUND: [ChannelClass; 18] = [
+                ChannelClass::Control,
+                ChannelClass::Control,
+                ChannelClass::Control,
+                ChannelClass::Control,
+                ChannelClass::Control,
+                ChannelClass::Control,
+                ChannelClass::Control,
+                ChannelClass::Control,
+                ChannelClass::Requests,
+                ChannelClass::Requests,
+                ChannelClass::Requests,
+                ChannelClass::Requests,
+                ChannelClass::Delivery,
+                ChannelClass::Delivery,
+                ChannelClass::Writes,
+                ChannelClass::Writes,
+                ChannelClass::LargeValue,
+                ChannelClass::Auxiliary,
+            ];
+            for _ in 0..ROUND.len() {
+                let class = ROUND[self.round_cursor];
+                self.round_cursor = (self.round_cursor + 1) % ROUND.len();
+                let after = self.class_cursor[class as usize];
+                let candidate = self
+                    .channels
+                    .iter()
+                    .filter(|(_, state)| state.class == class && eligible(state))
+                    .map(|(&id, _)| id)
+                    .find(|id| *id > after)
+                    .or_else(|| {
+                        self.channels
+                            .iter()
+                            .find(|(_, state)| state.class == class && eligible(state))
+                            .map(|(&id, _)| id)
+                    });
+                if let Some(id) = candidate {
+                    self.class_cursor[class as usize] = id;
+                    self.selected = Some(id);
+                    break;
                 }
             }
-            self.selected = self.round.pop_front();
         }
         let channel = self.selected?;
         let state = self.channels.get(&channel)?;
@@ -324,6 +363,9 @@ impl ChannelScheduler {
             state.messages.pop_front();
             state.bytes -= len;
             self.bytes -= len;
+            if len > CHANNEL_CHUNK_BYTES {
+                self.bulk_bytes -= len;
+            }
             if state.class != ChannelClass::Control {
                 self.data_bytes -= len;
                 self.data_messages -= 1;
@@ -332,6 +374,36 @@ impl ChannelScheduler {
         }
         self.selected = None;
         Ok(())
+    }
+
+    /// Reuse only a completely drained slot, explicitly advancing its generation.
+    pub fn reset_idle(&mut self, channel: u16, class: ChannelClass) -> Result<u64, String> {
+        if self.selected == Some(channel) {
+            return Err("channel still owns selected extent".into());
+        }
+        let Some(state) = self.channels.get_mut(&channel) else {
+            return Ok(0);
+        };
+        if !state.messages.is_empty() {
+            return Err("channel still owns queued messages".into());
+        }
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or("channel generation exhausted")?;
+        state.sequence = 0;
+        state.class = class;
+        Ok(state.generation)
+    }
+
+    /// A drained channel can be reassigned only after all accepted frames remain
+    /// ordered ahead of the new generation on the lower reliable carrier.
+    pub fn is_idle(&self, channel: u16) -> bool {
+        self.selected != Some(channel)
+            && self
+                .channels
+                .get(&channel)
+                .is_none_or(|s| s.messages.is_empty())
     }
 
     /// Allocated semantic bytes retained across all queues.

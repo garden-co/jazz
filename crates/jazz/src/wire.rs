@@ -80,6 +80,21 @@ pub enum WireFrame {
     Error(WireError),
     /// One physical extent of an encoded logical sync message.
     MessageFragment(WireMessageFragment),
+    /// One ordered channel extent. Postcard-v1 enum tag 4 within wire v3.
+    Channel(WireChannelEnvelope),
+}
+
+/// Authenticated metadata around one independently compressed channel extent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireChannelEnvelope {
+    /// Admitted wire protocol version.
+    pub protocol_version: u16,
+    /// Admitted features with exactly the active directional codec bit.
+    pub features: WireFeatures,
+    /// Immutable admitted session metadata.
+    pub session: Option<WireSession>,
+    /// Explicit postcard-v1 channel metadata and bounded payload.
+    pub extent: channels::ChannelFrame,
 }
 
 /// A bounded physical extent of one encoded logical message.
@@ -339,6 +354,18 @@ impl WireInboundContext {
         self.trusted_encoder = trusted;
     }
 
+    pub(crate) fn validate_channel_metadata(
+        &self,
+        frame: &WireChannelEnvelope,
+    ) -> Result<(), WireError> {
+        self.validate_envelope_metadata(&WireEnvelope {
+            protocol_version: frame.protocol_version,
+            features: frame.features,
+            session: frame.session.clone(),
+            payload: Vec::new(),
+        })
+    }
+
     pub(crate) fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
         if self.trusted_encoder {
             postcard::from_bytes(bytes)
@@ -367,17 +394,6 @@ impl WireInboundContext {
             envelope.protocol_version,
             envelope.features,
             envelope.session.as_ref(),
-        )
-    }
-
-    pub(crate) fn validate_fragment_metadata(
-        &self,
-        fragment: &WireMessageFragment,
-    ) -> Result<(), WireError> {
-        self.validate_metadata(
-            fragment.protocol_version,
-            fragment.features,
-            fragment.session.as_ref(),
         )
     }
 
@@ -603,6 +619,9 @@ pub fn validate_frame_for_artifact_corpus(
                 .map_err(|error| format!("semantic payload rejected: {}", error.message))
         }
         WireFrame::Error(_) => Ok(()),
+        WireFrame::Channel(_) => {
+            Err("channel frames require a persistent admitted endpoint".to_owned())
+        }
         WireFrame::MessageFragment(_) => Err(
             "artifact corpus has no peer reassembly context for a standalone fragment".to_owned(),
         ),
