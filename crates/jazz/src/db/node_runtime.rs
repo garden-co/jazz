@@ -344,6 +344,7 @@ where
         let mut connection = connection.lock().await;
         connection.staged_inbound.push_back(StagedInboundMessage {
             message,
+            lease: None,
             authority_receipt_eligible,
         });
         self.schedule_tick(TickUrgency::Immediate);
@@ -3336,7 +3337,10 @@ where
             // passes.
             let next = match Box::pin(connection.tick()).await {
                 Ok(next) => next,
-                Err(_) if connection.transport.has_terminal_failure() => {
+                Err(_)
+                    if matches!(connection.link, ConnectionLink::Subscriber(_))
+                        && connection.transport.has_terminal_failure() =>
+                {
                     connection.auxiliary_pump.disconnect();
                     drop(connection);
                     retired.push(Rc::clone(handle));
@@ -3380,7 +3384,10 @@ where
                         let mut connection = handle.lock().await;
                         let next = match Box::pin(connection.tick()).await {
                             Ok(next) => next,
-                            Err(_) if connection.transport.has_terminal_failure() => {
+                            Err(_)
+                                if matches!(connection.link, ConnectionLink::Subscriber(_))
+                                    && connection.transport.has_terminal_failure() =>
+                            {
                                 connection.auxiliary_pump.disconnect();
                                 drop(connection);
                                 retired.push(Rc::clone(handle));
@@ -5409,6 +5416,14 @@ pub trait Transport {
     /// not expose transport failures retain the Option-only behavior.
     fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
         Ok(self.try_recv())
+    }
+
+    /// Retain decoded-buffer ownership while a canonical message is deferred.
+    fn try_recv_owned_result(
+        &mut self,
+    ) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
+        self.try_recv_result()
+            .map(|message| message.map(super::ReceivedSyncMessage::unleased))
     }
 
     /// Drive one bounded output turn. Backpressure must wait for a binding wake.

@@ -527,12 +527,15 @@ impl<T: WireTransport> WireTransportAdapter<T> {
         }
     }
 
-    fn receive(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+    fn receive(&mut self) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
         if let Some(error) = &self.terminal_error {
             return Err(error.clone());
         }
         // Outbound backpressure does not block independent inbound progress.
         let _ = self.flush_turn(1)?;
+        if let Some(message) = self.endpoint.pop() {
+            return Ok(Some(message));
+        }
         while let Some(bytes) = self.inner.try_recv_frame() {
             validate_wire_frame_len(bytes.len()).map_err(TransportError::Failed)?;
             let frame = self
@@ -555,6 +558,7 @@ impl<T: WireTransport> WireTransportAdapter<T> {
                             TransportError::Failed("auxiliary channel mutex poisoned".into())
                         })?
                         .receive(frame, bytes.len())
+                        .map(|message| message.map(super::ReceivedSyncMessage::unleased))
                         .map_err(TransportError::Failed)?
                 }
                 WireFrame::Channel(frame) => self
@@ -635,6 +639,12 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
         self.try_recv_result().ok().flatten()
     }
     fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        self.try_recv_owned_result()
+            .map(|message| message.map(|message| message.message))
+    }
+    fn try_recv_owned_result(
+        &mut self,
+    ) -> Result<Option<super::ReceivedSyncMessage>, TransportError> {
         let was_terminal = self.terminal_error.is_some();
         let result = self.receive();
         if let Err(error) = &result {

@@ -1946,9 +1946,10 @@ where
             }
         }
         loop {
-            match self.transport.try_recv_result() {
+            match self.transport.try_recv_owned_result() {
                 Ok(Some(message)) => self.staged_inbound.push_back(StagedInboundMessage {
-                    message,
+                    message: message.message,
+                    lease: message.lease,
                     authority_receipt_eligible: false,
                 }),
                 Ok(None) => {
@@ -2032,6 +2033,9 @@ where
     }
 
     async fn tick_inner(&mut self) -> Result<DbTickStats, Error> {
+        // Retain decoded message reservations through batched application, not
+        // merely until dequeue. Deferrals clone the same lease into their front.
+        let mut received_leases = Vec::new();
         if let Some(error) = self.startup_error.take() {
             return Err(error);
         }
@@ -2706,9 +2710,10 @@ where
                     loop {
                         let next = match self.staged_inbound.pop_front() {
                             Some(staged) => Some(staged),
-                            None => match self.transport.try_recv_result() {
+                            None => match self.transport.try_recv_owned_result() {
                                 Ok(Some(message)) => Some(StagedInboundMessage {
-                                    message,
+                                    message: message.message,
+                                    lease: message.lease,
                                     authority_receipt_eligible:
                                         !self.inbound_authority_receipt_quarantine,
                                 }),
@@ -2731,11 +2736,13 @@ where
                         };
                         let Some(StagedInboundMessage {
                             message,
+                            lease,
                             authority_receipt_eligible,
                         }) = next
                         else {
                             break;
                         };
+                        received_leases.push(lease.clone());
                         let write_state_tx_id = write_state_update_tx_id(&message);
                         #[cfg(feature = "sync-autopsy")]
                         sync_autopsy::record(format!(
@@ -2843,6 +2850,7 @@ where
                                                     durability: None,
                                                 },
                                                 authority_receipt_eligible: false,
+                                                lease: None,
                                             });
                                         }
                                     }
@@ -2877,6 +2885,7 @@ where
                                     drop(catalogue_owner);
                                     self.staged_inbound.push_front(StagedInboundMessage {
                                         message: SyncMessage::CatalogueSnapshot(snapshot),
+                                        lease: lease.clone(),
                                         authority_receipt_eligible,
                                     });
                                     break;
@@ -3783,7 +3792,7 @@ where
                                     && ingress_owner.defer_catalogue_for_persistence(progress_waker.as_ref())?
                                 {
                                     drop(ingress_owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message, authority_receipt_eligible });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message, lease: lease.clone(), authority_receipt_eligible });
                                     break;
                                 }
                                 if *local_receiver {
@@ -4100,14 +4109,12 @@ where
                 loop {
                     // Drain new controls first, so cancellation retires parked
                     // requests before catalogue activation can replay them.
-                    let (message, parked_policy_binding) =
-                        if let Some(message) =
-                            self.staged_inbound.pop_front().map(|staged| staged.message)
-                        {
-                            (Box::new(message), None)
+                    let (message, parked_policy_binding, lease) =
+                        if let Some(staged) = self.staged_inbound.pop_front() {
+                            (Box::new(staged.message), None, staged.lease)
                         } else {
-                            match self.transport.try_recv_result() {
-                                Ok(Some(message)) => (Box::new(message), None),
+                            match self.transport.try_recv_owned_result() {
+                                Ok(Some(message)) => (Box::new(message.message), None, message.lease),
                                 Err(error)
                                     if handle_transport_backpressure(
                                         &self.node,
@@ -4137,10 +4144,12 @@ where
                                     (
                                         Box::new(SyncMessage::Subscribe(pending.subscribe)),
                                         Some(pending.policy_binding),
+                                        None,
                                     )
                                 }
                             }
                         };
+                    received_leases.push(lease.clone());
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.
@@ -5505,7 +5514,7 @@ where
                                 let mut owner = self.node.lock().await;
                                 if owner.defer_catalogue_for_persistence(progress_waker.as_ref())? {
                                     drop(owner);
-                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, authority_receipt_eligible: false });
+                                    self.staged_inbound.push_front(StagedInboundMessage { message: other, lease: lease.clone(), authority_receipt_eligible: false });
                                     catalogue_deferred = true;
                                     return Ok::<bool, Error>(false);
                                 }

@@ -6,8 +6,9 @@ Wire v3 separates control, query requests, independent query or authorization
 intent deliveries, the initial single authored-write FIFO, and independent
 immutable large-value transfers. Each channel is reliable and ordered. There
 is no implied order across channels. The ordered WebSocket carrier multiplexes
-bounded channel frames; a future QUIC adapter can map the same logical channels
-to reliable streams. This is the mandatory current-v3 transport contract,
+bounded channel frames. Cross-channel dependencies are enforced above the carrier,
+so a future QUIC adapter can map stable logical channels to reliable streams
+without changing database semantics. This is the mandatory current-v3 transport contract,
 not an optional fallback to independent per-message compression.
 
 ## Details
@@ -66,14 +67,33 @@ session metadata or semantic permission checks.
 
 FateUpdate conservatively uses the Writes channel with a bilateral canonical barrier. Applying a fate requires the transaction to exist. Direct write acknowledgements refer to an already-authored transaction, but until every cascaded-fate routing path is proven independent of prior deliveries, the transport preserves the existing enqueue order across those deliveries. This is a conservative dependency rule, not a claim that a production sender has been demonstrated to emit an otherwise unsafe sequence. It can be narrowed after that routing proof or with explicit transaction dependencies.
 
-A bilateral barrier drains every earlier canonical logical message before its
-first extent and prevents every later canonical message from starting until it
-completes. The ordered carrier delivers those complete messages into the existing
-single canonical consumer FIFO. A consumer may stage messages before applying
-them, but may not reorder that FIFO: deferred catalogue activation stays at its
-front. This preserves semantic application order without mislabeling decode as
-an application acknowledgement. Immutable auxiliary reads remain independent so
-a blocked semantic operation can obtain the chunks needed to complete.
+### Two independent layers
+
+The byte-stream backend accepts opaque messages, a stable stream ID and a
+priority. It owns framing, per-stream compression, flow control and codec
+lifetime. It does not inspect Jazz messages, epochs or barrier dependencies.
+One stable stream remains FIFO across codec generations: generation reset is
+inline stream lifecycle, not permission to reorder a replacement stream.
+
+The Jazz routing layer encodes a versioned envelope above that backend. Each
+canonical message carries an epoch and a per-stream logical ordinal, which
+never resets with the codec. A barrier snapshots the last accepted ordinal on
+each canonical stream, belongs to the current epoch, and advances the sender
+only after enqueue succeeds. Rejected enqueue changes none of these values.
+
+The receiver admits ordinary messages from the current epoch independently.
+For example, a fast query result does not wait for an unrelated large result
+in that epoch. A barrier waits until every predecessor watermark has entered
+the single canonical FIFO. It enters that FIFO next and opens the following
+epoch; complete messages received early from that epoch remain bounded staged
+inputs. This is not a global reorder of every message.
+
+The canonical consumer preserves that FIFO, including front deferral during
+catalogue activation. FIFO admission is therefore sufficient for dependencies;
+it is not an acknowledgement of query completion, durability or transaction
+settlement. There is no round trip per barrier. Immutable auxiliary reads and
+transport credits bypass canonical epochs so an operation waiting for storage
+chunks can still finish.
 
 ### Resource and scheduling contract
 
@@ -87,8 +107,15 @@ future frames.
 Queued bulk payloads are bounded by `MAX_LOGICAL_MESSAGE_BYTES` (D). The aggregate
 budget adds 8 MiB for bounded interactive traffic and 1 MiB reserved for control.
 Each channel is bounded by D; at most 1,024 messages are queued, with eight count
-slots reserved for control. Receiver declared-message reservations are bounded
-by the same aggregate ceiling before accumulation.
+slots reserved for control. Whole-message reservations are acquired transactionally in semantic enqueue
+order, before priority scheduling can select a later stream. They remain charged
+until the receiver's last owner of the decoded message releases its lease.
+Receiver leases begin at the first extent and survive upper-layer staging,
+canonical FIFO dequeue, batching and front deferral. Thus moving a message
+between queues cannot evade the bound or starve an earlier predecessor of
+already-reserved capacity. Auxiliary buffers have their independent D-byte
+window. Closing a connection retires its credit state; old lease drops cannot
+fund a new connection.
 
 Scheduling weights apply to classes, then round-robin among channels within a
 class. Each finite canonical round assigns control eight frames, requests four,
@@ -126,6 +153,16 @@ grant sequence, checked arithmetic and an amount no greater than outstanding
 charges. Reconnect creates fresh balances and sequence numbers. Credits are
 buffer receipts, not authorization or durability receipts.
 
+A separate grant scope releases decoded byte-message buffers and their message
+counts. Canonical buffers share D plus 8 MiB of interactive capacity and 1 MiB reserved
+for control. Bulk buffers, including large catalogue messages, share the D-byte
+bulk limit; the control reserve is not a maximum catalogue size. Auxiliary
+buffers have a separate D-byte limit. The canonical count limit is
+1,024, with eight slots reserved for control; auxiliary has its own 1,024 limit.
+Frame grants and buffer grants share the same reliable ordered control stream
+and grant sequence. Holding a decoded buffer does not hold physical-frame
+credit, and releasing physical-frame credit does not release the decoded lease.
+
 ### Explicit v3 postcard byte contract
 
 The outer `WireFrame` is encoded with postcard-v1. Channel is appended enum tag
@@ -140,8 +177,17 @@ booleans are exactly 0 or 1. There are no native-width wire integers.
 
 Class tags are control 0, requests 1, delivery 2, writes 3, large value 4 and
 auxiliary 5. Credit fields are protocol version (u16), features (u64), optional
-WireSession, class, grant sequence (u64), and consumed byte charges (u64). A
-shared bulk grant canonically names the Writes class.
+WireSession, class, grant sequence (u64), consumed byte charges (u64), and scope.
+Scope tag 0 releases physical frames; tag 1 additionally carries a released
+message count (u32) and bulk flag (bool). A shared bulk grant canonically names
+the Writes class.
+
+The canonical byte-message envelope is also postcard-v1: envelope version
+(u8, currently 1), epoch (u64), logical ordinal (u64), optional sorted predecessor
+vector of (slot u16, ordinal u64), and semantic payload bytes. At most 64
+predecessors are allowed. A bounded 1,024-byte allowance for this envelope is
+included within the raw D-byte message limit. Auxiliary payloads do not carry
+canonical dependency metadata.
 
 Physical size is checked before postcard decode. Exact decode rejects trailing
 bytes, unknown tags and malformed encodings. Endpoint admission additionally
@@ -152,14 +198,7 @@ and `wire::channel_credit::tests`.
 
 ## Open Questions
 
-None.
-
-## Open questions
-
-A future QUIC/WebTransport adapter can preserve these database semantics with
-reliable FIFO delivery per logical channel, but it is not a drop-in carrier
-replacement. Current bilateral barriers also rely on the ordered WebSocket
-carrier. Independent transport streams will need explicit cross-channel
-barrier dependencies or watermarks and receiver enforcement before applying
-later messages. Connection-global credit grant sequence can remain on an
-ordered control stream. This change does not implement that future adapter.
+QUIC/WebTransport is not implemented here. Its adapter must preserve FIFO for a
+stable stream across codec generations and carry credit grants on one ordered
+control stream. Separate transport streams need no new Jazz dependency rules:
+the receiver-enforced epoch contract already handles cross-stream reordering.

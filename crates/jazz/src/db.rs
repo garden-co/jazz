@@ -80,7 +80,9 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transactio
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
 pub(crate) mod channel_endpoint;
+mod routed_messages;
 pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
+pub use routed_messages::ReceivedSyncMessage;
 mod wire_transport;
 #[cfg(test)]
 use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
@@ -1260,6 +1262,13 @@ impl PeerIoPump {
     /// Detach this link's hop-local routing state. Bindings call this when the
     /// socket closes; another registered upstream inherits unsent demand.
     pub fn disconnect(&self) {
+        if let Some(endpoint) = &self.auxiliary_endpoint {
+            if let Ok(endpoint) = endpoint.lock() {
+                if let Ok(mut credits) = endpoint.channel_credits().lock() {
+                    credits.close();
+                }
+            }
+        }
         self.resolver.disconnect(
             self.connection,
             matches!(self.role, PeerIoPumpRole::Upstream),
@@ -1939,6 +1948,7 @@ struct AuthorityViewReceipts {
 /// the selected connection's fresh view receipt.
 struct StagedInboundMessage {
     message: SyncMessage,
+    lease: Option<crate::wire::channel_credit::BufferLease>,
     authority_receipt_eligible: bool,
 }
 

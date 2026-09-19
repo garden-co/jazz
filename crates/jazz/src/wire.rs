@@ -8,6 +8,7 @@
 
 pub mod channel_credit;
 pub mod channels;
+pub(crate) mod stream_backend;
 
 use postcard::{take_from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
@@ -87,6 +88,20 @@ pub enum WireFrame {
     ChannelCredit(WireChannelCredit),
 }
 
+/// Which independently bounded transport resource this grant releases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireCreditKind {
+    /// Bytes removed from a physical frame queue.
+    Frames,
+    /// Decoded byte-message buffers whose last owner released them.
+    Messages {
+        /// Number of released buffer reservations.
+        count: u32,
+        /// Whether these buffers used the bulk byte window.
+        bulk: bool,
+    },
+}
+
 /// Uncompressed connection-scoped receiver buffer credit; never authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireChannelCredit {
@@ -102,6 +117,8 @@ pub struct WireChannelCredit {
     pub sequence: u64,
     /// Exact returned physical-byte charges, including the tiny-frame floor.
     pub consumed_bytes: u64,
+    /// Physical queue capacity or retained decoded byte-message capacity.
+    pub kind: WireCreditKind,
 }
 
 /// Authenticated metadata around one independently compressed channel extent.

@@ -28,7 +28,7 @@ pub const CONTROL_RESERVE_MESSAGES: usize = 8;
 /// Maximum postcard-v1 channel metadata overhead.
 pub const CHANNEL_HEADER_BYTES: usize = 64;
 
-/// Slot zero is reserved for control and conservative semantic barriers.
+/// Slot zero reserves independent control capacity.
 pub const CONTROL_CHANNEL: u16 = 0;
 /// Fixed auxiliary lane shared with the lock-independent chunk pump.
 pub const AUXILIARY_CHANNEL: u16 = 63;
@@ -133,8 +133,6 @@ impl ChannelFrame {
 struct Message {
     bytes: Box<[u8]>,
     offset: usize,
-    ordinal: u64,
-    barrier: bool,
 }
 
 struct OutboundChannel {
@@ -179,7 +177,6 @@ pub struct ChannelScheduler {
     round_cursor: usize,
     class_cursor: [u16; 6],
     selected: Option<u16>,
-    next_ordinal: u64,
     bytes: usize,
     data_bytes: usize,
     messages: usize,
@@ -196,7 +193,6 @@ impl ChannelScheduler {
         generation: u64,
         class: ChannelClass,
         payload: Vec<u8>,
-        barrier: bool,
     ) -> Result<(), String> {
         if usize::from(channel) >= MAX_CHANNELS
             || (channel == CONTROL_CHANNEL) != (class == ChannelClass::Control)
@@ -230,8 +226,6 @@ impl ChannelScheduler {
                 return Err("channel queue backpressure".into());
             }
         }
-        let ordinal = self.next_ordinal;
-        let next_ordinal = ordinal.checked_add(1).ok_or("channel ordinal exhausted")?;
         let state = self
             .channels
             .entry(channel)
@@ -251,8 +245,6 @@ impl ChannelScheduler {
         state.messages.push_back(Message {
             bytes: payload.into_boxed_slice(),
             offset: 0,
-            ordinal,
-            barrier,
         });
         self.bytes += len;
         if len > CHANNEL_CHUNK_BYTES {
@@ -263,7 +255,6 @@ impl ChannelScheduler {
             self.data_messages += 1;
         }
         self.messages += 1;
-        self.next_ordinal = next_ordinal;
         Ok(())
     }
 
@@ -279,25 +270,7 @@ impl ChannelScheduler {
         has_credit: impl Fn(ChannelClass) -> bool,
     ) -> Option<ScheduledChunk<'_>> {
         if self.selected.is_none() {
-            let barrier = self
-                .channels
-                .values()
-                .flat_map(|c| c.messages.iter())
-                .filter(|m| m.barrier)
-                .map(|m| m.ordinal)
-                .min();
-            let oldest = self
-                .channels
-                .values()
-                .filter_map(|c| c.messages.front())
-                .map(|m| m.ordinal)
-                .min()?;
-            let eligible = |c: &OutboundChannel| {
-                has_credit(c.class)
-                    && c.messages.front().is_some_and(|m| {
-                        barrier.is_none_or(|b| m.ordinal < b || (m.ordinal == b && oldest == b))
-                    })
-            };
+            let eligible = |c: &OutboundChannel| has_credit(c.class) && !c.messages.is_empty();
             // Weight classes, then round-robin within each class: a newly
             // admitted request waits at most one finite 18-frame class round,
             // independent of how many large transfers are already active.
@@ -483,7 +456,6 @@ mod tests {
                 0,
                 ChannelClass::LargeValue,
                 vec![7; CHANNEL_CHUNK_BYTES * 20],
-                false,
             )
             .unwrap();
         let first = scheduler.next_chunk().unwrap();
@@ -492,7 +464,7 @@ mod tests {
             (4, 0, true, false)
         );
         scheduler
-            .enqueue(2, 0, ChannelClass::Delivery, vec![8; 3], false)
+            .enqueue(2, 0, ChannelClass::Delivery, vec![8; 3])
             .unwrap();
         // Lower transport rejected the first frame: retain it byte-for-byte.
         let retry = scheduler.next_chunk().unwrap();
@@ -506,29 +478,23 @@ mod tests {
     }
 
     #[test]
-    fn barriers_preserve_both_sides_of_claims_and_catalogue_transitions() {
+    fn byte_scheduler_prioritizes_control_without_semantic_barrier_knowledge() {
         let mut scheduler = ChannelScheduler::default();
         scheduler
-            .enqueue(
-                3,
-                0,
-                ChannelClass::Writes,
-                vec![1; CHANNEL_CHUNK_BYTES + 1],
-                false,
-            )
+            .enqueue(3, 0, ChannelClass::Writes, vec![1; CHANNEL_CHUNK_BYTES + 1])
             .unwrap();
         scheduler
-            .enqueue(0, 0, ChannelClass::Control, vec![2], true)
+            .enqueue(0, 0, ChannelClass::Control, vec![2])
             .unwrap();
         scheduler
-            .enqueue(1, 0, ChannelClass::Requests, vec![3], false)
+            .enqueue(1, 0, ChannelClass::Requests, vec![3])
             .unwrap();
         let mut order = Vec::new();
         while let Some(chunk) = scheduler.next_chunk() {
             order.push(chunk.channel);
             scheduler.accepted().unwrap();
         }
-        assert_eq!(order, [3, 3, 0, 1]);
+        assert_eq!(order, [0, 1, 3, 3]);
         assert_eq!(scheduler.queued_bytes(), 0);
     }
 
@@ -542,7 +508,6 @@ mod tests {
                     0,
                     ChannelClass::LargeValue,
                     vec![1; CHANNEL_CHUNK_BYTES * 2],
-                    false,
                 )
                 .unwrap();
         }
@@ -552,7 +517,7 @@ mod tests {
         );
         scheduler.accepted().unwrap();
         scheduler
-            .enqueue(1, 0, ChannelClass::Requests, vec![2], false)
+            .enqueue(1, 0, ChannelClass::Requests, vec![2])
             .unwrap();
         let mut turns = 0;
         loop {
@@ -575,11 +540,10 @@ mod tests {
                 0,
                 ChannelClass::LargeValue,
                 vec![1; CHANNEL_CHUNK_BYTES * 2],
-                false,
             )
             .unwrap();
         scheduler
-            .enqueue(1, 0, ChannelClass::Requests, vec![2], false)
+            .enqueue(1, 0, ChannelClass::Requests, vec![2])
             .unwrap();
         let selected = scheduler
             .next_chunk_where(|class| class != ChannelClass::LargeValue)
@@ -596,7 +560,7 @@ mod tests {
         let mut payload = Vec::with_capacity(1024 * 1024);
         payload.push(1);
         scheduler
-            .enqueue(1, 0, ChannelClass::Requests, payload, false)
+            .enqueue(1, 0, ChannelClass::Requests, payload)
             .unwrap();
         let allocation = &scheduler.channels[&1].messages[0].bytes;
         assert_eq!(
@@ -611,22 +575,22 @@ mod tests {
         let mut scheduler = ChannelScheduler::default();
         for _ in 0..MAX_CHANNEL_QUEUED_MESSAGES - CONTROL_RESERVE_MESSAGES {
             scheduler
-                .enqueue(3, 0, ChannelClass::Writes, vec![1], false)
+                .enqueue(3, 0, ChannelClass::Writes, vec![1])
                 .unwrap();
         }
         assert!(
             scheduler
-                .enqueue(3, 0, ChannelClass::Writes, vec![1], false)
+                .enqueue(3, 0, ChannelClass::Writes, vec![1])
                 .is_err()
         );
         for _ in 0..CONTROL_RESERVE_MESSAGES {
             scheduler
-                .enqueue(0, 0, ChannelClass::Control, vec![2], false)
+                .enqueue(0, 0, ChannelClass::Control, vec![2])
                 .unwrap();
         }
         assert!(
             scheduler
-                .enqueue(0, 0, ChannelClass::Control, vec![2], false)
+                .enqueue(0, 0, ChannelClass::Control, vec![2])
                 .is_err()
         );
     }
@@ -636,23 +600,17 @@ mod tests {
         let mut scheduler = ChannelScheduler::default();
         for value in [1, 2, 3] {
             scheduler
-                .enqueue(3, 0, ChannelClass::Writes, vec![value], false)
+                .enqueue(3, 0, ChannelClass::Writes, vec![value])
                 .unwrap();
         }
         assert!(
             scheduler
-                .enqueue(
-                    MAX_CHANNELS as u16,
-                    0,
-                    ChannelClass::Delivery,
-                    vec![1],
-                    false
-                )
+                .enqueue(MAX_CHANNELS as u16, 0, ChannelClass::Delivery, vec![1],)
                 .is_err()
         );
         assert!(
             scheduler
-                .enqueue(3, 1, ChannelClass::Writes, vec![1], false)
+                .enqueue(3, 1, ChannelClass::Writes, vec![1])
                 .is_err()
         );
         for value in [1, 2, 3] {

@@ -1,9 +1,15 @@
 //! Receiver-consumption credits for bounded physical channel queues.
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
-use super::channels::{ChannelClass, MAX_CHANNEL_FRAME_PAYLOAD};
-use super::{WireChannelCredit, WireEnvelope, WireFrame, WireInboundContext, encode_frame};
+use super::channels::{
+    CHANNEL_CHUNK_BYTES, CONTROL_RESERVE_BYTES, CONTROL_RESERVE_MESSAGES, ChannelClass,
+    INTERACTIVE_RESERVE_BYTES, MAX_CHANNEL_FRAME_PAYLOAD, MAX_CHANNEL_QUEUED_MESSAGES,
+};
+use super::{
+    WireChannelCredit, WireCreditKind, WireEnvelope, WireFrame, WireInboundContext, encode_frame,
+};
+use crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
 
 /// A tiny physical frame still occupies a bounded queue slot.
 pub const CHANNEL_FRAME_CREDIT_FLOOR: usize = 16 * 1024;
@@ -41,6 +47,57 @@ fn bucket_class(index: usize) -> ChannelClass {
     ][index]
 }
 
+fn buffer_bucket(class: ChannelClass, bytes: usize) -> usize {
+    match class {
+        ChannelClass::Auxiliary => 3,
+        ChannelClass::Control if bytes > CHANNEL_CHUNK_BYTES => 4,
+        ChannelClass::Control => 0,
+        _ if bytes > CHANNEL_CHUNK_BYTES => 2,
+        _ => 1,
+    }
+}
+fn grant_buffer_bucket(class: ChannelClass, bulk: bool) -> usize {
+    buffer_bucket(class, if bulk { CHANNEL_CHUNK_BYTES + 1 } else { 1 })
+}
+#[derive(Clone, Copy, Default)]
+struct BufferCost {
+    bytes: usize,
+    count: usize,
+}
+
+/// Ownership of one decoded byte message. Cloning shares the reservation;
+/// capacity returns only when its last owner drops, including upper-layer staging.
+#[derive(Clone)]
+pub struct BufferLease(Arc<BufferLeaseInner>);
+struct BufferLeaseInner {
+    owner: Weak<Mutex<ChannelCredits>>,
+    bucket: usize,
+    bytes: usize,
+}
+impl std::fmt::Debug for BufferLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BufferLease")
+            .field("bytes", &self.0.bytes)
+            .finish()
+    }
+}
+impl Drop for BufferLeaseInner {
+    fn drop(&mut self) {
+        if let Some(owner) = self.owner.upgrade() {
+            let mut state = owner.lock().expect("channel credit mutex poisoned");
+            state.received_buffers[self.bucket].bytes -= self.bytes;
+            state.received_buffers[self.bucket].count -= 1;
+            if !state.closed {
+                state.buffer_grants[self.bucket].bytes += self.bytes;
+                state.buffer_grants[self.bucket].count += 1;
+                if let Some(waker) = state.waker.take() {
+                    waker.wake();
+                }
+            }
+        }
+    }
+}
+
 /// Credits acknowledge raw-frame consumption, never semantic application or
 /// authority. Separate class windows preserve query/control/auxiliary progress
 /// while bulk bytes await the canonical consumer.
@@ -50,7 +107,11 @@ pub struct ChannelCredits {
     pending_grants: [usize; 5],
     next_sent: u64,
     next_received: u64,
-    pending: Option<(Vec<u8>, usize, usize)>,
+    pending: Option<(Vec<u8>, usize, usize, WireCreditKind)>,
+    sent_buffers: [BufferCost; 5],
+    received_buffers: [BufferCost; 5],
+    buffer_grants: [BufferCost; 5],
+    closed: bool,
     waker: Option<Waker>,
 }
 
@@ -65,9 +126,75 @@ impl ChannelCredits {
             next_sent: 0,
             next_received: 0,
             pending: None,
+            sent_buffers: [BufferCost::default(); 5],
+            received_buffers: [BufferCost::default(); 5],
+            buffer_grants: [BufferCost::default(); 5],
+            closed: false,
             waker: None,
         }
     }
+    fn buffer_can_add(costs: &[BufferCost; 5], index: usize, bytes: usize) -> bool {
+        if index == 3 {
+            return costs[3]
+                .bytes
+                .checked_add(bytes)
+                .is_some_and(|n| n <= MAX_LOGICAL_MESSAGE_BYTES)
+                && costs[3].count < MAX_CHANNEL_QUEUED_MESSAGES;
+        }
+        let canonical = [0, 1, 2, 4];
+        let total_bytes: usize = canonical.iter().map(|i| costs[*i].bytes).sum();
+        let total_count: usize = canonical.iter().map(|i| costs[*i].count).sum();
+        let control = index == 0 || index == 4;
+        total_bytes.checked_add(bytes).is_some_and(|n| {
+            n <= MAX_LOGICAL_MESSAGE_BYTES + INTERACTIVE_RESERVE_BYTES + CONTROL_RESERVE_BYTES
+        }) && total_count < MAX_CHANNEL_QUEUED_MESSAGES
+            && (control
+                || (costs[1].bytes + costs[2].bytes + bytes
+                    <= MAX_LOGICAL_MESSAGE_BYTES + INTERACTIVE_RESERVE_BYTES
+                    && costs[1].count + costs[2].count
+                        < MAX_CHANNEL_QUEUED_MESSAGES - CONTROL_RESERVE_MESSAGES))
+            && ((index != 2 && index != 4)
+                || costs[2].bytes + costs[4].bytes + bytes <= MAX_LOGICAL_MESSAGE_BYTES)
+    }
+    /// Check before semantic enqueue mutates routing, generation or codec state.
+    pub(crate) fn can_reserve_message(&self, class: ChannelClass, bytes: usize) -> bool {
+        !self.closed && Self::buffer_can_add(&self.sent_buffers, buffer_bucket(class, bytes), bytes)
+    }
+    pub(crate) fn reserve_message(&mut self, class: ChannelClass, bytes: usize) {
+        assert!(self.can_reserve_message(class, bytes));
+        let cost = &mut self.sent_buffers[buffer_bucket(class, bytes)];
+        cost.bytes += bytes;
+        cost.count += 1;
+    }
+    pub(crate) fn receive_message(
+        owner: &SharedChannelCredits,
+        class: ChannelClass,
+        bytes: usize,
+    ) -> Result<BufferLease, String> {
+        let mut state = owner.lock().map_err(|_| "channel credit mutex poisoned")?;
+        let index = buffer_bucket(class, bytes);
+        if state.closed || !Self::buffer_can_add(&state.received_buffers, index, bytes) {
+            return Err("decoded message receive window exceeded".into());
+        }
+        state.received_buffers[index].bytes += bytes;
+        state.received_buffers[index].count += 1;
+        Ok(BufferLease(Arc::new(BufferLeaseInner {
+            owner: Arc::downgrade(owner),
+            bucket: index,
+            bytes,
+        })))
+    }
+    /// Retire this connection; later lease drops cannot grant a new connection credit.
+    pub fn close(&mut self) {
+        self.closed = true;
+        self.pending = None;
+        self.pending_grants = [0; 5];
+        self.buffer_grants = [BufferCost::default(); 5];
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+
     /// Eligibility is checked before selecting or advancing a channel codec.
     pub fn can_send(&self, class: ChannelClass) -> bool {
         let index = bucket(class);
@@ -119,14 +246,34 @@ impl ChannelCredits {
         let index = bucket(grant.class);
         let amount = usize::try_from(grant.consumed_bytes)
             .map_err(|_| "channel credit does not fit receiver")?;
-        if amount == 0 || amount > self.outstanding[index] {
-            return Err("channel credit exceeds outstanding balance".into());
+        if amount == 0 {
+            return Err("empty channel credit".into());
+        }
+        match grant.kind {
+            WireCreditKind::Frames if amount > self.outstanding[index] => {
+                return Err("channel credit exceeds outstanding balance".into());
+            }
+            WireCreditKind::Messages { count, bulk } => {
+                let index = grant_buffer_bucket(grant.class, bulk);
+                let cost = &self.sent_buffers[index];
+                if count == 0 || count as usize > cost.count || amount > cost.bytes {
+                    return Err("message credit exceeds outstanding balance".into());
+                }
+            }
+            _ => {}
         }
         let successor = self
             .next_received
             .checked_add(1)
             .ok_or("channel credit sequence exhausted")?;
-        self.outstanding[index] -= amount;
+        match grant.kind {
+            WireCreditKind::Frames => self.outstanding[index] -= amount,
+            WireCreditKind::Messages { count, bulk } => {
+                let index = grant_buffer_bucket(grant.class, bulk);
+                self.sent_buffers[index].bytes -= amount;
+                self.sent_buffers[index].count -= count as usize;
+            }
+        }
         self.next_received = successor;
         if let Some(waker) = self.waker.take() {
             waker.wake();
@@ -135,23 +282,48 @@ impl ChannelCredits {
     }
     /// Retain the exact uncompressed grant frame through physical backpressure.
     pub fn peek_grant(&mut self) -> Result<Option<Vec<u8>>, String> {
-        if let Some((bytes, _, _)) = &self.pending {
+        if let Some((bytes, _, _, _)) = &self.pending {
             return Ok(Some(bytes.clone()));
         }
-        let Some(index) = self.pending_grants.iter().position(|amount| *amount != 0) else {
-            return Ok(None);
-        };
-        let amount = self.pending_grants[index];
+        let (index, amount, class, kind) =
+            if let Some(index) = self.buffer_grants.iter().position(|c| c.count != 0) {
+                let cost = self.buffer_grants[index];
+                (
+                    index,
+                    cost.bytes,
+                    [
+                        ChannelClass::Control,
+                        ChannelClass::Requests,
+                        ChannelClass::Writes,
+                        ChannelClass::Auxiliary,
+                        ChannelClass::Control,
+                    ][index],
+                    WireCreditKind::Messages {
+                        count: cost.count as u32,
+                        bulk: index == 2 || index == 4,
+                    },
+                )
+            } else if let Some(index) = self.pending_grants.iter().position(|amount| *amount != 0) {
+                (
+                    index,
+                    self.pending_grants[index],
+                    bucket_class(index),
+                    WireCreditKind::Frames,
+                )
+            } else {
+                return Ok(None);
+            };
         let frame = encode_frame(&WireFrame::ChannelCredit(WireChannelCredit {
             protocol_version: self.context.expected_protocol_version(),
             features: self.context.negotiated_features(),
             session: self.context.expected_session().cloned(),
-            class: bucket_class(index),
+            class,
             sequence: self.next_sent,
             consumed_bytes: amount as u64,
+            kind,
         }))
         .map_err(|error| error.to_string())?;
-        self.pending = Some((frame.clone(), index, amount));
+        self.pending = Some((frame.clone(), index, amount, kind));
         Ok(Some(frame))
     }
     /// Commit one grant only after physical acceptance. Newly consumed bytes
@@ -161,23 +333,36 @@ impl ChannelCredits {
             .next_sent
             .checked_add(1)
             .ok_or("channel credit sequence exhausted")?;
-        let (_, index, amount) = self
+        let (_, index, amount, kind) = self
             .pending
             .take()
             .ok_or("no channel credit grant pending")?;
-        self.pending_grants[index] = self.pending_grants[index]
-            .checked_sub(amount)
-            .ok_or("channel grant accounting underflow")?;
+        match kind {
+            WireCreditKind::Frames => {
+                self.pending_grants[index] = self.pending_grants[index]
+                    .checked_sub(amount)
+                    .ok_or("channel grant accounting underflow")?
+            }
+            WireCreditKind::Messages { count, .. } => {
+                self.buffer_grants[index].bytes -= amount;
+                self.buffer_grants[index].count -= count as usize;
+            }
+        }
         self.next_sent = next;
         Ok(())
     }
     /// Whether receiver consumption has queued a bounded grant frame.
     pub fn has_pending_grant(&self) -> bool {
-        self.pending.is_some() || self.pending_grants.iter().any(|amount| *amount != 0)
+        self.pending.is_some()
+            || self.pending_grants.iter().any(|amount| *amount != 0)
+            || self.buffer_grants.iter().any(|cost| cost.count != 0)
     }
     /// Readiness for either a pending grant or a channel waiting for new credit.
     pub fn poll_grant_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        if self.pending.is_some() || self.pending_grants.iter().any(|amount| *amount != 0) {
+        if self.pending.is_some()
+            || self.pending_grants.iter().any(|amount| *amount != 0)
+            || self.buffer_grants.iter().any(|cost| cost.count != 0)
+        {
             Poll::Ready(())
         } else {
             self.waker = Some(cx.waker().clone());
@@ -206,7 +391,7 @@ mod tests {
         sender.charge(ChannelClass::Requests, 7).unwrap();
         receiver.consumed(ChannelClass::Requests, 7).unwrap();
         let bytes = receiver.peek_grant().unwrap().unwrap();
-        assert_eq!(hex::encode(&bytes), "050301000100808001");
+        assert_eq!(hex::encode(&bytes), "05030100010080800100");
         assert_eq!(receiver.peek_grant().unwrap().unwrap(), bytes);
         let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
             panic!("credit frame")
@@ -228,6 +413,70 @@ mod tests {
             "old connection credits are not transferable"
         );
     }
+    #[test]
+    fn control_reserve_is_not_a_large_catalogue_cap_and_total_buffers_stay_bounded() {
+        let mut credits = ChannelCredits::new(context());
+        assert!(credits.can_reserve_message(ChannelClass::Control, MAX_LOGICAL_MESSAGE_BYTES));
+        credits.reserve_message(ChannelClass::Control, MAX_LOGICAL_MESSAGE_BYTES);
+        for _ in 0..INTERACTIVE_RESERVE_BYTES / CHANNEL_CHUNK_BYTES {
+            credits.reserve_message(ChannelClass::Requests, CHANNEL_CHUNK_BYTES);
+        }
+        for _ in 0..CONTROL_RESERVE_BYTES / CHANNEL_CHUNK_BYTES {
+            credits.reserve_message(ChannelClass::Control, CHANNEL_CHUNK_BYTES);
+        }
+        for class in [
+            ChannelClass::Control,
+            ChannelClass::Requests,
+            ChannelClass::Delivery,
+            ChannelClass::Writes,
+        ] {
+            assert!(!credits.can_reserve_message(class, 1));
+        }
+        assert!(
+            credits.can_reserve_message(ChannelClass::Auxiliary, MAX_LOGICAL_MESSAGE_BYTES),
+            "immutable chunk progress owns separate reserved capacity"
+        );
+    }
+
+    #[test]
+    fn decoded_buffer_credit_waits_for_last_owner_and_dies_with_connection() {
+        let receiver = Arc::new(Mutex::new(ChannelCredits::new(context())));
+        let mut sender = ChannelCredits::new(context());
+        sender.reserve_message(ChannelClass::Requests, 100);
+        let lease =
+            ChannelCredits::receive_message(&receiver, ChannelClass::Requests, 100).unwrap();
+        let staged = lease.clone();
+        drop(lease);
+        assert!(
+            !receiver.lock().unwrap().has_pending_grant(),
+            "moving into a deferred queue cannot return capacity"
+        );
+        drop(staged);
+        let bytes = receiver.lock().unwrap().peek_grant().unwrap().unwrap();
+        let WireFrame::ChannelCredit(grant) = decode_frame(&bytes).unwrap() else {
+            panic!("credit")
+        };
+        assert!(matches!(
+            grant.kind,
+            WireCreditKind::Messages {
+                count: 1,
+                bulk: false
+            }
+        ));
+        sender.receive_credit(grant).unwrap();
+        receiver.lock().unwrap().accept_grant().unwrap();
+        assert_eq!(sender.sent_buffers[1].bytes, 0);
+        let lease =
+            ChannelCredits::receive_message(&receiver, ChannelClass::Requests, 100).unwrap();
+        receiver.lock().unwrap().close();
+        drop(lease);
+        assert_eq!(receiver.lock().unwrap().received_buffers[1].bytes, 0);
+        assert!(
+            !receiver.lock().unwrap().has_pending_grant(),
+            "old leases cannot emit reconnect credits"
+        );
+    }
+
     #[test]
     fn exhausted_bulk_window_preserves_requests_deliveries_control_and_auxiliary() {
         let mut credits = ChannelCredits::new(context());

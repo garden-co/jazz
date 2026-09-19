@@ -1882,6 +1882,10 @@ fn rejected_dynamic_channel_admission_preserves_generation() {
     let mut receiver = WireTransportAdapter::current(right);
     sender.send(reply(1)).unwrap();
     assert_eq!(receive_after_pumping(&mut sender, &mut receiver), reply(1));
+    // The received message's last owner has dropped. Deliver its buffer-credit
+    // receipt before deliberately filling the entire new outstanding window.
+    receiver.poll_flush().unwrap();
+    assert!(sender.try_recv_result().unwrap().is_none());
     blocked.set(true);
     for _ in 0..crate::wire::channels::MAX_CHANNEL_QUEUED_MESSAGES {
         sender.send(test_catalogue_ack()).unwrap();

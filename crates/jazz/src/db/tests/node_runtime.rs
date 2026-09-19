@@ -2241,10 +2241,10 @@ fn byte_wire_round_trips_subscription_to_client() {
         };
         let first = decode(first);
         let second = decode(second);
-        let SyncMessage::RegisterShape { shape_id, .. } = first else {
+        let SyncMessage::RegisterShape { shape_id, .. } = first.message else {
             panic!("expected RegisterShape, got {first:?}");
         };
-        let SyncMessage::Subscribe(subscribe) = second else {
+        let SyncMessage::Subscribe(subscribe) = second.message else {
             panic!("expected Subscribe, got {second:?}");
         };
         assert_eq!(subscribe.shape_id, shape_id);

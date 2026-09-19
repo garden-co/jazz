@@ -47,6 +47,10 @@ impl Transport for ObservedTestTransport {
         self.inner.try_recv_result()
     }
 
+    fn try_recv_owned_result(&mut self) -> Result<Option<ReceivedSyncMessage>, TransportError> {
+        self.inner.try_recv_owned_result()
+    }
+
     fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
         self.inner.connection_session_context()
     }
