@@ -7,6 +7,8 @@ pub(super) struct NodeRuntimeMeta {
     pub(super) retainers: HashSet<Retainer>,
     pub(super) last_used_tick: u64,
     pub(super) depends_on_context: Option<bool>,
+    /// Immutable graph classification, not a proof that runtime state is ready.
+    pub(super) has_hydration_state_ancestor: Option<bool>,
     pub(super) input_signature: Option<Arc<NodeInputSignature>>,
     pub(super) input_generation: u64,
     pub(super) raw_projection_fields: Option<Option<Arc<PreparedProjection>>>,
