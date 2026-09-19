@@ -4718,6 +4718,7 @@ struct ConnectedClient {
     pending_subscriptions: BTreeMap<u64, ForegroundSubscriptionOpen>,
     subscriptions: BTreeMap<u64, SubscriptionStream>,
     pending_operations: BTreeMap<u64, ForegroundPendingOperation>,
+
     mutation_cleanups: Vec<ForegroundOperationFuture>,
     read_cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,
     read_cleanup: Option<Pin<Box<dyn Future<Output = ()>>>>,
@@ -5586,8 +5587,20 @@ impl RelayWorker {
             let client = self.foreground_client(client)?;
             Rc::clone(&client.db)
         };
+        // Direct mutations are admitted to the core FIFO without polling it.
+        // Ordinary reads must therefore wait for the writes admitted before
+        // this command, while transaction reads retain their existing
+        // transaction-local ordering below.
+        let mutation_barrier = open_tx.is_none().then(|| db.queued_mutation_barrier());
+
         let read_db = Rc::clone(&db);
         let future: ForegroundOperationFuture = Box::pin(async move {
+            if let Some(barrier) = mutation_barrier {
+                barrier
+                    .await
+                    .map_err(|_| RelayError::Closed)?
+                    .map_err(RelayError::Db)?;
+            }
             let release_db = Rc::clone(&read_db);
             let result = read_db
                 .all_serialized_query(
@@ -10126,6 +10139,90 @@ mod tests {
             ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
         ));
         client.close().unwrap();
+    }
+
+    #[test]
+    fn direct_mutations_admit_before_local_publish_and_fence_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay = NativeRelay::spawn(config(
+            directory.path().join("direct-before-publish.sqlite"),
+            Some("direct-before-publish"),
+        ))
+        .unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4d; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        for _ in 0..16 {
+            relay.pump().unwrap();
+        }
+        relay
+            .run(move |worker| worker.foreground_client(id).map(|_| ()))
+            .unwrap();
+
+        let first = relay
+            .run(move |worker| {
+                worker.direct_foreground_mutation(
+                    id,
+                    ForegroundMutationKind::Insert,
+                    "todos".into(),
+                    None,
+                    encoded_title_cells("first"),
+                    "{}".into(),
+                )
+            })
+            .unwrap();
+        let second = relay
+            .run(move |worker| {
+                worker.direct_foreground_mutation(
+                    id,
+                    ForegroundMutationKind::Insert,
+                    "todos".into(),
+                    None,
+                    encoded_title_cells("second"),
+                    "{}".into(),
+                )
+            })
+            .unwrap();
+
+        for (tx_id, _) in [first, second] {
+            assert_eq!(
+                relay
+                    .run(move |worker| worker.foreground_write_state(id, *tx_id.as_bytes()))
+                    .unwrap(),
+                "{\"fate\":\"Pending\",\"global_time\":null,\"durability\":\"None\"}"
+            );
+        }
+
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let mut read = client
+            .start_foreground_read(query, "{}".into(), None)
+            .unwrap();
+        assert!(
+            matches!(read, ForegroundOperationPoll::Pending { .. }),
+            "a read admitted after direct writes waits for their FIFO barrier"
+        );
+
+        for _ in 0..64 {
+            let operation = match read {
+                ForegroundOperationPoll::Pending { operation } => operation,
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) => {
+                    let batches: Vec<DecodedForegroundRowBatch> =
+                        postcard::from_bytes(&rows).unwrap();
+                    assert_eq!(batches.len(), 1);
+                    assert_eq!(batches[0].rows.len(), 2);
+                    client.close().unwrap();
+                    return;
+                }
+                _ => panic!("foreground read returned unexpectedly"),
+            };
+            relay.pump().unwrap();
+            read = client.poll_foreground_operation(operation).unwrap();
+        }
+        panic!("foreground read did not observe admitted direct mutations");
     }
 
     // Internal receipt: deterministic owner contention is not exposed by the public JS API.

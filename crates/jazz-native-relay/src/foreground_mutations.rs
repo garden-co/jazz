@@ -206,13 +206,6 @@ impl RelayWorker {
             }
         }
         .map_err(RelayError::Db)?;
-        client.db.drive_queued_mutation_once();
-        if let Some(error) = client
-            .db
-            .take_queued_mutation_failure(write.mergeable_tx_id())
-        {
-            return Err(RelayError::Db(error));
-        }
         let row_id = write.row_uuid();
         Ok((register_write(&client.mutations.writes, write), row_id))
     }
