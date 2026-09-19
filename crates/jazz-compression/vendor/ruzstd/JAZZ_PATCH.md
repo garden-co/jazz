@@ -23,7 +23,9 @@ Existing bulk helpers keep using upstream read/collect behavior.
 
 `set_max_block_output`, set after initialization, is opt-in. It checks encoded
 block lengths, regenerated literal lengths and sequence counts before their
-allocations, then checked-adds every match length to the literal count before
+allocations. Both Huffman loops reject excess symbols before pushing beyond
+the declared regenerated literal size, even when a malformed bitstream claims
+fewer symbols than it actually encodes. The patch then checked-adds every match length to the literal count before
 executing sequences or reserving regenerated output. The channel adapter checks
 the frame window before initializing the decoder, and decodes one complete
 bounded block at a time. Default bulk behavior has no new size limit.

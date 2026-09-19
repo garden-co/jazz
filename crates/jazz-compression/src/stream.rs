@@ -60,6 +60,11 @@ impl StreamEncoder {
                 encoder
                     .set_parameter(zstd::stream::raw::CParameter::ChecksumFlag(false))
                     .map_err(err)?;
+                // Even an empty stream must use the unknown-length channel
+                // profile rather than zstd's automatic single-segment frame.
+                encoder
+                    .set_parameter(zstd::stream::raw::CParameter::ContentSizeFlag(false))
+                    .map_err(err)?;
                 Encoder::Zstd(encoder)
             }
             #[allow(unreachable_patterns)]
@@ -229,7 +234,7 @@ enum Decoder {
     #[cfg(feature = "zstd")]
     Zstd(zstd::stream::raw::Decoder<'static>),
     #[cfg(all(feature = "ruzstd", not(feature = "zstd")))]
-    Ruzstd(ruzstd::decoding::FrameDecoder),
+    Ruzstd(Box<ruzstd::decoding::FrameDecoder>),
 }
 
 /// A decoder owns at most one encoded block and bounded codec history. The
@@ -241,6 +246,7 @@ pub struct StreamDecoder {
     packet: Vec<u8>,
     target: usize,
     packet_position: usize,
+    block_limit: usize,
     header: bool,
     packet_ready: bool,
     last_block: bool,
@@ -266,7 +272,7 @@ impl StreamDecoder {
                 Decoder::Zstd(decoder)
             }
             #[cfg(all(feature = "ruzstd", not(feature = "zstd")))]
-            Codec::Zstd => Decoder::Ruzstd(ruzstd::decoding::FrameDecoder::new()),
+            Codec::Zstd => Decoder::Ruzstd(Box::default()),
             #[allow(unreachable_patterns)]
             _ => Decoder::Unavailable,
         };
@@ -282,6 +288,7 @@ impl StreamDecoder {
                 Codec::Zstd => 6,
             },
             packet_position: 0,
+            block_limit: MAX_STREAM_CHUNK_BYTES,
             header: true,
             packet_ready: false,
             last_block: false,
@@ -381,7 +388,7 @@ impl StreamDecoder {
             Codec::Zstd => 3,
         }
     }
-    fn validate_header(&self) -> Result<(), String> {
+    fn validate_header(&mut self) -> Result<(), String> {
         let valid = match self.codec {
             // LZ4 v1 linked blocks, 64KiB, no optional fields; includes HC.
             Codec::Lz4 => self.packet == [0x04, 0x22, 0x4d, 0x18, 0x40, 0x40, 0xc0],
@@ -392,6 +399,11 @@ impl StreamDecoder {
             }
         };
         if valid {
+            if self.codec == Codec::Zstd {
+                let descriptor = self.packet[5];
+                let base = 1usize << (10 + (descriptor >> 3));
+                self.block_limit = base + (base / 8) * usize::from(descriptor & 7);
+            }
             Ok(())
         } else {
             Err("unsupported channel codec header/window profile".into())
@@ -417,8 +429,8 @@ impl StreamDecoder {
                 (size, if kind == 1 { 1 } else { size }, value & 1 != 0)
             }
         };
-        if size > MAX_STREAM_CHUNK_BYTES {
-            return Err("channel codec block exceeds 64KiB".into());
+        if size > self.block_limit {
+            return Err("channel codec block exceeds 64KiB/profile window".into());
         }
         Ok((stored, last))
     }
@@ -471,7 +483,7 @@ impl StreamDecoder {
                     if self.header {
                         decoder.init(input).map_err(err)?;
                         decoder
-                            .set_max_block_output(MAX_STREAM_CHUNK_BYTES)
+                            .set_max_block_output(self.block_limit)
                             .map_err(err)?;
                     } else {
                         decoder

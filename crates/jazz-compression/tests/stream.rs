@@ -53,6 +53,7 @@ fn payload() -> Vec<u8> {
         })
         .collect()
 }
+#[cfg(any(feature = "lz4", feature = "zstd"))]
 fn exercise(codec: Codec) {
     let mut encoder = StreamEncoder::new(codec).unwrap();
     let mut decoder = StreamDecoder::new(codec).unwrap();
@@ -143,13 +144,12 @@ fn codec_states_are_send() {
 }
 
 fn available_codecs() -> Vec<Codec> {
-    #[allow(unused_mut)]
-    let mut codecs = Vec::new();
-    #[cfg(feature = "lz4")]
-    codecs.push(Codec::Lz4);
-    #[cfg(feature = "zstd")]
-    codecs.push(Codec::Zstd);
-    codecs
+    vec![
+        #[cfg(feature = "lz4")]
+        Codec::Lz4,
+        #[cfg(feature = "zstd")]
+        Codec::Zstd,
+    ]
 }
 
 #[test]
@@ -204,6 +204,7 @@ fn multiple_blocks_and_more_than_one_window_round_trip() {
     }
 }
 
+#[cfg(any(feature = "lz4", feature = "zstd", feature = "ruzstd"))]
 fn reject(codec: Codec, bytes: &[u8], expected: &str) {
     let mut d = StreamDecoder::new(codec).unwrap();
     let error = d.decode(bytes, &mut [0; 65536]).unwrap_err();
@@ -257,4 +258,28 @@ fn zstd_rejects_profile_and_expansion_violations() {
     assert_eq!(&bomb[..5], &header[..5]);
     bomb[5] = 0x30;
     reject(Codec::Zstd, &bomb, "channel codec:");
+}
+
+#[test]
+fn empty_stream_has_an_explicit_end_marker() {
+    for codec in available_codecs() {
+        let mut encoder = StreamEncoder::new(codec).unwrap();
+        let bytes = encode(&mut encoder, &[], true, 1);
+        assert!(!bytes.is_empty());
+        let mut decoder = StreamDecoder::new(codec).unwrap();
+        assert!(decode(&mut decoder, &bytes, 1).is_empty());
+        decoder.finish().unwrap();
+    }
+}
+
+#[cfg(any(feature = "zstd", feature = "ruzstd"))]
+#[test]
+fn smaller_zstd_window_also_limits_the_block() {
+    let mut bytes = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0]; // 1KiB window
+    bytes.extend_from_slice(&(2048_u32 << 3).to_le_bytes()[..3]);
+    reject(Codec::Zstd, &bytes, "profile window");
+    let empty = [0x28, 0xb5, 0x2f, 0xfd, 0, 0, 1, 0, 0];
+    let mut decoder = StreamDecoder::new(Codec::Zstd).unwrap();
+    assert!(decode(&mut decoder, &empty, 1).is_empty());
+    decoder.finish().unwrap();
 }

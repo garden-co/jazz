@@ -110,6 +110,14 @@ fn decompress_literals(
             decoder.init_state(&mut br);
 
             while br.bits_remaining() > -(scratch.table.max_num_bits as isize) {
+                // The header was bounded before allocation. A malformed Huffman
+                // stream must not grow target past that declared regenerated size.
+                if target.len() >= section.regenerated_size as usize {
+                    return Err(err::DecodedLiteralCountMismatch {
+                        decoded: target.len() + 1,
+                        expected: section.regenerated_size as usize,
+                    });
+                }
                 target.push(decoder.decode_symbol());
                 decoder.next_state(&mut br);
             }
@@ -141,6 +149,14 @@ fn decompress_literals(
         }
         decoder.init_state(&mut br);
         while br.bits_remaining() > -(scratch.table.max_num_bits as isize) {
+            // The header was bounded before allocation. A malformed Huffman
+            // stream must not grow target past that declared regenerated size.
+            if target.len() >= section.regenerated_size as usize {
+                return Err(err::DecodedLiteralCountMismatch {
+                    decoded: target.len() + 1,
+                    expected: section.regenerated_size as usize,
+                });
+            }
             target.push(decoder.decode_symbol());
             decoder.next_state(&mut br);
         }

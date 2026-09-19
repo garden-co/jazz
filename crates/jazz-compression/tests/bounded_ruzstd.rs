@@ -84,3 +84,31 @@ fn zero_offset_is_rejected_without_repetition_loop() {
         .unwrap_err();
     assert!(format!("{error:?}").contains("ZeroOffset"), "{error:?}");
 }
+
+#[test]
+fn huffman_literal_output_cannot_exceed_its_declared_size() {
+    for four_streams in [false, true] {
+        // Direct Huffman weights for two one-bit symbols. Each sixteen-byte bit
+        // stream decodes 127 symbols, but the literal header advertises one.
+        let mut literals = vec![128, 0x10];
+        if four_streams {
+            literals.extend_from_slice(&[16, 0, 16, 0, 16, 0]);
+            literals.extend_from_slice(&[0xff; 64]);
+        } else {
+            literals.extend_from_slice(&[0xff; 16]);
+        }
+        let header = ((literals.len() as u32) << 14) | (1 << 4) | if four_streams { 6 } else { 2 };
+        let mut body = header.to_le_bytes()[..3].to_vec();
+        body.extend(literals);
+        body.push(0); // no sequences
+        let invalid = block(2, &body, body.len());
+        let error = decoder(if four_streams { 128 } else { 64 })
+            .decode_blocks(invalid.as_slice(), BlockDecodingStrategy::UptoBlocks(1))
+            .unwrap_err();
+        assert!(
+            format!("{error:?}")
+                .contains("DecodedLiteralCountMismatch { decoded: 2, expected: 1 }"),
+            "{error:?}"
+        );
+    }
+}
