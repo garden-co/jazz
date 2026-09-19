@@ -620,7 +620,6 @@ where
     pub(super) active_authority_view_receipts: ActiveAuthorityViewReceipts,
     pub(super) coverage_refresh_generations: CoverageRefreshGenerations,
     pub(super) scheduler: SharedTickScheduler,
-    pub(super) receive_expiry_wake: Option<web_time::Instant>,
     pub(super) query_runtime_wake_pending: Arc<AtomicBool>,
     pub(super) query_runtime_waker: Rc<RefCell<Option<Waker>>>,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
@@ -1978,19 +1977,8 @@ where
         }
         if result.is_ok() {
             if let Some(delay_ms) = self.transport.incomplete_receive_timeout_ms() {
-                let now = web_time::Instant::now();
-                let deadline = now + std::time::Duration::from_millis(delay_ms);
-                // Keep an earlier outstanding wake when progress extends the
-                // idle deadline. That wake will re-arm once, avoiding one host
-                // timer per incoming extent or unrelated database tick.
-                if self
-                    .receive_expiry_wake
-                    .is_none_or(|scheduled| scheduled <= now || deadline < scheduled)
-                {
-                    if let Some(scheduler) = self.scheduler.borrow().as_ref() {
-                        scheduler.schedule_tick_after(delay_ms);
-                        self.receive_expiry_wake = Some(deadline);
-                    }
+                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                    scheduler.schedule_tick_after(delay_ms);
                 }
             }
         }

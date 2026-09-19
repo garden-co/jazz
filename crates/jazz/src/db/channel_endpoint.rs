@@ -102,6 +102,12 @@ impl ChannelEndpoint {
         self.last_wire_error.clone()
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn set_incomplete_receive_timeout_for_test(&mut self, timeout_ms: u64) {
+        self.idle_timeout_ms = timeout_ms;
+        self.age_timeout_ms = timeout_ms;
+    }
+
     pub(super) fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
         self.inbound
             .values()
@@ -531,8 +537,8 @@ impl AuxiliaryChannelEndpoint {
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn set_incomplete_receive_timeout_for_test(&mut self, timeout_ms: u64) {
-        self.endpoint.idle_timeout_ms = timeout_ms;
-        self.endpoint.age_timeout_ms = timeout_ms;
+        self.endpoint
+            .set_incomplete_receive_timeout_for_test(timeout_ms);
     }
     /// Share canonical and auxiliary physical windows for this admitted link.
     pub fn set_channel_credits(&mut self, credits: SharedChannelCredits) {

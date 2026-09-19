@@ -343,6 +343,13 @@ impl<T: WireTransport> WireTransportAdapter<T> {
         self.endpoint.set_elapsed_for_test(elapsed_ms);
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_incomplete_receive_timeout_for_test(&mut self, timeout_ms: u64) {
+        self.endpoint
+            .set_incomplete_receive_timeout_for_test(timeout_ms);
+    }
+
     fn route(
         &mut self,
         message: &SyncMessage,

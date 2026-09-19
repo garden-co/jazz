@@ -1548,7 +1548,10 @@ pub trait TickScheduler {
     /// This is deliberately distinct from [`TickUrgency::Deferred`]: callers
     /// use it for protocol admission windows, where turning a deadline into a
     /// microtask would create a resend hot loop. Every host therefore supplies
-    /// a real timer implementation.
+    /// a real timer implementation. Hosts coalesce at the earliest requested
+    /// deadline and must bring an existing later timer forward. Servicing that
+    /// wake ticks all connections; live obligations re-arm their remaining
+    /// deadlines, so hosts need not retain every individual timer request.
     fn schedule_tick_after(&self, delay_ms: u64);
 
     /// A waker for cold query-runtime storage progress.
