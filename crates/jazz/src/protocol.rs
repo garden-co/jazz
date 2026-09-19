@@ -49,6 +49,11 @@ pub struct AuthorityPublication {
     pub commits: Vec<AuthorityCommitUnit>,
 }
 
+/// Uninhabited payload preserving retired postcard discriminants.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum ReservedWireMessage {}
+
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
@@ -129,13 +134,9 @@ pub enum SyncMessage {
         /// Lens payload.
         lens: MigrationLens,
     },
-    /// Set the current write-schema pointer.
-    SetCurrentWriteSchema {
-        /// Authenticated catalogue admin.
-        author: AuthorSubject,
-        /// Core-ordered pointer payload.
-        pointer: CurrentWriteSchema,
-    },
+    /// Retired wire tag. Uninhabited so it cannot be sent or received.
+    #[doc(hidden)]
+    Reserved12(ReservedWireMessage),
     /// Catalogue-lane acknowledgement.
     CatalogueAck(CatalogueAck),
     /// Downstream current-row view update.

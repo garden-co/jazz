@@ -73,7 +73,7 @@ where
                 ));
             }
         }
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let mut emitted = BTreeSet::new();
         for commit in &commits {
             let table = self.table_in_schema(&commit.table, schema_version)?;
@@ -285,7 +285,7 @@ where
         made_at: TxTime,
     ) -> Result<PublishedTransaction, Error> {
         self.require_catalogue_ready()?;
-        let write_schema_version = self.catalogue.current_write_schema.schema;
+        let write_schema_version = self.catalogue.active_schema.schema;
         let commits = commits
             .into_iter()
             .map(|commit| (write_schema_version, commit))
@@ -606,7 +606,7 @@ where
                     authored_columns: authored_column_ids,
                     deletion: commit.deletion,
                 },
-                (write_schema_version != self.catalogue.current_schema_version_id)
+                (write_schema_version != self.catalogue.local_schema_version_id)
                     .then_some(write_schema_version),
                 history_descriptor,
             )?;
@@ -924,7 +924,7 @@ where
         branch: &BranchSelector,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         self.visible_current_physical_cells_in_branch_schema(
             schema_version,
             table,
@@ -1072,7 +1072,7 @@ where
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<TxId>, Error> {
-        let schema_version = self.catalogue.current_write_schema.schema;
+        let schema_version = self.catalogue.active_schema.schema;
         let table_schema = self.table_in_schema(table, schema_version)?;
         let schema = &self
             .catalogue
@@ -1108,7 +1108,7 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
         self.local_content_winner_tx_id_in_schema(
-            self.catalogue.current_write_schema.schema,
+            self.catalogue.active_schema.schema,
             table,
             row_uuid,
         )
@@ -1134,7 +1134,7 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
         self.local_deletion_winner_tx_id_in_schema(
-            self.catalogue.current_write_schema.schema,
+            self.catalogue.active_schema.schema,
             table,
             row_uuid,
         )
@@ -1321,7 +1321,7 @@ where
         self.local_current_row_in_schema(
             table,
             row_uuid,
-            self.catalogue.current_write_schema.schema,
+            self.catalogue.active_schema.schema,
         )
         .await
     }

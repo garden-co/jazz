@@ -28,7 +28,7 @@ use crate::ids::{AuthorSubject, MigrationLensId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaLineagePublication, SchemaVersion,
-    SyncMessage, TableLens,
+    SyncMessage,
 };
 use crate::schema::JazzSchema;
 use crate::storage_codec_profile::epoch_1_storage_codec_profile;
@@ -578,6 +578,7 @@ impl ShellDb {
         }
     }
 
+    #[cfg(test)]
     fn publish_schema(&self, schema: SchemaVersion) -> ShellResult<Vec<SyncMessage>> {
         match self {
             Self::Memory(db) => crate::db::block_on(db.publish_schema(schema)).map_err(Into::into),
@@ -609,16 +610,34 @@ impl ShellDb {
         }
     }
 
-    fn set_current_write_schema(
+    fn validate_schema_activation(&self, revision: u64, schema: JazzSchema) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db
+                .validate_schema_activation(revision, schema)
+                .map_err(Into::into),
+            Self::Durable(db) => db
+                .validate_schema_activation(revision, schema)
+                .map_err(Into::into),
+        }
+    }
+
+    fn activate_schema(
         &self,
-        pointer: CurrentWriteSchema,
-    ) -> ShellResult<Vec<SyncMessage>> {
+        revision: u64,
+        schema: JazzSchema,
+        permissions: std::collections::HashMap<
+            crate::tools::public_schema::TableName,
+            crate::tools::public_schema::TablePolicies,
+        >,
+    ) -> ShellResult<()> {
         match self {
             Self::Memory(db) => {
-                crate::db::block_on(db.set_current_write_schema(pointer)).map_err(Into::into)
+                crate::db::block_on(db.activate_schema(revision, schema, permissions))
+                    .map_err(Into::into)
             }
             Self::Durable(db) => {
-                crate::db::block_on(db.set_current_write_schema(pointer)).map_err(Into::into)
+                crate::db::block_on(db.activate_schema(revision, schema, permissions))
+                    .map_err(Into::into)
             }
         }
     }
@@ -936,13 +955,6 @@ impl InMemoryServerShell {
         edge_cache_budget: Option<EdgeCacheBudget>,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> ShellResult<Self> {
-        let active_schema = snapshot.current_write_schema.schema;
-        let active_schema_payload = snapshot
-            .schemas
-            .iter()
-            .find(|schema| schema.id == active_schema)
-            .map(|schema| schema.schema.clone())
-            .ok_or(ShellError::MissingEvent("trusted snapshot active schema"))?;
         let db = ShellDb::open_catalogue_uninitialized_edge(
             identity,
             storage_config,
@@ -950,8 +962,9 @@ impl InMemoryServerShell {
             Some(0x5e),
         )?;
         db.apply_trusted_catalogue_snapshot(snapshot)?;
+        let structural = db.trusted_current_catalogue_schema()?;
         let mut db = db;
-        db.select_schema_view(active_schema_payload)?;
+        db.select_schema_view(structural)?;
         db.set_edge_cache_budget(edge_cache_budget);
         Ok(Self {
             db,
@@ -1087,75 +1100,11 @@ impl InMemoryServerShell {
         self.db.catalogue_schema(schema).is_some()
     }
 
-    fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {
-        let schema_id = schema.version_id();
+    fn bootstrap_runtime_schema(&mut self, _schema: JazzSchema) -> ShellResult<()> {
         let current = self.db.current_write_schema()?;
-        if current.schema == schema_id
-            && current.revision > 0
-            && self.db.catalogue_schema(schema_id).is_some()
-        {
-            self.runtime_schema_state.current_write_revision = current.revision;
-            self.runtime_schema_state.last_published_schema = Some(schema_id);
-            return Ok(());
-        }
-
-        self.publish_runtime_schema(schema)?;
-        Ok(())
-    }
-
-    // Genesis-only bootstrap. Non-genesis callers must use atomic lineage
-    // admission through `publish_runtime_schema_with_lens`.
-    fn publish_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<SchemaVersionId> {
-        let schema_version = SchemaVersion::new(schema);
-        let schema_id = schema_version.id;
-        let expected_schema = schema_version.schema.clone();
-        let current = self.db.current_write_schema()?;
-        if current.schema == schema_id
-            && current.revision > 0
-            && self.db.catalogue_schema(schema_id).as_ref() == Some(&expected_schema)
-        {
-            self.runtime_schema_state.current_write_revision = current.revision;
-            self.runtime_schema_state.last_published_schema = Some(schema_id);
-            return Ok(schema_id);
-        }
-
-        let publish_acks = catalogue_acks_from_messages(self.db.publish_schema(schema_version)?);
-        let catalogue_matches =
-            self.db.catalogue_schema(schema_id).as_ref() == Some(&expected_schema);
-        let publish_applied = publish_acks
-            .iter()
-            .any(|ack| ack.applied && ack.schema == Some(schema_id));
-        if !publish_applied && !catalogue_matches {
-            return Err(ShellError::MissingEvent("CatalogueAck"));
-        }
-        if !catalogue_matches {
-            return Err(ShellError::MissingEvent("CatalogueAck"));
-        }
-
-        let current = self.db.current_write_schema()?;
-        if current.schema == schema_id && current.revision > 0 {
-            self.runtime_schema_state.current_write_revision = current.revision;
-            self.runtime_schema_state.last_published_schema = Some(schema_id);
-            return Ok(schema_id);
-        }
-
-        let revision = current.revision.saturating_add(1);
-        let set_current_acks =
-            catalogue_acks_from_messages(self.db.set_current_write_schema(CurrentWriteSchema {
-                revision,
-                schema: schema_id,
-            })?);
-        let set_current_applied = set_current_acks.iter().any(|ack| {
-            ack.applied && ack.revision == Some(revision) && ack.schema == Some(schema_id)
-        });
-        let current = self.db.current_write_schema()?;
-        if !(set_current_applied || current.schema == schema_id && current.revision > 0) {
-            return Err(ShellError::MissingEvent("CatalogueAck"));
-        }
-
         self.runtime_schema_state.current_write_revision = current.revision;
-        self.runtime_schema_state.last_published_schema = Some(schema_id);
-        Ok(schema_id)
+        self.runtime_schema_state.last_published_schema = Some(current.schema);
+        Ok(())
     }
 
     /// Atomically admit a non-genesis schema with its lineage-defining lens.
@@ -1208,62 +1157,31 @@ impl InMemoryServerShell {
         Ok(())
     }
 
-    /// Publish a schema derived from the authoritative permissions head and
-    /// release parked session-scoped reads and writes.
-    pub fn publish_permissions_schema(
-        &mut self,
+    pub(crate) fn validate_schema_activation(
+        &self,
+        revision: u64,
         schema: JazzSchema,
-        lineage_source: SchemaVersionId,
+    ) -> ShellResult<()> {
+        self.db.validate_schema_activation(revision, schema)
+    }
+
+    /// Activate a structural schema and its explicit permission bundle together.
+    pub fn activate_schema(
+        &mut self,
+        revision: u64,
+        schema: JazzSchema,
+        permissions: std::collections::HashMap<
+            crate::tools::public_schema::TableName,
+            crate::tools::public_schema::TablePolicies,
+        >,
     ) -> ShellResult<SchemaVersionId> {
         let schema_id = schema.version_id();
-        let existing = self.db.catalogue_schema(schema_id);
-        if existing.as_ref() != Some(&schema) && existing.is_some() {
-            let acks = catalogue_acks_from_messages(
-                self.db.publish_schema(SchemaVersion::new(schema.clone()))?,
-            );
-            if !acks
-                .iter()
-                .any(|ack| ack.applied && ack.schema == Some(schema_id))
-            {
-                return Err(ShellError::MissingEvent("CatalogueAck"));
-            }
-        } else if existing.is_none() {
-            let lens = MigrationLens::new(
-                lineage_source,
-                schema_id,
-                schema
-                    .tables
-                    .iter()
-                    .map(|table| TableLens {
-                        source_table: table.name.clone(),
-                        target_table: table.name.clone(),
-                        ops: Vec::new(),
-                    })
-                    .collect(),
-            )
-            .expect("valid migration lens");
-            self.publish_runtime_schema_with_lens(schema, lens, Vec::new(), Vec::new())?;
+        if self.db.catalogue_schema(schema_id).is_none() {
+            return Err(ShellError::MissingEvent("active schema structural lineage"));
         }
-
-        let current = self.db.current_write_schema()?;
-        if current.schema != schema_id {
-            let revision = current.revision.saturating_add(1);
-            let acks = catalogue_acks_from_messages(self.db.set_current_write_schema(
-                CurrentWriteSchema {
-                    revision,
-                    schema: schema_id,
-                },
-            )?);
-            if !acks.iter().any(|ack| {
-                ack.applied && ack.revision == Some(revision) && ack.schema == Some(schema_id)
-            }) {
-                return Err(ShellError::MissingEvent("CatalogueAck"));
-            }
-        }
-        let current = self.db.current_write_schema()?;
-        self.runtime_schema_state.current_write_revision = current.revision;
+        self.db.activate_schema(revision, schema, permissions)?;
+        self.runtime_schema_state.current_write_revision = revision;
         self.runtime_schema_state.last_published_schema = Some(schema_id);
-        self.db.set_permissions_ready(true)?;
         Ok(schema_id)
     }
 
@@ -2562,26 +2480,62 @@ mod tests {
         )
         .unwrap();
 
-        shell.publish_permissions_schema(first, schema_id).unwrap();
+        let permissions = |schema: &JazzSchema| {
+            schema
+                .public_schema()
+                .iter()
+                .map(|(name, table)| (name.clone(), table.policies.clone()))
+                .collect()
+        };
+        // Internal: catalogue payloads and activation revisions are not app query results.
+        let assert_active = |shell: &InMemoryServerShell, expected: &JazzSchema, revision| {
+            let snapshot = shell.trusted_catalogue_snapshot().unwrap();
+            assert_eq!(snapshot.schemas, vec![SchemaVersion::new(expected.clone())]);
+            assert!(snapshot.lineages.is_empty());
+            assert_eq!(snapshot.current_write_schema.revision, revision);
+            assert_eq!(snapshot.current_write_schema.schema, schema_id);
+            assert_eq!(
+                shell.db.catalogue_schema(schema_id),
+                Some(structural.clone())
+            );
+        };
         shell
-            .publish_permissions_schema(second.clone(), schema_id)
+            .activate_schema(1, structural.clone(), permissions(&first))
             .unwrap();
-        assert_eq!(shell.db.catalogue_schema(schema_id), Some(second.clone()));
-        assert_eq!(shell.db.current_write_schema().unwrap().schema, schema_id);
+        shell
+            .activate_schema(2, structural.clone(), permissions(&second))
+            .unwrap();
+        // Replays are idempotent; stale and conflicting revisions cannot change grants.
+        shell
+            .activate_schema(2, structural.clone(), permissions(&second))
+            .unwrap();
+        assert!(
+            shell
+                .activate_schema(1, structural.clone(), permissions(&first))
+                .is_err()
+        );
+        assert!(
+            shell
+                .activate_schema(2, structural.clone(), Default::default())
+                .is_err()
+        );
+        // Publishing a schema alone does not replace the selected permissions.
+        shell.db.publish_schema(SchemaVersion::new(first)).unwrap();
+        assert_active(&shell, &second, 2);
         drop(shell);
 
-        let reopened = InMemoryServerShell::start_with_storage(
+        let mut reopened = InMemoryServerShell::start_with_storage(
             config,
             StorageConfig::RocksDb {
                 path: dir.path().to_path_buf(),
             },
         )
         .unwrap();
-        assert_eq!(reopened.db.catalogue_schema(schema_id), Some(second));
-        assert_eq!(
-            reopened.db.current_write_schema().unwrap().schema,
-            schema_id
-        );
+        assert_active(&reopened, &second, 2);
+        reopened
+            .activate_schema(3, structural.clone(), Default::default())
+            .unwrap();
+        assert_active(&reopened, &structural, 3);
     }
     #[test]
     fn closed_session_slot_reuse_rejects_stale_different_identity_handles() {

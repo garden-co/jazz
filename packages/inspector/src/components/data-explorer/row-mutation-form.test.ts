@@ -1,5 +1,14 @@
+import type { ColumnType } from "jazz-tools";
 import { describe, expect, it } from "vitest";
 import { formatMutationFieldValue, parseMutationFieldValue } from "./row-mutation-form";
+
+const nestedBigIntRow = {
+  type: "Row",
+  columns: [
+    { name: "nullableCount", column_type: { type: "BigInt" }, nullable: true },
+    { name: "exactCount", column_type: { type: "BigInt" }, nullable: false },
+  ],
+} satisfies ColumnType;
 
 describe("parseMutationFieldValue", () => {
   it("rejects empty integer input", () => {
@@ -26,6 +35,18 @@ describe("parseMutationFieldValue", () => {
     expect(parseMutationFieldValue({ type: "BigInt" }, "9223372036854775807")).toBe(
       9223372036854775807n,
     );
+  });
+
+  it("preserves nullable nested nulls while parsing neighboring BigInt values exactly", () => {
+    const parsed = parseMutationFieldValue(
+      nestedBigIntRow,
+      JSON.stringify({ nullableCount: null, exactCount: "9007199254740993" }),
+    );
+
+    expect(parsed).toEqual({
+      nullableCount: null,
+      exactCount: 9007199254740993n,
+    });
   });
 
   it("rejects non-decimal and out-of-range BigInt values", () => {

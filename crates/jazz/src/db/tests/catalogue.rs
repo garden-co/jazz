@@ -321,7 +321,7 @@ fn assert_offline_replica_schema_bootstrap(backend: bool) {
         )
         .unwrap();
     bob.publish_schema_with_lens(1, publication).unwrap();
-    bob.set_current_write_schema(CurrentWriteSchema {
+    bob.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: target.version_id(),
     })
@@ -549,7 +549,7 @@ fn assert_snapshot_preserves_offline_enum_rows(descendant: bool) {
             .unwrap();
         authority.publish_schema_with_lens(1, publication).unwrap();
         authority
-            .set_current_write_schema(CurrentWriteSchema {
+            .activate_catalogue_schema_for_test(CurrentWriteSchema {
                 revision: 1,
                 schema: evolved.id,
             })
@@ -708,12 +708,9 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: schema_version.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: schema_version.id,
         })
         .unwrap();
 
@@ -836,12 +833,9 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 1,
-                schema: middle.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: middle.id,
         })
         .unwrap();
     assert_eq!(
@@ -883,12 +877,9 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     db.node
         .node
         .borrow_mut()
-        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorSubject::SYSTEM,
-            pointer: CurrentWriteSchema {
-                revision: 2,
-                schema: latest.id,
-            },
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 2,
+            schema: latest.id,
         })
         .unwrap();
     db.refresh_subscriptions().unwrap();
@@ -943,23 +934,18 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         };
         build_public_db_test_schema(PublicSchemaBuilder::new().table(table))
     };
-    let read_owner = table(false, Some("owner"));
-    let read_editor = table(false, Some("editor"));
-    let write_schema = table(true, None);
-    let read_owner_payload = SchemaVersion::new(read_owner.clone());
-    let read_editor_payload = SchemaVersion::new(read_editor.clone());
-    let write_payload = SchemaVersion::new(write_schema.clone());
-    assert_eq!(read_owner_payload.id, read_editor_payload.id);
-    assert_ne!(read_owner_payload.id, write_payload.id);
+    let structural = table(false, None);
+    let owner_head = table(true, Some("owner"));
+    let editor_head = table(true, Some("editor"));
+    let owner_payload = SchemaVersion::new(owner_head.clone());
+    assert_eq!(owner_payload.id, editor_head.version_id());
 
-    // The owner-policy schema remains the active read schema while the
-    // structurally wider schema is selected only for writes.
-    let db = open_db(0xa0, AuthorSubject::SYSTEM, &read_owner);
+    let db = open_db(0xa0, AuthorSubject::SYSTEM, &structural);
     db.set_test_provider_claims(alice, test_provider_claims(alice));
     db.set_test_provider_claims(bob, test_provider_claims(bob));
-    let write_lens = MigrationLens::new(
-        read_owner.version_id(),
-        write_payload.id,
+    let owner_lens = MigrationLens::new(
+        structural.version_id(),
+        owner_payload.id,
         vec![TableLens {
             source_table: "todos".to_owned(),
             target_table: "todos".to_owned(),
@@ -970,25 +956,20 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         }],
     )
     .expect("valid migration lens");
-    let write_publication = db
+    let owner_publication = db
         .author_schema_lineage_publication(
-            write_payload.clone(),
-            write_lens,
+            owner_payload.clone(),
+            owner_lens,
             Vec::<String>::new(),
             Vec::<String>::new(),
         )
         .unwrap();
-    db.publish_schema_with_lens(1, write_publication).unwrap();
-    db.set_current_write_schema(CurrentWriteSchema {
+    db.publish_schema_with_lens(1, owner_publication).unwrap();
+    db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
-        schema: write_payload.id,
+        schema: owner_payload.id,
     })
     .unwrap();
-    assert_ne!(
-        db.current_write_schema().unwrap().schema,
-        read_owner_payload.id,
-        "the policy schema must remain non-write"
-    );
     let first = row(0xa1);
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
@@ -1018,7 +999,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         vec![first]
     );
 
-    db.publish_schema(read_editor_payload).unwrap();
+    db.activate_schema_for_test(2, editor_head).unwrap();
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
         row(0xb2),
@@ -1095,11 +1076,11 @@ fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
         revision: 2,
         schema: schema_version.id,
     };
-    let pointer_ack = core.set_current_write_schema(pointer).unwrap();
-    assert!(matches!(
-        pointer_ack.as_slice(),
-        [SyncMessage::CatalogueAck(ack)] if ack.revision == Some(2) && ack.schema == Some(schema_version.id) && ack.applied
-    ));
+    core.activate_catalogue_schema_for_test(pointer).unwrap();
+    assert_eq!(
+        core.server.node().borrow().current_write_schema().unwrap(),
+        pointer
+    );
 
     let row = seed(&core, "todos", cells("under evolved schema", false, owner));
     let rows = core.read(&Query::from("todos")).unwrap();
@@ -1417,4 +1398,236 @@ fn catalogue_after_same_turn_merge_resumes_after_local_settlement() {
             .len(),
         1
     );
+}
+
+// Internal transport-boundary tests are needed to inject the authority snapshot
+// independently of the local read schema; assertions use visible subscription events.
+#[test]
+fn trusted_snapshot_schema_switch_rebuilds_live_authorization() {
+    assert_authorization_source_refresh(true, false, false);
+}
+
+#[test]
+fn direct_schema_switch_with_same_policies_rebuilds_live_authorization() {
+    assert_authorization_source_refresh(false, true, false);
+}
+
+#[test]
+fn trusted_snapshot_schema_switch_with_same_policies_rebuilds_live_authorization() {
+    assert_authorization_source_refresh(true, true, false);
+}
+
+#[test]
+fn schema_switch_with_constant_deny_preserves_live_authorization() {
+    assert_authorization_source_refresh(true, true, true);
+    assert_authorization_source_refresh(false, true, true);
+}
+
+fn assert_authorization_source_refresh(
+    snapshot_activation: bool,
+    same_policies: bool,
+    deny_all: bool,
+) {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let table = |with_body: u8, read_column: Option<&str>| {
+        let table = PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .column("owner", PublicColumnType::Uuid)
+            .column("editor", PublicColumnType::Uuid);
+        let table = if with_body > 0 {
+            table.column("body", PublicColumnType::Text)
+        } else {
+            table
+        };
+        let table = if with_body > 1 {
+            table.column("extra", PublicColumnType::Text)
+        } else {
+            table
+        };
+        let table = if let Some(column) = read_column {
+            table.policies(PublicTablePolicies::new().with_select(if deny_all {
+                PublicPolicyExpr::False
+            } else {
+                public_session_eq(column, &["claims", "sub"])
+            }))
+        } else {
+            table
+        };
+        build_public_db_test_schema(PublicSchemaBuilder::new().table(table))
+    };
+    let structural = table(0, None);
+    let owner_head = table(1, Some("owner"));
+    let editor_head = table(2, Some(if same_policies { "owner" } else { "editor" }));
+    let owner_payload = SchemaVersion::new(owner_head.clone());
+    assert_ne!(owner_payload.id, editor_head.version_id());
+
+    let db = open_db(0xa0, AuthorSubject::SYSTEM, &structural);
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    db.set_test_provider_claims(bob, test_provider_claims(bob));
+    let owner_lens = MigrationLens::new(
+        structural.version_id(),
+        owner_payload.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    )
+    .expect("valid migration lens");
+    let owner_publication = db
+        .author_schema_lineage_publication(
+            owner_payload.clone(),
+            owner_lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    db.publish_schema_with_lens(1, owner_publication).unwrap();
+    db.activate_catalogue_schema_for_test(CurrentWriteSchema {
+        revision: 1,
+        schema: owner_payload.id,
+    })
+    .unwrap();
+    let editor_lens = MigrationLens::new(
+        owner_payload.id,
+        editor_head.version_id(),
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "extra".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    )
+    .unwrap();
+    let editor_publication = db
+        .author_schema_lineage_publication(
+            SchemaVersion::new(editor_head.clone()),
+            editor_lens,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .unwrap();
+    db.publish_schema_with_lens(2, editor_publication).unwrap();
+    let first = row(0xa1);
+    db.seed_settled_mergeable_for_bootstrap(
+        "todos",
+        first,
+        AuthorSubject::SYSTEM,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("first".to_owned())),
+            ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+            ("editor".to_owned(), Value::Uuid(bob.test_uuid())),
+            ("body".to_owned(), Value::String(String::new())),
+        ]),
+    )
+    .unwrap();
+
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe_for_identity(
+        &prepared,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        alice,
+    ))
+    .unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
+        if deny_all { vec![] } else { vec![first] }
+    );
+
+    // Replaying the identical authority must retain the live subscription.
+    let token = db.node.node.borrow().groove_runtime_token();
+    let snapshot = db.node.node.borrow().catalogue_snapshot().unwrap();
+    db.node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
+        .unwrap();
+    assert_eq!(db.node.node.borrow().groove_runtime_token(), token);
+    assert!(subscription.try_next_event().is_none());
+    // Advancing only the authority revision must also preserve live state.
+    if snapshot_activation {
+        let mut revision_only = snapshot.clone();
+        revision_only.current_write_schema.revision = 2;
+        db.node
+            .node
+            .borrow_mut()
+            .apply_trusted_catalogue_snapshot_settled(revision_only)
+            .unwrap();
+    } else {
+        db.activate_schema_for_test(2, owner_head).unwrap();
+    }
+    assert_eq!(db.node.node.borrow().groove_runtime_token(), token);
+    assert!(subscription.try_next_event().is_none());
+    if snapshot_activation {
+        let mut snapshot = snapshot;
+        snapshot.current_write_schema = CurrentWriteSchema {
+            revision: 3,
+            schema: editor_head.version_id(),
+        };
+        db.node
+            .node
+            .borrow_mut()
+            .apply_trusted_catalogue_snapshot_settled(snapshot)
+            .unwrap();
+    } else {
+        db.activate_schema_for_test(3, editor_head).unwrap();
+    }
+    db.seed_settled_mergeable_for_bootstrap(
+        "todos",
+        row(0xb2),
+        AuthorSubject::SYSTEM,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("second".to_owned())),
+            ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+            ("editor".to_owned(), Value::Uuid(bob.test_uuid())),
+            ("body".to_owned(), Value::String(String::new())),
+        ]),
+    )
+    .unwrap();
+
+    if deny_all {
+        assert_eq!(db.node.node.borrow().groove_runtime_token(), token);
+        assert!(subscription.try_next_event().is_none());
+        return;
+    }
+
+    let event = subscription
+        .try_next_event()
+        .expect("permissions-head change must refresh the live subscription");
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        ..
+    } = event
+    else {
+        panic!("permissions-head refresh must emit a delta reset");
+    };
+
+    assert!(reset);
+    assert!(updated.is_empty());
+    if same_policies {
+        assert_eq!(
+            added
+                .iter()
+                .map(|output| output.row.row_uuid())
+                .collect::<Vec<_>>(),
+            vec![first, row(0xb2)]
+        );
+        assert!(removed.is_empty());
+    } else {
+        assert!(added.is_empty());
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].row_uuid, first);
+    }
 }

@@ -2078,7 +2078,7 @@ pub fn decode_permissions_head(
         });
     }
 
-    let decoded = decode_current_permissions_head(data)?;
+    let decoded = decode_active_schema_summary(data)?;
     ensure_canonical_payload(
         data,
         &encode_permissions_head(decoded.0, decoded.1, decoded.2, decoded.3),
@@ -2087,7 +2087,7 @@ pub fn decode_permissions_head(
     Ok(decoded)
 }
 
-fn decode_current_permissions_head(
+fn decode_active_schema_summary(
     data: &[u8],
 ) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
     let mut offset = 1;

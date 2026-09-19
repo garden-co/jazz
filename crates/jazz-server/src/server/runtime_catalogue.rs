@@ -9,7 +9,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, Value};
 use jazz::tools::schema_lens::{Lens, LensOp};
 
-use super::catalogue::{CatalogueError, PermissionsHeadSummary};
+use super::catalogue::{ActiveSchemaSummary, CatalogueError};
 
 use super::{ServerRuntimeHandle, ServerState};
 
@@ -45,7 +45,7 @@ pub(crate) async fn publish_permissions_and_runtime(
     schema_hash: SchemaHash,
     permissions: HashMap<TableName, jazz::tools::public_schema::TablePolicies>,
     expected_parent_bundle_object_id: Option<jazz::tools::ObjectId>,
-) -> Result<PermissionsHeadSummary, PermissionsPublicationError> {
+) -> Result<ActiveSchemaSummary, PermissionsPublicationError> {
     #[cfg(test)]
     state.run_runtime_catalogue_before_publication_hook_for_test();
     let _publication = state.runtime_catalogue_publication.lock().await;
@@ -66,6 +66,49 @@ pub(crate) async fn publish_permissions_and_runtime(
             })?;
     }
 
+    // Validate the complete selection before advancing the durable active schema.
+    // Omitted table grants are explicitly empty, including for legacy sources.
+    let mut source = known_schema(state, &HashMap::new(), schema_hash)
+        .map_err(PermissionsPublicationError::Bridge)?;
+    for (name, table) in &mut source {
+        table.policies = permissions.get(name).cloned().unwrap_or_default();
+    }
+    if permissions.keys().any(|name| !source.contains_key(name)) {
+        return Err(PermissionsPublicationError::Catalogue(
+            CatalogueError::WriteError(
+                "active schema permissions reference an unknown table".to_owned(),
+            ),
+        ));
+    }
+    let compiled = JazzSchema::new(&source).map_err(|error| {
+        PermissionsPublicationError::Catalogue(CatalogueError::WriteError(format!(
+            "invalid active schema permissions: {error}"
+        )))
+    })?;
+
+    if let Some(runtime) = shell {
+        let current = state
+            .catalogue
+            .active_schema(&state.catalogue_store)
+            .map_err(PermissionsPublicationError::Catalogue)?;
+        let revision = match current {
+            Some(current)
+                if current.summary.schema_hash == schema_hash
+                    && current.permissions == permissions =>
+            {
+                current.summary.version
+            }
+            Some(current) => current.summary.version.checked_add(1).ok_or_else(|| {
+                PermissionsPublicationError::Bridge("active schema revision overflow".to_owned())
+            })?,
+            None => 1,
+        };
+        runtime
+            .validate_schema_activation(revision, compiled)
+            .await
+            .map_err(PermissionsPublicationError::Bridge)?;
+    }
+
     state
         .catalogue
         .publish_permissions_bundle(
@@ -77,14 +120,14 @@ pub(crate) async fn publish_permissions_and_runtime(
         .map_err(PermissionsPublicationError::Catalogue)?;
     let head = state
         .catalogue
-        .current_permissions(&state.catalogue_store)
+        .active_schema(&state.catalogue_store)
         .map_err(PermissionsPublicationError::Catalogue)?
         .ok_or_else(|| {
             PermissionsPublicationError::Bridge(
                 "published permissions head is missing from the catalogue".to_owned(),
             )
         })?
-        .head;
+        .summary;
 
     publish_runtime_catalogue_locked(state, &[], &[])
         .await
@@ -119,7 +162,7 @@ async fn publish_runtime_catalogue_locked(
 
     let permissions = state
         .catalogue
-        .current_permissions(&state.catalogue_store)
+        .active_schema(&state.catalogue_store)
         .map_err(|error| format!("read permissions head for runtime: {error}"))?;
     #[cfg(test)]
     state.run_runtime_catalogue_after_permissions_read_hook_for_test();
@@ -128,7 +171,7 @@ async fn publish_runtime_catalogue_locked(
     };
     ensure_structural_lineage_locked(
         state,
-        permissions.head.schema_hash,
+        permissions.summary.schema_hash,
         &supplied_schemas,
         lenses,
         &mut shell,
@@ -136,25 +179,18 @@ async fn publish_runtime_catalogue_locked(
     .await
     .map_err(StructuralLineageError::into_string)?;
 
-    let mut schema = known_schema(state, &supplied_schemas, permissions.head.schema_hash)?;
+    let schema = known_schema(state, &supplied_schemas, permissions.summary.schema_hash)?;
     let structural_runtime = JazzSchema::new(&schema)
-        .map_err(|error| format!("convert permissions lineage source schema: {error}"))?;
-    let lineage_source = structural_runtime.version_id();
-    let runtime_shell = runtime_shell(state, &mut shell, structural_runtime)?;
-    for (table_name, policies) in permissions.permissions {
-        let table = schema.get_mut(&table_name).ok_or_else(|| {
-            format!(
-                "permissions head references table {} absent from schema {}",
-                table_name.as_str(),
-                permissions.head.schema_hash
-            )
-        })?;
-        table.policies = policies;
-    }
+        .map_err(|error| format!("convert active structural schema: {error}"))?;
+    let runtime_shell = runtime_shell(state, &mut shell, structural_runtime.clone())?;
     runtime_shell
-        .publish_permissions_source(schema, lineage_source)
+        .activate_schema(
+            permissions.summary.version,
+            structural_runtime,
+            permissions.permissions,
+        )
         .await
-        .map_err(|error| format!("compile and publish permissions source: {error}"))?;
+        .map_err(|error| format!("activate schema: {error}"))?;
     Ok(())
 }
 
@@ -527,6 +563,154 @@ fn public_value_to_core(value: Value) -> Result<CoreValue, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Internal bridge tests inspect both stored administrative state and runtime
+    // state, including rejection before an administrative write.
+    async fn sibling_catalogue() -> (super::super::BuiltServer, Schema, Schema) {
+        use jazz::tools::{AppId, ColumnType, SchemaBuilder, TableSchema};
+        let schema = |column| {
+            SchemaBuilder::new()
+                .table(TableSchema::builder("notes").column(column, ColumnType::Text))
+                .build()
+        };
+        let base = schema("body");
+        let left = schema("left_body");
+        let right = schema("right_body");
+        let server = super::super::ServerBuilder::new(AppId::from_name("sibling-selection"))
+            .with_schema(base.clone())
+            .with_storage(super::super::StorageBackend::InMemory)
+            .build()
+            .await
+            .unwrap();
+        for (target, column) in [(&left, "left_body"), (&right, "right_body")] {
+            let lens = Lens::new(
+                SchemaHash::compute(&base),
+                SchemaHash::compute(target),
+                jazz::tools::schema_lens::LensTransform::with_ops(vec![LensOp::RenameColumn {
+                    table: "notes".into(),
+                    old_name: "body".into(),
+                    new_name: column.into(),
+                }]),
+            );
+            server
+                .state
+                .catalogue
+                .publish_schema(&server.state.catalogue_store, target.clone())
+                .unwrap();
+            server
+                .state
+                .catalogue
+                .publish_lens(&server.state.catalogue_store, &lens)
+                .unwrap();
+            publish_runtime_catalogue(&server.state, &[target.clone()], &[lens])
+                .await
+                .unwrap();
+        }
+        (server, left, right)
+    }
+
+    #[tokio::test]
+    async fn sibling_selection_activates_and_retries_without_advancing_revision() {
+        let (server, left, right) = sibling_catalogue().await;
+        let first = publish_permissions_and_runtime(
+            &server.state,
+            SchemaHash::compute(&left),
+            HashMap::new(),
+            None,
+        )
+        .await
+        .ok()
+        .expect("activate left sibling");
+        let second = publish_permissions_and_runtime(
+            &server.state,
+            SchemaHash::compute(&right),
+            HashMap::new(),
+            Some(first.bundle_object_id),
+        )
+        .await
+        .ok()
+        .expect("activate right sibling");
+        let replay = publish_permissions_and_runtime(
+            &server.state,
+            SchemaHash::compute(&right),
+            HashMap::new(),
+            Some(second.bundle_object_id),
+        )
+        .await
+        .ok()
+        .expect("retry selection");
+        assert_eq!(replay.version, second.version);
+        let runtime = server.state.runtime().unwrap();
+        let snapshot = runtime.trusted_catalogue_snapshot_for_test().await.unwrap();
+        assert_eq!(
+            snapshot.current_write_schema.schema,
+            JazzSchema::new(&right).unwrap().version_id()
+        );
+        assert_eq!(snapshot.current_write_schema.revision, second.version);
+        let stored = server
+            .state
+            .catalogue
+            .active_schema(&server.state.catalogue_store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.summary.schema_hash, SchemaHash::compute(&right));
+        assert_eq!(stored.summary.version, second.version);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rejected_activation_does_not_advance_administrative_selection() {
+        let (server, left, right) = sibling_catalogue().await;
+        let first = publish_permissions_and_runtime(
+            &server.state,
+            SchemaHash::compute(&left),
+            HashMap::new(),
+            None,
+        )
+        .await
+        .ok()
+        .expect("activate left sibling");
+        let runtime = server.state.runtime().unwrap();
+        // Simulate a runtime ahead of the administrative store. The proposed
+        // revision must be rejected before the store selects the right sibling.
+        runtime
+            .activate_schema(
+                first.version + 2,
+                JazzSchema::new(&left).unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let result = publish_permissions_and_runtime(
+                &server.state,
+                SchemaHash::compute(&right),
+                HashMap::new(),
+                Some(first.bundle_object_id),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(PermissionsPublicationError::Bridge(message))
+                if message.contains("stale active schema revision"))
+            );
+            let stored = server
+                .state
+                .catalogue
+                .active_schema(&server.state.catalogue_store)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.summary.bundle_object_id, first.bundle_object_id);
+            assert_eq!(stored.summary.schema_hash, SchemaHash::compute(&left));
+            assert_eq!(stored.summary.version, first.version);
+        }
+        let snapshot = runtime.trusted_catalogue_snapshot_for_test().await.unwrap();
+        assert_eq!(
+            snapshot.current_write_schema.schema,
+            JazzSchema::new(&left).unwrap().version_id()
+        );
+        assert_eq!(snapshot.current_write_schema.revision, first.version + 2);
+        server.shutdown().await;
+    }
 
     #[test]
     fn migration_lens_defaults_preserve_logical_signed_scalars_and_nested_arrays() {

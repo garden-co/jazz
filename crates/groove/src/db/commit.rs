@@ -566,10 +566,12 @@ impl Database {
                 let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
                     resolve_raw_record_input(table_schema, record, descriptor)?;
+                let key = key.clone().into_bytes();
+                validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
-                    key: key.clone().into_bytes(),
+                    key,
                     variant_tag,
                     descriptor,
                     record: record.clone(),
@@ -580,10 +582,12 @@ impl Database {
                 let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
                     resolve_raw_record_input(table_schema, record, descriptor)?;
+                let key = key.clone().into_bytes();
+                validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::InsertFresh,
                     table: table.clone(),
-                    key: key.clone().into_bytes(),
+                    key,
                     variant_tag,
                     descriptor,
                     record: record.clone(),
@@ -609,10 +613,12 @@ impl Database {
                 let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
                     resolve_raw_record_input(table_schema, record, descriptor)?;
+                let key = key.clone().into_bytes();
+                validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
-                    key: key.clone().into_bytes(),
+                    key,
                     variant_tag,
                     descriptor,
                     record: record.clone(),
@@ -654,10 +660,12 @@ impl Database {
                 let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
                 let (variant_tag, descriptor, record) =
                     resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                let key = key.into_bytes();
+                validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table,
-                    key: key.into_bytes(),
+                    key,
                     variant_tag,
                     descriptor,
                     record,
@@ -668,10 +676,12 @@ impl Database {
                 let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
                 let (variant_tag, descriptor, record) =
                     resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                let key = key.into_bytes();
+                validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::InsertFresh,
                     table,
-                    key: key.into_bytes(),
+                    key,
                     variant_tag,
                     descriptor,
                     record,
@@ -697,10 +707,12 @@ impl Database {
                 let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
                 let (variant_tag, descriptor, record) =
                     resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                let key = key.into_bytes();
+                validate_raw_primary_key(table_schema, variant_tag, descriptor, &record, &key)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table,
-                    key: key.into_bytes(),
+                    key,
                     variant_tag,
                     descriptor,
                     record,

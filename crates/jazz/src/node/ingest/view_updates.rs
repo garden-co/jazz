@@ -34,7 +34,7 @@ where
             // schema. An otherwise valid version in an unreconciled schema
             // has its own physical lineage and merge-head set, but cannot be
             // semantically merged into the write schema until a lens exists.
-            if projected_schema != self.catalogue.current_write_schema.schema {
+            if projected_schema != self.catalogue.active_schema.schema {
                 continue;
             }
             rows.push((table, record.branch_key().clone(), record.row_uuid()));
@@ -77,12 +77,12 @@ where
         authority: MergeAuthority,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let table_id =
-            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+            self.physical_table_id_for_schema(self.catalogue.active_schema.schema, table)?;
         let head_tx_ids = self
             .merge_head_tx_ids(table_id, branch_key, row_uuid)
             .await?;
         let table_schema =
-            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
+            self.table_in_schema(table, self.catalogue.active_schema.schema)?;
         let has_gset_column = table_schema
             .columns
             .iter()
@@ -162,7 +162,7 @@ where
         let schema = &self
             .catalogue
             .catalogue_schemas
-            .get(&self.catalogue.current_write_schema.schema)
+            .get(&self.catalogue.active_schema.schema)
             .expect("current write schema exists")
             .schema;
         let branch = schema
@@ -544,20 +544,12 @@ where
     async fn query_global_layer_winner_in_batch(
         &mut self,
         batch: &DatabaseBatch,
+        schema_version: SchemaVersionId,
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
         layer: VersionLayer,
     ) -> Result<Option<VersionRow>, Error> {
-        let schema_version = if self
-            .table_in_schema(table, self.catalogue.current_schema_version_id)
-            .is_ok()
-        {
-            self.catalogue.current_schema_version_id
-        } else {
-            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-            self.catalogue.current_write_schema.schema
-        };
         let current_table = self.physical_current_table_for_schema(
             schema_version,
             table,
@@ -582,6 +574,7 @@ where
             NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
         self.query_version_by_alias_in_batch(
             batch,
+            schema_version,
             table,
             branch_key,
             row_uuid,
@@ -595,6 +588,7 @@ where
     async fn query_version_by_alias_in_batch(
         &mut self,
         batch: &DatabaseBatch,
+        schema_version: SchemaVersionId,
         table: &str,
         branch_key: &BranchKey,
         row_uuid: RowUuid,
@@ -604,7 +598,8 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         for storage_table in self.version_storage_sources_for_layer(table, layer)? {
             let key = if storage_table == SHARED_DELETION_HISTORY_TABLE {
-                let mut key = self.deletion_storage_prefix_in_branch(
+                let mut key = self.deletion_storage_prefix_in_schema_and_branch(
+                    schema_version,
                     table,
                     branch_key,
                     Some(row_uuid),

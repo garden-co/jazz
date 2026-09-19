@@ -1,3 +1,4 @@
+use jazz::tools::test_support::AllowAll;
 use jazz_testkit as support;
 
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ fn metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -33,6 +35,7 @@ fn count_named_metrics_schema() -> Schema {
                 .column("count", ColumnType::Text)
                 .column("score", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -44,6 +47,7 @@ fn mixed_metrics_schema() -> Schema {
                 .column("score", ColumnType::Integer)
                 .column("high", ColumnType::BigInt),
         )
+        .allow_all()
         .build()
 }
 
@@ -54,6 +58,7 @@ fn nullable_metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .nullable_column("score", ColumnType::Integer),
         )
+        .allow_all()
         .build()
 }
 
@@ -64,6 +69,7 @@ fn bigint_metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::BigInt),
         )
+        .allow_all()
         .build()
 }
 
@@ -74,6 +80,7 @@ fn double_metrics_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("score", ColumnType::Double),
         )
+        .allow_all()
         .build()
 }
 
@@ -84,6 +91,7 @@ fn counter_schema(count_type: ColumnType) -> Schema {
                 .column("name", ColumnType::Text)
                 .column("count", count_type),
         )
+        .allow_all()
         .build();
     let table = schema
         .get_mut(&TableName::new("counters"))

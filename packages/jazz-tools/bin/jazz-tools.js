@@ -128,16 +128,15 @@ function printWrapperHelp() {
   console.log("Usage: jazz-tools <COMMAND> [options]");
   console.log("");
   console.log("Commands:");
-  console.log("  validate              Validate root schema.ts and optional permissions.ts");
+  console.log("  validate              Validate root schema.ts and permissions.ts");
   console.log(
     "  schema export         Print structural schema JSON from schema.ts or a schema hash",
   );
-  console.log("  deploy                Publish the current schema and permissions to the server");
+  console.log("  deploy                Publish schema, permissions, and required migrations");
   console.log("  permissions status    Show the current server permissions head for this app");
   console.log(
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
-  console.log("  migrations push       Push a reviewed migration edge to the server");
   console.log("  create                Create a new resource");
   console.log("  server                Run a Jazz server");
   console.log("  help                  Print this message");

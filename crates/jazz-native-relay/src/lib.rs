@@ -8199,7 +8199,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn private_session_strict_read_crosses_edge_and_core() {
         let issuer = TestJwtIssuer::start().await;
-        let schema = schema();
+        let schema = permissive_schema();
         let public_schema = schema.public_schema().clone();
         let core = JazzServer::builder()
             .with_schema(public_schema.clone())
@@ -8294,7 +8294,7 @@ mod tests {
 
     async fn private_session_restart_receipt(offline: bool) {
         let issuer = TestJwtIssuer::start().await;
-        let schema = schema();
+        let schema = permissive_schema();
         let public_schema = schema.public_schema().clone();
         let core = JazzServer::builder()
             .with_schema(public_schema.clone())

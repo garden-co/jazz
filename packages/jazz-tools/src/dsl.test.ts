@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
 import { col, getCollectedSchema, resetCollectedState, table } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
+import { resolveSchemaSource } from "./schema-source.js";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
 import { defineApp, defineSchema, defineTable } from "./typed-app.js";
 import type { AddOp } from "./schema.js";
@@ -440,5 +441,56 @@ describe("reserved table id", () => {
     expect(() =>
       defineTable({ payload: col.enum({ item: { id: col.string() } }) }, {}),
     ).not.toThrow();
+  });
+});
+
+describe("reserved table names", () => {
+  const objectPrototypeOwnNames = Object.getOwnPropertyNames(Object.prototype);
+  const fixedControlNames = ["union", "exists", "_schema", "wasmSchema", "schemaAst"];
+
+  it.each([...objectPrototypeOwnNames, ...fixedControlNames])(
+    "rejects reserved table name %s during schema compilation",
+    (tableName) => {
+      resetCollectedState();
+      table(tableName, { value: col.string() });
+
+      expect(() => schemaToWasm(getCollectedSchema())).toThrow(/reserved/i);
+    },
+  );
+
+  it.each(["_schema", "wasmSchema"])(
+    "rejects schema-source table discriminator %s",
+    (tableName) => {
+      expect(() =>
+        resolveSchemaSource({
+          [tableName]: { columns: [] },
+        } as never),
+      ).toThrow(/reserved/i);
+    },
+  );
+
+  it("keeps ordinary, prototype, and hyphenated table names usable", () => {
+    const app = defineApp({
+      normal: defineTable({ value: col.string() }, {}),
+      prototype: defineTable({ value: col.string() }, {}),
+      "hyphenated-name": defineTable({ value: col.string() }, {}),
+    });
+
+    expect(Object.keys(app.wasmSchema).sort()).toEqual(["hyphenated-name", "normal", "prototype"]);
+    expect(JSON.parse(app.normal._build()).table).toBe("normal");
+    expect(JSON.parse(app.prototype._build()).table).toBe("prototype");
+    expect(JSON.parse(app["hyphenated-name"]._build()).table).toBe("hyphenated-name");
+  });
+});
+
+describe("schema table-name uniqueness", () => {
+  it("rejects duplicate legacy table declarations during schema lowering", () => {
+    resetCollectedState();
+    table("tasks", { title: col.string() });
+    table("tasks", { completed: col.boolean() });
+
+    expect(() => schemaToWasm(getCollectedSchema())).toThrow(
+      'Duplicate table name "tasks" in schema.',
+    );
   });
 });

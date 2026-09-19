@@ -1,7 +1,7 @@
-import { useEffect, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import type { PublicSession } from "../runtime/context.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
-import { jazzDevPluginActive, startInspectorOnce } from "../dev-tools/auto-attach.js";
+import { jazzDevPluginActive } from "../dev-tools/auto-attach.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
@@ -13,6 +13,7 @@ import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/
 import type { JazzAuth } from "../session/app.js";
 import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
 
 // In dev builds, pull in a generated module that withJazz (next.ts/vite.ts/...)
 // rewrites on every schema push. The bundler tracks this as a dependency of the
@@ -32,17 +33,6 @@ interface JazzClientContextValue {
 
 const createClient: CreateJazzClient = (config) =>
   createJazzClient(config) as Promise<CreatedJazzClient>;
-
-// Dev-only: mount the inspector overlay + publish the host handle for this db.
-// Only rendered when shouldAutoAttach is true, so the lazy overlay chunk is
-// dropped from production bundles.
-function DevToolsAutoAttach() {
-  const { db } = useCoreJazzClient() as JazzClientContextValue;
-  useEffect(() => {
-    startInspectorOnce(db);
-  }, [db]);
-  return null;
-}
 
 type JazzProviderCommonProps = {
   fallback?: ReactNode;

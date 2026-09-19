@@ -136,7 +136,13 @@ pub(super) fn lowered_materialization_app_rows_graph(
                     }
                 )
             });
-    if publishes_structured_tree || public_root_owns_membership {
+    let existence_only = program
+        .request
+        .output
+        .app_rows
+        .as_ref()
+        .is_some_and(|rows| !rows.public_terminal);
+    if existence_only || publishes_structured_tree || public_root_owns_membership {
         return lowered_app_rows_graph(program);
     }
     program

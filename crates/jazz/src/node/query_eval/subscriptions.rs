@@ -136,7 +136,7 @@ where
         if ast.version != ShapeAst::VERSION {
             return Err(Error::InvalidStoredValue("unsupported query AST version"));
         }
-        let schema = if ast.schema_version == self.catalogue.current_schema_version_id {
+        let schema = if ast.schema_version == self.catalogue.local_schema_version_id {
             &self.catalogue.schema
         } else {
             let Some(schema) = self.catalogue.catalogue_schemas.get(&ast.schema_version) else {

@@ -33,7 +33,7 @@ use crate::legacy_test_future::{
 };
 use crate::protocol::{
     AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
-    CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp, PeerPayloadInventory,
+    KnownStateCompleteness, KnownStateDeclaration, LensOp, PeerPayloadInventory,
     PermissionAdviceAction, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, RowVersionRef,
     ShapeAst, SnapshotRef, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, TableLens,
     VersionBundle, VersionBundleScope, VersionCarrier,

@@ -148,7 +148,7 @@ fn reopening_rejects_a_schema_version_with_two_durable_aliases() {
     let temp_dir = tempfile::tempdir().unwrap();
     {
         let mut opened = open_node_at(&temp_dir, schema.clone());
-        let schema_version = opened.catalogue.current_schema_version_id;
+        let schema_version = opened.catalogue.local_schema_version_id;
         let mapping = opened.catalogue.physical_mappings[&schema_version].clone();
         let mut batch = opened.database.open_batch();
         batch.insert(
@@ -187,7 +187,7 @@ fn reopening_rejects_schema_alias_that_cannot_lower_to_a_groove_variant_tag() {
         let mut opened = open_node_at(&temp_dir, schema.clone());
         let schema_version = SchemaVersionId::from_bytes([0x9d; 16]);
         let mapping = opened.catalogue.physical_mappings
-            [&opened.catalogue.current_schema_version_id]
+            [&opened.catalogue.local_schema_version_id]
             .clone();
         let mut batch = opened.database.open_batch();
         batch.insert(
@@ -834,12 +834,9 @@ fn contribution_provenance_survives_compatible_column_rename_and_reopen() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorSubject::SYSTEM,
-        pointer: CurrentWriteSchema {
-            revision: 1,
-            schema: renamed.id,
-        },
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: renamed.id,
     })
     .unwrap();
     assert_eq!(

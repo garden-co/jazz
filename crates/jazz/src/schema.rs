@@ -84,6 +84,44 @@ impl JazzSchema {
         crate::tools::public_schema_convert::convert_public_schema(schema)
     }
 
+    /// Structural catalogue payload, independent of the active permissions.
+    pub(crate) fn without_permissions(&self) -> Self {
+        let mut schema = self.clone();
+        for table in schema.public_schema.values_mut() {
+            table.policies = Default::default();
+        }
+        for table in &mut schema.runtime.tables {
+            table.read_policy = None;
+            table.write_policies = Default::default();
+        }
+        schema
+    }
+
+    /// Refresh non-identity metadata while retaining the selected grants.
+    pub(crate) fn with_permissions_from(&self, selected: &Self) -> Self {
+        assert_eq!(self.version_id(), selected.version_id());
+        let mut schema = self.clone();
+        for (name, table) in &mut schema.public_schema {
+            table.policies = selected
+                .public_schema
+                .get(name)
+                .expect("same schema tables")
+                .policies
+                .clone();
+        }
+        for table in &mut schema.runtime.tables {
+            let selected = selected
+                .runtime
+                .tables
+                .iter()
+                .find(|other| other.name == table.name)
+                .expect("same schema tables");
+            table.read_policy = selected.read_policy.clone();
+            table.write_policies = selected.write_policies.clone();
+        }
+        schema
+    }
+
     /// Return the developer-authored public schema retained for persistence.
     pub fn public_schema(&self) -> &PublicSchema {
         &self.public_schema
@@ -1004,12 +1042,8 @@ impl TableSchema {
         }
     }
 
-    /// Whether this table has opted into authorization.
-    ///
-    /// A completely policy-free table is intentionally open so a new app can
-    /// use its data before it has introduced permissions. Once a table
-    /// declares any read or write clause, its policy set is closed: an
-    /// omitted operation has no grant and therefore denies at the authority.
+    /// Whether this table declares any explicit authorization grants.
+    /// Absence is not an authorization bypass: ordinary user operations deny.
     pub fn has_any_policy(&self) -> bool {
         self.read_policy.is_some() || self.write_policies.has_any()
     }

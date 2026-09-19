@@ -236,6 +236,7 @@ where
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
         let mut bootstrap_ready = None;
+        let mut active_selection = None;
         let mut staged_lineages = BTreeMap::new();
         let mut active_lineages = BTreeMap::new();
         let mut has_catalogue_residue = false;
@@ -256,6 +257,12 @@ where
                             "duplicate catalogue genesis marker",
                         ));
                     }
+                }
+                codec::CatalogueRecordKind::ActiveSchema => {
+                    if record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)? != uuid::Uuid::nil() || active_selection.is_some() {
+                        return Err(Error::InvalidStoredValue("invalid active schema record identity"));
+                    }
+                    active_selection = Some(codec::decode_active_schema(record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?)?);
                 }
                 codec::CatalogueRecordKind::Schema => {
                     let schema = codec::decode_catalogue_schema(
@@ -325,7 +332,7 @@ where
                 ))
             })
             .collect::<Result<BTreeSet<_>, Error>>()?;
-        let durable_pointer = meta_database
+        let legacy_pointer = meta_database
             .primary_key_last_raw("jazz_catalogue_pointer", &[])
             .await?
             .map(|raw| {
@@ -338,6 +345,14 @@ where
                 })
             })
             .transpose()?;
+        // An upgraded selection can have a lower revision than obsolete legacy
+        // rows. Validate its exact compatibility projection, not the largest old counter.
+        let durable_pointer = if let Some(active) = &active_selection {
+            match meta_database.primary_key_get_raw("jazz_catalogue_pointer", &[Value::U64(active.revision)]).await? {
+                Some(raw) if raw.record().get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX)? == active.schema.0 => Some(active.wire_pointer()),
+                _ => None,
+            }
+        } else { legacy_pointer };
         let mut has_non_catalogue_residue = false;
         for table in [
             "jazz_transactions",
@@ -379,9 +394,13 @@ where
                     Self::validate_durable_staged_lineage(staged, &schemas)?;
                     match active_lineages.remove(&staged.publication.id) {
                         Some(sequence) if sequence == staged.catalogue_seq => {
-                            if schemas.get(&staged.publication.schema.id)
-                                != Some(&staged.publication.schema)
-                                || !active_lineage_targets.insert(staged.publication.schema.id)
+                            // Legacy receipts retain their original grants, while
+                            // activation stores permissions separately. Compare all
+                            // remaining schema metadata without reviving those grants.
+                            if schemas.get(&staged.publication.schema.id).is_none_or(|schema| {
+                                schema.schema.without_permissions()
+                                    != staged.publication.schema.schema.without_permissions()
+                            }) || !active_lineage_targets.insert(staged.publication.schema.id)
                             {
                                 return Err(Error::InvalidStoredValue(
                                     "catalogue bootstrap active lineage does not own its schema",
@@ -576,7 +595,7 @@ where
         T: ReopenableStorage + 'static,
         S: ReopenableStorage,
     {
-        let current_schema_version_id = schema.version_id();
+        let local_schema_version_id = schema.version_id();
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
         let CatalogueOpenState {
@@ -589,11 +608,11 @@ where
             pending_lineages,
             mut active_lineages_by_target,
             mut active_catalogue_seq,
-            pending_write_pointers,
             next_physical_table_id,
             next_physical_column_id,
             current_write_schema,
             catalogue_bootstrap_marker,
+            recovered_active_schema,
         } = Self::open_catalogue_stage(
             schema.clone(),
             storage,
@@ -643,7 +662,7 @@ where
             Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
             if catalogue_bootstrap_marker {
                 let ready = CatalogueBootstrapReady {
-                    genesis: current_schema_version_id,
+                    genesis: local_schema_version_id,
                     current_write_schema,
                     active_catalogue_seq: next,
                 };
@@ -670,18 +689,23 @@ where
             staged_lineages.remove(&next);
             active_catalogue_seq = next;
         }
-        let current_schema_version_alias = schema_version_aliases
-            .get(&current_schema_version_id)
+        let local_schema_version_alias = schema_version_aliases
+            .get(&local_schema_version_id)
             .copied();
         // Schema identity excludes policy and physical-index metadata. On a
         // reopen, retain the durable payload previously learned from the
         // authority instead of reverting to the caller's structural schema;
         // otherwise the first catalogue snapshot spuriously changes runtime
         // semantics and rebuilds warm subscriptions during resume.
-        let active_schema = schemas
-            .get(&current_schema_version_id)
+        let mut active_schema = schemas
+            .get(&local_schema_version_id)
             .map(|version| version.schema.clone())
             .unwrap_or_else(|| schema.clone());
+        if let Some(recovered) = &recovered_active_schema {
+            if recovered.schema == local_schema_version_id {
+                active_schema = recovered.compiled.clone();
+            }
+        }
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
         let chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver> =
@@ -689,12 +713,22 @@ where
         database.set_missing_chunk_resolver(chunk_resolver.clone());
         let content_runtime_provider = database.owned_chunk_provider();
         let local_chunk_reader = database.local_chunk_reader();
+        let schemas_for_active = schemas.get(&current_write_schema.schema)
+            .ok_or(Error::InvalidStoredValue("active schema missing"))?.schema.clone();
+        let upgrade_active_schema = recovered_active_schema.is_none()
+            && catalogue_bootstrap_state == CatalogueBootstrapState::Ready;
+        // Old write counters are not authority revisions. Normalize once at open;
+        // the server installs its durable administrative selection before serving.
+        let selection = recovered_active_schema.unwrap_or(ActiveSchema::new(
+            CurrentWriteSchema { revision: 0, schema: current_write_schema.schema },
+            schemas_for_active,
+        )?);
         let mut node = Self {
             node_uuid,
             self_node_alias: None,
             catalogue: SchemaCatalogue {
-                current_schema_version_id,
-                current_schema_version_alias,
+                local_schema_version_id,
+                local_schema_version_alias,
                 schema: active_schema,
                 schema_version_aliases,
                 catalogue_schemas: schemas,
@@ -704,13 +738,12 @@ where
                 pending_lineages,
                 active_lineages_by_target,
                 active_catalogue_seq,
-                pending_write_pointers,
                 next_physical_table_id,
                 next_physical_column_id,
                 lens_path_cache: BTreeMap::new(),
                 compiled_lens_cache: BTreeMap::new(),
                 physical_write_plan_cache: BTreeMap::new(),
-                current_write_schema,
+                active_schema: selection,
             },
             catalogue_bootstrap_state,
             catalogue_bootstrap_marker,
@@ -814,7 +847,15 @@ where
         node.synchronize_physical_version_tables().await?;
         node.database.ensure_declared_index_generation(1).await?;
         node.recover_pending_schema_lineages().await?;
-        node.recover_pending_catalogue_pointers().await?;
+        if upgrade_active_schema {
+            let active = node.catalogue.active_schema.clone();
+            let mut batch = node.database.open_batch();
+            Self::write_active_schema_to_batch(&mut batch, &active)?;
+            node.write_active_schema_bootstrap_to_batch(&mut batch, &active).await?;
+            let applied = node.database.apply_batch(batch).await?;
+            let persisted = applied.persist().await;
+            node.database.finish_persistence(persisted)?;
+        }
         #[cfg(feature = "testing")]
         if let Some(receipt) = receipt.as_deref_mut() {
             let started = Instant::now();
@@ -853,9 +894,9 @@ where
         let self_node_alias = node.ensure_node_alias(node_uuid).await?;
         node.self_node_alias = Some(self_node_alias);
         let schema_alias = node
-            .ensure_schema_version_alias(current_schema_version_id)
+            .ensure_schema_version_alias(local_schema_version_id)
             .await?;
-        node.catalogue.current_schema_version_alias = Some(schema_alias);
+        node.catalogue.local_schema_version_alias = Some(schema_alias);
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.finalize_catalogue = started.elapsed();
@@ -1814,11 +1855,12 @@ where
     where
         T: ReopenableStorage + 'static,
     {
-        let current_schema_version_id = schema.version_id();
+        let local_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let mut meta_database =
             Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
                 .await?;
+        let mut recovered_active_schema = None;
         let mut catalogue_schemas = BTreeMap::new();
         let mut catalogue_lenses = BTreeMap::new();
         let mut staged_lineages_by_id = BTreeMap::new();
@@ -1835,6 +1877,12 @@ where
             match codec::CatalogueRecordKind::from_key(
                 record.get_u64(CatalogueRowRecord::FIELD_KIND_IDX)?,
             )? {
+                codec::CatalogueRecordKind::ActiveSchema => {
+                    if record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)? != uuid::Uuid::nil() || recovered_active_schema.is_some() {
+                        return Err(Error::InvalidStoredValue("invalid active schema record identity"));
+                    }
+                    recovered_active_schema = Some(codec::decode_active_schema(record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?)?);
+                }
                 codec::CatalogueRecordKind::Schema => {
                     let schema_version = codec::decode_catalogue_schema(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
@@ -2109,7 +2157,7 @@ where
             }
         }
         match genesis_schema {
-            Some(_) if !catalogue_schemas.contains_key(&current_schema_version_id) => {
+            Some(_) if !catalogue_schemas.contains_key(&local_schema_version_id) => {
                 return Err(Error::InvalidStoredValue(
                     "opened schema is absent from the durable catalogue",
                 ));
@@ -2137,17 +2185,17 @@ where
                 "uninitialized catalogue open requires empty durable catalogue state",
             ));
         }
-        let had_current_schema = catalogue_schemas.contains_key(&current_schema_version_id);
+        let had_current_schema = catalogue_schemas.contains_key(&local_schema_version_id);
         if !had_current_schema {
             catalogue_schemas.insert(
-                current_schema_version_id,
+                local_schema_version_id,
                 SchemaVersion::new(schema.clone()),
             );
         }
-        if !physical_mappings.contains_key(&current_schema_version_id)
-            || !schema_version_aliases.contains_key(&current_schema_version_id)
+        if !physical_mappings.contains_key(&local_schema_version_id)
+            || !schema_version_aliases.contains_key(&local_schema_version_id)
         {
-            let mapping = match physical_mappings.get(&current_schema_version_id) {
+            let mapping = match physical_mappings.get(&local_schema_version_id) {
                 Some(mapping) => mapping.clone(),
                 None => allocate_provisional_physical_mapping(
                     &schema,
@@ -2164,7 +2212,7 @@ where
                 )?,
             };
             let alias = schema_version_aliases
-                .get(&current_schema_version_id)
+                .get(&local_schema_version_id)
                 .copied()
                 .unwrap_or(SchemaVersionAlias(
                     schema_version_aliases
@@ -2182,7 +2230,7 @@ where
                         "jazz_catalogue",
                         vec![
                             Value::U64(codec::CatalogueRecordKind::Genesis.key()),
-                            Value::Uuid(current_schema_version_id.0),
+                            Value::Uuid(local_schema_version_id.0),
                             Value::Bytes(Vec::new()),
                         ],
                     );
@@ -2192,7 +2240,7 @@ where
                         "jazz_catalogue",
                         vec![
                             Value::U64(codec::CatalogueRecordKind::Schema.key()),
-                            Value::Uuid(current_schema_version_id.0),
+                            Value::Uuid(local_schema_version_id.0),
                             Value::Bytes(codec::encode_catalogue_schema(&SchemaVersion::new(
                                 schema.clone(),
                             ))?),
@@ -2202,15 +2250,15 @@ where
                 Self::write_schema_version_mapping_to_batch(
                     &mut batch,
                     alias,
-                    current_schema_version_id,
+                    local_schema_version_id,
                     &mapping,
                 )?;
                 let applied = meta_database.apply_batch(batch).await?;
                 let persisted = applied.persist().await;
                 meta_database.finish_persistence(persisted)?;
             }
-            schema_version_aliases.insert(current_schema_version_id, alias);
-            physical_mappings.insert(current_schema_version_id, mapping);
+            schema_version_aliases.insert(local_schema_version_id, alias);
+            physical_mappings.insert(local_schema_version_id, mapping);
         }
         Self::validate_durable_physical_identity_bindings(
             &catalogue_schemas,
@@ -2229,7 +2277,7 @@ where
         validate_payload_enum_case_provenance(&physical_mappings, &schema_version_aliases)?;
         let mut current_write_schema = CurrentWriteSchema {
             revision: 0,
-            schema: current_schema_version_id,
+            schema: local_schema_version_id,
         };
         if let Some(raw) = meta_database
             .primary_key_last_raw("jazz_catalogue_pointer", &[])
@@ -2243,6 +2291,12 @@ where
                 ),
             };
         }
+        if let Some(active) = &recovered_active_schema {
+            if !catalogue_schemas.contains_key(&active.schema) {
+                return Err(Error::InvalidStoredValue("active schema references an unknown structural schema"));
+            }
+        }
+        if let Some(active) = &recovered_active_schema { current_write_schema = active.wire_pointer(); }
         Ok(CatalogueOpenState {
             storage: meta_database.into_storage(),
             schemas: catalogue_schemas,
@@ -2253,11 +2307,11 @@ where
             pending_lineages,
             active_lineages_by_target,
             active_catalogue_seq,
-            pending_write_pointers,
             next_physical_table_id,
             next_physical_column_id,
             current_write_schema,
             catalogue_bootstrap_marker: catalogue_bootstrap_ready.is_some(),
+            recovered_active_schema,
         })
     }
 
