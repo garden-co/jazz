@@ -1196,11 +1196,22 @@ fn complete_auxiliary_response_with_wrong_protocol_version_is_rejected_without_r
             },
         ))
         .unwrap();
-        let frame = encode_frame(&WireFrame::Message(WireEnvelope::new(
-            WIRE_PROTOCOL_VERSION + 1,
+        let frame = encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+            protocol_version: WIRE_PROTOCOL_VERSION + 1,
             features,
-            payload,
-        )))
+            session: None,
+            extent: crate::wire::channels::ChannelFrame {
+                channel: crate::wire::channels::AUXILIARY_CHANNEL,
+                generation: 0,
+                sequence: 0,
+                class: crate::wire::channels::ChannelClass::Auxiliary,
+                first: true,
+                last: true,
+                message_len: payload.len() as u32,
+                decoded_len: payload.len() as u32,
+                payload,
+            },
+        }))
         .unwrap();
 
         let route = pump.route_incoming_wire_frame(frame).await;
@@ -1283,10 +1294,22 @@ fn paired_wire_context_governs_auxiliary_frames_in_both_directions() {
             session_id: "different-auxiliary-session".to_owned(),
             ..session
         };
-        let inbound = encode_frame(&WireFrame::Message(
-            WireEnvelope::new(WIRE_PROTOCOL_VERSION, features, payload)
-                .with_session(mismatched_session),
-        ))
+        let inbound = encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+            protocol_version: WIRE_PROTOCOL_VERSION,
+            features,
+            session: Some(mismatched_session),
+            extent: crate::wire::channels::ChannelFrame {
+                channel: crate::wire::channels::AUXILIARY_CHANNEL,
+                generation: 0,
+                sequence: 0,
+                class: crate::wire::channels::ChannelClass::Auxiliary,
+                first: true,
+                last: true,
+                message_len: payload.len() as u32,
+                decoded_len: payload.len() as u32,
+                payload,
+            },
+        }))
         .unwrap();
 
         let route = pump.route_incoming_wire_frame(inbound).await;

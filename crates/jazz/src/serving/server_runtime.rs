@@ -2072,16 +2072,39 @@ mod tests {
         let session = shell
             .accept_subscriber_session(AuthorSubject::for_test_bytes([0x77; 16]))
             .unwrap();
+        let mut sequence = 0;
+        let mut encode_request = |message: SyncMessage| {
+            let payload = encode_sync_message(&message).unwrap();
+            let frame = encode_frame(&WireFrame::Channel(crate::wire::WireChannelEnvelope {
+                protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+                features: crate::wire::FEATURE_NONE,
+                session: None,
+                extent: crate::wire::channels::ChannelFrame {
+                    channel: 1,
+                    generation: 0,
+                    sequence,
+                    class: crate::wire::channels::ChannelClass::Requests,
+                    first: true,
+                    last: true,
+                    message_len: payload.len() as u32,
+                    decoded_len: payload.len() as u32,
+                    payload,
+                },
+            }))
+            .unwrap();
+            sequence += 1;
+            frame
+        };
         shell
             .receive_frames(
                 session,
                 [
-                    encode_message(SyncMessage::RegisterShape {
+                    encode_request(SyncMessage::RegisterShape {
                         shape_id: shape.shape_id(),
                         ast: crate::protocol::ShapeAst::from_validated(&shape),
                         opts: crate::protocol::RegisterShapeOptions::default(),
                     }),
-                    encode_message(SyncMessage::Subscribe(Subscribe {
+                    encode_request(SyncMessage::Subscribe(Subscribe {
                         shape_id: shape.shape_id(),
                         subscription,
                         values: Vec::new(),

@@ -2225,15 +2225,22 @@ fn byte_wire_round_trips_subscription_to_client() {
         let queued = server_inbound.borrow();
         let first = queued.front().expect("register shape frame");
         let second = queued.get(1).expect("subscribe frame");
-        let mut decoder = WireStreamDecoder::new(current_wire_features()).unwrap();
-        let first = match decode_frame(first).unwrap() {
-            WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
-            other => panic!("expected message frame, got {other:?}"),
+        let mut decoder = crate::db::channel_endpoint::ChannelEndpoint::new(
+            crate::wire::WireInboundContext::new(
+                WIRE_PROTOCOL_VERSION,
+                current_wire_features(),
+                None,
+            ),
+        )
+        .unwrap();
+        let mut decode = |bytes: &Vec<u8>| match decode_frame(bytes).unwrap() {
+            WireFrame::Channel(envelope) => {
+                decoder.receive(envelope, bytes.len()).unwrap().unwrap()
+            }
+            other => panic!("expected channel frame, got {other:?}"),
         };
-        let second = match decode_frame(second).unwrap() {
-            WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
-            other => panic!("expected message frame, got {other:?}"),
-        };
+        let first = decode(first);
+        let second = decode(second);
         let SyncMessage::RegisterShape { shape_id, .. } = first else {
             panic!("expected RegisterShape, got {first:?}");
         };
