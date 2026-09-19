@@ -1903,3 +1903,111 @@ fn rejected_dynamic_channel_admission_preserves_generation() {
     sender.send(reply(4)).unwrap();
     assert_eq!(receive_after_pumping(&mut sender, &mut receiver), reply(4));
 }
+
+/// A real server snapshot introduces a previously unknown transaction. Its
+/// later fate arrives first on another ordered stream; canonical application
+/// must still install the snapshot before attempting to apply that fate.
+#[test]
+fn reordered_delivery_and_fate_apply_in_dependency_order_to_real_client() {
+    struct Tap {
+        inner: WireTransportAdapter<ByteDuplexTransport>,
+        sent: Rc<RefCell<Vec<SyncMessage>>>,
+    }
+    impl Transport for Tap {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            self.inner.send(message.clone())?;
+            self.sent.borrow_mut().push(message);
+            Ok(())
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.inner.try_recv()
+        }
+        fn try_recv_owned_result(
+            &mut self,
+        ) -> Result<Option<crate::db::ReceivedSyncMessage>, TransportError> {
+            self.inner.try_recv_owned_result()
+        }
+        fn poll_flush(&mut self) -> Result<crate::db::WireFlushStatus, TransportError> {
+            self.inner.poll_flush()
+        }
+    }
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0xc2, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "todos",
+            row(0xc3),
+            cells("dependency ordered", false, alice),
+        )
+        .unwrap();
+    let client = open_db(0xc4, alice, &schema);
+    let (client_bytes, server_bytes) = byte_duplex_raw();
+    let inbound = Rc::clone(&client_bytes.inbound);
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let upstream =
+        block_on(client.connect_upstream(Box::new(WireTransportAdapter::current(client_bytes))));
+    let subscriber = server.accept_subscriber(
+        Box::new(Tap {
+            inner: WireTransportAdapter::current(server_bytes),
+            sent: Rc::clone(&sent),
+        }),
+        alice,
+    );
+    for _ in 0..8 {
+        client.tick().unwrap();
+        subscriber.borrow_mut().tick().unwrap();
+    }
+    let _subscription =
+        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+    client.tick().unwrap();
+    let view = (0..32)
+        .find_map(|_| {
+            subscriber.borrow_mut().tick().unwrap();
+            sent.borrow().iter().find_map(|message| match message {
+                SyncMessage::ViewUpdate(view) => Some(view.clone()),
+                _ => None,
+            })
+        })
+        .expect("real query emits snapshot");
+    let tx_id = view
+        .version_carriers
+        .iter()
+        .flat_map(|carrier| carrier.expand().unwrap())
+        .next()
+        .expect("snapshot carries row transaction")
+        .tx
+        .tx_id;
+    subscriber
+        .borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: None,
+            durability: Some(DurabilityTier::Edge),
+        })
+        .unwrap();
+    subscriber.borrow_mut().transport.poll_flush().unwrap();
+    // Reorder only across streams. Each stream's own physical FIFO is kept.
+    let mut frames: Vec<_> = inbound.borrow_mut().drain(..).collect();
+    frames.sort_by_key(|bytes| match decode_frame(bytes).unwrap() {
+        WireFrame::Channel(frame)
+            if frame.extent.class == crate::wire::channels::ChannelClass::Writes =>
+        {
+            0
+        }
+        _ => 1,
+    });
+    assert!(
+        matches!(decode_frame(&frames[0]).unwrap(),WireFrame::Channel(frame) if frame.extent.class==crate::wire::channels::ChannelClass::Writes)
+    );
+    inbound.borrow_mut().extend(frames);
+    block_on(async { upstream.lock().await.tick().await })
+        .expect("fate cannot run before its snapshot introduces the transaction");
+    client.tick().unwrap();
+    assert_eq!(
+        row_ids(&prepared_read(&client, &Query::from("todos"))),
+        vec![row(0xc3)]
+    );
+}

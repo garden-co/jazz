@@ -14,7 +14,7 @@ pub const ENVELOPE_VERSION: u8 = 1;
 /// Bounded metadata allowance within the existing raw byte-message limit.
 pub const MAX_ENVELOPE_OVERHEAD: usize = 1024;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Envelope<'a> {
     version: u8,
     epoch: u64,
@@ -22,6 +22,15 @@ struct Envelope<'a> {
     predecessors: Option<Vec<(u16, u64)>>,
     #[serde(borrow)]
     payload: &'a [u8],
+}
+
+fn decode_envelope(bytes: &[u8]) -> Result<Envelope<'_>, String> {
+    let (envelope, rest) = postcard::take_from_bytes(bytes)
+        .map_err(|error| format!("invalid routed envelope: {error}"))?;
+    if !rest.is_empty() {
+        return Err("trailing bytes after routed envelope".into());
+    }
+    Ok(envelope)
 }
 
 /// The lease follows payload ownership through canonical and deferred queues.
@@ -142,8 +151,7 @@ impl RoutedMessages {
                 message,
             )
         };
-        let envelope: Envelope = postcard::from_bytes(&bytes)
-            .map_err(|e| malformed(format!("invalid routed envelope: {e}")))?;
+        let envelope = decode_envelope(&bytes).map_err(malformed)?;
         let slot = channel as usize;
         if envelope.version != ENVELOPE_VERSION
             || envelope.epoch < self.receive_epoch
@@ -219,6 +227,27 @@ impl RoutedMessages {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn routed_envelope_v1_corpus_is_exact() {
+        let mut router = RoutedMessages::default();
+        let ordinary = router.prepare(3, false, vec![0xaa, 0xbb]).unwrap();
+        assert_eq!(ordinary, [1, 0, 1, 0, 2, 0xaa, 0xbb]);
+        router.accepted(3, false);
+        let barrier = router.prepare(0, true, vec![0xcc]).unwrap();
+        assert_eq!(barrier, [1, 0, 1, 1, 1, 3, 1, 1, 0xcc]);
+        for bytes in [ordinary, barrier] {
+            let envelope = decode_envelope(&bytes).unwrap();
+            assert_eq!(postcard::to_allocvec(&envelope).unwrap(), bytes);
+            let mut trailing = bytes.clone();
+            trailing.push(0);
+            assert!(
+                decode_envelope(&trailing)
+                    .unwrap_err()
+                    .contains("trailing bytes")
+            );
+        }
+    }
+
     #[test]
     fn barrier_preparation_does_not_consume_epoch_or_dependency_on_failed_admission() {
         let mut router = RoutedMessages::default();

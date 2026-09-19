@@ -169,8 +169,8 @@ pub struct ScheduledChunk<'a> {
 /// independent of lower-transport backpressure; codec state advances only when
 /// the host encodes the selected extent, never while enqueuing a huge message.
 ///
-/// Barriers order message completion on the carrier. They do not acknowledge
-/// semantic application; a dispatch host must separately enforce that boundary.
+/// Each stable stream is FIFO across codec generations. Cross-stream semantic
+/// dependencies belong to the upper message layer, never this byte scheduler.
 #[derive(Default)]
 pub struct ChannelScheduler {
     channels: BTreeMap<u16, OutboundChannel>,
