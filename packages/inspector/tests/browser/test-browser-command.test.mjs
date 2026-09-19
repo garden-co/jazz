@@ -5,7 +5,7 @@ import packageJson from "../../package.json" with { type: "json" };
 test("browser receipts rebuild the embedded inspector through sealed artifact admission", () => {
   assert.equal(
     packageJson.scripts["test:browser"],
-    "node ../../dev/gates/run-correctness-consumer.mjs -- bash -lc 'pnpm run build:embedded && pnpm exec playwright test --config playwright.config.ts'",
+    "node ../../dev/gates/run-correctness-consumer.mjs -- bash -lc 'pnpm run build:embedded && pnpm exec playwright test --config playwright.config.ts && pnpm exec playwright test --config playwright.sessions.config.ts'",
   );
 });
 

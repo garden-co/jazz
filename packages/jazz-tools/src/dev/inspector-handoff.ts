@@ -12,7 +12,7 @@ export interface InspectorHandoffOptions {
   timeoutMs?: number;
 }
 
-/** Root exchange is server-to-server; launch URL contains connection metadata only. */
+/** Root exchange is server-to-server; launch URL contains metadata and a single-use bootstrap code, never an access token. */
 export async function startInspectorHandoff(options: InspectorHandoffOptions) {
   const inspector = new URL(options.inspectorUrl);
   if (
@@ -82,6 +82,8 @@ export async function startInspectorHandoff(options: InspectorHandoffOptions) {
     capabilities: body.capabilities,
     serverUrl: options.serverUrl,
   };
+  let launchCode: string | undefined = randomBytes(32).toString("base64url");
+  const initialLaunchCode = launchCode;
   let binding: { challenge: string; code: string } | undefined;
   let used = false;
   let finish!: () => void;
@@ -128,9 +130,14 @@ export async function startInspectorHandoff(options: InspectorHandoffOptions) {
       if (
         request.url === "/challenge" &&
         !binding &&
+        launchCode !== undefined &&
+        typeof input.launch_code === "string" &&
+        input.launch_code.length === launchCode.length &&
+        timingSafeEqual(Buffer.from(input.launch_code), Buffer.from(launchCode)) &&
         typeof input.code_challenge === "string" &&
         /^[A-Za-z0-9_-]{43}$/.test(input.code_challenge)
       ) {
+        launchCode = undefined;
         binding = { challenge: input.code_challenge, code: randomBytes(32).toString("base64url") };
         response.setHeader("Content-Type", "application/json");
         response.end(JSON.stringify({ code: binding.code }));
@@ -159,6 +166,7 @@ export async function startInspectorHandoff(options: InspectorHandoffOptions) {
   let timer: ReturnType<typeof setTimeout>;
   const stop = (force = false) => {
     used = true;
+    launchCode = undefined;
     session = undefined;
     binding = undefined;
     clearTimeout(timer);
@@ -176,6 +184,7 @@ export async function startInspectorHandoff(options: InspectorHandoffOptions) {
   inspector.hash = new URLSearchParams({
     appId: options.appId,
     handoff: `http://127.0.0.1:${address.port}`,
+    launch: initialLaunchCode,
   }).toString();
   return { url: inspector.href, close: () => stop(true), done };
 }

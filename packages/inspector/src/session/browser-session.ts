@@ -108,30 +108,31 @@ export class DashboardInspectorSession {
     const popup = window.open("about:blank", "jazz-inspector-login", "popup,width=520,height=700");
     if (!popup) throw new Error("Allow the login popup, then try again");
     this.popup = popup;
-    const state = randomProof();
-    const verifier = randomProof();
-    const challenge = await proofChallenge(verifier);
-    if (this.generation !== generation) {
-      popup.close();
-      throw new Error("Inspector login cancelled");
-    }
-    const authorize = new URL("/inspector/authorize", this.origin);
-    authorize.search = new URLSearchParams({
-      app_id: this.appId,
-      redirect_uri: this.redirectUri,
-      state,
-      code_challenge: challenge,
-      code_challenge_method: "S256",
-      capabilities: requested.join(" "),
-    }).toString();
     try {
+      const state = randomProof();
+      const verifier = randomProof();
+      const challenge = await proofChallenge(verifier);
+      if (this.generation !== generation) {
+        popup.close();
+        throw new Error("Inspector login cancelled");
+      }
+      const authorize = new URL("/inspector/authorize", this.origin);
+      authorize.search = new URLSearchParams({
+        app_id: this.appId,
+        redirect_uri: this.redirectUri,
+        state,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        capabilities: requested.join(" "),
+      }).toString();
       const code = await new Promise<string>((resolve, reject) => {
         const finish = (code?: string) => {
           clearTimeout(timeout);
           clearInterval(closed);
           window.removeEventListener("message", receive);
           this.cancelPending = null;
-          code ? resolve(code) : reject(new Error("Inspector login cancelled or expired"));
+          if (code) resolve(code);
+          else reject(new Error("Inspector login cancelled or expired"));
         };
         const receive = (event: MessageEvent) => {
           if (event.origin !== new URL(this.redirectUri).origin || event.source !== popup) return;
@@ -214,7 +215,12 @@ export function completeInspectorCallback(): boolean {
   return true;
 }
 
-export async function receiveCliSession(handoff: string, appId: string): Promise<InspectorSession> {
+export async function receiveCliSession(
+  handoff: string,
+  appId: string,
+  launchCode: string,
+): Promise<InspectorSession> {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(launchCode)) throw new Error("Invalid Inspector launch code");
   const endpoint = new URL(handoff);
   if (
     endpoint.protocol !== "http:" ||
@@ -237,7 +243,10 @@ export async function receiveCliSession(handoff: string, appId: string): Promise
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-  const challenge = await post("/challenge", { code_challenge: await proofChallenge(verifier) });
+  const challenge = await post("/challenge", {
+    launch_code: launchCode,
+    code_challenge: await proofChallenge(verifier),
+  });
   if (!challenge.ok) throw new Error("Inspector handoff expired. Run the CLI again.");
   const { code } = (await challenge.json()) as { code?: unknown };
   if (typeof code !== "string" || !code) throw new Error("Invalid Inspector handoff");

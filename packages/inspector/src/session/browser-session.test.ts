@@ -134,4 +134,21 @@ describe("Inspector browser sessions", () => {
     ).toThrow();
     expect(() => validateSession({ ...session(), capabilities: ["root"] }, "app")).toThrow();
   });
+  it("closes the popup if PKCE generation fails", async () => {
+    const popup = { close: vi.fn() };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    vi.spyOn(crypto.subtle, "digest").mockRejectedValueOnce(new Error("unavailable"));
+    await expect(auth().authorize()).rejects.toThrow("unavailable");
+    expect(popup.close).toHaveBeenCalledTimes(1);
+  });
+  it("rejects an unrequested privilege returned by renewal", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ csrfToken: "csrf" })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ ...session(), capabilities: ["inspector:read", "inspector:admin"] }),
+        ),
+      );
+    await expect(auth().renew()).rejects.toThrow("Unexpected Inspector capability");
+  });
 });

@@ -75,7 +75,9 @@ describe("Inspector session lifetime", () => {
     });
     expect(screen.getByText("Protected application rows")).toBeTruthy();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1100);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(mock.renew).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(30_000);
     });
     expect(screen.queryByText("Protected application rows")).toBeNull();
     expect(screen.getByRole("alert").textContent).toContain("Session ended");
@@ -151,5 +153,38 @@ describe("Inspector session lifetime", () => {
       '{"appId":"app","mode":"dashboard"}',
     );
     expect(window.location.hash).toBe("");
+  });
+  it("scrubs the one-time launch code immediately and never persists it", () => {
+    setup();
+    window.history.replaceState(
+      null,
+      "",
+      "/#appId=app&handoff=http%3A%2F%2F127.0.0.1%3A1234&launch=one-time-code",
+    );
+    expect(readSessionConnection()).toEqual({
+      appId: "app",
+      handoff: "http://127.0.0.1:1234",
+      launchCode: "one-time-code",
+    });
+    expect(window.location.hash).toBe("");
+    expect(localStorage.length).toBe(0);
+  });
+
+  it("silently restores metadata via cookies and suppresses restore after explicit logout", async () => {
+    setup();
+    mock.renew.mockResolvedValue(token());
+    localStorage.setItem(
+      "jazz-inspector-session-connection",
+      JSON.stringify({ appId: "app", mode: "dashboard" }),
+    );
+    const restored = readSessionConnection(connection.dashboard)!;
+    expect(restored.restore).toBe(true);
+    render(<SessionApp connection={restored} />);
+    await screen.findByText("Protected application rows");
+    expect(mock.authorize).not.toHaveBeenCalled();
+    expect(mock.renew).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByText("Log out"));
+    expect(readSessionConnection(connection.dashboard)?.restore).toBe(false);
+    expect(localStorage.getItem("jazz-inspector-session-connection")).not.toContain("ephemeral");
   });
 });

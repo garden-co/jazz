@@ -19,7 +19,8 @@ async function listen(handler: (req: IncomingMessage, res: ServerResponse) => vo
   };
 }
 
-async function mockAdapter() {
+async function mockAdapter(sameOrigin = false) {
+  let serveInspector: (req: IncomingMessage, res: ServerResponse) => void;
   let allowed = true,
     renewals = 0;
   let inspectorOrigin = "";
@@ -33,6 +34,10 @@ async function mockAdapter() {
   });
   const dashboard = await listen(async (req, res) => {
     const url = new URL(req.url!, "http://local");
+    if (sameOrigin && ["/", "/browser-session.js", "/inspector/callback"].includes(url.pathname)) {
+      serveInspector(req, res);
+      return;
+    }
     const json = (status: number, body: unknown) => {
       res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(JSON.stringify(body));
@@ -70,7 +75,12 @@ async function mockAdapter() {
       json(200, session());
       return;
     }
-    if (req.headers.origin !== inspectorOrigin) {
+    const sameOriginSessionGet =
+      url.pathname === "/inspector/session" &&
+      req.method === "GET" &&
+      !req.headers.origin &&
+      req.headers["sec-fetch-site"] === "same-origin";
+    if (req.headers.origin !== inspectorOrigin && !sameOriginSessionGet) {
       json(403, { error: "access_denied" });
       return;
     }
@@ -138,7 +148,7 @@ async function mockAdapter() {
   const javascript = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText;
-  const inspector = await listen((req, res) => {
+  serveInspector = (req, res) => {
     if (req.url === "/browser-session.js") {
       res.setHeader("Content-Type", "text/javascript");
       res.end(javascript);
@@ -147,15 +157,19 @@ async function mockAdapter() {
     res.setHeader("Content-Type", "text/html");
     res.end(`<button id="login">Sign in</button><button id="renew">Renew</button><button id="cli">CLI</button><output id="state">ready</output><script type="module">
       import { DashboardInspectorSession, completeInspectorCallback, receiveCliSession } from '/browser-session.js';
+      const launch = new URLSearchParams(location.hash.slice(1)); history.replaceState(null, "", location.pathname + location.search);
       if (!completeInspectorCallback()) {
         const auth = new DashboardInspectorSession(${JSON.stringify(dashboard.origin)}, 'app', location.origin + '/inspector/callback');
         const run = async task => { try { window.session = await task(); document.querySelector('#state').textContent = 'connected'; } catch { window.session = null; document.querySelector('#state').textContent = 'denied'; } };
         document.querySelector('#login').onclick = () => run(() => auth.authorize());
         document.querySelector('#renew').onclick = () => run(() => auth.renew());
-        document.querySelector('#cli').onclick = () => run(() => receiveCliSession(new URLSearchParams(location.hash.slice(1)).get('handoff'), 'app'));
+        document.querySelector('#cli').onclick = () => run(() => receiveCliSession(launch.get('handoff'), 'app', launch.get('launch')));
       }
     </script>`);
-  });
+  };
+  const inspector = sameOrigin
+    ? { origin: dashboard.origin, close() {} }
+    : await listen(serveInspector);
   inspectorOrigin = inspector.origin;
   return {
     dashboard,
@@ -171,39 +185,40 @@ async function mockAdapter() {
   };
 }
 
-test("real browser popup PKCE, cookie CSRF renewal and permission removal", async ({
-  page,
-  context,
-}) => {
-  const adapter = await mockAdapter();
-  try {
-    await page.goto(`${adapter.dashboard.origin}/login`);
-    await page.goto(adapter.inspector.origin);
-    let popups = 0;
-    page.on("popup", () => {
-      popups++;
-    });
-    await page.getByText("Sign in", { exact: true }).click();
-    await expect(page.locator("output")).toHaveText("connected");
-    expect(popups).toBe(1);
-    await page.getByText("Renew", { exact: true }).click();
-    await expect.poll(adapter.renewals).toBe(1);
-    await expect(page.locator("output")).toHaveText("connected");
-    expect(popups).toBe(1);
-    adapter.revoke();
-    await page.getByText("Renew", { exact: true }).click();
-    await expect(page.locator("output")).toHaveText("denied");
-    expect(
-      await page.evaluate(() => (window as unknown as { session: unknown }).session),
-    ).toBeNull();
-    expect(popups).toBe(1);
-    const cookies = await context.cookies();
-    expect(cookies[0]?.httpOnly).toBe(true);
-    expect(page.url()).not.toContain("synthetic-scoped-access");
-  } finally {
-    adapter.close();
-  }
-});
+for (const sameOrigin of [false, true])
+  test(`real browser ${sameOrigin ? "same-origin" : "same-site cross-origin"} popup PKCE, cookie CSRF renewal and permission removal`, async ({
+    page,
+    context,
+  }) => {
+    const adapter = await mockAdapter(sameOrigin);
+    try {
+      await page.goto(`${adapter.dashboard.origin}/login`);
+      await page.goto(adapter.inspector.origin);
+      let popups = 0;
+      page.on("popup", () => {
+        popups++;
+      });
+      await page.getByText("Sign in", { exact: true }).click();
+      await expect(page.locator("output")).toHaveText("connected");
+      expect(popups).toBe(1);
+      await page.getByText("Renew", { exact: true }).click();
+      await expect.poll(adapter.renewals).toBe(1);
+      await expect(page.locator("output")).toHaveText("connected");
+      expect(popups).toBe(1);
+      adapter.revoke();
+      await page.getByText("Renew", { exact: true }).click();
+      await expect(page.locator("output")).toHaveText("denied");
+      expect(
+        await page.evaluate(() => (window as unknown as { session: unknown }).session),
+      ).toBeNull();
+      expect(popups).toBe(1);
+      const cookies = await context.cookies();
+      expect(cookies[0]?.httpOnly).toBe(true);
+      expect(page.url()).not.toContain("synthetic-scoped-access");
+    } finally {
+      adapter.close();
+    }
+  });
 
 test("real browser redeems CLI loopback proof without a credential URL", async ({ page }) => {
   const adapter = await mockAdapter();
