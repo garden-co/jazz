@@ -108,30 +108,31 @@ export class DashboardInspectorSession {
     const popup = window.open("about:blank", "jazz-inspector-login", "popup,width=520,height=700");
     if (!popup) throw new Error("Allow the login popup, then try again");
     this.popup = popup;
-    const state = randomProof();
-    const verifier = randomProof();
-    const challenge = await proofChallenge(verifier);
-    if (this.generation !== generation) {
-      popup.close();
-      throw new Error("Inspector login cancelled");
-    }
-    const authorize = new URL("/inspector/authorize", this.origin);
-    authorize.search = new URLSearchParams({
-      app_id: this.appId,
-      redirect_uri: this.redirectUri,
-      state,
-      code_challenge: challenge,
-      code_challenge_method: "S256",
-      capabilities: requested.join(" "),
-    }).toString();
     try {
+      const state = randomProof();
+      const verifier = randomProof();
+      const challenge = await proofChallenge(verifier);
+      if (this.generation !== generation) {
+        popup.close();
+        throw new Error("Inspector login cancelled");
+      }
+      const authorize = new URL("/inspector/authorize", this.origin);
+      authorize.search = new URLSearchParams({
+        app_id: this.appId,
+        redirect_uri: this.redirectUri,
+        state,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        capabilities: requested.join(" "),
+      }).toString();
       const code = await new Promise<string>((resolve, reject) => {
         const finish = (code?: string) => {
           clearTimeout(timeout);
           clearInterval(closed);
           window.removeEventListener("message", receive);
           this.cancelPending = null;
-          code ? resolve(code) : reject(new Error("Inspector login cancelled or expired"));
+          if (code) resolve(code);
+          else reject(new Error("Inspector login cancelled or expired"));
         };
         const receive = (event: MessageEvent) => {
           if (event.origin !== new URL(this.redirectUri).origin || event.source !== popup) return;
