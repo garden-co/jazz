@@ -1122,7 +1122,12 @@ async fn stream_bootstrap_catalogue(
                         .into_iter().map(|bytes| Message::Binary(bytes.into())).collect::<Vec<_>>());
                 }
             }
-            if status == WireFlushStatus::Idle && pending.is_none() { break; }
+            // The receiver still has to decode the last carrier and return its
+            // consumption credit. Closing when the writer drains races that
+            // credit send in native transports and can discard a valid snapshot.
+            // Keep the credit path alive until the receiver ends this one-shot
+            // exchange, under the same delivery deadline.
+            let delivered = status == WireFlushStatus::Idle && pending.is_none();
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => return Err("bootstrap delivery timed out".to_owned()),
                 _ = &mut stopped_rx => return Err("bootstrap writer stopped before delivery".to_owned()),
@@ -1144,6 +1149,7 @@ async fn stream_bootstrap_catalogue(
                                 return Err("snapshot-only bootstrap received semantic traffic".to_owned());
                             }
                         }
+                        Some(Ok(Message::Close(_))) | None if delivered => break,
                         Some(Ok(Message::Close(_))) | None => return Err("bootstrap peer disconnected before delivery".to_owned()),
                         Some(Err(error)) => return Err(error.to_string()),
                         _ => {}
