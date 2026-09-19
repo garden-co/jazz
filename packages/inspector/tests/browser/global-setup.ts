@@ -5,6 +5,7 @@ import runServer from "../../scripts/dev-sync-server.js";
 import { createServer } from "vite";
 import { fileURLToPath } from "node:url";
 import { createServer as createHttpServer } from "node:http";
+import { startSessionTenantManager } from "./session-tenant-manager.js";
 import { standalonePermissions } from "./schema.js";
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
@@ -12,8 +13,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   // Concurrent worktrees must neither collide nor reuse another checkout.
   const servers: LocalJazzServerHandle[] = [];
   const httpServer = createHttpServer();
+  let tenant: Awaited<ReturnType<typeof startSessionTenantManager>> | undefined;
   let webServer: Awaited<ReturnType<typeof createServer>> | undefined;
   const cleanup = async () => {
+    tenant?.close();
     await Promise.all([
       webServer?.close(),
       ...servers.map((server) => server.stop()),
@@ -47,7 +50,9 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       .poll(async () => (await fetch(`${edge.url}/health`)).status, { timeout: 15_000 })
       .toBe(200);
 
+    tenant = await startSessionTenantManager(edge.url);
     webServer = await createServer({
+      define: { "import.meta.env.VITE_INSPECTOR_DASHBOARD_ORIGIN": JSON.stringify(tenant.origin) },
       root: fileURLToPath(new URL("../..", import.meta.url)),
       // Vite treats port 0 as its default port; Node owns the actual listener.
       server: { middlewareMode: true, hmr: { server: httpServer } },
@@ -65,6 +70,9 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       throw new Error("Inspector browser web server did not bind a TCP listener");
     }
     process.env.JAZZ_INSPECTOR_TEST_WEB_URL = `http://127.0.0.1:${address.port}`;
+    tenant.setInspectorOrigin(process.env.JAZZ_INSPECTOR_TEST_WEB_URL);
+    process.env.JAZZ_INSPECTOR_TEST_DASHBOARD_URL = tenant.origin;
+    process.env.JAZZ_INSPECTOR_TEST_CORE_SERVER_URL = core.url;
     process.env.JAZZ_INSPECTOR_TEST_SERVER_URL = overlay.url;
     process.env.JAZZ_INSPECTOR_TEST_STANDALONE_SERVER_URL = edge.url;
     console.log("Inspector browser endpoints", {

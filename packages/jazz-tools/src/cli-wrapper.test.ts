@@ -153,3 +153,17 @@ export default s.definePermissions(app, ({ policy }) => {
     expect(result.stderr).toContain("Missing value for --rust-bin.");
   });
 });
+
+it("routes inspect to the TypeScript session handoff without exposing root credentials", async () => {
+  const result = await runWrapper(["--rust-bin", "/does-not-exist", "inspect", "sample-app"], {
+    env: {
+      ...process.env,
+      JAZZ_ADMIN_SECRET: "synthetic-root-not-for-output",
+      JAZZ_INSPECTOR_URL: "",
+    },
+  });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("Inspect requires");
+  expect(result.stderr).not.toContain("does-not-exist");
+  expect(result.stderr + result.stdout).not.toContain("synthetic-root-not-for-output");
+});

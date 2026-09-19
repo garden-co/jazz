@@ -514,7 +514,7 @@ export function encodeWebSocketPrelude(
  */
 export function policyClaimsForAdmittedWebSocket(authJson: string): Record<string, unknown> {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
-  if (auth.admin_secret) return {};
+  if (auth.admin_secret || auth.inspector_token) return {};
   if (typeof auth.backend_secret === "string") {
     const session = auth.backend_session;
     const claims =
@@ -560,6 +560,7 @@ export function peerIdentityForWebSocketAuth(
   // by `canonicalAuthorForWebSocketAuth`.
   if (
     typeof auth.admin_secret === "string" ||
+    typeof auth.inspector_token === "string" ||
     (typeof auth.backend_secret === "string" && !hasUsableBackendSession(auth))
   ) {
     return new TextEncoder().encode(canonicalAuthorSubject("urn:jazz:system", "system"));
@@ -622,7 +623,8 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
   // Admin admission is intentionally sessionless and takes precedence over
   // every other field in the server route. Do not let an incidental (or
   // attacker-controlled) bearer payload change its peer identity/cap bucket.
-  if (typeof auth.admin_secret === "string") return null;
+  if (typeof auth.admin_secret === "string" || typeof auth.inspector_token === "string")
+    return null;
 
   // `backend_session` is only accepted by the server together with a valid
   // backend secret. It carries the same public Session wire fields as a

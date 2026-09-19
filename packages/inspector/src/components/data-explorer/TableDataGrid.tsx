@@ -818,7 +818,7 @@ export function TableDataGrid() {
     return <Navigate to="/data-explorer" replace />;
   }
 
-  const { wasmSchema: schema, runtime } = useDevtoolsContext();
+  const { wasmSchema: schema, runtime, readOnly = false } = useDevtoolsContext();
   const db = useDb();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -1220,6 +1220,7 @@ export function TableDataGrid() {
     }
   };
   const handleQueueSelectedDeletes = (): void => {
+    if (readOnly) return;
     if (selectedVisibleRowIds.size === 0) {
       return;
     }
@@ -1251,6 +1252,7 @@ export function TableDataGrid() {
     setSelectedRowIds(new Set());
   };
   const handleSaveQueuedEdits = async (): Promise<void> => {
+    if (readOnly) return;
     const mutationTable = table;
     let pendingSave = pendingSaveByTable.get(mutationTable);
     if (!hasQueuedChanges && !pendingSave) {
@@ -1429,7 +1431,7 @@ export function TableDataGrid() {
                   setStagedInserts((current) => [...current, stagedInsert]);
                   setPendingScrollToRowId(stagedInsert.id);
                 }}
-                disabled={isAnyMutationPending}
+                disabled={readOnly || isAnyMutationPending}
               >
                 <PlusIcon className={styles.buttonIcon} />
               </button>
@@ -1444,7 +1446,7 @@ export function TableDataGrid() {
                 className={`${styles.secondaryButton} ${styles.iconButton}`}
                 aria-label="Delete row(s)"
                 onClick={handleQueueSelectedDeletes}
-                disabled={selectedVisibleRowIds.size === 0}
+                disabled={readOnly || selectedVisibleRowIds.size === 0}
               >
                 <TrashIcon className={styles.buttonIcon} />
               </button>
@@ -1939,11 +1941,13 @@ function ColumnsIcon({ className }: { className?: string }) {
 }
 
 function BooleanCellCheckbox({
+  disabled,
   checked,
   indeterminate,
   label,
   onToggle,
 }: {
+  disabled?: boolean;
   checked: boolean;
   indeterminate: boolean;
   label: string;
@@ -1964,6 +1968,7 @@ function BooleanCellCheckbox({
       ref={checkboxRef}
       type="checkbox"
       className={styles.booleanCellCheckbox}
+      disabled={disabled}
       aria-label={label}
       checked={checked}
       onMouseDown={(event) => {
@@ -2136,6 +2141,7 @@ function PlainTableView({
   onQueuedDeletesChange: Dispatch<SetStateAction<Set<string>>>;
   onPendingScrollToRowIdChange: (value: string | null) => void;
 }) {
+  const { readOnly = false } = useDevtoolsContext();
   const selectionAnchorRowIdRef = useRef<string | null>(null);
   const dataGridRef = useRef<DataGridHandle | null>(null);
   const animatedRows = useAnimatedGridRows(rows, gridColumns, animationScopeKey);
@@ -2223,6 +2229,7 @@ function PlainTableView({
     column: ColumnDescriptor,
     nextEdit: QueuedCellEdit,
   ): void => {
+    if (readOnly) return;
     onQueuedSaveErrorChange(null);
 
     if (row.isStagedInsert) {
@@ -2267,6 +2274,7 @@ function PlainTableView({
     });
   };
   const toggleQueuedDelete = (rowId: string): void => {
+    if (readOnly) return;
     onQueuedSaveErrorChange(null);
     onQueuedDeletesChange((current) => {
       const next = new Set(current);
@@ -2302,6 +2310,7 @@ function PlainTableView({
       const isIdColumn = column.id === "id";
       const schemaColumn = schemaColumnById.get(column.id);
       const isEditable =
+        !readOnly &&
         !isIdColumn &&
         schemaColumn &&
         schemaColumn.column_type.type !== "Boolean" &&
@@ -2350,6 +2359,7 @@ function PlainTableView({
             return (
               <div className={styles.booleanCell}>
                 <BooleanCellCheckbox
+                  disabled={readOnly}
                   label={`Toggle ${column.accessorKey} for ${rowLabel}`}
                   checked={rawValue === true || rawValue === "true"}
                   indeterminate={
@@ -2366,6 +2376,7 @@ function PlainTableView({
                   <button
                     type="button"
                     className={styles.inlineNullButton}
+                    disabled={readOnly}
                     aria-label={`Set ${column.accessorKey} to NULL for ${rowLabel}`}
                     title="Set to NULL"
                     onMouseDown={(event) => {
@@ -2464,6 +2475,7 @@ function PlainTableView({
               type="button"
               className={isQueuedDelete ? styles.actionButton : styles.dangerActionButton}
               aria-label={isQueuedDelete ? `Undo delete ${rowId}` : `Delete ${rowId}`}
+              disabled={readOnly}
               title={isQueuedDelete ? "Undo" : "Delete row"}
               onMouseDown={(event) => {
                 event.stopPropagation();
@@ -2486,6 +2498,7 @@ function PlainTableView({
 
     return [...dataColumns, actionsColumn];
   }, [
+    readOnly,
     gridColumns,
     onCancelStagedInserts,
     onStagedInsertsChange,
@@ -2580,7 +2593,7 @@ function PlainTableView({
       selectedRows={selectedRowIds}
       sortColumns={sorting}
       onSortColumnsChange={onSortColumnsChange}
-      onRowsChange={handleRowsChange}
+      onRowsChange={readOnly ? undefined : handleRowsChange}
       onCellMouseDown={(_args, event) => {
         if (event.shiftKey) {
           event.preventDefault();
@@ -2590,6 +2603,7 @@ function PlainTableView({
         selectRowRange(args.row, args.rowIdx, event.shiftKey);
       }}
       onCellKeyDown={(args, event) => {
+        if (readOnly) return;
         if (args.mode === "EDIT") {
           return;
         }
@@ -2615,6 +2629,7 @@ function PlainTableView({
         const schemaColumn = schemaColumnById.get(String(args.column.key));
         const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
         if (
+          readOnly ||
           !schemaColumn ||
           getFieldReadOnlyReason(schemaColumn) !== null ||
           (rowId !== null && queuedDeletes.has(rowId))

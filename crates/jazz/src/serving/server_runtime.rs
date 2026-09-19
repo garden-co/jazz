@@ -966,8 +966,38 @@ impl ServerRuntimeHandle {
         session_context: Option<ConnectionSessionContext>,
         link_admission: crate::serving::ServerLinkAdmission,
     ) -> Result<ServerSession, String> {
-        self.run(move |shell| {
-            shell
+        // A deadline/cancelled HTTP upgrade may drop the waiting future both
+        // before and after the owner allocates a session. Keep cleanup ownership
+        // in the reply until the caller actually receives it.
+        struct PendingSession {
+            session: Option<ServerSession>,
+            jobs: mpsc::UnboundedSender<ServerShellCommand>,
+        }
+        impl Drop for PendingSession {
+            fn drop(&mut self) {
+                if let Some(session) = self.session.take() {
+                    let _ =
+                        self.jobs
+                            .unbounded_send(ServerShellCommand::Run(Box::new(move |shell| {
+                                let _ = shell.close_session(session);
+                            })));
+                }
+            }
+        }
+        let (reply, response) = oneshot::channel();
+        let jobs = self
+            .inner
+            .jobs
+            .lock()
+            .map_err(|_| "server shell jobs mutex poisoned".to_owned())?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "server shell is shut down".to_owned())?;
+        self.send(ServerShellCommand::Run(Box::new(move |shell| {
+            if reply.is_closed() {
+                return;
+            }
+            let result = shell
                 .accept_subscriber_session_with_claims_and_trust_and_context(
                     identity,
                     claims,
@@ -976,9 +1006,20 @@ impl ServerRuntimeHandle {
                     session_context,
                     link_admission,
                 )
-                .map_err(|error| error.to_string())
-        })
-        .await
+                .map(|session| PendingSession {
+                    session: Some(session),
+                    jobs,
+                })
+                .map_err(|error| error.to_string());
+            let _ = reply.send(result);
+        })))?;
+        let mut pending = response
+            .await
+            .map_err(|_| "server shell thread dropped response".to_owned())??;
+        Ok(pending
+            .session
+            .take()
+            .expect("new session reply owns cleanup"))
     }
 
     /// Publish a validated schema and optional migration lens to the runtime.
@@ -1059,6 +1100,9 @@ impl ServerRuntimeHandle {
         self.send(ServerShellCommand::RunAsync(Box::new(move |shell| {
             Box::pin(async move {
                 for frame in frames {
+                    if outbound_tx.is_closed() {
+                        return;
+                    }
                     let phase = inbound_frame_phase(&frame);
                     let result = match shell.receive_frames_async(session, [frame]).await {
                         Err(error) => Err(format!("server receive {phase}: {error}")),
@@ -2057,5 +2101,78 @@ mod tests {
             "server shell shutdown panicked: planted shutdown panic"
         );
         assert_eq!(shutdown_blocking(&inner), waiter_result);
+    }
+    // Internal test: only the runtime owner queue can deterministically stop
+    // between allocation and delivery, which is where an expired upgrade drops
+    // its open future. Public timing tests cannot prove cleanup at both points.
+    #[tokio::test]
+    async fn cancelled_session_open_releases_allocated_or_queued_session() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let open = || {
+            runtime.open_with_session_context(
+                AuthorSubject::SYSTEM,
+                BTreeMap::new(),
+                CommitUnitTrust::Inspector { edit: false },
+                crate::wire::current_wire_features(),
+                None,
+                crate::serving::ServerLinkAdmission::OrdinarySession,
+            )
+        };
+        let (allocate, wait_to_allocate) = oneshot::channel();
+        runtime
+            .send(ServerShellCommand::RunAsync(Box::new(move |_| {
+                Box::pin(async move {
+                    let _ = wait_to_allocate.await;
+                })
+            })))
+            .unwrap();
+        let mut allocated = Box::pin(open());
+        assert!(futures::poll!(&mut allocated).is_pending());
+        allocate.send(()).unwrap();
+        assert_eq!(
+            runtime
+                .run(|shell| Ok(shell.metrics_snapshot().active_sessions))
+                .await
+                .unwrap(),
+            1
+        );
+        drop(allocated);
+        assert_eq!(
+            runtime
+                .run(|shell| Ok(shell.metrics_snapshot().active_sessions))
+                .await
+                .unwrap(),
+            0,
+            "dropping a delivered-but-unobserved session reply closes the session"
+        );
+
+        let (release, wait) = oneshot::channel();
+        runtime
+            .send(ServerShellCommand::RunAsync(Box::new(move |_| {
+                Box::pin(async move {
+                    let _ = wait.await;
+                })
+            })))
+            .unwrap();
+        let mut queued = Box::pin(open());
+        assert!(futures::poll!(&mut queued).is_pending());
+        drop(queued);
+        release.send(()).unwrap();
+        assert_eq!(
+            runtime
+                .run(|shell| Ok(shell.metrics_snapshot().active_sessions))
+                .await
+                .unwrap(),
+            0,
+            "cancelled queued admission never leaks a session"
+        );
+        runtime.shutdown().await.unwrap();
     }
 }

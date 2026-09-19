@@ -1438,6 +1438,12 @@ pub enum CommitUnitTrust {
     /// their permission subject; only complete authority publications carry
     /// a prior edge-admission proof. Never inferred from a wire identity.
     TrustedAuthority,
+    /// Host-admitted Inspector: protected reads and optionally ordinary data edits.
+    /// Never grants replication, catalogue publication or policy impersonation.
+    Inspector {
+        /// Whether ordinary application data commits are allowed.
+        edit: bool,
+    },
     /// Administrators may preserve provenance and bypass application write policies.
     TrustedAdmin,
 }

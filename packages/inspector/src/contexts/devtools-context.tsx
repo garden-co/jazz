@@ -7,6 +7,7 @@ interface DevtoolsContextValue {
   wasmSchema: WasmSchema;
   storedPermissions: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
+  readOnly?: boolean;
 }
 
 export const DevtoolsContext = createContext<DevtoolsContextValue | null>(null);
@@ -16,14 +17,16 @@ export function DevtoolsProvider({
   wasmSchema,
   storedPermissions = null,
   runtime,
+  readOnly = false,
 }: PropsWithChildren<{
   wasmSchema: WasmSchema;
   storedPermissions?: StoredPermissionsResponse | null;
   runtime: InspectorRuntime;
+  readOnly?: boolean;
 }>) {
   const value = useMemo(
-    () => ({ wasmSchema, storedPermissions, runtime }),
-    [wasmSchema, storedPermissions, runtime],
+    () => ({ wasmSchema, storedPermissions, runtime, readOnly }),
+    [wasmSchema, storedPermissions, runtime, readOnly],
   );
   return <DevtoolsContext.Provider value={value}>{children}</DevtoolsContext.Provider>;
 }

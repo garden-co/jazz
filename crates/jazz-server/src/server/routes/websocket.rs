@@ -84,6 +84,8 @@ struct WebSocketAdmission {
     trust: CommitUnitTrust,
     credential: WebSocketCredential,
     requested_link: RequestedWebSocketLink,
+    expires_at: Option<u64>,
+    inspector_operator: Option<[u8; 32]>,
 }
 
 /// Authentication class selected by the prelude.  `TrustedBackend` is still
@@ -92,12 +94,14 @@ struct WebSocketAdmission {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WebSocketCredential {
     Admin,
+    Inspector,
     Backend,
     Session,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct WebSocketAdmissionKey {
+    inspector_operator: Option<[u8; 32]>,
     app_id: jazz::tools::AppId,
     identity: AuthorSubject,
 }
@@ -272,6 +276,32 @@ async fn ws_admission(
     let requested_link = prelude.requested_link;
     let auth = prelude.auth;
 
+    if let Some(token) = auth.inspector_token.as_deref() {
+        if auth.admin_secret.is_some()
+            || auth.backend_secret.is_some()
+            || auth.jwt_token.is_some()
+            || auth.backend_session.is_some()
+            || prelude.bootstrap_catalogue
+            || requested_link != RequestedWebSocketLink::OrdinarySession
+            || peer_identity != AuthorSubject::SYSTEM
+        {
+            return Err("invalid Inspector admission".into());
+        }
+        let claims = super::inspector::verify(token, state)
+            .map_err(|_| "invalid Inspector credential".to_owned())?;
+        return Ok(WebSocketAdmission {
+            identity: AuthorSubject::SYSTEM,
+            claims: BTreeMap::new(),
+            trust: CommitUnitTrust::Inspector {
+                edit: claims.edit(),
+            },
+            credential: WebSocketCredential::Inspector,
+            requested_link: RequestedWebSocketLink::OrdinarySession,
+            expires_at: Some(claims.exp),
+            inspector_operator: Some(claims.operator_key()),
+        });
+    }
+
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
@@ -292,6 +322,8 @@ async fn ws_admission(
             identity: peer_identity,
             claims: BTreeMap::new(),
             trust,
+            expires_at: None,
+            inspector_operator: None,
             credential: WebSocketCredential::Admin,
             requested_link: RequestedWebSocketLink::OrdinarySession,
         });
@@ -338,6 +370,8 @@ async fn ws_admission(
             identity: peer_identity,
             claims: BTreeMap::new(),
             trust: CommitUnitTrust::TrustedBackend,
+            expires_at: None,
+            inspector_operator: None,
             credential: WebSocketCredential::Backend,
             requested_link: RequestedWebSocketLink::OrdinarySession,
         });
@@ -389,6 +423,8 @@ async fn ws_admission(
         identity: peer_identity,
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
+        expires_at: None,
+        inspector_operator: None,
         credential: if has_authenticated_backend_session {
             WebSocketCredential::Backend
         } else {
@@ -647,6 +683,13 @@ async fn handle_ws_connection(
             return;
         }
     };
+    let inspector_deadline = admission.expires_at.map(|expiry| {
+        let remaining = std::time::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(expiry))
+            .and_then(|end| end.duration_since(std::time::SystemTime::now()).ok())
+            .unwrap_or_default();
+        (expiry, tokio::time::Instant::now() + remaining)
+    });
     // This cap follows policy-scoped sessions, including trusted backend impersonation,
     // after credential verification.  It must not key off `SYSTEM` (or any
     // other claimed subject): trusted edge/bootstrap links share SYSTEM and a
@@ -656,13 +699,26 @@ async fn handle_ws_connection(
     let mut admission_registration = ws_register_admission(
         Arc::clone(&state.websocket_admissions),
         WebSocketAdmissionKey {
+            inspector_operator: admission.inspector_operator,
             app_id: state.app_id,
             identity: admission.identity,
         },
-        admission.trust == CommitUnitTrust::Session,
+        matches!(
+            admission.trust,
+            CommitUnitTrust::Session | CommitUnitTrust::Inspector { .. }
+        ),
     );
 
-    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
+    let read_hello = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state);
+    let first = if let Some((_, deadline)) = inspector_deadline {
+        tokio::time::timeout_at(deadline, read_hello)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        read_hello.await
+    };
+    let Some(first) = first else {
         return;
     };
 
@@ -831,17 +887,23 @@ async fn handle_ws_connection(
                 return;
             }
         };
-    let session = match core_server_shell
-        .open_with_session_context(
-            admission.identity,
-            admission.claims,
-            admission.trust,
-            negotiated.features,
-            session_context,
-            link_admission,
-        )
-        .await
-    {
+    let open_session = core_server_shell.open_with_session_context(
+        admission.identity,
+        admission.claims,
+        admission.trust,
+        negotiated.features,
+        session_context,
+        link_admission,
+    );
+    let opened = if let Some((_, deadline)) = inspector_deadline {
+        match tokio::time::timeout_at(deadline, open_session).await {
+            Ok(result) => result,
+            Err(_) => return,
+        }
+    } else {
+        open_session.await
+    };
+    let session = match opened {
         Ok(session) => session,
         Err(error) => {
             send_ws_error(
@@ -853,143 +915,143 @@ async fn handle_ws_connection(
             return;
         }
     };
-    let server_hello = WireFrame::Hello(
-        WireHello::current(WirePeerRole::Core, negotiated.features)
-            .with_authority(server_endpoint.node, server_endpoint.epoch),
-    );
-    let server_hello = match encode_frame(&server_hello) {
-        Ok(frame) => frame,
-        Err(error) => {
+    // A deadline surrounds every await, including slow receivers and nested
+    // outbound streams. An idle select branch alone cannot bound those paths.
+    let authorized_activity = async {
+        if inspector_expired(inspector_deadline) {
+            return;
+        }
+        let server_hello = WireFrame::Hello(
+            WireHello::current(WirePeerRole::Core, negotiated.features)
+                .with_authority(server_endpoint.node, server_endpoint.epoch),
+        );
+        let server_hello = match encode_frame(&server_hello) {
+            Ok(frame) => frame,
+            Err(error) => {
+                send_ws_error(
+                    &mut socket,
+                    WireError::new(
+                        WireErrorCode::Internal,
+                        WireRetry::Never,
+                        format!("failed to encode websocket server hello: {error}"),
+                    ),
+                )
+                .await;
+                let _ = socket.close().await;
+                return;
+            }
+        };
+        if send_ws_authorized(&mut socket, &[server_hello], inspector_deadline)
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        tracing::info!(
+            protocol_version = negotiated.protocol_version,
+            features = negotiated.features,
+            identity = ?admission.identity,
+            "websocket negotiated"
+        );
+
+        let account_identity = matches!(admission.credential, WebSocketCredential::Session)
+            .then_some(admission.identity);
+        let mut account_changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        let mut activity_rx = core_server_shell.subscribe_activity();
+        // Subscribe before checking: a revocation concurrent with this check must
+        // remain visible even if no application traffic arrives afterward.
+        if let Err(error) = account_still_admitted(&state, account_identity).await {
+            send_ws_error(&mut socket, error.into_wire()).await;
+            let _ = socket.close().await;
+            core_server_shell.close(session);
+            return;
+        }
+        if let Err(error) =
+            drain_ws_outbound(&mut socket, &core_server_shell, session, inspector_deadline).await
+        {
             send_ws_error(
                 &mut socket,
-                WireError::new(
-                    WireErrorCode::Internal,
-                    WireRetry::Never,
-                    format!("failed to encode websocket server hello: {error}"),
-                ),
+                WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
             )
             .await;
+            core_server_shell.close(session);
             let _ = socket.close().await;
             return;
         }
-    };
-    if send_ws_encoded_frames(&mut socket, &[server_hello])
-        .await
-        .is_err()
-    {
-        return;
-    }
 
-    tracing::info!(
-        protocol_version = negotiated.protocol_version,
-        features = negotiated.features,
-        identity = ?admission.identity,
-        "websocket negotiated"
-    );
-
-    let account_identity =
-        matches!(admission.credential, WebSocketCredential::Session).then_some(admission.identity);
-    let mut account_changes = state.accounts.as_ref().map(|registry| registry.subscribe());
-    let mut activity_rx = core_server_shell.subscribe_activity();
-    // Subscribe before checking: a revocation concurrent with this check must
-    // remain visible even if no application traffic arrives afterward.
-    if let Err(error) = account_still_admitted(&state, account_identity).await {
-        send_ws_error(&mut socket, error.into_wire()).await;
-        let _ = socket.close().await;
-        core_server_shell.close(session);
-        return;
-    }
-    if let Err(error) = drain_ws_outbound(&mut socket, &core_server_shell, session).await {
-        send_ws_error(
-            &mut socket,
-            WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-        )
-        .await;
-        core_server_shell.close(session);
-        let _ = socket.close().await;
-        return;
-    }
-
-    'connection: loop {
-        tokio::select! {
-            _ = async {
-                if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
-                else if account_identity.is_some() {
-                    // Edges have no local registry watch. Recheck idle sessions,
-                    // as well as every inbound/outbound operation, without an
-                    // admission cache that could outlive revocation.
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                } else { std::future::pending::<()>().await; }
-            } => {
-                if let Err(error) = account_still_admitted(&state, account_identity).await {
-                    send_ws_error(&mut socket, error.into_wire()).await;
-                    let _ = socket.close().await;
-                    break;
-                }
-            }
-            eviction = admission_registration.evict_rx.recv() => {
-                if eviction.is_some() {
-                    send_ws_error(
-                        &mut socket,
-                        WireError::new(
-                            WireErrorCode::Backpressure,
-                            WireRetry::Later,
-                            "websocket peer_identity connection cap exceeded",
-                        ),
-                    )
-                    .await;
-                    close_ws_for_policy(&mut socket, "websocket connection cap exceeded").await;
-                }
+        'connection: loop {
+            if inspector_expired(inspector_deadline) {
                 break;
             }
-            changed = shutdown_rx.changed() => {
-                if changed.is_ok() && state.shutdown.is_shutting_down() {
-                    close_ws_for_shutdown(&mut socket).await;
-                    break;
-                }
-            }
-            msg = socket.recv() => match msg {
-                Some(Ok(Message::Binary(bytes))) => {
+            tokio::select! {
+                _ = async {
+                    if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
+                    else if account_identity.is_some() {
+                        // Edges have no local registry watch. Recheck idle sessions,
+                        // as well as every inbound/outbound operation, without an
+                        // admission cache that could outlive revocation.
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    } else { std::future::pending::<()>().await; }
+                } => {
                     if let Err(error) = account_still_admitted(&state, account_identity).await {
                         send_ws_error(&mut socket, error.into_wire()).await;
                         let _ = socket.close().await;
                         break;
                     }
-                    let frames = match decode_ws_encoded_frame_batch(&bytes) {
-                        Ok(frames) => frames,
-                        Err(_) => {
-                            send_ws_error(
-                                &mut socket,
-                                WireError::new(
-                                    WireErrorCode::MalformedFrame,
-                                    WireRetry::Never,
-                                    "failed to decode websocket frame batch",
-                                ),
-                            )
-                            .await;
+                }
+                eviction = admission_registration.evict_rx.recv() => {
+                    if eviction.is_some() {
+                        send_ws_error(
+                            &mut socket,
+                            WireError::new(
+                                WireErrorCode::Backpressure,
+                                WireRetry::Later,
+                                "websocket peer_identity connection cap exceeded",
+                            ),
+                        )
+                        .await;
+                        close_ws_for_policy(&mut socket, "websocket connection cap exceeded").await;
+                    }
+                    break;
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_ok() && state.shutdown.is_shutting_down() {
+                        close_ws_for_shutdown(&mut socket).await;
+                        break;
+                    }
+                }
+                msg = socket.recv() => match msg {
+                    Some(Ok(Message::Binary(bytes))) => {
+                    if inspector_expired(inspector_deadline) { break; }
+                        if let Err(error) = account_still_admitted(&state, account_identity).await {
+                            send_ws_error(&mut socket, error.into_wire()).await;
+                            let _ = socket.close().await;
                             break;
                         }
-                    };
-                    // The shell owns a synchronous database, so one tick is the
-                    // smallest ordering-preserving unit at which its newly
-                    // durable responses can be observed. Do not hold those
-                    // responses behind the rest of this WebSocket message: a
-                    // large import can otherwise delay an already-global
-                    // FateUpdate until every later commit has been ingested.
-                    let mut outbound = match core_server_shell.receive_tick_stream(session, frames) {
-                        Ok(outbound) => outbound,
-                        Err(error) => {
-                            send_ws_error(
-                                &mut socket,
-                                WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-                            )
-                            .await;
-                            break 'connection;
-                        }
-                    };
-                    while let Some(outbound) = outbound.recv().await {
-                        let outbound = match outbound {
+                        let frames = match decode_ws_encoded_frame_batch(&bytes) {
                             Ok(frames) => frames,
+                            Err(_) => {
+                                send_ws_error(
+                                    &mut socket,
+                                    WireError::new(
+                                        WireErrorCode::MalformedFrame,
+                                        WireRetry::Never,
+                                        "failed to decode websocket frame batch",
+                                    ),
+                                )
+                                .await;
+                                break;
+                            }
+                        };
+                        // The shell owns a synchronous database, so one tick is the
+                        // smallest ordering-preserving unit at which its newly
+                        // durable responses can be observed. Do not hold those
+                        // responses behind the rest of this WebSocket message: a
+                        // large import can otherwise delay an already-global
+                        // FateUpdate until every later commit has been ingested.
+                        let mut outbound = match core_server_shell.receive_tick_stream(session, frames) {
+                            Ok(outbound) => outbound,
                             Err(error) => {
                                 send_ws_error(
                                     &mut socket,
@@ -999,72 +1061,110 @@ async fn handle_ws_connection(
                                 break 'connection;
                             }
                         };
-                        if let Err(error) = account_still_admitted(&state, account_identity).await {
-                            send_ws_error(&mut socket, error.into_wire()).await;
-                        let _ = socket.close().await;
-                            break 'connection;
-                        }
-                        if !outbound.is_empty()
-                            && let Err(error) = send_ws_encoded_frames(&mut socket, &outbound).await
-                        {
-                            send_ws_error(
-                                &mut socket,
-                                WireError::new(
-                                    WireErrorCode::Internal,
-                                    WireRetry::Later,
-                                    error.to_string(),
-                                ),
-                            )
-                            .await;
-                            break 'connection;
+                        while let Some(outbound) = outbound.recv().await {
+                            let outbound = match outbound {
+                                Ok(frames) => frames,
+                                Err(error) => {
+                                    send_ws_error(
+                                        &mut socket,
+                                        WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
+                                    )
+                                    .await;
+                                    break 'connection;
+                                }
+                            };
+                            if let Err(error) = account_still_admitted(&state, account_identity).await {
+                                send_ws_error(&mut socket, error.into_wire()).await;
+                            let _ = socket.close().await;
+                                break 'connection;
+                            }
+                            if !outbound.is_empty()
+                                && let Err(error) = send_ws_authorized(&mut socket, &outbound, inspector_deadline).await
+                            {
+                                send_ws_error(
+                                    &mut socket,
+                                    WireError::new(
+                                        WireErrorCode::Internal,
+                                        WireRetry::Later,
+                                        error.to_string(),
+                                    ),
+                                )
+                                .await;
+                                break 'connection;
+                            }
                         }
                     }
-                }
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Ok(Message::Ping(payload))) => {
-                    if socket.send(Message::Pong(payload)).await.is_err() {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                },
+                changed = activity_rx.changed() => {
+                    if let Err(error) = account_still_admitted(&state, account_identity).await {
+                        send_ws_error(&mut socket, error.into_wire()).await;
+                        let _ = socket.close().await;
+                        break;
+                    }
+                    if changed.is_err() {
+                        break;
+                    }
+                    if let Err(error) =
+                        drain_ws_outbound(&mut socket, &core_server_shell, session, inspector_deadline).await
+                    {
+                        send_ws_error(
+                            &mut socket,
+                            WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
+                        )
+                        .await;
                         break;
                     }
                 }
-                _ => {}
-            },
-            changed = activity_rx.changed() => {
-                if let Err(error) = account_still_admitted(&state, account_identity).await {
-                    send_ws_error(&mut socket, error.into_wire()).await;
-                    let _ = socket.close().await;
-                    break;
-                }
-                if changed.is_err() {
-                    break;
-                }
-                if let Err(error) =
-                    drain_ws_outbound(&mut socket, &core_server_shell, session).await
-                {
-                    send_ws_error(
-                        &mut socket,
-                        WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
-                    )
-                    .await;
-                    break;
-                }
             }
         }
+    };
+    if let Some((_, deadline)) = inspector_deadline {
+        if tokio::time::timeout_at(deadline, authorized_activity)
+            .await
+            .is_err()
+        {
+            // Never wait indefinitely for a peer that stopped reading.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                send_ws_error(
+                    &mut socket,
+                    WireError::new(
+                        WireErrorCode::AuthFailed,
+                        WireRetry::Never,
+                        "Inspector session expired",
+                    ),
+                ),
+            )
+            .await;
+        }
+    } else {
+        authorized_activity.await;
     }
-
     core_server_shell.close(session);
-    let _ = socket.close().await;
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(100), socket.close()).await;
 }
 
 async fn drain_ws_outbound(
     socket: &mut WebSocket,
     core_server_shell: &crate::server::ServerRuntimeHandle,
     session: jazz::serving::ServerSession,
+    inspector_deadline: Option<(u64, tokio::time::Instant)>,
 ) -> Result<(), String> {
+    if inspector_expired(inspector_deadline) {
+        return Err("Inspector session expired".into());
+    }
     let outbound = core_server_shell.tick_take(session).await?;
     if outbound.is_empty() {
         return Ok(());
     }
-    send_ws_encoded_frames(socket, &outbound)
+    send_ws_authorized(socket, &outbound, inspector_deadline)
         .await
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -1088,6 +1188,29 @@ fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error
 
 fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
     jazz::wire::decode_websocket_frame_batch(bytes)
+}
+
+fn inspector_expired(deadline: Option<(u64, tokio::time::Instant)>) -> bool {
+    deadline.is_some_and(|(wall, monotonic)| {
+        super::inspector::now() >= wall || tokio::time::Instant::now() >= monotonic
+    })
+}
+
+async fn send_ws_authorized(
+    socket: &mut WebSocket,
+    frames: &[Vec<u8>],
+    deadline: Option<(u64, tokio::time::Instant)>,
+) -> Result<(), axum::Error> {
+    for batch in encode_ws_frame_batches(frames).map_err(axum::Error::new)? {
+        if inspector_expired(deadline) {
+            return Err(axum::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Inspector session expired",
+            )));
+        }
+        socket.send(Message::Binary(batch.into())).await?;
+    }
+    Ok(())
 }
 
 async fn send_ws_encoded_frames(
@@ -3810,6 +3933,7 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorSubject::for_test_bytes([0x42; 16]);
         let key = WebSocketAdmissionKey {
+            inspector_operator: None,
             app_id: state.app_id,
             identity,
         };
@@ -3965,6 +4089,7 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorSubject::SYSTEM;
         let key = WebSocketAdmissionKey {
+            inspector_operator: None,
             app_id: state.app_id,
             identity,
         };
@@ -3991,6 +4116,7 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorSubject::for_test_bytes([0x24; 16]);
         let key = WebSocketAdmissionKey {
+            inspector_operator: None,
             app_id: state.app_id,
             identity,
         };
@@ -4029,10 +4155,12 @@ mod tests {
         let noisy_identity = AuthorSubject::for_test_bytes([0x31; 16]);
         let quiet_identity = AuthorSubject::for_test_bytes([0x32; 16]);
         let noisy_key = WebSocketAdmissionKey {
+            inspector_operator: None,
             app_id: state.app_id,
             identity: noisy_identity,
         };
         let quiet_key = WebSocketAdmissionKey {
+            inspector_operator: None,
             app_id: state.app_id,
             identity: quiet_identity,
         };
@@ -4079,6 +4207,7 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let identity = AuthorSubject::for_test_bytes([0x33; 16]);
         let key = WebSocketAdmissionKey {
+            inspector_operator: None,
             app_id: state.app_id,
             identity,
         };
@@ -4145,5 +4274,344 @@ mod tests {
             ),
             "idle websocket upgrade must close cleanly under shutdown; observed {outcome:?}"
         );
+    }
+    async fn inspector_test_token(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        edit: bool,
+        ttl: u64,
+    ) -> String {
+        let capabilities = if edit {
+            vec!["inspector:read", "inspector:edit"]
+        } else {
+            vec!["inspector:read"]
+        };
+        let response = reqwest::Client::new().post(format!("http://{addr}/apps/{}/admin/inspector/sessions", state.app_id))
+            .header("x-jazz-admin-secret", "admin-secret")
+            .json(&serde_json::json!({"operator":"ws-test-operator", "capabilities":capabilities, "expiresIn":ttl}))
+            .send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        response.json::<serde_json::Value>().await.unwrap()["accessToken"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    fn inspector_test_prelude(token: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({"peer_identity":AuthorSubject::SYSTEM.canonical(), "auth":{"inspector_token":token}})).unwrap()
+    }
+    #[tokio::test]
+    async fn inspector_idle_websocket_expires_and_cannot_reconnect() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let token = inspector_test_token(addr, &state, false, 2).await;
+        let mut ws =
+            open_negotiated_ws_with_prelude(addr, &state, inspector_test_prelude(&token)).await;
+        let response = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let message = ws.next().await.unwrap().unwrap();
+                if let Some(error) = decode_ws_message(&message).into_iter().find_map(|frame| {
+                    if let WireFrame::Error(error) = frame {
+                        Some(error)
+                    } else {
+                        None
+                    }
+                }) {
+                    break error;
+                }
+            }
+        })
+        .await
+        .expect("idle Inspector expires without incoming traffic");
+        assert_eq!(response.code, WireErrorCode::AuthFailed);
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id)).await.unwrap();
+        ws.send(WsMessage::Binary(inspector_test_prelude(&token).into()))
+            .await
+            .unwrap();
+        let message = ws.next().await.unwrap().unwrap();
+        assert!(decode_ws_message(&message).iter().any(|frame| matches!(frame, WireFrame::Error(error) if error.code == WireErrorCode::AuthFailed)));
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspector_readonly_reads_protected_rows_but_rejects_writes() {
+        let schema = ws_private_docs_schema_convert();
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".into()),
+                backend_secret: Some("backend-secret".into()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_core_server_shell_schema(schema.clone())
+            .build()
+            .await
+            .unwrap()
+            .state;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let writer = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
+        let mut writer_ws = open_negotiated_ws_session(addr, &state, alice).await;
+        writer.insert_private_doc("protected Inspector row", alice);
+        for _ in 0..5 {
+            pump_core_websocket_transport_once(&writer, &mut writer_ws).await;
+        }
+        let token = inspector_test_token(addr, &state, false, 900).await;
+        let reader =
+            TestClient::new_with_identity(schema, 0xd1, 0xd100, AuthorSubject::SYSTEM).await;
+        let mut ws =
+            open_negotiated_ws_with_prelude(addr, &state, inspector_test_prelude(&token)).await;
+        let (query, attachment) = reader.attach_table_query("docs");
+        let started = tokio::time::Instant::now();
+        while !reader.edge_attachment_is_covered(&attachment)
+            && started.elapsed() < WS_PUMP_DEADLINE
+        {
+            pump_core_websocket_transport_once(&reader, &mut ws).await;
+        }
+        assert!(reader.edge_attachment_is_covered(&attachment));
+        assert_eq!(
+            reader
+                .edge_titles(&query, &ws_private_docs_table_schema())
+                .await,
+            vec!["protected Inspector row"]
+        );
+        reader.insert_private_doc("forbidden write", alice);
+        let outbound = reader.tick_take();
+        assert!(!outbound.is_empty());
+        ws.send(WsMessage::Binary(ws_frame_batch(&outbound).into()))
+            .await
+            .unwrap();
+        let denied = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let message = ws.next().await.unwrap().unwrap();
+                if decode_ws_message(&message)
+                    .iter()
+                    .any(|frame| matches!(frame, WireFrame::Error(_)))
+                {
+                    break true;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(denied, "read-only Inspector must reject a real data commit");
+        reader.detach_query(attachment);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspector_explicit_edit_settles_data_write() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let token = inspector_test_token(addr, &state, true, 900).await;
+        let client = TestClient::new_with_identity(
+            ws_public_schema_convert(),
+            0xd2,
+            0xd200,
+            AuthorSubject::SYSTEM,
+        )
+        .await;
+        let mut ws =
+            open_negotiated_ws_with_prelude(addr, &state, inspector_test_prelude(&token)).await;
+        let write = client.write_todo("explicit Inspector edit");
+        let result = settle_ws_write(&client, &mut ws, &write).await;
+        assert!(matches!(result.fate, Fate::Accepted), "{result:?}");
+    }
+    #[tokio::test]
+    async fn inspector_cannot_forge_admin_bootstrap_relay_or_other_identity() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let token = inspector_test_token(addr, &state, true, 900).await;
+        for patch in [
+            serde_json::json!({"bootstrap_catalogue":true}),
+            serde_json::json!({"requested_link":"scope_isolated_client_relay"}),
+            serde_json::json!({"peer_identity":AuthorSubject::for_test_bytes([0xab;16]).canonical()}),
+            serde_json::json!({"auth":{"inspector_token":token, "admin_secret":token}}),
+        ] {
+            let mut prelude: serde_json::Value =
+                serde_json::from_slice(&inspector_test_prelude(&token)).unwrap();
+            for (key, value) in patch.as_object().unwrap() {
+                prelude[key] = value.clone();
+            }
+            let (mut ws, _) = connect_async(ws_url(addr, state.app_id)).await.unwrap();
+            ws.send(WsMessage::Binary(
+                serde_json::to_vec(&prelude).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+            let message = ws.next().await.unwrap().unwrap();
+            assert!(decode_ws_message(&message).iter().any(|frame| matches!(frame, WireFrame::Error(error) if error.code == WireErrorCode::AuthFailed)));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspector_edit_cannot_publish_authority_or_impersonate_policy_subjects() {
+        use jazz::db::Transport;
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let token = inspector_test_token(addr, &state, true, 900).await;
+        let client = TestClient::new_with_identity(
+            ws_public_schema_convert(),
+            0xd3,
+            0xd300,
+            AuthorSubject::SYSTEM,
+        )
+        .await;
+        let tx_id = client.write_todo_tx_id("local-only-publication-fixture");
+        let schema = ws_public_schema_convert();
+        for message in [
+            SyncMessage::SessionClaims {
+                identity: AuthorSubject::for_test_bytes([0x83; 16]),
+                claims: BTreeMap::new(),
+            },
+            SyncMessage::PublishSchema {
+                author: AuthorSubject::SYSTEM,
+                schema: Box::new(jazz::protocol::SchemaVersion {
+                    id: schema.version_id(),
+                    schema,
+                }),
+            },
+            SyncMessage::AuthorityPublication(jazz::protocol::AuthorityPublication {
+                tx_id,
+                commits: Vec::new(),
+            }),
+            SyncMessage::FetchRowVersions {
+                requests: Vec::new(),
+                delegated_session: Some(jazz::protocol::DelegatedSessionBinding {
+                    identity: AuthorSubject::for_test_bytes([0x84; 16]),
+                    claims: BTreeMap::new(),
+                }),
+            },
+        ] {
+            let features = FEATURE_SYNC_MESSAGE_PAYLOAD
+                | FEATURE_STRUCTURED_ERRORS
+                | jazz::wire::FEATURE_AUTHORITY_PUBLICATIONS;
+            let mut ws = open_negotiated_ws_with_prelude_and_features(
+                addr,
+                &state,
+                inspector_test_prelude(&token),
+                features,
+            )
+            .await;
+            let transport = TestWireTransport::default();
+            let mut adapter =
+                WireTransportAdapter::new(transport.clone(), WIRE_PROTOCOL_VERSION, features, None);
+            let label = format!("{message:?}");
+            adapter.send(message).unwrap();
+            let frames = transport
+                .queues
+                .borrow_mut()
+                .outbound
+                .drain(..)
+                .collect::<Vec<_>>();
+            ws.send(WsMessage::Binary(ws_frame_batch(&frames).into()))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let response = ws.next().await.unwrap().unwrap();
+                    if decode_ws_message(&response)
+                        .iter()
+                        .any(|frame| matches!(frame, WireFrame::Error(_)))
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("Inspector must reject {label}"));
+        }
+    }
+    #[tokio::test]
+    async fn inspector_expiry_closes_connection_before_wire_hello() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        // Start just after a wall-clock second so this one-second credential
+        // cannot accidentally expire before its prelude is actually admitted.
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_millis();
+        tokio::time::sleep(Duration::from_millis(u64::from(1050 - millis))).await;
+        let token = inspector_test_token(addr, &state, false, 1).await;
+        let claims = super::super::inspector::verify(&token, &state).unwrap();
+        let key = WebSocketAdmissionKey {
+            app_id: state.app_id,
+            identity: AuthorSubject::SYSTEM,
+            inspector_operator: Some(claims.operator_key()),
+        };
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id)).await.unwrap();
+        ws.send(WsMessage::Binary(inspector_test_prelude(&token).into()))
+            .await
+            .unwrap();
+        wait_for_ws_live_admissions(&state, key, |count| count == 1).await;
+        let closed = tokio::time::timeout(Duration::from_millis(1400), ws.next())
+            .await
+            .expect("Inspector lifetime also bounds the pre-Hello handshake");
+        assert!(
+            !matches!(closed, Some(Ok(WsMessage::Binary(_)))),
+            "no authorized data after expiry"
+        );
+    }
+    // Public server runtime admission rejects forged durable authors before either Core or dynamic Edge can persist them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn inspector_edit_binds_provenance_on_core_and_dynamic_edge() {
+        for edge in [false, true] {
+            let builder = ServerBuilder::new(AppId::random())
+                .with_auth_config(AuthConfig {
+                    admin_secret: Some("admin-secret".into()),
+                    ..Default::default()
+                })
+                .with_storage(StorageBackend::InMemory)
+                .with_schema(Schema::new())
+                .with_core_server_shell_schema(ws_public_schema_convert());
+            let server = builder.build().await.unwrap();
+            let runtime = server.state.runtime_for_client().unwrap();
+            let runtime = if edge {
+                let snapshot = runtime.trusted_catalogue_snapshot_for_test().await.unwrap();
+                jazz::serving::ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
+                    jazz::serving::StorageConfig::InMemory,
+                    None,
+                    None,
+                    snapshot,
+                )
+                .unwrap()
+            } else {
+                runtime
+            };
+            let features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+            let session = runtime
+                .open_with_session_context(
+                    AuthorSubject::SYSTEM,
+                    BTreeMap::new(),
+                    CommitUnitTrust::Inspector { edit: true },
+                    features,
+                    None,
+                    ServerLinkAdmission::OrdinarySession,
+                )
+                .await
+                .unwrap();
+            let client = TestClient::new_with_identity(
+                ws_public_schema_convert(),
+                0xe3,
+                0xe300,
+                AuthorSubject::for_test_bytes([0xe4; 16]),
+            )
+            .await;
+            client.write_todo("forged Inspector author");
+            let frames = client.tick_take();
+            assert!(!frames.is_empty());
+            let mut responses = runtime.receive_tick_stream(session, frames).unwrap();
+            let mut rejection = None;
+            while let Some(response) = responses.recv().await {
+                if let Err(error) = response {
+                    rejection = Some(error);
+                    break;
+                }
+            }
+            runtime.close(session);
+            assert!(
+                rejection
+                    .as_ref()
+                    .is_some_and(|error| error.contains("provenance")),
+                "edge={edge}: Inspector must reject forged durable author, observed {rejection:?}"
+            );
+        }
     }
 }

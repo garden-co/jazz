@@ -2537,7 +2537,8 @@ where
         let peer = match trust {
             CommitUnitTrust::TrustedBackend
             | CommitUnitTrust::TrustedAuthority
-            | CommitUnitTrust::TrustedAdmin => {
+            | CommitUnitTrust::TrustedAdmin
+            | CommitUnitTrust::Inspector { .. } => {
                 PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
             }
             CommitUnitTrust::Session => PeerState::edge_client(identity),
@@ -2578,7 +2579,8 @@ where
         let peer = match trust {
             CommitUnitTrust::TrustedBackend
             | CommitUnitTrust::TrustedAuthority
-            | CommitUnitTrust::TrustedAdmin => {
+            | CommitUnitTrust::TrustedAdmin
+            | CommitUnitTrust::Inspector { .. } => {
                 PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
             }
             CommitUnitTrust::Session => PeerState::client_link(identity),

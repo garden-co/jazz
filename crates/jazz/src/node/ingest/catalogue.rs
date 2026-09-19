@@ -67,6 +67,15 @@ where
     where
         S: ReopenableStorage,
     {
+        if let Some(context) = ingest_context
+            && let CommitUnitTrust::Inspector { edit } = context.trust
+            && (crate::node::is_catalogue_mutation(&message)
+                || matches!(&message, SyncMessage::AuthorityPublication(_) | SyncMessage::SessionClaims { .. })
+                || (!edit && matches!(&message, SyncMessage::CommitUnit { .. }
+                    | SyncMessage::ChunkUploadStart(_) | SyncMessage::ChunkUploadNodes(_))))
+        {
+            return Box::pin(async { Err(Error::UnsupportedSyncMessage("Inspector capability does not permit this operation")) });
+        }
         if crate::node::is_catalogue_mutation(&message) {
             if let Err(error) = self.database.ensure_usable() {
                 return Box::pin(async move { Err(error.into()) });

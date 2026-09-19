@@ -53,7 +53,7 @@ where
         // trusted local/backend paths retain an explicit permission subject.
         let tx = if matches!(
             ingest_context.map(|context| context.trust),
-            Some(CommitUnitTrust::Session | CommitUnitTrust::Relay)
+            Some(CommitUnitTrust::Session | CommitUnitTrust::Relay | CommitUnitTrust::Inspector { .. })
         ) {
             Transaction {
                 permission_subject: None,
@@ -641,7 +641,7 @@ where
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error> {
         let redact_permission_subject = matches!(
             ingest_context.map(|context| context.trust),
-            Some(CommitUnitTrust::Session | CommitUnitTrust::Relay)
+            Some(CommitUnitTrust::Session | CommitUnitTrust::Relay | CommitUnitTrust::Inspector { .. })
         );
         let versions = canonical_versions(versions);
         let mut memo = IngestMemo::default();

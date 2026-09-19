@@ -170,6 +170,30 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     });
   });
 
+  it("preserves scoped Inspector authority on initial connection and reconnect", async () => {
+    const client = makeClientStub();
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+      inspectorToken: "synthetic-scoped-inspector",
+    });
+    db.exposeGetClient(makeSchema());
+    await db.disconnect();
+    await db.reconnect();
+    const calls = vi.mocked(client.connectTransport).mock.calls;
+    expect(calls).toHaveLength(2);
+    for (const [url, auth] of calls) {
+      expect(url).toBe("https://example.test");
+      expect(auth).toEqual({
+        inspector_token: "synthetic-scoped-inspector",
+        jwt_token: undefined,
+        admin_secret: undefined,
+        backend_session: undefined,
+      });
+    }
+  });
+
   it("DBRT-U02 does not call connectTransport when serverUrl is absent", () => {
     const client = makeClientStub();
     vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);

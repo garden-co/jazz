@@ -14,6 +14,7 @@ const mockDelete = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
 let currentReferenceRowsByTable: Record<string, Array<Record<string, unknown>>>;
 let currentTable: string;
+let currentReadOnly = false;
 
 function getContainingCell(element: HTMLElement | null): HTMLElement | null {
   return element?.closest('[role="gridcell"], td') ?? null;
@@ -136,6 +137,7 @@ vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
     wasmSchema: currentWasmSchema,
     runtime: "overlay",
+    readOnly: currentReadOnly,
   }),
 }));
 
@@ -154,6 +156,7 @@ describe("TableDataGrid", () => {
   });
 
   beforeEach(() => {
+    currentReadOnly = false;
     localStorage.clear();
     currentWasmSchema = mockWasmSchema;
     mockWasmSchema.todos.columns = [...initialMockTodoColumns];
@@ -1662,5 +1665,30 @@ describe("TableDataGrid", () => {
 
     expect(screen.queryByText("1 row will be deleted")).toBeNull();
     expect(mockDelete).not.toHaveBeenCalled();
+  });
+  it("disables every data mutation entry point for a read-only Inspector session", () => {
+    currentReadOnly = true;
+    renderGrid();
+    expect((screen.getByRole("button", { name: "Insert row" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(
+      (screen.getByRole("button", { name: "Delete row(s)" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Delete row-2" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    const checkbox = screen.getByRole("checkbox", {
+      name: "Toggle done for row-2",
+    }) as HTMLInputElement;
+    expect(checkbox.disabled).toBe(true);
+    const title = screen.getByText("zeta");
+    fireEvent.doubleClick(title);
+    expect(screen.queryByRole("textbox", { name: "Edit title" })).toBeNull();
+    fireEvent.keyDown(getContainingCell(title)!, { key: "Delete" });
+    fireEvent.click(checkbox);
+    expect(screen.queryByText(/row will be deleted/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    expect(mockTransaction).not.toHaveBeenCalled();
   });
 });

@@ -19,7 +19,13 @@ import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
 /** Public clients always select an enrolled account, never an unverified principal. */
 export type AccountDbConfig = Omit<
   DbConfig,
-  "secret" | "jwtToken" | "cookieSession" | "adminSecret" | "accountId" | "accountRegistryAuthority"
+  | "secret"
+  | "jwtToken"
+  | "cookieSession"
+  | "adminSecret"
+  | "inspectorToken"
+  | "accountId"
+  | "accountRegistryAuthority"
 > & {
   account: AccountHandle;
 };
@@ -43,6 +49,7 @@ function accountContextScope(config: AccountDbConfig): string {
     "jwtToken",
     "cookieSession",
     "adminSecret",
+    "inspectorToken",
     "accountId",
     "accountRegistryAuthority",
   ]) {

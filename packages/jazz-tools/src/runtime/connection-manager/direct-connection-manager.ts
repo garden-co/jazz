@@ -70,6 +70,7 @@ export class DirectConnectionManager extends ConnectionManager {
     client.connectTransport(config.serverUrl, {
       jwt_token: config.jwtToken,
       admin_secret: config.adminSecret,
+      inspector_token: config.inspectorToken,
       backend_session: config.cookieSession,
     });
   }

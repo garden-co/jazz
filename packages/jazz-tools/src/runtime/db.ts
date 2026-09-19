@@ -108,6 +108,8 @@ export type DbConfig = {
   env?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
+  /** Short-lived, scoped diagnostic authority; never an account credential. */
+  inspectorToken?: string;
   /** @internal Server-only admission credential; client DbConfig must never carry it. */
   backendSecret?: never;
   /** IndexedDB database name for browser persistence (default: appId). */
@@ -3206,7 +3208,12 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       resolvedConfig = { ...configWithoutAuth, jwtToken };
       setTrustedReservedSession(resolvedConfig, trustedReservedSession);
     }
-  } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
+  } else if (
+    !config.jwtToken &&
+    !config.cookieSession &&
+    !config.adminSecret &&
+    !config.inspectorToken
+  ) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.

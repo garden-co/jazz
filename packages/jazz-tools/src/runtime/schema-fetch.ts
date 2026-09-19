@@ -1,3 +1,4 @@
+import { inspectorAuthorityHeaders } from "./inspector-auth.js";
 import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 import type {
   ColumnType,
@@ -11,7 +12,8 @@ import { appScopedUrl } from "./url.js";
 
 export interface FetchStoredWasmSchemaOptions {
   appId: string;
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
   schemaHash: string;
 }
 
@@ -36,12 +38,12 @@ export async function fetchStoredWasmSchema(
   const response = await fetch(schemaUrl, {
     method: "GET",
     headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
+      ...inspectorAuthorityHeaders(options),
     },
   });
 
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
+    const bodyText = options.inspectorToken ? "" : await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
     throw new Error(`Schema fetch failed: ${response.status} ${response.statusText}${detail}`);
   }
@@ -59,7 +61,8 @@ export async function fetchStoredWasmSchema(
 
 export interface FetchStoredSchemasOptions {
   appId: string;
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
 }
 
 export interface StoredSchemaHash {
@@ -114,12 +117,12 @@ export async function fetchSchemaHashes(
   const response = await fetch(appScopedUrl(serverUrl, options.appId, "schemas"), {
     method: "GET",
     headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
+      ...inspectorAuthorityHeaders(options),
     },
   });
 
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
+    const bodyText = options.inspectorToken ? "" : await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
     // A 404 also deliberately hides invalid/mismatched app IDs. It is not a
     // transient-readiness signal, so leave the retry decision with the caller.
@@ -150,7 +153,8 @@ export async function fetchSchemaHashes(
 
 export interface PublishStoredSchemaOptions {
   appId: string;
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
   schema: WasmSchema;
 }
 
@@ -162,13 +166,13 @@ export async function publishStoredSchema(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Jazz-Admin-Secret": options.adminSecret,
+      ...inspectorAuthorityHeaders(options),
     },
     body: JSON.stringify({ schema: { tables: options.schema } }, runtimeSchemaJsonReplacer),
   });
 
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
+    const bodyText = options.inspectorToken ? "" : await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
     throw new Error(`Schema publish failed: ${response.status} ${response.statusText}${detail}`);
   }
@@ -185,7 +189,8 @@ export interface StoredPermissionsHead {
 
 export interface FetchPermissionsHeadOptions {
   appId: string;
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
 }
 
 export async function fetchPermissionsHead(
@@ -195,12 +200,12 @@ export async function fetchPermissionsHead(
   const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/permissions/head"), {
     method: "GET",
     headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
+      ...inspectorAuthorityHeaders(options),
     },
   });
 
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
+    const bodyText = options.inspectorToken ? "" : await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
     throw new Error(
       `Permissions head fetch failed: ${response.status} ${response.statusText}${detail}`,
@@ -220,7 +225,8 @@ export interface StoredPermissionsResponse {
 
 export interface FetchStoredPermissionsOptions {
   appId: string;
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
 }
 
 export async function fetchStoredPermissions(
@@ -230,12 +236,12 @@ export async function fetchStoredPermissions(
   const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/permissions"), {
     method: "GET",
     headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
+      ...inspectorAuthorityHeaders(options),
     },
   });
 
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
+    const bodyText = options.inspectorToken ? "" : await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
     throw new Error(`Permissions fetch failed: ${response.status} ${response.statusText}${detail}`);
   }
@@ -252,7 +258,8 @@ export async function fetchStoredPermissions(
 
 export interface PublishStoredPermissionsOptions {
   appId: string;
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
   schemaHash: string;
   permissions: CompiledPermissionsMap;
   expectedParentBundleObjectId?: string | null;
@@ -266,7 +273,7 @@ export async function publishStoredPermissions(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Jazz-Admin-Secret": options.adminSecret,
+      ...inspectorAuthorityHeaders(options),
     },
     body: JSON.stringify({
       schemaHash: options.schemaHash,
@@ -276,7 +283,7 @@ export async function publishStoredPermissions(
   });
 
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
+    const bodyText = options.inspectorToken ? "" : await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
     throw new Error(
       `Permissions publish failed: ${response.status} ${response.statusText}${detail}`,
@@ -291,7 +298,8 @@ export async function publishStoredPermissions(
 
 export interface FetchSchemaConnectivityOptions {
   appId: string;
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
   fromHash: string;
   toHash: string;
 }
@@ -307,12 +315,12 @@ export async function fetchSchemaConnectivity(
   const response = await fetch(url.toString(), {
     method: "GET",
     headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
+      ...inspectorAuthorityHeaders(options),
     },
   });
 
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
+    const bodyText = options.inspectorToken ? "" : await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
     throw new Error(
       `Schema connectivity fetch failed: ${response.status} ${response.statusText}${detail}`,
@@ -368,7 +376,8 @@ export interface PublishedTableLens {
 
 export interface PublishStoredMigrationOptions {
   appId: string;
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
   fromHash: string;
   toHash: string;
   forward: PublishedTableLens[];
@@ -420,7 +429,7 @@ export async function publishStoredMigration(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Jazz-Admin-Secret": options.adminSecret,
+      ...inspectorAuthorityHeaders(options),
     },
     body: JSON.stringify({
       fromHash: options.fromHash,
@@ -430,7 +439,7 @@ export async function publishStoredMigration(
   });
 
   if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
+    const bodyText = options.inspectorToken ? "" : await response.text().catch(() => "");
     const detail = bodyText ? ` - ${bodyText}` : "";
     throw new Error(`Migration push failed: ${response.status} ${response.statusText}${detail}`);
   }

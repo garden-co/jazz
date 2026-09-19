@@ -3576,6 +3576,49 @@ fn subscriber_inbound_message_is_authority_only(
     ingest: CommitUnitIngestContext,
     peer: &crate::peer::PeerState,
 ) -> bool {
+    if let CommitUnitTrust::Inspector { edit } = ingest.trust {
+        if matches!(
+            message,
+            SyncMessage::Subscribe(crate::protocol::Subscribe {
+                delegated_session: Some(_),
+                ..
+            }) | SyncMessage::FetchRowVersions {
+                delegated_session: Some(_),
+                ..
+            } | SyncMessage::AuthorizationScopeIntent {
+                delegated_session: Some(_),
+                ..
+            } | SyncMessage::CurrentRowsRequest(crate::protocol::CurrentRowsRequest {
+                delegated_session: Some(_),
+                ..
+            })
+        ) {
+            return true;
+        }
+        // Positive operation allowlist: newly added protocol messages cannot
+        // accidentally become Inspector authority. Delegated bindings are
+        // checked separately by admitted_request_policy_binding.
+        let read_allowed = matches!(
+            message,
+            SyncMessage::RegisterShape { .. }
+                | SyncMessage::Subscribe(_)
+                | SyncMessage::Unsubscribe { .. }
+                | SyncMessage::FetchRowVersions { .. }
+                | SyncMessage::PermissionAdviceRequest { .. }
+                | SyncMessage::AuthorizationScopeIntent { .. }
+                | SyncMessage::CurrentRowsRequest(_)
+                | SyncMessage::CurrentRowsCancel { .. }
+                | SyncMessage::ChunkRequestBatch(_)
+        );
+        let edit_allowed = edit
+            && matches!(
+                message,
+                SyncMessage::CommitUnit { .. }
+                    | SyncMessage::ChunkUploadStart(_)
+                    | SyncMessage::ChunkUploadNodes(_)
+            );
+        return !(read_allowed || edit_allowed);
+    }
     matches!(
         message,
         SyncMessage::FateUpdate { .. }
@@ -3656,7 +3699,8 @@ fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> Option<Auth
         CommitUnitTrust::Relay => None,
         CommitUnitTrust::TrustedBackend
         | CommitUnitTrust::TrustedAuthority
-        | CommitUnitTrust::TrustedAdmin => Some(AuthorSubject::SYSTEM),
+        | CommitUnitTrust::TrustedAdmin
+        | CommitUnitTrust::Inspector { .. } => Some(AuthorSubject::SYSTEM),
     }
 }
 

@@ -590,7 +590,41 @@ if (isMainModule()) {
   }
   const command = args[0] ?? "";
 
-  if (command === "validate") {
+  if (command === "inspect") {
+    const { appId, args: commandArgs } = splitLeadingAppId(args.slice(1));
+    const inspectorUrl =
+      getFlagValue(commandArgs, "--inspector-url") ?? process.env.JAZZ_INSPECTOR_URL;
+    const adminSecret = process.env.JAZZ_ADMIN_SECRET;
+    const serverUrl =
+      getFlagValue(commandArgs, "--server-url") ?? resolveEnvVar(SERVER_URL_ENV_VARS);
+    if (!inspectorUrl || !adminSecret || !serverUrl) {
+      console.error(
+        "Inspect requires JAZZ_ADMIN_SECRET, --server-url and --inspector-url (or their environment configuration).",
+      );
+      process.exit(1);
+    }
+    import("./dev/inspector-handoff.js")
+      .then(async ({ startInspectorHandoff }) => {
+        const capabilities: ("inspector:read" | "inspector:edit" | "inspector:admin")[] = [
+          "inspector:read",
+        ];
+        if (hasFlag(commandArgs, "--edit")) capabilities.push("inspector:edit");
+        if (hasFlag(commandArgs, "--admin")) capabilities.push("inspector:admin");
+        const handoff = await startInspectorHandoff({
+          appId: requireAppId(appId),
+          serverUrl,
+          adminSecret,
+          inspectorUrl,
+          capabilities,
+        });
+        console.log(`Open Inspector within 60 seconds: ${handoff.url}`);
+        await handoff.done;
+      })
+      .catch(() => {
+        console.error("Inspector handoff failed. Check server and Inspector configuration.");
+        process.exitCode = 1;
+      });
+  } else if (command === "validate") {
     const { options } = parseArgs(args);
     validate(options).catch((err) => {
       console.error(err.message);

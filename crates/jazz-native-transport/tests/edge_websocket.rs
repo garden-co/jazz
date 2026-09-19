@@ -641,3 +641,153 @@ async fn blank_dynamic_edge_rejects_downstream_with_retry_later_until_ready() {
     );
     task.abort();
 }
+
+/// The local memory client opens as SYSTEM, as the Inspector does, but this
+/// adapter supplies only the short-lived token on the real socket. It never
+/// forwards the local opener's placeholder as server administrative authority.
+struct InspectorTransport(String);
+impl jazz::tools::native_transport_connector::NativeTransportConnector for InspectorTransport {
+    fn bootstrap_catalogue(
+        &self,
+        _request: NativeTransportRequest,
+    ) -> jazz::tools::native_transport_connector::NativeCatalogueBootstrapFuture {
+        Box::pin(async {
+            Err(
+                jazz::tools::native_transport_connector::NativeTransportError::Terminal(
+                    "Inspector cannot bootstrap".into(),
+                ),
+            )
+        })
+    }
+    fn connect(
+        &self,
+        mut request: NativeTransportRequest,
+    ) -> jazz::tools::native_transport_connector::NativeTransportFuture {
+        request.auth = jazz::tools::websocket_prelude_auth::AuthConfig {
+            inspector_token: Some(self.0.clone()),
+            ..Default::default()
+        };
+        NativeWebSocketConnector.connect(request)
+    }
+}
+
+#[tokio::test]
+async fn inspector_reads_and_edits_protected_data_through_dynamic_edge_without_delegation() {
+    use jazz::query::Query;
+    use jazz::tools::{
+        ColumnType, PolicyExpr, ReadTier, SchemaBuilder, TablePolicies, TableSchema, Value,
+    };
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let app_id = AppId::random();
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("documents")
+                        .column("title", ColumnType::Text)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::False)
+                                .with_insert(PolicyExpr::False),
+                        ),
+                )
+                .build();
+            let core = ServerBuilder::new(app_id)
+                .with_schema(schema.clone())
+                .with_auth_config(auth("inspector-edge-root"))
+                .with_storage(StorageBackend::InMemory)
+                .build()
+                .await
+                .unwrap();
+            let (core_url, _core_state, core_task) = serve_built(core).await;
+            let context = |url: String| AppContext {
+                app_id,
+                client_id: None,
+                schema: schema.clone(),
+                server_url: url,
+                data_dir: std::env::temp_dir(),
+                storage: ClientStorage::Memory,
+                storage_factory: None,
+                account_id: None,
+                jwt_token: None,
+                backend_secret: None,
+                admin_secret: Some("inspector-edge-root".into()),
+            };
+            let writer = JazzClient::connect_with_native_transport(
+                context(core_url.clone()),
+                native_connector(),
+            )
+            .await
+            .unwrap();
+            let (_, _, tx) = writer
+                .insert(
+                    "documents",
+                    jazz::row_input!("title" => "protected edge row"),
+                )
+                .unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                writer.wait_for_transaction(tx.unwrap(), jazz::tools::DurabilityTier::GlobalServer),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let edge = ServerBuilder::new(app_id)
+                .with_auth_config(auth("inspector-edge-root"))
+                .with_storage(StorageBackend::InMemory)
+                .with_upstream_url(core_url.clone())
+                .with_native_transport_connector(native_connector())
+                .build()
+                .await
+                .unwrap();
+            let (edge_url, edge_state, edge_task) = serve_built(edge).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !edge_state.has_core_server_shell_for_client_for_test() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let response = reqwest::Client::new()
+                .post(format!("{edge_url}/apps/{app_id}/admin/inspector/sessions"))
+                .header("x-jazz-admin-secret", "inspector-edge-root")
+                .json(&serde_json::json!({"operator":"edge-test-operator", "capabilities":["inspector:read", "inspector:edit"]}))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            let token = response.json::<serde_json::Value>().await.unwrap()["accessToken"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let mut inspector_context = context(edge_url);
+            inspector_context.admin_secret = Some("local-memory-SYSTEM-opener-only".into());
+            let inspector = JazzClient::connect_with_native_transport(
+                inspector_context,
+                Arc::new(InspectorTransport(token)),
+            )
+            .await
+            .unwrap();
+            let rows = tokio::time::timeout(
+                Duration::from_secs(5),
+                inspector.query(Query::from("documents"), ReadTier::Remote),
+            )
+            .await
+            .expect("protected Inspector query must settle through the partial Edge")
+            .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].get("title"),
+                Some(&Value::Text("protected edge row".into()))
+            );
+            let (_, _, edited) = inspector.insert("documents", jazz::row_input!("title" => "explicit edge edit")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), inspector.wait_for_transaction(edited.unwrap(), jazz::tools::DurabilityTier::GlobalServer)).await
+            .expect("explicit Inspector edit settles through Core").unwrap();
+        let core_rows = writer.query(Query::from("documents"), ReadTier::Remote).await.unwrap();
+        assert_eq!(core_rows.len(), 2, "Core receives the protected Inspector edit");
+        inspector.shutdown().await.unwrap();
+            writer.shutdown().await.unwrap();
+            edge_task.abort();
+            core_task.abort();
+        })
+        .await;
+}

@@ -10,6 +10,7 @@
 
 mod accounts;
 mod http;
+mod inspector;
 mod utils;
 mod websocket;
 
@@ -86,6 +87,7 @@ async fn app_shutdown_gate(
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
+        .route("/inspector/sessions", post(inspector::exchange))
         .route("/accounts/resolve", post(accounts::resolve_for_edge))
         .route("/schemas", post(publish_schema_handler))
         .route("/schema-connectivity", get(schema_connectivity_handler))
@@ -120,6 +122,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/schema/{hash}", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .nest("/admin", admin_routes)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            inspector::authorize_http,
+        ))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             app_shutdown_gate,

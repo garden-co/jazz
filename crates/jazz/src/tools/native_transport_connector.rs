@@ -246,6 +246,7 @@ mod tests {
                 jwt_token: Some(marker.to_owned()),
                 backend_secret: Some(marker.to_owned()),
                 admin_secret: Some(marker.to_owned()),
+                inspector_token: Some(marker.to_owned()),
                 backend_session: Some(serde_json::json!({ "credential": marker })),
             },
             wake: Arc::new(|| {}),

@@ -4,7 +4,8 @@ import type { SchemaHashInfo } from "../utility/schema-hash-display.js";
 export interface StandaloneConnectionConfig {
   serverUrl: string;
   appId: string;
-  adminSecret: string;
+  adminSecret?: string;
+  inspectorToken?: string;
 }
 
 interface StandaloneContextValue {

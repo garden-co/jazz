@@ -462,6 +462,10 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<bool, Error> {
+        if let Some(context) = ingest_context
+            && let CommitUnitTrust::Inspector { edit } = context.trust {
+            return Ok(edit && context.identity == AuthorSubject::SYSTEM && matches!(tx.made_by, AuthorSubject::SystemAt(_)));
+        }
         if ingest_context.is_some_and(|context| context.trust == CommitUnitTrust::TrustedAdmin) {
             return Ok(true);
         }
@@ -478,7 +482,7 @@ where
                     // or the transport identity here.
                     CommitUnitTrust::Relay => return Ok(context.admitted_write_authorization),
                     CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => tx.permission_subject.unwrap_or(tx.made_by),
-                    CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
+                    CommitUnitTrust::TrustedAdmin | CommitUnitTrust::Inspector { .. } => unreachable!("handled above"),
                 }
             }
             None => tx.permission_subject.unwrap_or(tx.made_by),
